@@ -1,4 +1,5 @@
 mod tui;
+mod util;
 
 use chrono::Datelike;
 use clap::Parser;
@@ -25,8 +26,9 @@ fn process_start_instant() -> Instant {
 ///   - monotonic time since process start
 ///   - the process PID
 ///   - a process-lifetime atomic counter
-/// All four are mixed through a splitmix64-style hash to fill 16 bytes, and
-/// the version/variant bits are set per RFC 4122.
+///
+/// All four are mixed through a splitmix64-style hash to fill 16 bytes,
+/// and the version/variant bits are set per RFC 4122.
 fn generate_uuid_v4() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -141,6 +143,8 @@ enum Commands {
     Tui {
         #[arg(short, long)]
         mode: Option<String>,
+        #[arg(index = 1)]
+        query: Option<String>,
     },
     ImportAtuin,
     List {
@@ -228,6 +232,11 @@ fn highlight(haystack: &str, needle: &str, open: &str, close: &str) -> String {
     out
 }
 
+/// Escape the SQLite `LIKE` wildcards (`%` and `_`) in a user-supplied
+/// search string. (Implementation in `crate::util`; kept as a
+/// re-export so existing call sites compile unchanged.)
+use crate::util::escape_like;
+
 /// True if stdout is connected to a terminal (so we can emit ANSI escapes
 /// without polluting piped output).
 fn stdout_is_tty() -> bool {
@@ -245,7 +254,7 @@ fn highlight_markers() -> (&'static str, &'static str) {
 }
 
 fn project_row(
-    row_data: &[(&str, String)],
+    row_data: &[(String, String)],
     fields: &[String],
     derived: &[String],
     query: Option<&str>,
@@ -260,7 +269,7 @@ fn project_row(
     for f in fields {
         if derived.contains(f) {
             out.push(compute_derived(f, row_data));
-        } else if let Some((_, v)) = row_data.iter().find(|(k, _)| k == f) {
+        } else if let Some((_, v)) = row_data.iter().find(|(k, _)| k.as_str() == f) {
             let cell = v.clone();
             // Highlight the search string only in the `command` field.
             // Other fields (directory, base, etc.) won't contain it because
@@ -322,23 +331,23 @@ const DERIVED_FIELDS: &[&str] = &["time", "diff", "base"];
 
 /// Produce the value for a single derived field, given the raw row.
 /// `raw_row` is the (raw_field, value) pairs in the order of the SQL select.
-fn compute_derived(name: &str, raw_row: &[(&str, String)]) -> String {
+fn compute_derived(name: &str, raw_row: &[(String, String)]) -> String {
     match name {
         "time" => raw_row
             .iter()
-            .find(|(k, _)| *k == "timestamp")
+            .find(|(k, _)| k.as_str() == "timestamp")
             .and_then(|(_, v)| v.parse::<i64>().ok())
             .map(format_time)
             .unwrap_or_else(|| "N/A".to_string()),
         "diff" => raw_row
             .iter()
-            .find(|(k, _)| *k == "timestamp")
+            .find(|(k, _)| k.as_str() == "timestamp")
             .and_then(|(_, v)| v.parse::<i64>().ok())
             .map(format_diff)
             .unwrap_or_else(|| "N/A".to_string()),
         "base" => raw_row
             .iter()
-            .find(|(k, _)| *k == "directory")
+            .find(|(k, _)| k.as_str() == "directory")
             .map(|(_, v)| format_base(v))
             .unwrap_or_else(|| "N/A".to_string()),
         _ => "N/A".to_string(),
@@ -347,12 +356,9 @@ fn compute_derived(name: &str, raw_row: &[(&str, String)]) -> String {
 
 /// Format a Unix epoch (seconds) as "dd.Mon.YYYY HH:MM:SS" in UTC, e.g.
 /// "03.Jun.2026 17:43:01". Returns "N/A" if the value is out of range.
-fn format_time(epoch: i64) -> String {
-    match chrono::DateTime::from_timestamp(epoch, 0) {
-        Some(dt) => dt.naive_utc().format("%d.%b.%Y %H:%M:%S").to_string(),
-        None => "N/A".to_string(),
-    }
-}
+/// (Implementation in `crate::util`; kept as a re-export so existing
+/// call sites compile unchanged.)
+use crate::util::format_time;
 
 /// Human-readable difference between `epoch` and now, using the largest
 /// non-zero unit. Ladder (with short unit suffixes):
@@ -487,8 +493,12 @@ fn build_where_clause(
     let mut clause = String::from(" WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(q) = query {
-        clause.push_str(" AND command LIKE ?");
-        params.push(Box::new(format!("%{}%", q)));
+        // Escape LIKE wildcards in the user's query so `100%` matches
+        // a literal `100%` rather than anything starting with `100`.
+        // The ESCAPE clause tells SQLite to use `\` as the escape
+        // character (default is no escape).
+        clause.push_str(" AND command LIKE ? ESCAPE '\\'");
+        params.push(Box::new(format!("%{}%", escape_like(q))));
     }
     if let Some(dir) = directory {
         clause.push_str(" AND directory = ?");
@@ -532,6 +542,16 @@ fn init_db() -> anyhow::Result<Connection> {
         )",
         [],
     )?;
+    // A unique index on (command, directory, session_id) lets the
+    // `Add` arm use `INSERT ... ON CONFLICT DO UPDATE` for atomic
+    // upsert. The IF NOT EXISTS makes this safe for both new and
+    // existing databases (the upgrade is a no-op when the index
+    // already exists).
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_dedup
+         ON history (command, directory, session_id)",
+        [],
+    )?;
     Ok(conn)
 }
 
@@ -545,29 +565,18 @@ fn main() -> anyhow::Result<()> {
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
 
-            let mut stmt = conn.prepare(
-                "SELECT id FROM history 
-                 WHERE command = ? AND directory = ? AND session_id = ? 
-                 ORDER BY timestamp DESC LIMIT 1",
+            // Atomic upsert: if (command, directory, session_id) already
+            // exists, refresh its timestamp and exit_code; otherwise
+            // insert a new row. The unique index idx_history_dedup is
+            // the conflict target.
+            conn.execute(
+                "INSERT INTO history (command, directory, session_id, exit_code)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (command, directory, session_id) DO UPDATE
+                 SET timestamp = (strftime('%s', 'now')),
+                     exit_code = excluded.exit_code",
+                params![command, pwd, session_id, exit_code],
             )?;
-
-            let mut rows = stmt.query(params![command, pwd, session_id])?;
-
-            if let Some(row) = rows.next()? {
-                let id: i64 = row.get(0)?;
-                // Refresh both the timestamp (so recent runs float to the
-                // top) and the exit_code (so the stored value matches the
-                // most recent run, not the first one).
-                conn.execute(
-                    "UPDATE history SET timestamp = (strftime('%s', 'now')), exit_code = ? WHERE id = ?",
-                    params![exit_code, id],
-                )?;
-            } else {
-                conn.execute(
-                    "INSERT INTO history (command, directory, session_id, exit_code) VALUES (?1, ?2, ?3, ?4)",
-                    params![command, pwd, session_id, exit_code],
-                )?;
-            }
         }
         Commands::Search {
             query,
@@ -593,17 +602,11 @@ fn main() -> anyhow::Result<()> {
             let mut stmt = conn.prepare(&sql)?;
             let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-            let rows = stmt.query_map(&params_ref[..], move |row| {
-                let row_data: Vec<(&str, String)> = raw_names
+            let rows = stmt.query_map(&params_ref[..], move |row| -> Result<Vec<(String, String)>, rusqlite::Error> {
+                let row_data: Vec<(String, String)> = raw_names
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| {
-                        // We need `name` to live long enough; leak it into a
-                        // `&'static str` via Box::leak. The closure is only
-                        // called once per row.
-                        let s: &'static str = Box::leak(name.clone().into_boxed_str());
-                        (s, cell_to_string(row, i))
-                    })
+                    .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
                     .collect();
                 Ok(row_data)
             })?;
@@ -642,13 +645,10 @@ fn main() -> anyhow::Result<()> {
             let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
             let rows = stmt.query_map(&params_ref[..], move |row| {
-                let row_data: Vec<(&str, String)> = raw_names
+                let row_data: Vec<(String, String)> = raw_names
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| {
-                        let s: &'static str = Box::leak(name.clone().into_boxed_str());
-                        (s, cell_to_string(row, i))
-                    })
+                    .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
                     .collect();
                 Ok(row_data)
             })?;
@@ -709,19 +709,24 @@ fn main() -> anyhow::Result<()> {
             println!("Deleted {} entr{}.", deleted, if deleted == 1 { "y" } else { "ies" });
         }
         Commands::Init { shell } => {
-            if shell == "zsh" {
-                // Generate a fresh UUID v4 here and embed it into the emitted
-                // snippet. This avoids any dependency on `uuidgen`,
-                // /dev/urandom, or an OS RNG at shell-init time.
-                let session_id = generate_uuid_v4();
-                println!(
-                    r#"
+            if shell != "zsh" {
+                anyhow::bail!(
+                    "unsupported shell: {}. Only 'zsh' is currently supported.",
+                    shell
+                );
+            }
+            // Generate a fresh UUID v4 here and embed it into the emitted
+            // snippet. This avoids any dependency on `uuidgen`,
+            // /dev/urandom, or an OS RNG at shell-init time.
+            let session_id = generate_uuid_v4();
+            println!(
+                r#"
 # Smart History ZSH Init
 # Generate a unique session ID if not already set.
 # The UUID is produced by the smarthistory binary itself (no uuidgen,
 # no /dev/urandom, no OS RNG), so it works in any minimal environment.
 if [ -z "$SMART_HISTORY_SESSION" ]; then
-    export SMART_HISTORY_SESSION="{session_id}"
+export SMART_HISTORY_SESSION="{session_id}"
 fi
 
 # Debug logging. Set SMARTHISTORY_DEBUG=1 in the environment to enable
@@ -734,21 +739,21 @@ fi
 # Capture the about-to-run command line in preexec (before execution, when
 # $? still reflects the previous command, so we must NOT read it here).
 _smarthistory_preexec() {{
-    _smarthistory_cmd="$1"
+_smarthistory_cmd="$1"
 }}
 # Capture $? in precmd (after the command has finished, before the next
 # prompt) and record both the command and its real exit code.
 _smarthistory_precmd() {{
-    local exit_code=$?
-    # Skip empty command lines (e.g. bare Enter presses).
-    [ -n "$_smarthistory_cmd" ] || return 0
-    smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
-    # Remember the most recently executed command for the Ctrl-S
-    # "next probable command" widget. Reset the cycle index so the
-    # next press starts with the most probable candidate.
-    _smarthistory_last_cmd="$_smarthistory_cmd"
-    _smarthistory_next_index=0
-    _smarthistory_cmd=""
+local exit_code=$?
+# Skip empty command lines (e.g. bare Enter presses).
+[ -n "$_smarthistory_cmd" ] || return 0
+smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
+# Remember the most recently executed command for the Ctrl-S
+# "next probable command" widget. Reset the cycle index so the
+# next press starts with the most probable candidate.
+_smarthistory_last_cmd="$_smarthistory_cmd"
+_smarthistory_next_index=0
+_smarthistory_cmd=""
 }}
 # Cycle index for the Ctrl-S widget (which next-candidate to pick).
 # Reset to 0 after each executed command.
@@ -766,18 +771,18 @@ add-zsh-hook precmd _smarthistory_precmd
 #   3 -> Left:         prefill BUFFER, cursor at start, do NOT submit
 #   1 -> Esc/Ctrl+C:   cancel, leave BUFFER untouched
 _smarthistory_select() {{
-    local selected rc
-    selected=$(smarthistory tui)
-    rc=$?
-    if [ -n "$selected" ]; then
-        BUFFER="$selected"
-        case $rc in
-            0)  zle accept-line ;;
-            2)  CURSOR=${{#BUFFER}} ;;
-            3)  CURSOR=0 ;;
-            *)  CURSOR=${{#BUFFER}} ;;  # unknown code: default to end
-        esac
-    fi
+local selected rc
+selected=$(smarthistory tui "$BUFFER")
+rc=$?
+if [ -n "$selected" ]; then
+    BUFFER="$selected"
+    case $rc in
+        0)  zle accept-line ;;
+        2)  CURSOR=${{#BUFFER}} ;;
+        3)  CURSOR=0 ;;
+        *)  CURSOR=${{#BUFFER}} ;;  # unknown code: default to end
+    esac
+fi
 }}
 zle -N _smarthistory_select
 bindkey '^R' _smarthistory_select
@@ -814,44 +819,44 @@ _smarthistory_mode="sess"
 typeset -g _smarthistory_rprompt_save="$RPROMPT"
 
 _smarthistory_reset_state() {{
-    _smarthistory_matches=""
-    _smarthistory_index=0
-    _smarthistory_query_key=""
-    _smarthistory_last_match=""
-    _smarthistory_debug_log "reset_state: cleared all caches"
+_smarthistory_matches=""
+_smarthistory_index=0
+_smarthistory_query_key=""
+_smarthistory_last_match=""
+_smarthistory_debug_log "reset_state: cleared all caches"
 }}
 
 _smarthistory_update_rprompt() {{
-    case "$_smarthistory_mode" in
-        sess)   label="[smarthistory: SESS]" ;;
-        dir)    label="[smarthistory: DIR]" ;;
-        global) label="[smarthistory: GLOBAL]" ;;
-        *)      label="[smarthistory: ?]" ;;
-    esac
-    if [ -n "$_smarthistory_rprompt_save" ]; then
-        RPROMPT="$label $_smarthistory_rprompt_save"
-    else
-        RPROMPT="$label"
-    fi
-    # Force a redraw only if ZLE is active (i.e. we're in a widget).
-    # During the first precmd (before ZLE is fully initialized),
-    # zle reset-prompt would error; the next prompt will pick up
-    # the new RPROMPT automatically.
-    zle reset-prompt 2>/dev/null
+case "$_smarthistory_mode" in
+    sess)   label="[smarthistory: SESS]" ;;
+    dir)    label="[smarthistory: DIR]" ;;
+    global) label="[smarthistory: GLOBAL]" ;;
+    *)      label="[smarthistory: ?]" ;;
+esac
+if [ -n "$_smarthistory_rprompt_save" ]; then
+    RPROMPT="$label $_smarthistory_rprompt_save"
+else
+    RPROMPT="$label"
+fi
+# Force a redraw only if ZLE is active (i.e. we're in a widget).
+# During the first precmd (before ZLE is fully initialized),
+# zle reset-prompt would error; the next prompt will pick up
+# the new RPROMPT automatically.
+zle reset-prompt 2>/dev/null
 }}
 
 _smarthistory_cycle_mode() {{
-    local old_mode="$_smarthistory_mode"
-    case "$_smarthistory_mode" in
-        sess)   _smarthistory_mode="dir" ;;
-        dir)    _smarthistory_mode="global" ;;
-        global) _smarthistory_mode="sess" ;;
-    esac
-    _smarthistory_debug_log "cycle_mode: $old_mode -> $_smarthistory_mode"
-    # Invalidate the match cache; the next Up/Down will re-query under
-    # the new scope.
-    _smarthistory_reset_state
-    _smarthistory_update_rprompt
+local old_mode="$_smarthistory_mode"
+case "$_smarthistory_mode" in
+    sess)   _smarthistory_mode="dir" ;;
+    dir)    _smarthistory_mode="global" ;;
+    global) _smarthistory_mode="sess" ;;
+esac
+_smarthistory_debug_log "cycle_mode: $old_mode -> $_smarthistory_mode"
+# Invalidate the match cache; the next Up/Down will re-query under
+# the new scope.
+_smarthistory_reset_state
+_smarthistory_update_rprompt
 }}
 
 # Populate the match cache for the current (mode, pwd, prefix) triple.
@@ -871,121 +876,121 @@ _smarthistory_cycle_mode() {{
 # Use a small `tail -f ~/.local/cache/smarthistory/widget-debug.log`
 # from another terminal to watch what the widget is doing.
 _smarthistory_debug_log() {{
-    [ "$SMARTHISTORY_DEBUG" = "1" ] || return 0
-    local msg="$1"
-    local logfile="$HOME/.local/cache/smarthistory/widget-debug.log"
-    # Best-effort: don't fail the widget if the log can't be written.
-    {{
-        print -r -- "$(date '+%H:%M:%S') $msg" >> "$logfile" 2>/dev/null
-    }} || true
+[ "$SMARTHISTORY_DEBUG" = "1" ] || return 0
+local msg="$1"
+local logfile="$HOME/.local/cache/smarthistory/widget-debug.log"
+# Best-effort: don't fail the widget if the log can't be written.
+{{
+    print -r -- "$(date '+%H:%M:%S') $msg" >> "$logfile" 2>/dev/null
+}} || true
 }}
 
 _smarthistory_prime_cache() {{
-    # Two checks decide whether to re-query:
-    #
-    # 1. Did the user just press Up/Down (no new typing)? If BUFFER
-    #    still equals the last match we showed, the user pressed
-    #    Up/Down again. The cached results are still valid; we just
-    #    need to advance the index. (Without this check, the
-    #    second press would re-query with the previous match as
-    #    the new prefix, returning only that one row and effectively
-    #    making Up a no-op.)
-    #
-    # 2. Has the (mode, pwd, prefix) triple changed since the last
-    #    query? If the user `cd`'d, switched scope (Ctrl+G), or
-    #    typed a new prefix, the cached results may be stale.
-    #
-    # The first check fires for the common "press Up again" case.
-    # The second check fires when state has actually changed.
-    if [ -n "$_smarthistory_last_match" ] && [ "$BUFFER" = "$_smarthistory_last_match" ]; then
-        _smarthistory_debug_log "prime_cache: BUFFER == last_match, advancing without re-query"
-        return
-    fi
-    local query_key="$_smarthistory_mode|$PWD|$LBUFFER"
-    _smarthistory_debug_log "prime_cache: BUFFER=[$BUFFER] LBUFFER=[$LBUFFER] PWD=[$PWD] mode=[$_smarthistory_mode] query_key=[$query_key] cached=[$_smarthistory_query_key]"
-    if [ "$query_key" = "$_smarthistory_query_key" ]; then
-        _smarthistory_debug_log "prime_cache: cache HIT, skipping re-query"
-        return
-    fi
-    # Re-query with the current LBUFFER (which is the user's typed
-    # prefix, since neither check fired).
-    local args=("$LBUFFER" --limit 0 --no-highlight)
-    case "$_smarthistory_mode" in
-        sess)   args+=(--session) ;;
-        dir)    args+=(--directory "$PWD") ;;
-        global) ;;
-    esac
-    _smarthistory_debug_log "prime_cache: cache MISS, running: smarthistory search ${{args[*]}}"
-    _smarthistory_matches=$(smarthistory search ${{args[@]}} 2>/dev/null)
-    _smarthistory_index=0
-    _smarthistory_query_key="$query_key"
-    _smarthistory_last_match=""
-    # Count how many matches we got (one match per non-empty line).
-    local match_count=0
-    local line
-    for line in ${{(f)_smarthistory_matches}}; do
-        [ -n "$line" ] && match_count=$((match_count + 1))
-    done
-    _smarthistory_debug_log "prime_cache: got $match_count match(es) (LBUFFER=[$LBUFFER], PWD=[$PWD])"
+# Two checks decide whether to re-query:
+#
+# 1. Did the user just press Up/Down (no new typing)? If BUFFER
+#    still equals the last match we showed, the user pressed
+#    Up/Down again. The cached results are still valid; we just
+#    need to advance the index. (Without this check, the
+#    second press would re-query with the previous match as
+#    the new prefix, returning only that one row and effectively
+#    making Up a no-op.)
+#
+# 2. Has the (mode, pwd, prefix) triple changed since the last
+#    query? If the user `cd`'d, switched scope (Ctrl+G), or
+#    typed a new prefix, the cached results may be stale.
+#
+# The first check fires for the common "press Up again" case.
+# The second check fires when state has actually changed.
+if [ -n "$_smarthistory_last_match" ] && [ "$BUFFER" = "$_smarthistory_last_match" ]; then
+    _smarthistory_debug_log "prime_cache: BUFFER == last_match, advancing without re-query"
+    return
+fi
+local query_key="$_smarthistory_mode|$PWD|$LBUFFER"
+_smarthistory_debug_log "prime_cache: BUFFER=[$BUFFER] LBUFFER=[$LBUFFER] PWD=[$PWD] mode=[$_smarthistory_mode] query_key=[$query_key] cached=[$_smarthistory_query_key]"
+if [ "$query_key" = "$_smarthistory_query_key" ]; then
+    _smarthistory_debug_log "prime_cache: cache HIT, skipping re-query"
+    return
+fi
+# Re-query with the current LBUFFER (which is the user's typed
+# prefix, since neither check fired).
+local args=("$LBUFFER" --limit 0 --no-highlight)
+case "$_smarthistory_mode" in
+    sess)   args+=(--session) ;;
+    dir)    args+=(--directory "$PWD") ;;
+    global) ;;
+esac
+_smarthistory_debug_log "prime_cache: cache MISS, running: smarthistory search ${{args[*]}}"
+_smarthistory_matches=$(smarthistory search ${{args[@]}} 2>/dev/null)
+_smarthistory_index=0
+_smarthistory_query_key="$query_key"
+_smarthistory_last_match=""
+# Count how many matches we got (one match per non-empty line).
+local match_count=0
+local line
+for line in ${{(f)_smarthistory_matches}}; do
+    [ -n "$line" ] && match_count=$((match_count + 1))
+done
+_smarthistory_debug_log "prime_cache: got $match_count match(es) (LBUFFER=[$LBUFFER], PWD=[$PWD])"
 }}
 
 _smarthistory_up_history() {{
-    # Always use smarthistory, even with an empty LBUFFER (an empty
-    # query means "give me the oldest command in the current scope").
-    _smarthistory_prime_cache
-    # Split the newline-joined match list into a real array. Using
-    # `local -a` + assignment is the only reliable way to get the
-    # correct element count in zsh.
-    local -a _smarthistory_lines
-    _smarthistory_lines=("${{(f)_smarthistory_matches}}")
-    local n=${{#_smarthistory_lines}}
-    if [ $n -eq 0 ]; then
-        zle -M "no history matches"
-        return
-    fi
-    if [ $_smarthistory_index -ge $n ]; then
-        # Already at the newest entry; stay put.
-        zle -M "no more history"
-        _smarthistory_debug_log "up: at end of list (index=$_smarthistory_index/$n), no-op"
-        return
-    fi
-    _smarthistory_index=$((_smarthistory_index + 1))
-    local match=${{_smarthistory_lines[$_smarthistory_index]}}
-    BUFFER="$match"
-    CURSOR=${{#BUFFER}}
-    _smarthistory_last_match="$match"
-    _smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
+# Always use smarthistory, even with an empty LBUFFER (an empty
+# query means "give me the oldest command in the current scope").
+_smarthistory_prime_cache
+# Split the newline-joined match list into a real array. Using
+# `local -a` + assignment is the only reliable way to get the
+# correct element count in zsh.
+local -a _smarthistory_lines
+_smarthistory_lines=("${{(f)_smarthistory_matches}}")
+local n=${{#_smarthistory_lines}}
+if [ $n -eq 0 ]; then
+    zle -M "no history matches"
+    return
+fi
+if [ $_smarthistory_index -ge $n ]; then
+    # Already at the newest entry; stay put.
+    zle -M "no more history"
+    _smarthistory_debug_log "up: at end of list (index=$_smarthistory_index/$n), no-op"
+    return
+fi
+_smarthistory_index=$((_smarthistory_index + 1))
+local match=${{_smarthistory_lines[$_smarthistory_index]}}
+BUFFER="$match"
+CURSOR=${{#BUFFER}}
+_smarthistory_last_match="$match"
+_smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
 }}
 _smarthistory_down_history() {{
-    # Down walks the match list in the *opposite* direction of Up
-    # (Up advances through the array from oldest to newest, Down
-    # walks back from newest to oldest). At the very start of the
-    # list (index 0 in zsh's 1-based array), there's nothing older
-    # to show, so Down clears the line buffer.
-    _smarthistory_prime_cache
-    local -a _smarthistory_lines
-    _smarthistory_lines=("${{(f)_smarthistory_matches}}")
-    local n=${{#_smarthistory_lines}}
-    if [ $n -eq 0 ]; then
-        zle -M "no history matches"
-        return
-    fi
-    if [ $_smarthistory_index -le 0 ]; then
-        # At the start of the list (oldest entry, or fresh prompt).
-        # Clear the buffer to signal "nothing older than this."
-        BUFFER=""
-        CURSOR=0
-        _smarthistory_last_match=""
-        zle -M "no older history (line cleared)"
-        _smarthistory_debug_log "down: at start of list, cleared BUFFER"
-        return
-    fi
-    _smarthistory_index=$((_smarthistory_index - 1))
-    local match=${{_smarthistory_lines[$_smarthistory_index]}}
-    BUFFER="$match"
-    CURSOR=${{#BUFFER}}
-    _smarthistory_last_match="$match"
-    _smarthistory_debug_log "down: index=$_smarthistory_index/$n BUFFER=[$match]"
+# Down walks the match list in the *opposite* direction of Up
+# (Up advances through the array from oldest to newest, Down
+# walks back from newest to oldest). At the very start of the
+# list (index 0 in zsh's 1-based array), there's nothing older
+# to show, so Down clears the line buffer.
+_smarthistory_prime_cache
+local -a _smarthistory_lines
+_smarthistory_lines=("${{(f)_smarthistory_matches}}")
+local n=${{#_smarthistory_lines}}
+if [ $n -eq 0 ]; then
+    zle -M "no history matches"
+    return
+fi
+if [ $_smarthistory_index -le 0 ]; then
+    # At the start of the list (oldest entry, or fresh prompt).
+    # Clear the buffer to signal "nothing older than this."
+    BUFFER=""
+    CURSOR=0
+    _smarthistory_last_match=""
+    zle -M "no older history (line cleared)"
+    _smarthistory_debug_log "down: at start of list, cleared BUFFER"
+    return
+fi
+_smarthistory_index=$((_smarthistory_index - 1))
+local match=${{_smarthistory_lines[$_smarthistory_index]}}
+BUFFER="$match"
+CURSOR=${{#BUFFER}}
+_smarthistory_last_match="$match"
+_smarthistory_debug_log "down: index=$_smarthistory_index/$n BUFFER=[$match]"
 }}
 # Reset bindings for accept-line and send-break are defined further
 # down (next to the keybindings).
@@ -998,30 +1003,30 @@ zle -N _smarthistory_cycle_mode
 # probability. The cycle resets to the top candidate when a new
 # command is actually executed (handled in the precmd hook).
 _smarthistory_next_history() {{
-    if [ -z "$_smarthistory_last_cmd" ]; then
-        zle -M "no previous command yet"
-        return
-    fi
-    # Fetch the candidate list (freq<TAB>command, one per line,
-    # sorted by descending frequency). We fetch on every press so
-    # that newly-added commands are visible immediately. The awk
-    # script extracts just the command field, one per line.
-    local -a _smarthistory_candidates
-    _smarthistory_candidates=("${{(f)$(smarthistory next "$_smarthistory_last_cmd" --limit 10 2>/dev/null | cut -f2)}}")
-    local n=${{#_smarthistory_candidates}}
-    if [ $n -eq 0 ]; then
-        zle -M "no suggestions after '$_smarthistory_last_cmd'"
-        return
-    fi
-    # Cycle through candidates. Reset on each new command (precmd).
-    if [ $_smarthistory_next_index -ge $n ]; then
-        _smarthistory_next_index=0
-    fi
-    local match=${{_smarthistory_candidates[$((_smarthistory_next_index + 1))]}}
-    BUFFER="$match"
-    CURSOR=${{#BUFFER}}
-    _smarthistory_next_index=$((_smarthistory_next_index + 1))
-    _smarthistory_debug_log "next_history: after=[$_smarthistory_last_cmd] picked=[$match] index=$_smarthistory_next_index/$n"
+if [ -z "$_smarthistory_last_cmd" ]; then
+    zle -M "no previous command yet"
+    return
+fi
+# Fetch the candidate list (freq<TAB>command, one per line,
+# sorted by descending frequency). We fetch on every press so
+# that newly-added commands are visible immediately. The awk
+# script extracts just the command field, one per line.
+local -a _smarthistory_candidates
+_smarthistory_candidates=("${{(f)$(smarthistory next "$_smarthistory_last_cmd" --limit 10 2>/dev/null | cut -f2)}}")
+local n=${{#_smarthistory_candidates}}
+if [ $n -eq 0 ]; then
+    zle -M "no suggestions after '$_smarthistory_last_cmd'"
+    return
+fi
+# Cycle through candidates. Reset on each new command (precmd).
+if [ $_smarthistory_next_index -ge $n ]; then
+    _smarthistory_next_index=0
+fi
+local match=${{_smarthistory_candidates[$((_smarthistory_next_index + 1))]}}
+BUFFER="$match"
+CURSOR=${{#BUFFER}}
+_smarthistory_next_index=$((_smarthistory_next_index + 1))
+_smarthistory_debug_log "next_history: after=[$_smarthistory_last_cmd] picked=[$match] index=$_smarthistory_next_index/$n"
 }}
 zle -N _smarthistory_next_history
 bindkey '^[[A' _smarthistory_up_history
@@ -1046,14 +1051,14 @@ bindkey '^S' _smarthistory_next_history
 # _smarthistory_index from the previous walk and lands on an
 # unexpected match.
 _smarthistory_reset_and_accept() {{
-    _smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
-    _smarthistory_reset_state
-    zle .accept-line
+_smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
+_smarthistory_reset_state
+zle .accept-line
 }}
 _smarthistory_reset_and_break() {{
-    _smarthistory_debug_log "send-break: resetting state"
-    _smarthistory_reset_state
-    zle .send-break
+_smarthistory_debug_log "send-break: resetting state"
+_smarthistory_reset_state
+zle .send-break
 }}
 zle -N accept-line _smarthistory_reset_and_accept
 zle -N send-break _smarthistory_reset_and_break
@@ -1061,10 +1066,10 @@ zle -N send-break _smarthistory_reset_and_break
 # that resets state and aborts the current line. This makes Ctrl-C
 # behave like Ctrl-G plus a buffer-cancel.
 _smarthistory_reset_and_abort_line() {{
-    _smarthistory_debug_log "ctrl-c: resetting state, BUFFER=[$BUFFER]"
-    _smarthistory_reset_state
-    zle .kill-whole-line
-    zle .send-break
+_smarthistory_debug_log "ctrl-c: resetting state, BUFFER=[$BUFFER]"
+_smarthistory_reset_state
+zle .kill-whole-line
+zle .send-break
 }}
 zle -N _smarthistory_reset_and_abort_line
 bindkey '^C' _smarthistory_reset_and_abort_line
@@ -1072,13 +1077,12 @@ bindkey '^C' _smarthistory_reset_and_abort_line
 # call the update function inline at init time because ZLE is not yet
 # active (zle reset-prompt would error).
 _smarthistory_init_rprompt() {{
-    _smarthistory_update_rprompt
-    add-zsh-hook -d precmd _smarthistory_init_rprompt
+_smarthistory_update_rprompt
+add-zsh-hook -d precmd _smarthistory_init_rprompt
 }}
 add-zsh-hook precmd _smarthistory_init_rprompt
 "#
-                );
-            }
+            );
         }
         Commands::ImportAtuin => {
             let atuin_db =
@@ -1119,14 +1123,11 @@ add-zsh-hook precmd _smarthistory_init_rprompt
             let mut stmt = conn.prepare(&sql)?;
 
             let raw_names: Vec<String> = raw_fields.clone();
-            let rows = stmt.query_map([], move |row| {
-                let row_data: Vec<(&str, String)> = raw_names
+            let rows = stmt.query_map([], move |row| -> Result<Vec<(String, String)>, rusqlite::Error> {
+                let row_data: Vec<(String, String)> = raw_names
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| {
-                        let s: &'static str = Box::leak(name.clone().into_boxed_str());
-                        (s, cell_to_string(row, i))
-                    })
+                    .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
                     .collect();
                 Ok(row_data)
             })?;
@@ -1206,18 +1207,151 @@ add-zsh-hook precmd _smarthistory_init_rprompt
                 println!("{}\t{}", freq, next);
             }
         }
-        Commands::Tui { mode } => {
+        Commands::Tui { mode, query } => {
             let initial_mode = mode.unwrap_or_else(|| "SESS".to_string());
-            match tui::run_tui_to_stdout(initial_mode, conn)? {
-                Some((command, exit_code)) => {
-                    // Print the chosen command. The exit code tells the
-                    // parent what to do with it.
+            let initial_query = query.unwrap_or_else(|| "".to_string());
+            match tui::run_tui_to_stdout(initial_mode, initial_query, conn)? {
+                Some((command, pick_mode)) => {
+                    // Print the chosen command. The pick_mode tells
+                    // the parent what to do with it.
                     println!("{}", command);
-                    std::process::exit(exit_code);
+                    std::process::exit(pick_mode);
                 }
-                None => std::process::exit(1), // cancelled
+                None => std::process::exit(tui::exit_code::CANCEL),
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `format_diff` uses a calendar-month ladder before falling back
+    /// to smaller units. Each test pins a specific scenario so a
+    /// regression in the ordering or the unit suffix is caught.
+    #[test]
+    fn format_diff_seconds() {
+        let five_sec_ago = chrono::Utc::now() - chrono::Duration::seconds(5);
+        assert_eq!(format_diff(five_sec_ago.timestamp()), "5s");
+    }
+
+    #[test]
+    fn format_diff_minutes() {
+        let three_min_ago = chrono::Utc::now() - chrono::Duration::minutes(3);
+        assert_eq!(format_diff(three_min_ago.timestamp()), "3m");
+    }
+
+    #[test]
+    fn format_diff_hours() {
+        let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+        assert_eq!(format_diff(two_hours_ago.timestamp()), "2h");
+    }
+
+    #[test]
+    fn format_diff_days() {
+        let five_days_ago = chrono::Utc::now() - chrono::Duration::days(5);
+        assert_eq!(format_diff(five_days_ago.timestamp()), "5d");
+    }
+
+    #[test]
+    fn format_diff_zero_or_negative_is_na() {
+        // 0 and negative timestamps are treated as missing data.
+        assert_eq!(format_diff(0), "N/A");
+        assert_eq!(format_diff(-1), "N/A");
+    }
+
+    #[test]
+    fn format_base_leaf_dir() {
+        assert_eq!(format_base("/Users/har/projects/notes"), "notes");
+        assert_eq!(format_base("/tmp"), "tmp");
+        assert_eq!(format_base("/"), "/");
+    }
+
+    #[test]
+    fn format_base_empty_string() {
+        // Path::file_name of "" returns None; the fallback returns the
+        // input unchanged.
+        assert_eq!(format_base(""), "");
+    }
+
+    #[test]
+    fn highlight_empty_needle() {
+        // An empty needle should not modify the haystack.
+        assert_eq!(highlight("hello world", "", "[", "]"), "hello world");
+    }
+
+    #[test]
+    fn highlight_wraps_all_occurrences() {
+        assert_eq!(
+            highlight("foo bar foo", "foo", "[", "]"),
+            "[foo] bar [foo]"
+        );
+    }
+
+    #[test]
+    fn highlight_no_occurrences() {
+        // When the needle doesn't appear, the haystack is returned
+        // unchanged.
+        assert_eq!(
+            highlight("hello world", "xyz", "[", "]"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn highlight_empty_haystack() {
+        assert_eq!(highlight("", "foo", "[", "]"), "");
+    }
+
+    #[test]
+    fn highlight_at_start() {
+        assert_eq!(highlight("foo bar", "foo", "[", "]"), "[foo] bar");
+    }
+
+    #[test]
+    fn highlight_at_end() {
+        assert_eq!(highlight("bar foo", "foo", "[", "]"), "bar [foo]");
+    }
+
+    #[test]
+    fn generate_uuid_v4_format() {
+        // The output must be 36 characters in the canonical
+        // `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` form.
+        let u = generate_uuid_v4();
+        assert_eq!(u.len(), 36, "UUID has unexpected length: {u}");
+        assert_eq!(u.as_bytes()[8], b'-');
+        assert_eq!(u.as_bytes()[13], b'-');
+        assert_eq!(u.as_bytes()[18], b'-');
+        assert_eq!(u.as_bytes()[23], b'-');
+        // The 13th hex char (index 14) is the version nibble; for
+        // v4 it must be '4'.
+        assert_eq!(
+            u.as_bytes()[14],
+            b'4',
+            "UUID version nibble is not '4' in {u}"
+        );
+        // The 17th hex char (index 19) is the variant nibble; for
+        // RFC 4122 it must be one of 8/9/a/b.
+        let variant = u.as_bytes()[19];
+        assert!(
+            matches!(variant, b'8' | b'9' | b'a' | b'b'),
+            "UUID variant nibble is invalid in {u}: {:?}",
+            variant as char
+        );
+    }
+
+    #[test]
+    fn generate_uuid_v4_uniqueness() {
+        // Two successive calls must return different UUIDs (the
+        // counter + process start instant + wall clock provides more
+        // than enough entropy for this to never collide).
+        let u1 = generate_uuid_v4();
+        let u2 = generate_uuid_v4();
+        let u3 = generate_uuid_v4();
+        assert_ne!(u1, u2);
+        assert_ne!(u2, u3);
+        assert_ne!(u1, u3);
+    }
 }

@@ -66,13 +66,29 @@ enum PickMode {
     /// `Right` — prefill the line for editing, cursor at the end.
     EditEnd,
 }
+/// Exit codes returned by the TUI binary, also used by the line-editor
+/// widget to dispatch on. The shell snippet in `init zsh` reads these
+/// to decide what to do with the chosen command.
+pub mod exit_code {
+    /// User pressed `Enter` — run the command (parent should submit
+    /// the line).
+    pub const RUN: i32 = 0;
+    /// User pressed `Esc` / `Ctrl+C` — cancel, no command was chosen.
+    pub const CANCEL: i32 = 1;
+    /// User pressed `Right` — prefill the line for editing, cursor at
+    /// the end.
+    pub const EDIT_END: i32 = 2;
+    /// User pressed `Left` — prefill the line for editing, cursor at
+    /// the start.
+    pub const EDIT_START: i32 = 3;
+}
 
 impl PickMode {
     fn exit_code(self) -> i32 {
         match self {
-            PickMode::Run => 0,
-            PickMode::EditEnd => 2,
-            PickMode::EditStart => 3,
+            PickMode::Run => exit_code::RUN,
+            PickMode::EditEnd => exit_code::EDIT_END,
+            PickMode::EditStart => exit_code::EDIT_START,
         }
     }
 }
@@ -93,12 +109,12 @@ struct App {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String) -> Self {
         let list_state = ListState::default();
         let mut app = App {
             conn,
             mode: initial_mode,
-            query: String::new(),
+            query: initial_query,
             rows: Vec::new(),
             pad: 0,
             list_state,
@@ -160,8 +176,12 @@ impl App {
         let mut clause = String::from(" WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if !self.query.is_empty() {
-            clause.push_str(" AND command LIKE ?");
-            params.push(Box::new(format!("%{}%", self.query)));
+            // Escape LIKE wildcards in the user query (re-uses the
+            // helper from `crate::util`). The ESCAPE clause enables
+            // backslash escapes in SQLite's LIKE.
+            let escaped = crate::util::escape_like(&self.query);
+            clause.push_str(" AND command LIKE ? ESCAPE '\\'");
+            params.push(Box::new(format!("%{}%", escaped)));
         }
         match self.mode {
             Mode::Sess => {
@@ -256,10 +276,16 @@ impl App {
 /// is printed to **stdout** by the caller (`main`).
 pub fn run_tui_to_stdout(
     initial_mode: String,
+    initial_query: String,
     conn: Connection,
 ) -> Result<Option<(String, i32)>> {
-    let mode = Mode::parse(&initial_mode).unwrap_or(Mode::Sess);
-    let mut app = App::new(conn, mode);
+    let mode = Mode::parse(&initial_mode).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown TUI mode {:?}; expected one of SESS, SESSION, DIR, DIRECTORY, GLOBAL",
+            initial_mode
+        )
+    })?;
+    let mut app = App::new(conn, mode, initial_query);
 
     // Render to stderr so stdout is free for the selected command.
     let mut render = std::io::stderr();
@@ -524,9 +550,5 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn format_time(epoch: i64) -> String {
-    match chrono::DateTime::from_timestamp(epoch, 0) {
-        Some(dt) => dt.naive_utc().format("%d.%b.%Y %H:%M:%S").to_string(),
-        None => "N/A".to_string(),
-    }
-}
+// `format_time` lives in `crate::util` and is re-exported.
+use crate::util::format_time;
