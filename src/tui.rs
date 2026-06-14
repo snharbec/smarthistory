@@ -4,12 +4,15 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use rusqlite::Connection;
 use std::time::Duration;
+
+use crate::util::{format_diff, format_time};
 
 /// Search scope for the TUI. Mirrors the line-editor widget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,13 +23,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Sess => "SESS",
-            Mode::Dir => "DIR",
-            Mode::Global => "GLOBAL",
-        }
-    }
     fn next(self) -> Self {
         match self {
             Mode::Sess => Mode::Dir,
@@ -66,6 +62,7 @@ enum PickMode {
     /// `Right` — prefill the line for editing, cursor at the end.
     EditEnd,
 }
+
 /// Exit codes returned by the TUI binary, also used by the line-editor
 /// widget to dispatch on. The shell snippet in `init zsh` reads these
 /// to decide what to do with the chosen command.
@@ -93,15 +90,49 @@ impl PickMode {
     }
 }
 
+/// Consistent color palette and styles for the TUI.
+struct Theme;
+
+impl Theme {
+    const BG: Color = Color::Black;
+    const FG: Color = Color::Gray;
+    const ACCENT: Color = Color::Cyan;
+    const SUCCESS: Color = Color::Green;
+    const ERROR: Color = Color::Red;
+    const WARNING: Color = Color::Yellow;
+    const DIM: Color = Color::DarkGray;
+    const HIGHLIGHT: Color = Color::Yellow;
+
+    fn default() -> Style {
+        Style::default().fg(Self::FG).bg(Self::BG)
+    }
+
+    fn accent() -> Style {
+        Style::default().fg(Self::ACCENT)
+    }
+
+    fn success() -> Style {
+        Style::default().fg(Self::SUCCESS)
+    }
+
+    fn error() -> Style {
+        Style::default().fg(Self::ERROR)
+    }
+
+    fn dim() -> Style {
+        Style::default().fg(Self::DIM)
+    }
+
+    fn highlight() -> Style {
+        Style::default().fg(Self::HIGHLIGHT)
+    }
+}
+
 struct App {
     conn: Connection,
     mode: Mode,
     query: String,
     rows: Vec<HistoryRow>,
-    /// Number of empty items prepended to the list to bottom-align
-    /// the real rows. Recomputed every render based on the list's
-    /// available height.
-    pad: usize,
     list_state: ListState,
     selection: Option<String>,
     pick_mode: Option<PickMode>,
@@ -116,35 +147,29 @@ impl App {
             mode: initial_mode,
             query: initial_query,
             rows: Vec::new(),
-            pad: 0,
             list_state,
             selection: None,
             pick_mode: None,
             cancelled: false,
         };
         app.refresh();
-        // Default to the newest entry (last row) so the user lands
-        // on the most recent match and can scroll up to see older
-        // history. If there are no rows, leave the selection unset.
+        // Rows are ordered newest first; index 0 is the newest entry.
+        // Keep the selection on the newest match so it appears at the
+        // bottom of the bottom-aligned list.
         if !app.rows.is_empty() {
-            // Initial selection is the *real* index of the newest
-            // entry; draw_list will add the padding offset when it
-            // updates `app.pad` on the first render.
-            app.list_state.select(Some(app.rows.len() - 1));
+            app.list_state.select(Some(0));
         }
         app
     }
 
-    /// Re-query the database with the current mode + query. Cheap on
-    /// local SQLite; if it ever becomes a bottleneck, move to a
-    /// background thread.
+    /// Re-query the database with the current mode + query.
+    /// After re-querying, land on the newest match (index 0).
     fn refresh(&mut self) {
         self.rows = self.fetch().unwrap_or_default();
         if self.rows.is_empty() {
             self.list_state.select(None);
         } else {
-            let i = self.list_state.selected().unwrap_or(0).min(self.rows.len() - 1);
-            self.list_state.select(Some(i));
+            self.list_state.select(Some(0));
         }
     }
 
@@ -152,7 +177,7 @@ impl App {
         let (where_clause, params) = self.build_where();
         let sql = format!(
             "SELECT command, directory, session_id, exit_code, timestamp \
-             FROM history {} ORDER BY timestamp ASC LIMIT 1000",
+             FROM history {} ORDER BY timestamp DESC LIMIT 1000",
             where_clause
         );
         let params_ref: Vec<&dyn rusqlite::ToSql> =
@@ -176,9 +201,6 @@ impl App {
         let mut clause = String::from(" WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if !self.query.is_empty() {
-            // Escape LIKE wildcards in the user query (re-uses the
-            // helper from `crate::util`). The ESCAPE clause enables
-            // backslash escapes in SQLite's LIKE.
             let escaped = crate::util::escape_like(&self.query);
             clause.push_str(" AND command LIKE ? ESCAPE '\\'");
             params.push(Box::new(format!("%{}%", escaped)));
@@ -186,17 +208,19 @@ impl App {
         match self.mode {
             Mode::Sess => {
                 if let Ok(s) = std::env::var("SMART_HISTORY_SESSION")
-                    && !s.is_empty() {
-                        clause.push_str(" AND session_id = ?");
-                        params.push(Box::new(s));
-                    }
+                    && !s.is_empty()
+                {
+                    clause.push_str(" AND session_id = ?");
+                    params.push(Box::new(s));
+                }
             }
             Mode::Dir => {
                 if let Ok(pwd) = std::env::var("PWD")
-                    && !pwd.is_empty() {
-                        clause.push_str(" AND directory = ?");
-                        params.push(Box::new(pwd));
-                    }
+                    && !pwd.is_empty()
+                {
+                    clause.push_str(" AND directory = ?");
+                    params.push(Box::new(pwd));
+                }
             }
             Mode::Global => {}
         }
@@ -206,17 +230,6 @@ impl App {
     fn cycle_mode(&mut self) {
         self.mode = self.mode.next();
         self.refresh();
-        // After switching scope, jump the highlight to the most
-        // recent entry so the user lands on the newest command in
-        // the new mode. Without this, the previous selection index
-        // would either be out of bounds (clamped to a different
-        // entry) or point at a row that no longer makes sense in
-        // the new mode.
-        if !self.rows.is_empty() {
-            self.list_state.select(Some(self.rows.len() - 1));
-        } else {
-            self.list_state.select(None);
-        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -225,32 +238,35 @@ impl App {
         }
         let n = self.rows.len();
         let cur = self.list_state.selected().unwrap_or(0) as isize;
-        let next = (cur + delta).rem_euclid(n as isize) as usize;
+        let next = (cur + delta).clamp(0, n as isize - 1) as usize;
         self.list_state.select(Some(next));
     }
 
     fn select_for_run(&mut self) {
         if let Some(i) = self.list_state.selected()
-            && let Some(row) = self.rows.get(i) {
-                self.selection = Some(row.command.clone());
-                self.pick_mode = Some(PickMode::Run);
-            }
+            && let Some(row) = self.rows.get(i)
+        {
+            self.selection = Some(row.command.clone());
+            self.pick_mode = Some(PickMode::Run);
+        }
     }
 
     fn select_for_edit_start(&mut self) {
         if let Some(i) = self.list_state.selected()
-            && let Some(row) = self.rows.get(i) {
-                self.selection = Some(row.command.clone());
-                self.pick_mode = Some(PickMode::EditStart);
-            }
+            && let Some(row) = self.rows.get(i)
+        {
+            self.selection = Some(row.command.clone());
+            self.pick_mode = Some(PickMode::EditStart);
+        }
     }
 
     fn select_for_edit_end(&mut self) {
         if let Some(i) = self.list_state.selected()
-            && let Some(row) = self.rows.get(i) {
-                self.selection = Some(row.command.clone());
-                self.pick_mode = Some(PickMode::EditEnd);
-            }
+            && let Some(row) = self.rows.get(i)
+        {
+            self.selection = Some(row.command.clone());
+            self.pick_mode = Some(PickMode::EditEnd);
+        }
     }
 
     fn push_char(&mut self, c: char) {
@@ -266,6 +282,12 @@ impl App {
     fn clear_query(&mut self) {
         self.query.clear();
         self.refresh();
+    }
+
+    fn selected_row(&self) -> Option<&HistoryRow> {
+        self.list_state
+            .selected()
+            .and_then(|i| self.rows.get(i))
     }
 }
 
@@ -287,7 +309,6 @@ pub fn run_tui_to_stdout(
     })?;
     let mut app = App::new(conn, mode, initial_query);
 
-    // Render to stderr so stdout is free for the selected command.
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
@@ -300,7 +321,6 @@ pub fn run_tui_to_stdout(
     let mut terminal = Terminal::new(backend)?;
     let result = run_loop(&mut terminal, &mut app);
 
-    // Always restore the terminal, even on error.
     let _ = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::terminal::LeaveAlternateScreen,
@@ -324,24 +344,21 @@ where
     B: Backend,
 {
     loop {
-        // `terminal.draw` returns `Result<(), B::Error>`. We can't
-        // use `?` because the error type may not be Send. Treat
-        // draw errors as terminal-unrecoverable and bail out.
         if let Err(e) = terminal.draw(|f| ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
 
         if crossterm::event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-                && handle_key(app, key) {
-                    return Ok(());
-                }
+            && handle_key(app, key)
+        {
+            return Ok(());
+        }
     }
 }
 
 /// Returns `true` if the app should exit (selection made or cancelled).
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    // Ctrl-modified keys first.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
@@ -357,11 +374,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Char('p') => {
-                app.move_selection(-1);
+                app.move_selection(1);
                 return false;
             }
             KeyCode::Char('n') => {
-                app.move_selection(1);
+                app.move_selection(-1);
                 return false;
             }
             _ => return false,
@@ -378,12 +395,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         KeyCode::Left => {
-            // Edit mode with cursor at the start of the line.
             app.select_for_edit_start();
             true
         }
         KeyCode::Right => {
-            // Edit mode with cursor at the end of the line.
             app.select_for_edit_end();
             true
         }
@@ -391,31 +406,36 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.backspace();
             false
         }
+        // Rows are ordered newest-first (index 0 = newest). The list
+        // is bottom-aligned, so the newest entry sits at the bottom.
+        // Up moves visually upward = older = higher index.
         KeyCode::Up => {
-            app.move_selection(-1);
-            false
-        }
-        KeyCode::Down => {
             app.move_selection(1);
             false
         }
-        KeyCode::PageUp => {
-            app.move_selection(-10);
+        KeyCode::Down => {
+            app.move_selection(-1);
             false
         }
-        KeyCode::PageDown => {
+        KeyCode::PageUp => {
             app.move_selection(10);
             false
         }
+        KeyCode::PageDown => {
+            app.move_selection(-10);
+            false
+        }
+        // Home jumps to the oldest entry (last index), End to the
+        // newest (index 0, bottom of the list).
         KeyCode::Home => {
             if !app.rows.is_empty() {
-                app.list_state.select(Some(0));
+                app.list_state.select(Some(app.rows.len() - 1));
             }
             false
         }
         KeyCode::End => {
             if !app.rows.is_empty() {
-                app.list_state.select(Some(app.rows.len() - 1));
+                app.list_state.select(Some(0));
             }
             false
         }
@@ -432,99 +452,298 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Min(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
+                Constraint::Length(1), // mode strip
+                Constraint::Min(6),    // list
+                Constraint::Length(8), // details
+                Constraint::Length(3), // input
+                Constraint::Length(1), // status
             ]
             .as_ref(),
         )
         .split(f.area());
 
-    draw_list(f, app, chunks[0]);
-    draw_input(f, app, chunks[1]);
-    draw_status(f, app, chunks[2]);
+    draw_mode_strip(f, app, chunks[0]);
+    draw_list(f, app, chunks[1]);
+    draw_details(f, app, chunks[2]);
+    draw_input(f, app, chunks[3]);
+    draw_status(f, app, chunks[4]);
+}
+
+fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
+    let spans = vec![
+        Span::styled("smart", Theme::dim()),
+        Span::styled("history", Theme::accent()),
+        Span::styled("  ", Theme::default()),
+        mode_badge(app.mode),
+        Span::styled(
+            format!(
+                "  {} ",
+                match app.mode {
+                    Mode::Sess => "current session only",
+                    Mode::Dir => "current directory only",
+                    Mode::Global => "all history",
+                }
+            ),
+            Theme::dim(),
+        ),
+    ];
+    let line = Line::from(spans);
+    let paragraph = Paragraph::new(line);
+    f.render_widget(paragraph, area);
+}
+
+fn mode_badge(mode: Mode) -> Span<'static> {
+    let (label, color) = match mode {
+        Mode::Sess => ("SESS", Theme::SUCCESS),
+        Mode::Dir => ("DIR", Theme::WARNING),
+        Mode::Global => ("GLOBAL", Theme::ACCENT),
+    };
+    Span::styled(
+        format!(" {} ", label),
+        Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let items_real: Vec<ListItem> = app
+    // Compute a fixed age-column width based on the visible rows so
+    // the age values line up neatly. Use a minimum of 3 chars.
+    let age_width = app
         .rows
         .iter()
-        .map(|r| {
-            let time = format_time(r.timestamp);
-            let exit_marker = if r.exit_code == 0 { "OK" } else { "ERR" };
-            let line = Line::from(vec![
-                Span::styled(
-                    format!(" {}  ", time),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{} ", exit_marker),
-                    Style::default().fg(if r.exit_code == 0 {
-                        Color::Green
-                    } else {
-                        Color::Red
-                    }),
-                ),
-                Span::styled(r.command.clone(), Style::default()),
-                Span::styled(
-                    format!("  ({})", r.directory),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            ListItem::new(line)
+        .map(|r| format_diff(r.timestamp).chars().count())
+        .max()
+        .unwrap_or(3)
+        .max(3);
+
+    // Build the real row items. Rows are stored newest-first; for
+    // display we want oldest at the top and newest at the bottom,
+    // so reverse the order. Pass `is_selected` based on the data index.
+    let real_items: Vec<ListItem> = app
+        .rows
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(data_idx, r)| {
+            let is_selected = app.list_state.selected() == Some(data_idx);
+            ListItem::new(render_row(r, &app.query, is_selected, age_width))
         })
         .collect();
 
     // Bottom-align: when there are fewer items than the list's
     // available height, pad the top with empty items so the actual
-    // rows sit at the bottom of the widget instead of the top.
-    // `area.height` includes the top and bottom borders; subtract 2
-    // for those. If the list is taller than the available area,
-    // `saturating_sub` clamps `pad` to zero (no padding).
+    // rows sit at the bottom of the widget. `area.height` includes
+    // the top and bottom borders; subtract 2 for those.
     let visible_height = area.height.saturating_sub(2) as usize;
-    let pad = visible_height.saturating_sub(items_real.len());
-    app.pad = pad;
-    let mut items: Vec<ListItem> = (0..pad).map(|_| ListItem::new("")).collect();
-    items.extend(items_real);
+    let real_count = real_items.len();
+    let pad = visible_height.saturating_sub(real_count);
 
-    // Translate the stored real-row index into a rendered index.
-    // If no selection (e.g. empty list), leave it unset.
-    if let Some(real_idx) = app.list_state.selected() {
-        if real_idx < app.rows.len() {
-            app.list_state.select(Some(real_idx + pad));
-        } else {
-            app.list_state.select(None);
-        }
+    let mut items: Vec<ListItem> = (0..pad).map(|_| ListItem::new("")).collect();
+    items.extend(real_items);
+
+    // Translate the stored data index into a rendered index.
+    // data index 0 = newest, which is the last real item in the
+    // reversed + padded list.
+    let rendered_idx = app.list_state.selected().map(|data_idx| {
+        pad + (real_count.saturating_sub(1) - data_idx)
+    });
+    if let Some(ri) = rendered_idx {
+        app.list_state.select(Some(ri));
     }
 
-    let title = format!(" History ({}) ", app.rows.len());
+    let title = format!(" History — {} ", app.rows.len());
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(title)
+                .title_style(Theme::accent())
+                .border_style(Theme::dim()),
+        )
         .highlight_style(
             Style::default()
-                .bg(Color::Gray)
+                .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("> ");
+        .highlight_symbol(symbols::line::THICK_VERTICAL_RIGHT)
+        .repeat_highlight_symbol(true);
 
     f.render_stateful_widget(list, area, &mut app.list_state);
 
-    // Translate the rendered index back to a real-row index so the
-    // stored value is always in real-row coordinates.
-    if let Some(rendered_idx) = app.list_state.selected() {
-        let real = rendered_idx.saturating_sub(pad);
-        app.list_state.select(Some(real));
+    // Translate the rendered index back to a data index so the
+    // stored value is always in data coordinates (0 = newest).
+    if let Some(ri) = app.list_state.selected() {
+        if ri < pad {
+            app.list_state.select(None);
+        } else {
+            let real = ri - pad;
+            let data_idx = real_count.saturating_sub(1) - real;
+            app.list_state.select(Some(data_idx));
+        }
     }
+}
+
+/// Render a single history row as a `Line` with optional query
+/// highlighting. The layout is a fixed-width columnar form:
+///
+///   [age] [status]  command  ·  time
+///
+/// `age_width` is the right-aligned width of the age column so rows
+/// line up.
+fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width: usize) -> Line<'a> {
+    let age = format_diff(row.timestamp);
+    let age_padded = format!("{:>age_width$}", age);
+
+    let exit_marker = if row.exit_code == 0 { "✓" } else { "✗" };
+    let exit_style = if row.exit_code == 0 {
+        Theme::success()
+    } else {
+        Theme::error()
+    };
+
+    let mut spans = vec![
+        Span::styled(format!(" {} ", age_padded), Theme::accent()),
+        Span::raw(" "),
+        Span::styled(format!(" {} ", exit_marker), exit_style),
+        Span::raw(" "),
+    ];
+
+    // Highlight query matches inside the command.
+    spans.extend(highlight_matches(&row.command, query));
+
+    spans.push(Span::styled(
+        format!("  · {} ", format_time(row.timestamp)),
+        Theme::dim(),
+    ));
+
+    if is_selected {
+        spans.push(Span::styled(
+            format!("· {} ", row.directory),
+            Theme::dim(),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Return a sequence of spans that wrap every occurrence of `query`
+/// in `text` with a highlight style. Matching is case-insensitive and
+/// based on Unicode scalar values. Adjacent non-matching characters
+/// are coalesced into a single span.
+fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>> {
+    if query.is_empty() {
+        return vec![Span::raw(text)];
+    }
+
+    let lower_query: Vec<char> = query.to_lowercase().chars().collect();
+    let lower_text: Vec<char> = text.to_lowercase().chars().collect();
+    let text_chars: Vec<char> = text.chars().collect();
+    let qlen = lower_query.len();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut i = 0;
+    let mut pending_start = 0;
+
+    while i + qlen <= lower_text.len() {
+        if lower_text[i..i + qlen] == lower_query[..] {
+            // Emit pending non-matching prefix, if any.
+            if i > pending_start {
+                let prefix: String = text_chars[pending_start..i].iter().collect();
+                spans.push(Span::raw(prefix));
+            }
+            let matched: String = text_chars[i..i + qlen].iter().collect();
+            spans.push(Span::styled(
+                matched,
+                Style::default()
+                    .fg(Theme::HIGHLIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            i += qlen;
+            pending_start = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if pending_start < text_chars.len() {
+        let tail: String = text_chars[pending_start..].iter().collect();
+        spans.push(Span::raw(tail));
+    }
+
+    spans
+}
+
+fn draw_details(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Details ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim());
+
+    let Some(row) = app.selected_row() else {
+        let empty = Paragraph::new(
+            Line::from(vec![Span::styled("No command selected", Theme::dim())]),
+        )
+        .block(block);
+        f.render_widget(empty, area);
+        return;
+    };
+
+    let exit_marker = if row.exit_code == 0 { "✓" } else { "✗" };
+    let exit_text = if row.exit_code == 0 {
+        "success".to_string()
+    } else {
+        format!("exit {}", row.exit_code)
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Command  ", Theme::dim()),
+            Span::styled(row.command.clone(), Style::default().add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("Dir      ", Theme::dim()),
+            Span::raw(row.directory.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("Session  ", Theme::dim()),
+            Span::raw(row.session_id.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("Time     ", Theme::dim()),
+            Span::raw(format!(
+                "{} · {} · epoch {}",
+                format_time(row.timestamp),
+                format_diff(row.timestamp),
+                row.timestamp
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("Status   ", Theme::dim()),
+            Span::styled(format!("{} {}", exit_marker, exit_text), Theme::success()),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let input = Paragraph::new(Line::from(vec![
-        Span::styled("> ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("> ", Theme::accent()),
         Span::raw(app.query.as_str()),
     ]))
-    .block(Block::default().borders(Borders::ALL).title(" search "))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(" search ")
+            .title_style(Theme::accent())
+            .border_style(Theme::dim()),
+    )
     .wrap(Wrap { trim: false });
     f.render_widget(input, area);
+
     // Place the cursor at the end of the query.
     let cursor_x = area.x + 3 + app.query.chars().count() as u16;
     let cursor_y = area.y + 1;
@@ -537,18 +756,59 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let n = app.rows.len();
     let count = match n {
+        0 => "0 matches".to_string(),
         1 => "1 match".to_string(),
         x => format!("{} matches", x),
     };
-    let mode_str = format!("[{}]", app.mode.label());
-    let help = "Arrows nav  PgUp/PgDn  Home/End  Enter run  Left/Right edit  ^G scope  ^U clear  Esc cancel";
+
+    let help = match app.selected_row() {
+        Some(_) => "Enter run · Left/Right edit · ↑↓ nav · ^G scope · ^U clear · Esc cancel",
+        None => "Type to search · ^G scope · ^U clear · Esc cancel",
+    };
+
     let line = Line::from(vec![
-        Span::styled(format!(" {}  ", count), Style::default().fg(Color::Yellow)),
-        Span::styled(format!("{}  ", mode_str), Style::default().fg(Color::Cyan)),
-        Span::styled(help, Style::default().fg(Color::DarkGray)),
+        Span::styled(format!(" {}  ", count), Theme::highlight()),
+        Span::styled(help, Theme::dim()),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
 
-// `format_time` lives in `crate::util` and is re-exported.
-use crate::util::format_time;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_matches_empty_query() {
+        let spans = highlight_matches("hello world", "");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello world".to_string());
+    }
+
+    #[test]
+    fn highlight_matches_single() {
+        let spans = highlight_matches("git status", "stat");
+        let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(content, vec!["git ", "stat", "us"]);
+    }
+
+    #[test]
+    fn highlight_matches_case_insensitive() {
+        let spans = highlight_matches("Git Status", "stat");
+        let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(content, vec!["Git ", "Stat", "us"]);
+    }
+
+    #[test]
+    fn highlight_matches_multiple() {
+        let spans = highlight_matches("foo bar foo", "foo");
+        let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(content, vec!["foo", " bar ", "foo"]);
+    }
+
+    #[test]
+    fn highlight_matches_no_match() {
+        let spans = highlight_matches("hello world", "xyz");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello world".to_string());
+    }
+}

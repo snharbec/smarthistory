@@ -2,6 +2,8 @@
 //! TUI (`tui.rs`). Keeping them in one place avoids drift when the
 //! format string or the "N/A" sentinel changes.
 
+use chrono::Datelike;
+
 /// Format a Unix epoch (seconds) as "dd.Mon.YYYY HH:MM:SS" in UTC, e.g.
 /// "03.Jun.2026 17:43:01". Returns "N/A" if the value is out of range.
 pub fn format_time(epoch: i64) -> String {
@@ -9,6 +11,46 @@ pub fn format_time(epoch: i64) -> String {
         Some(dt) => dt.naive_utc().format("%d.%b.%Y %H:%M:%S").to_string(),
         None => "N/A".to_string(),
     }
+}
+
+/// Human-readable difference between `epoch` and now, using the largest
+/// non-zero unit. Ladder (with short unit suffixes):
+///   month  -> "1M", 2M, ...
+///   day    -> "1d", 2d, ...
+///   hour   -> "1h", 2h, ...
+///   minute -> "1m", 2m, ...
+///   second -> "1s", 2s, ...
+/// Returns "N/A" for non-positive or out-of-range timestamps.
+pub fn format_diff(epoch: i64) -> String {
+    let now = chrono::Utc::now().naive_utc();
+    let Some(then) = chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.naive_utc()) else {
+        return "N/A".to_string();
+    };
+    if epoch <= 0 {
+        return "N/A".to_string();
+    }
+
+    // Calendar-month diff first, since it's non-uniform in seconds.
+    let months = (now.year() - then.year()) * 12 + (now.month() as i32 - then.month() as i32);
+    if months > 0 {
+        return format!("{}M", months);
+    }
+
+    let delta = now - then;
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        return format!("{}s", secs.max(0));
+    }
+    let mins = delta.num_minutes();
+    if mins < 60 {
+        return format!("{}m", mins);
+    }
+    let hours = delta.num_hours();
+    if hours < 24 {
+        return format!("{}h", hours);
+    }
+    let days = delta.num_days();
+    format!("{}d", days)
 }
 
 /// Escape the SQLite `LIKE` wildcards (`%` and `_`) in a user-supplied

@@ -1,7 +1,6 @@
 mod tui;
 mod util;
 
-use chrono::Datelike;
 use clap::Parser;
 use rusqlite::{params, Connection};
 use std::env;
@@ -358,47 +357,7 @@ fn compute_derived(name: &str, raw_row: &[(String, String)]) -> String {
 /// "03.Jun.2026 17:43:01". Returns "N/A" if the value is out of range.
 /// (Implementation in `crate::util`; kept as a re-export so existing
 /// call sites compile unchanged.)
-use crate::util::format_time;
-
-/// Human-readable difference between `epoch` and now, using the largest
-/// non-zero unit. Ladder (with short unit suffixes):
-///   month  -> "1M", 2M, ...
-///   day    -> "1d", 2d, ...
-///   hour   -> "1h", 2h, ...
-///   minute -> "1m", 2m, ...
-///   second -> "1s", 2s, ...
-/// Returns "N/A" for non-positive or out-of-range timestamps.
-fn format_diff(epoch: i64) -> String {
-    let now = chrono::Utc::now().naive_utc();
-    let Some(then) = chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.naive_utc()) else {
-        return "N/A".to_string();
-    };
-    if epoch <= 0 {
-        return "N/A".to_string();
-    }
-
-    // Calendar-month diff first, since it's non-uniform in seconds.
-    let months = (now.year() - then.year()) * 12 + (now.month() as i32 - then.month() as i32);
-    if months > 0 {
-        return format!("{}M", months);
-    }
-
-    let delta = now - then;
-    let secs = delta.num_seconds();
-    if secs < 60 {
-        return format!("{}s", secs.max(0));
-    }
-    let mins = delta.num_minutes();
-    if mins < 60 {
-        return format!("{}m", mins);
-    }
-    let hours = delta.num_hours();
-    if hours < 24 {
-        return format!("{}h", hours);
-    }
-    let days = delta.num_days();
-    format!("{}d", days)
-}
+use crate::util::{format_diff, format_time};
 
 /// Leaf directory name of a stored path. For "/Users/har/projects/foo"
 /// returns "foo". For "/" or empty strings returns the input unchanged.
