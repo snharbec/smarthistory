@@ -128,9 +128,32 @@ impl Theme {
     }
 }
 
+/// Filter by exit status. Cycled with Ctrl+S in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // `label` kept for future use (e.g. larger displays)
+enum ExitFilter {
+    /// No exit-code filter.
+    All,
+    /// Only successful commands (exit_code == 0).
+    Success,
+    /// Only failed commands (exit_code != 0).
+    Failed,
+}
+
+impl ExitFilter {
+    fn next(self) -> Self {
+        match self {
+            ExitFilter::All => ExitFilter::Success,
+            ExitFilter::Success => ExitFilter::Failed,
+            ExitFilter::Failed => ExitFilter::All,
+        }
+    }
+}
+
 struct App {
     conn: Connection,
     mode: Mode,
+    exit_filter: ExitFilter,
     query: String,
     rows: Vec<HistoryRow>,
     list_state: ListState,
@@ -145,6 +168,7 @@ impl App {
         let mut app = App {
             conn,
             mode: initial_mode,
+            exit_filter: ExitFilter::All,
             query: initial_query,
             rows: Vec::new(),
             list_state,
@@ -205,6 +229,11 @@ impl App {
             clause.push_str(" AND command LIKE ? ESCAPE '\\'");
             params.push(Box::new(format!("%{}%", escaped)));
         }
+        match self.exit_filter {
+            ExitFilter::Success => clause.push_str(" AND exit_code = 0"),
+            ExitFilter::Failed => clause.push_str(" AND exit_code != 0"),
+            ExitFilter::All => {}
+        }
         match self.mode {
             Mode::Sess => {
                 if let Ok(s) = std::env::var("SMART_HISTORY_SESSION")
@@ -229,6 +258,11 @@ impl App {
 
     fn cycle_mode(&mut self) {
         self.mode = self.mode.next();
+        self.refresh();
+    }
+
+    fn cycle_exit_filter(&mut self) {
+        self.exit_filter = self.exit_filter.next();
         self.refresh();
     }
 
@@ -369,6 +403,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.cycle_mode();
                 return false;
             }
+            KeyCode::Char('s') => {
+                app.cycle_exit_filter();
+                return false;
+            }
             KeyCode::Char('u') => {
                 app.clear_query();
                 return false;
@@ -475,13 +513,20 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("history", Theme::accent()),
         Span::styled("  ", Theme::default()),
         mode_badge(app.mode),
+        Span::styled("  ", Theme::default()),
+        exit_filter_badge(app.exit_filter),
         Span::styled(
             format!(
-                "  {} ",
+                "  {} · {} ",
                 match app.mode {
                     Mode::Sess => "current session only",
                     Mode::Dir => "current directory only",
                     Mode::Global => "all history",
+                },
+                match app.exit_filter {
+                    ExitFilter::All => "all exit codes",
+                    ExitFilter::Success => "successful only",
+                    ExitFilter::Failed => "failed only",
                 }
             ),
             Theme::dim(),
@@ -490,6 +535,18 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     f.render_widget(paragraph, area);
+}
+
+fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
+    let (label, color) = match filter {
+        ExitFilter::All => ("ALL", Theme::ACCENT),
+        ExitFilter::Success => ("OK", Theme::SUCCESS),
+        ExitFilter::Failed => ("ERR", Theme::ERROR),
+    };
+    Span::styled(
+        format!(" {} ", label),
+        Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn mode_badge(mode: Mode) -> Span<'static> {
@@ -762,8 +819,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(_) => "Enter run · Left/Right edit · ↑↓ nav · ^G scope · ^U clear · Esc cancel",
-        None => "Type to search · ^G scope · ^U clear · Esc cancel",
+        Some(_) => "Enter run · Left/Right edit · ↑↓ nav · ^G scope · ^S status · ^U clear · Esc cancel",
+        None => "Type to search · ^G scope · ^S status · ^U clear · Esc cancel",
     };
 
     let line = Line::from(vec![
