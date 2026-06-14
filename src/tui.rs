@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::time::Duration;
 
 use crate::util::{format_diff, format_time};
@@ -45,11 +45,13 @@ impl Mode {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // some fields are kept for future display
 struct HistoryRow {
+    id: i64,
     command: String,
     directory: String,
     session_id: String,
     exit_code: i32,
     timestamp: i64,
+    comment: String,
 }
 
 /// How the parent shell should treat the chosen command.
@@ -160,6 +162,9 @@ struct App {
     selection: Option<String>,
     pick_mode: Option<PickMode>,
     cancelled: bool,
+    /// When `Some`, we are editing the comment of a history row.
+    /// The `i64` is the row id; the `String` is the live edit buffer.
+    comment_edit: Option<(i64, String)>,
 }
 
 impl App {
@@ -175,6 +180,7 @@ impl App {
             selection: None,
             pick_mode: None,
             cancelled: false,
+            comment_edit: None,
         };
         app.refresh();
         // Rows are ordered newest first; index 0 is the newest entry.
@@ -200,8 +206,9 @@ impl App {
     fn fetch(&self) -> Result<Vec<HistoryRow>> {
         let (where_clause, params) = self.build_where();
         let sql = format!(
-            "SELECT command, directory, session_id, exit_code, timestamp \
-             FROM history {} ORDER BY timestamp DESC LIMIT 1000",
+            "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment \
+             FROM history h LEFT JOIN command_comments c ON h.command = c.command{} \
+             ORDER BY h.timestamp DESC LIMIT 1000",
             where_clause
         );
         let params_ref: Vec<&dyn rusqlite::ToSql> =
@@ -210,11 +217,13 @@ impl App {
         let rows = stmt
             .query_map(&params_ref[..], |row| {
                 Ok(HistoryRow {
-                    command: row.get(0)?,
-                    directory: row.get(1)?,
-                    session_id: row.get(2)?,
-                    exit_code: row.get(3)?,
-                    timestamp: row.get(4)?,
+                    id: row.get(0)?,
+                    command: row.get(1)?,
+                    directory: row.get(2)?,
+                    session_id: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    comment: row.get(6).unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -226,12 +235,13 @@ impl App {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if !self.query.is_empty() {
             let escaped = crate::util::escape_like(&self.query);
-            clause.push_str(" AND command LIKE ? ESCAPE '\\'");
+            clause.push_str(" AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')");
+            params.push(Box::new(format!("%{}%", escaped)));
             params.push(Box::new(format!("%{}%", escaped)));
         }
         match self.exit_filter {
-            ExitFilter::Success => clause.push_str(" AND exit_code = 0"),
-            ExitFilter::Failed => clause.push_str(" AND exit_code != 0"),
+            ExitFilter::Success => clause.push_str(" AND h.exit_code = 0"),
+            ExitFilter::Failed => clause.push_str(" AND h.exit_code != 0"),
             ExitFilter::All => {}
         }
         match self.mode {
@@ -239,7 +249,7 @@ impl App {
                 if let Ok(s) = std::env::var("SMART_HISTORY_SESSION")
                     && !s.is_empty()
                 {
-                    clause.push_str(" AND session_id = ?");
+                    clause.push_str(" AND h.session_id = ?");
                     params.push(Box::new(s));
                 }
             }
@@ -247,7 +257,7 @@ impl App {
                 if let Ok(pwd) = std::env::var("PWD")
                     && !pwd.is_empty()
                 {
-                    clause.push_str(" AND directory = ?");
+                    clause.push_str(" AND h.directory = ?");
                     params.push(Box::new(pwd));
                 }
             }
@@ -304,24 +314,64 @@ impl App {
     }
 
     fn push_char(&mut self, c: char) {
-        self.query.push(c);
-        self.refresh();
+        if let Some((_, ref mut buf)) = self.comment_edit {
+            buf.push(c);
+        } else {
+            self.query.push(c);
+            self.refresh();
+        }
     }
 
     fn backspace(&mut self) {
-        self.query.pop();
-        self.refresh();
+        if let Some((_, ref mut buf)) = self.comment_edit {
+            buf.pop();
+        } else {
+            self.query.pop();
+            self.refresh();
+        }
     }
 
     fn clear_query(&mut self) {
-        self.query.clear();
+        if let Some((_, ref mut buf)) = self.comment_edit {
+            buf.clear();
+        } else {
+            self.query.clear();
+            self.refresh();
+        }
+    }
+
+    fn start_comment_edit(&mut self) {
+        if let Some(row) = self.selected_row() {
+            self.comment_edit = Some((row.id, row.comment.clone()));
+        }
+    }
+
+    fn cancel_comment_edit(&mut self) {
+        self.comment_edit = None;
+    }
+
+    fn save_comment_edit(&mut self) -> Result<()> {
+        if let Some((_, ref comment)) = self.comment_edit
+            && let Some(row) = self.selected_row() {
+                self.conn.execute(
+                    "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                     ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                    params![row.command, comment],
+                )?;
+            }
+        self.comment_edit = None;
         self.refresh();
+        Ok(())
     }
 
     fn selected_row(&self) -> Option<&HistoryRow> {
         self.list_state
             .selected()
             .and_then(|i| self.rows.get(i))
+    }
+
+    fn is_comment_editing(&self) -> bool {
+        self.comment_edit.is_some()
     }
 }
 
@@ -393,6 +443,11 @@ where
 
 /// Returns `true` if the app should exit (selection made or cancelled).
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // When editing a comment, most keys go to the comment buffer.
+    if app.is_comment_editing() {
+        return handle_comment_edit_key(app, key);
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
@@ -405,6 +460,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('s') => {
                 app.cycle_exit_filter();
+                return false;
+            }
+            KeyCode::Char('e') => {
+                app.start_comment_edit();
                 return false;
             }
             KeyCode::Char('u') => {
@@ -485,16 +544,54 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Key handler used while editing a comment. Returns `true` only when
+/// the user aborts the whole TUI with Ctrl+C.
+fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.cancelled = true;
+                return true;
+            }
+            KeyCode::Char('u') => {
+                app.clear_query();
+                return false;
+            }
+            _ => return false,
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_comment_edit();
+            false
+        }
+        KeyCode::Enter => {
+            let _ = app.save_comment_edit();
+            false
+        }
+        KeyCode::Backspace => {
+            app.backspace();
+            false
+        }
+        KeyCode::Char(c) => {
+            app.push_char(c);
+            false
+        }
+        _ => false,
+    }
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Length(1), // mode strip
-                Constraint::Min(6),    // list
-                Constraint::Length(8), // details
-                Constraint::Length(3), // input
-                Constraint::Length(1), // status
+                Constraint::Length(1),   // mode strip
+                Constraint::Fill(1),     // list: take all remaining space
+                Constraint::Length(6),   // details: fixed 6 lines incl. header/borders
+                Constraint::Length(3),   // input
+                Constraint::Length(1),   // status
             ]
             .as_ref(),
         )
@@ -562,8 +659,6 @@ fn mode_badge(mode: Mode) -> Span<'static> {
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
-    // Compute a fixed age-column width based on the visible rows so
-    // the age values line up neatly. Use a minimum of 3 chars.
     let age_width = app
         .rows
         .iter()
@@ -586,10 +681,10 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    // Bottom-align: when there are fewer items than the list's
-    // available height, pad the top with empty items so the actual
-    // rows sit at the bottom of the widget. `area.height` includes
-    // the top and bottom borders; subtract 2 for those.
+    // Bottom-align: when there are fewer real rows than the visible
+    // height, pad the top with empty items so the real rows sit at
+    // the bottom of the widget. `area.height` includes the top and
+    // bottom borders; subtract 2 for the content area.
     let visible_height = area.height.saturating_sub(2) as usize;
     let real_count = real_items.len();
     let pad = visible_height.saturating_sub(real_count);
@@ -597,15 +692,30 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let mut items: Vec<ListItem> = (0..pad).map(|_| ListItem::new("")).collect();
     items.extend(real_items);
 
-    // Translate the stored data index into a rendered index.
-    // data index 0 = newest, which is the last real item in the
-    // reversed + padded list.
+    // The stored selection is in data coordinates (0 = newest).
+    // Map it to the rendered list coordinates where the newest item
+    // is the last real item.
     let rendered_idx = app.list_state.selected().map(|data_idx| {
         pad + (real_count.saturating_sub(1) - data_idx)
     });
-    if let Some(ri) = rendered_idx {
-        app.list_state.select(Some(ri));
-    }
+
+    // Anchor the visible window so the selected row appears at the
+    // bottom. If we padded, start from the top; otherwise start from
+    // the position that puts the selection at the bottom of the view.
+    let offset = if let Some(ri) = rendered_idx {
+        if real_count >= visible_height {
+            ri.saturating_sub(visible_height.saturating_sub(1))
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Replace the state so we can set the offset explicitly. Preserve
+    // the rendered selection for this frame.
+    let mut render_state = ListState::default().with_offset(offset);
+    render_state.select(rendered_idx);
 
     let title = format!(" History — {} ", app.rows.len());
     let list = List::new(items)
@@ -625,19 +735,21 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol(symbols::line::THICK_VERTICAL_RIGHT)
         .repeat_highlight_symbol(true);
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    f.render_stateful_widget(list, area, &mut render_state);
 
-    // Translate the rendered index back to a data index so the
-    // stored value is always in data coordinates (0 = newest).
-    if let Some(ri) = app.list_state.selected() {
+    // ratatui may have scrolled the state; read its final offset and
+    // selection back into app.list_state in data coordinates.
+    let final_selected = render_state.selected();
+    let data_idx = final_selected.and_then(|ri| {
         if ri < pad {
-            app.list_state.select(None);
+            None
         } else {
             let real = ri - pad;
-            let data_idx = real_count.saturating_sub(1) - real;
-            app.list_state.select(Some(data_idx));
+            Some(real_count.saturating_sub(1) - real)
         }
-    }
+    });
+    app.list_state = ListState::default().with_offset(0);
+    app.list_state.select(data_idx);
 }
 
 /// Render a single history row as a `Line` with optional query
@@ -673,7 +785,16 @@ fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width
         Theme::dim(),
     ));
 
-    if is_selected {
+    // Show a non-empty comment inline for every row, and fall back to
+    // the directory on the selected row when there is no comment.
+    if !row.comment.is_empty() {
+        spans.push(Span::styled(
+            format!("# {} ", row.comment),
+            Style::default()
+                .fg(Theme::WARNING)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    } else if is_selected {
         spans.push(Span::styled(
             format!("· {} ", row.directory),
             Theme::dim(),
@@ -753,7 +874,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         format!("exit {}", row.exit_code)
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Command  ", Theme::dim()),
             Span::styled(row.command.clone(), Style::default().add_modifier(Modifier::BOLD)),
@@ -781,28 +902,55 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         ]),
     ];
 
+    // Add the comment line only when one exists.
+    if !row.comment.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Comment  ", Theme::dim()),
+            Span::styled(
+                row.comment.clone(),
+                Style::default()
+                    .fg(Theme::WARNING)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    let (prompt, title, content) = match app.comment_edit {
+        Some((_, ref buf)) => {
+            ("comment> ", " comment ", buf.as_str())
+        }
+        None => ("> ", " search ", app.query.as_str()),
+    };
+
     let input = Paragraph::new(Line::from(vec![
-        Span::styled("> ", Theme::accent()),
-        Span::raw(app.query.as_str()),
+        Span::styled(prompt, Theme::accent()),
+        Span::raw(content),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(" search ")
+            .title(title)
             .title_style(Theme::accent())
-            .border_style(Theme::dim()),
+            .border_style(if app.comment_edit.is_some() {
+                Style::default().fg(Theme::WARNING)
+            } else {
+                Theme::dim()
+            }),
     )
     .wrap(Wrap { trim: false });
     f.render_widget(input, area);
 
-    // Place the cursor at the end of the query.
-    let cursor_x = area.x + 3 + app.query.chars().count() as u16;
+    // Place the cursor at the end of the active buffer.
+    // The visible text starts at area.x + 1 (one cell for the left
+    // border). The prompt string includes its own trailing space.
+    let prompt_width = prompt.chars().count() as u16;
+    let cursor_x = area.x + 1 + prompt_width + content.chars().count() as u16;
     let cursor_y = area.y + 1;
     f.set_cursor_position((
         cursor_x.min(area.x.saturating_add(area.width).saturating_sub(2)),
@@ -819,8 +967,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(_) => "Enter run · Left/Right edit · ↑↓ nav · ^G scope · ^S status · ^U clear · Esc cancel",
-        None => "Type to search · ^G scope · ^S status · ^U clear · Esc cancel",
+        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
+        None => "Type to search · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
     };
 
     let line = Line::from(vec![

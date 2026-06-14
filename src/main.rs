@@ -91,6 +91,10 @@ enum Commands {
         command: String,
         #[arg(short, long)]
         exit_code: i32,
+        /// Optional comment attached to the history entry. Searchable
+        /// from the TUI and CLI.
+        #[arg(long)]
+        comment: Option<String>,
     },
     Search {
         #[arg(index = 1)]
@@ -103,8 +107,8 @@ enum Commands {
         #[arg(long)]
         exit_code: Option<String>,
         /// Comma-separated list of columns to return. Available: command,
-        /// directory, session_id, exit_code, timestamp, id, time, diff, base.
-        /// May also be passed multiple times: -f command -f directory.
+        /// directory, session_id, exit_code, timestamp, id, comment, time,
+        /// diff, base. May also be passed multiple times: -f command -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
         /// Maximum number of rows to return. Default 100. Use 0 for no limit.
@@ -127,8 +131,8 @@ enum Commands {
         #[arg(long)]
         exit_code: Option<String>,
         /// Comma-separated list of columns to return. Available: command,
-        /// directory, session_id, exit_code, timestamp, id, time, diff, base.
-        /// May also be passed multiple times: -f command -f directory.
+        /// directory, session_id, exit_code, timestamp, id, comment, time,
+        /// diff, base. May also be passed multiple times: -f command -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
         /// Maximum number of rows to return. Default 1000. Use 0 for no limit.
@@ -148,8 +152,8 @@ enum Commands {
     ImportAtuin,
     List {
         /// Comma-separated list of columns to return. Available: command,
-        /// directory, session_id, exit_code, timestamp, id, time, diff, base.
-        /// May also be passed multiple times: -f command -f directory.
+        /// directory, session_id, exit_code, timestamp, id, comment, time,
+        /// diff, base. May also be passed multiple times: -f command -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
         #[arg(short, long)]
@@ -324,6 +328,15 @@ fn split_fields(fields: &[String]) -> (Vec<String>, Vec<String>) {
     (raw, derived)
 }
 
+/// Return the SQL expression for a conceptual field name, qualifying
+/// history columns with `h.` and the global comment with `c.comment`.
+fn qualify_field(name: &str) -> String {
+    match name {
+        "comment" => "c.comment".to_string(),
+        _ => format!("h.{}", name),
+    }
+}
+
 /// Reserved field names that are computed in Rust from the raw columns
 /// (`timestamp`, `directory`) rather than read directly from the table.
 const DERIVED_FIELDS: &[&str] = &["time", "diff", "base"];
@@ -424,12 +437,12 @@ fn confirm(prompt: &str) -> bool {
     }
 }
 
-/// Append ` ORDER BY timestamp DESC [LIMIT n]` to `sql`. A `limit` of 0
+/// Append ` ORDER BY h.timestamp DESC [LIMIT n]` to `sql`. A `limit` of 0
 /// means "no limit" and the `LIMIT` clause is omitted. The newest
 /// entries come first so the line-editor widget's first Up/Down press
 /// shows the most recent command in scope.
 fn append_order_and_limit(sql: &mut String, limit: usize) {
-    sql.push_str(" ORDER BY timestamp DESC");
+    sql.push_str(" ORDER BY h.timestamp DESC");
     if limit > 0 {
         sql.push_str(&format!(" LIMIT {}", limit));
     }
@@ -484,6 +497,50 @@ fn build_where_clause(
     (clause, params)
 }
 
+/// Build the `FROM ... WHERE ...` clause used by searches that can also
+/// match global command comments. Always joins `command_comments` so
+/// the `comment` field can be selected/searched.
+fn build_search_where_clause(
+    query: Option<&str>,
+    directory: Option<String>,
+    session_flag: bool,
+    exit_code: Option<&str>,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut clause = String::from(
+        " FROM history h LEFT JOIN command_comments c ON h.command = c.command WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(q) = query {
+        let escaped = escape_like(q);
+        clause.push_str(" AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')");
+        params.push(Box::new(format!("%{}%", escaped)));
+        params.push(Box::new(format!("%{}%", escaped)));
+    }
+    if let Some(dir) = directory {
+        clause.push_str(" AND h.directory = ?");
+        params.push(Box::new(dir));
+    }
+    if session_flag {
+        match env::var("SMART_HISTORY_SESSION") {
+            Ok(s) if !s.is_empty() => {
+                clause.push_str(" AND h.session_id = ?");
+                params.push(Box::new(s));
+            }
+            _ => eprintln!(
+                "warning: --session requested but SMART_HISTORY_SESSION is not set; ignoring"
+            ),
+        }
+    }
+    if let Some(ec) = exit_code {
+        if ec == "OK" {
+            clause.push_str(" AND h.exit_code = 0");
+        } else if ec == "ERROR" {
+            clause.push_str(" AND h.exit_code != 0");
+        }
+    }
+    (clause, params)
+}
+
 fn init_db() -> anyhow::Result<Connection> {
     let path = get_db_path();
     if let Some(parent) = path.parent() {
@@ -501,6 +558,16 @@ fn init_db() -> anyhow::Result<Connection> {
         )",
         [],
     )?;
+    // Global comments are stored per-command in a separate table so
+    // they survive re-execution and apply to every instance of the
+    // same command text across sessions/directories.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS command_comments (
+            command TEXT PRIMARY KEY,
+            comment TEXT NOT NULL
+        )",
+        [],
+    )?;
     // A unique index on (command, directory, session_id) lets the
     // `Add` arm use `INSERT ... ON CONFLICT DO UPDATE` for atomic
     // upsert. The IF NOT EXISTS makes this safe for both new and
@@ -511,7 +578,51 @@ fn init_db() -> anyhow::Result<Connection> {
          ON history (command, directory, session_id)",
         [],
     )?;
+    // If an older database still has the per-row comment column from
+    // a previous schema, migrate those comments into the global
+    // command_comments table and then drop the column.
+    migrate_history_comment_column(&conn)?;
     Ok(conn)
+}
+
+/// If the `history` table still has a per-row `comment` column (from
+/// an earlier schema), copy the first non-empty comment for each
+/// command into `command_comments`, then remove the column.
+fn migrate_history_comment_column(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(history)")?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let has_comment = names.filter_map(|n| n.ok()).any(|n| n == "comment");
+    if !has_comment {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO command_comments (command, comment)
+         SELECT DISTINCT command, comment FROM history
+         WHERE comment IS NOT NULL AND comment != ''",
+        [],
+    )?;
+    // SQLite only supports dropping columns in 3.35.0+; rusqlite
+    // bundles a recent enough SQLite, but we use a defensive rename
+    // and recreate approach for portability.
+    conn.execute("ALTER TABLE history RENAME TO history_old", [])?;
+    conn.execute(
+        "CREATE TABLE history (
+            id INTEGER PRIMARY KEY,
+            command TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            exit_code INTEGER,
+            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+        )",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp)
+         SELECT id, command, directory, session_id, exit_code, timestamp FROM history_old",
+        [],
+    )?;
+    conn.execute("DROP TABLE history_old", [])?;
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -519,7 +630,11 @@ fn main() -> anyhow::Result<()> {
     let conn = init_db()?;
 
     match args.command {
-        Commands::Add { command, exit_code } => {
+        Commands::Add {
+            command,
+            exit_code,
+            comment,
+        } => {
             let pwd = env::current_dir()?.to_string_lossy().into_owned();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
@@ -527,7 +642,9 @@ fn main() -> anyhow::Result<()> {
             // Atomic upsert: if (command, directory, session_id) already
             // exists, refresh its timestamp and exit_code; otherwise
             // insert a new row. The unique index idx_history_dedup is
-            // the conflict target.
+            // the conflict target. Comments live in a separate global
+            // table keyed only by command, so this statement never
+            // touches them.
             conn.execute(
                 "INSERT INTO history (command, directory, session_id, exit_code)
                  VALUES (?1, ?2, ?3, ?4)
@@ -536,6 +653,17 @@ fn main() -> anyhow::Result<()> {
                      exit_code = excluded.exit_code",
                 params![command, pwd, session_id, exit_code],
             )?;
+
+            // If a comment was explicitly supplied, store it globally
+            // for this command text.
+            if let Some(c) = comment.filter(|c| !c.is_empty()) {
+                conn.execute(
+                    "INSERT INTO command_comments (command, comment)
+                     VALUES (?1, ?2)
+                     ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                    params![command, c],
+                )?;
+            }
         }
         Commands::Search {
             query,
@@ -548,11 +676,13 @@ fn main() -> anyhow::Result<()> {
         } => {
             let selected_fields = fields.unwrap_or_else(|| vec!["command".to_string()]);
             let (raw_fields, derived) = split_fields(&selected_fields);
-            let mut sql = format!("SELECT {} FROM history", raw_fields.join(", "));
+            let qualified_fields: Vec<String> =
+                raw_fields.iter().map(|f| qualify_field(f)).collect();
+            let mut sql = format!("SELECT {}", qualified_fields.join(", "));
 
             let query_ref = query.as_deref();
             let (where_clause, params) =
-                build_where_clause(query_ref, directory, session, exit_code.as_deref());
+                build_search_where_clause(query_ref, directory, session, exit_code.as_deref());
             sql.push_str(&where_clause);
 
             append_order_and_limit(&mut sql, limit.unwrap_or(100));
@@ -590,11 +720,13 @@ fn main() -> anyhow::Result<()> {
         } => {
             let selected_fields = fields.unwrap_or_else(|| vec!["command".to_string()]);
             let (raw_fields, derived) = split_fields(&selected_fields);
-            let mut sql = format!("SELECT {} FROM history", raw_fields.join(", "));
+            let qualified_fields: Vec<String> =
+                raw_fields.iter().map(|f| qualify_field(f)).collect();
+            let mut sql = format!("SELECT {}", qualified_fields.join(", "));
 
             let query_ref = query.as_deref();
             let (where_clause, params) =
-                build_where_clause(query_ref, directory, session, exit_code.as_deref());
+                build_search_where_clause(query_ref, directory, session, exit_code.as_deref());
             sql.push_str(&where_clause);
 
             append_order_and_limit(&mut sql, limit.unwrap_or(1000));
@@ -628,10 +760,11 @@ fn main() -> anyhow::Result<()> {
             exit_code,
             force,
         } => {
-            // Build the same WHERE clause Search/Select use, then issue a
-            // COUNT first and a DELETE second. The COUNT drives the
-            // confirmation message; the DELETE uses the same params so
-            // the matched set is identical.
+            // Build the WHERE clause for the history table (command text
+            // only; comments are not considered for deletion) and then
+            // issue a COUNT first and a DELETE second. The COUNT drives
+            // the confirmation message; the DELETE uses the same params
+            // so the matched set is identical.
             let (where_clause, params) = build_where_clause(
                 query.as_deref(),
                 directory,
@@ -712,7 +845,12 @@ fn main() -> anyhow::Result<()> {
         Commands::List { fields, table } => {
             let selected_fields = fields.unwrap_or_else(|| vec!["command".to_string()]);
             let (raw_fields, derived) = split_fields(&selected_fields);
-            let sql = format!("SELECT {} FROM history ORDER BY timestamp DESC", raw_fields.join(", "));
+            let qualified_fields: Vec<String> =
+                raw_fields.iter().map(|f| qualify_field(f)).collect();
+            let sql = format!(
+                "SELECT {} FROM history h LEFT JOIN command_comments c ON h.command = c.command ORDER BY h.timestamp DESC",
+                qualified_fields.join(", ")
+            );
 
             let mut stmt = conn.prepare(&sql)?;
 
