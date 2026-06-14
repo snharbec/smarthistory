@@ -61,6 +61,72 @@ match standard workflow expectations. This project aims to provide:
    session UUID and binds the keyboard shortcuts. Re-run it once per
    shell startup; running it twice in the same shell is a no-op.
 
+## TMUX integration
+
+To use the automatic capture feature inside tmux, the following
+configuration must be added to your tmux configuration. The hooks
+mirror the full pane output to a per-pane log file in
+`~/.cache/tmux-history/output-${TMUX_PANE}.log`, which the smarthistory
+precmd hook then reads to capture up to 20 lines of output for every
+executed command.
+
+```bash
+# Hooks to save the pane-output to a log file inside
+# /home/har/.cache/tmux-history/output-PANE.log
+# 1. Create a hook that triggers whenever a new pane is initialized
+set-hook -g after-split-window \'run-shell "~/.local/bin/log_tmux_pane.sh #{pane_id}"\'
+set-hook -g after-new-window \'run-shell "~/.local/bin/log_tmux_pane.sh #{pane_id}"\'
+set-hook -g session-created \'run-shell "~/.local/bin/log_tmux_pane.sh #{pane_id}"\'
+set-hook -g after-kill-pane \'run-shell "~/.local/bin/stop_tmux_pane.sh #{pane_id}"\'
+```
+
+The script `log_tmux_pane.sh` looks like the following:
+
+```bash
+#!bash
+PANE=$1
+LOG=~/.cache/tmux-history/output-%$PANE.log
+DIR=$(dirname $LOG)
+mkdir -p $DIR
+rm -f $LOG
+tmux pipe-pane -t $PANE "cat >> $LOG"
+```
+
+The script `stop_tmux_pane.sh` looks like the following:
+
+```bash
+#!bash
+declare -A tmux_panes
+
+while read -r pid; do
+    if [[ -n "$pid" ]]; then
+        tmux_panes["$pid"]=1
+    fi
+done < <(tmux list-panes -a -F "#{pane_id}")
+
+DIR=~/.cache/tmux-history/
+# Now check all files inside the
+(
+  cd $DIR
+  for log in `ls output-*.log`
+  do
+    ID=$(echo $log | sed "s/output-//" | sed "s/.log//")
+    if [[ -n "${tmux_panes[$ID]}" ]]; then
+      echo Do not do anything
+    else
+      rm output-$ID.log
+    fi
+  done
+)
+```
+
+With this in place, every command executed in a tmux pane is
+automatically recorded by smarthistory together with up to 20 lines
+of captured output. The `precmd` hook waits up to 2 seconds (20
+retries of 100 ms each) for the pane log to be flushed before giving
+up; commands that finish quickly are captured without any delay.
+When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
+
 ## Usage
 
 ### Keyboard shortcuts (interactive zsh)

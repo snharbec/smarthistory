@@ -24,7 +24,21 @@ _smarthistory_precmd() {
     local exit_code=$?
     # Skip empty command lines (e.g. bare Enter presses).
     [ -n "$_smarthistory_cmd" ] || return 0
-    smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
+    # When running inside a tmux session, the full pane is mirrored to
+    # ~/.cache/tmux-history/output-${TMUX_PANE}.log. If that file
+    # exists, use `smarthistory capture-tmux` to grab the command line
+    # and the following output (up to 20 lines) automatically. This
+    # avoids an explicit `smarthistory capture <cmd>` call.
+    if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
+        local tmux_log="$HOME/.cache/tmux-history/output-${TMUX_PANE}.log"
+        if [ -f "$tmux_log" ]; then
+            smarthistory capture-tmux "$_smarthistory_cmd" "$tmux_log" --exit-code $exit_code 2>/dev/null
+        else
+            smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
+        fi
+    else
+        smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
+    fi
     # Remember the most recently executed command for the Ctrl-S
     # "next probable command" widget. Reset the cycle index so the
     # next press starts with the most probable candidate.

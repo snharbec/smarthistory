@@ -52,6 +52,7 @@ struct HistoryRow {
     exit_code: i32,
     timestamp: i64,
     comment: String,
+    output: String,
 }
 
 /// How the parent shell should treat the chosen command.
@@ -163,8 +164,11 @@ struct App {
     pick_mode: Option<PickMode>,
     cancelled: bool,
     /// When `Some`, we are editing the comment of a history row.
-    /// The `i64` is the row id; the `String` is the live edit buffer.
-    comment_edit: Option<(i64, String)>,
+    /// The `String` is the live edit buffer.
+    comment_edit: Option<String>,
+    /// When `Some`, we are viewing the captured output of a history
+    /// row in a full-screen overlay.
+    output_view: Option<String>,
 }
 
 impl App {
@@ -181,6 +185,7 @@ impl App {
             pick_mode: None,
             cancelled: false,
             comment_edit: None,
+            output_view: None,
         };
         app.refresh();
         // Rows are ordered newest first; index 0 is the newest entry.
@@ -206,8 +211,10 @@ impl App {
     fn fetch(&self) -> Result<Vec<HistoryRow>> {
         let (where_clause, params) = self.build_where();
         let sql = format!(
-            "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment \
-             FROM history h LEFT JOIN command_comments c ON h.command = c.command{} \
+            "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output \
+             FROM history h \
+             LEFT JOIN command_comments c ON h.command = c.command \
+             LEFT JOIN history_output o ON h.id = o.history_id{} \
              ORDER BY h.timestamp DESC LIMIT 1000",
             where_clause
         );
@@ -224,6 +231,7 @@ impl App {
                     exit_code: row.get(4)?,
                     timestamp: row.get(5)?,
                     comment: row.get(6).unwrap_or_default(),
+                    output: row.get(7).unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -314,7 +322,7 @@ impl App {
     }
 
     fn push_char(&mut self, c: char) {
-        if let Some((_, ref mut buf)) = self.comment_edit {
+        if let Some(ref mut buf) = self.comment_edit {
             buf.push(c);
         } else {
             self.query.push(c);
@@ -323,7 +331,7 @@ impl App {
     }
 
     fn backspace(&mut self) {
-        if let Some((_, ref mut buf)) = self.comment_edit {
+        if let Some(ref mut buf) = self.comment_edit {
             buf.pop();
         } else {
             self.query.pop();
@@ -332,7 +340,7 @@ impl App {
     }
 
     fn clear_query(&mut self) {
-        if let Some((_, ref mut buf)) = self.comment_edit {
+        if let Some(ref mut buf) = self.comment_edit {
             buf.clear();
         } else {
             self.query.clear();
@@ -342,7 +350,7 @@ impl App {
 
     fn start_comment_edit(&mut self) {
         if let Some(row) = self.selected_row() {
-            self.comment_edit = Some((row.id, row.comment.clone()));
+            self.comment_edit = Some(row.comment.clone());
         }
     }
 
@@ -351,17 +359,28 @@ impl App {
     }
 
     fn save_comment_edit(&mut self) -> Result<()> {
-        if let Some((_, ref comment)) = self.comment_edit
-            && let Some(row) = self.selected_row() {
-                self.conn.execute(
-                    "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
-                     ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
-                    params![row.command, comment],
-                )?;
-            }
+        if let Some(ref comment) = self.comment_edit
+            && let Some(row) = self.selected_row()
+        {
+            self.conn.execute(
+                "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                 ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                params![row.command, comment],
+            )?;
+        }
         self.comment_edit = None;
         self.refresh();
         Ok(())
+    }
+
+    fn show_output_view(&mut self) {
+        if let Some(row) = self.selected_row().filter(|r| !r.output.is_empty()) {
+            self.output_view = Some(row.output.clone());
+        }
+    }
+
+    fn close_output_view(&mut self) {
+        self.output_view = None;
     }
 
     fn selected_row(&self) -> Option<&HistoryRow> {
@@ -372,6 +391,10 @@ impl App {
 
     fn is_comment_editing(&self) -> bool {
         self.comment_edit.is_some()
+    }
+
+    fn is_output_viewing(&self) -> bool {
+        self.output_view.is_some()
     }
 }
 
@@ -443,6 +466,11 @@ where
 
 /// Returns `true` if the app should exit (selection made or cancelled).
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // When viewing captured output, only a small set of keys apply.
+    if app.is_output_viewing() {
+        return handle_output_view_key(app, key);
+    }
+
     // When editing a comment, most keys go to the comment buffer.
     if app.is_comment_editing() {
         return handle_comment_edit_key(app, key);
@@ -464,6 +492,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('e') => {
                 app.start_comment_edit();
+                return false;
+            }
+            KeyCode::Char('l') => {
+                app.show_output_view();
                 return false;
             }
             KeyCode::Char('u') => {
@@ -544,6 +576,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Key handler used while viewing captured output. Returns `true` only
+/// when the user aborts the whole TUI with Ctrl+C.
+fn handle_output_view_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc
+        | KeyCode::Enter
+        | KeyCode::Char('q') => {
+            app.close_output_view();
+            false
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Key handler used while editing a comment. Returns `true` only when
 /// the user aborts the whole TUI with Ctrl+C.
 fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
@@ -583,6 +633,11 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    if let Some(ref output) = app.output_view {
+        draw_output_view(f, output);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -602,6 +657,22 @@ fn ui(f: &mut Frame, app: &mut App) {
     draw_details(f, app, chunks[2]);
     draw_input(f, app, chunks[3]);
     draw_status(f, app, chunks[4]);
+}
+
+fn draw_output_view(f: &mut Frame, output: &str) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Captured output (^L close) ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim());
+
+    let lines: Vec<Line> = output
+        .lines()
+        .map(|l| Line::from(Span::raw(l.to_string())))
+        .collect();
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, f.area());
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
@@ -915,13 +986,21 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
+    // Add the captured output line(s) when output exists.
+    if !row.output.is_empty() {
+        lines.push(Line::from(vec![Span::styled("Output   ", Theme::dim())]));
+        for line in row.output.lines() {
+            lines.push(Line::from(vec![Span::raw(format!("    {}", line))]));
+        }
+    }
+
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let (prompt, title, content) = match app.comment_edit {
-        Some((_, ref buf)) => {
+        Some(ref buf) => {
             ("comment> ", " comment ", buf.as_str())
         }
         None => ("> ", " search ", app.query.as_str()),
@@ -967,6 +1046,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
+        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^L output · ^U clear · Esc cancel",
         Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
         None => "Type to search · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
     };

@@ -107,8 +107,9 @@ enum Commands {
         #[arg(long)]
         exit_code: Option<String>,
         /// Comma-separated list of columns to return. Available: command,
-        /// directory, session_id, exit_code, timestamp, id, comment, time,
-        /// diff, base. May also be passed multiple times: -f command -f directory.
+        /// directory, session_id, exit_code, timestamp, id, comment, output,
+        /// time, diff, base. May also be passed multiple times: -f command
+        /// -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
         /// Maximum number of rows to return. Default 100. Use 0 for no limit.
@@ -131,8 +132,9 @@ enum Commands {
         #[arg(long)]
         exit_code: Option<String>,
         /// Comma-separated list of columns to return. Available: command,
-        /// directory, session_id, exit_code, timestamp, id, comment, time,
-        /// diff, base. May also be passed multiple times: -f command -f directory.
+        /// directory, session_id, exit_code, timestamp, id, comment, output,
+        /// time, diff, base. May also be passed multiple times: -f command
+        /// -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
         /// Maximum number of rows to return. Default 1000. Use 0 for no limit.
@@ -152,8 +154,9 @@ enum Commands {
     ImportAtuin,
     List {
         /// Comma-separated list of columns to return. Available: command,
-        /// directory, session_id, exit_code, timestamp, id, comment, time,
-        /// diff, base. May also be passed multiple times: -f command -f directory.
+        /// directory, session_id, exit_code, timestamp, id, comment, output,
+        /// time, diff, base. May also be passed multiple times: -f command
+        /// -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
         #[arg(short, long)]
@@ -190,6 +193,25 @@ enum Commands {
         #[arg(short, long)]
         limit: Option<usize>,
     },
+    /// Run a command, capture up to 20 lines of combined stdout/stderr,
+    /// and store the output in the database alongside the history entry.
+    Capture {
+        /// The command to run (pass remaining args verbatim).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Read a tmux pane log file, extract the command line and the
+    /// following output (up to 20 lines), and store it in the database.
+    /// Intended to be called automatically by the zsh precmd hook when
+    /// running inside tmux.
+    CaptureTmux {
+        /// The command that was executed (as recorded by zsh preexec).
+        command: String,
+        /// Path to the tmux pane log file.
+        file: PathBuf,
+        #[arg(short, long)]
+        exit_code: i32,
+    },
 }
 
 fn get_db_path() -> PathBuf {
@@ -199,6 +221,190 @@ fn get_db_path() -> PathBuf {
         .join("cache")
         .join("smarthistory")
         .join("smarthistory.db")
+}
+
+/// Maximum number of output lines stored per history entry. A higher
+/// value makes the details pane less useful, so we cap it.
+const MAX_OUTPUT_LINES: usize = 20;
+
+/// Run `command`, capture up to `MAX_OUTPUT_LINES` of combined
+/// stdout/stderr, and return `(command_string, exit_code, captured_output)`.
+/// The command is joined with a single space; callers that need shell
+/// features should invoke a shell explicitly.
+fn capture_command_output(command: &[String]) -> anyhow::Result<(String, i32, String)> {
+    if command.is_empty() {
+        anyhow::bail!("no command provided");
+    }
+    let program = &command[0];
+    let args = &command[1..];
+    let child = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let output = child.wait_with_output()?;
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr);
+
+    let limited: String = combined
+        .lines()
+        .take(MAX_OUTPUT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let joined = command.join(" ");
+    Ok((joined, exit_code, limited))
+}
+
+/// Upsert a history row and return its id. This matches the dedup key
+/// used by the zsh hook.
+fn upsert_history_row(
+    conn: &Connection,
+    command: &str,
+    directory: &str,
+    session_id: &str,
+    exit_code: i32,
+) -> anyhow::Result<i64> {
+    conn.execute(
+        "INSERT INTO history (command, directory, session_id, exit_code)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (command, directory, session_id) DO UPDATE
+         SET timestamp = (strftime('%s', 'now')),
+             exit_code = excluded.exit_code",
+        params![command, directory, session_id, exit_code],
+    )?;
+    let id: i64 = conn.query_row(
+        "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+        params![command, directory, session_id],
+        |row| row.get(0),
+    )?;
+    Ok(id)
+}
+
+/// Store or replace the captured output for a history row.
+fn store_output(conn: &Connection, history_id: i64, output: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO history_output (history_id, output) VALUES (?1, ?2)
+         ON CONFLICT (history_id) DO UPDATE
+         SET output = excluded.output,
+             captured_at = (strftime('%s', 'now'))",
+        params![history_id, output],
+    )?;
+    Ok(())
+}
+
+/// Read `file` and extract the command line matching `command` and up
+/// to `MAX_OUTPUT_LINES` following lines. The search starts from the
+/// end of the file and walks backward to find the last occurrence of
+/// a line containing `command`. The returned string includes that
+/// line and the following lines.
+///
+/// If the command is not found on the first pass, the function retries
+/// up to 5 times with a 100 ms delay between attempts. This handles
+/// the race condition where the tmux log file hasn't been flushed
+/// yet by the time the precmd hook runs.
+///
+/// The search prefers lines where the command text appears at the
+/// END of the line (i.e. the prompt+command line, like `$ ls -la`)
+/// over lines that merely contain the command as a substring. This
+/// avoids false matches on output lines that happen to include the
+/// command text (e.g. `echo ls` produces an output line `ls`).
+/// ANSI escape sequences are stripped first so that colourised
+/// prompts do not interfere with the match.
+fn extract_tmux_output(command: &str, file: &std::path::Path) -> anyhow::Result<String> {
+    use std::fs;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    const MAX_ATTEMPTS: u32 = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(100);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        if let Ok(contents) = fs::read_to_string(file) {
+            let cleaned = strip_ansi(&contents);
+            let lines: Vec<&str> = cleaned.lines().collect();
+
+            // First pass: find a line where the command sits at the
+            // end (after the prompt). This is the most reliable
+            // signature of a command line in a tmux pane log.
+            if let Some(start) = lines
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, l)| l.trim_end().ends_with(command))
+                .map(|(i, _)| i)
+            {
+                let end = (start + 1 + MAX_OUTPUT_LINES).min(lines.len());
+                return Ok(lines[start..end].join("\n"));
+            }
+
+            // Second pass: fall back to a substring match. This is
+            // the legacy behaviour and may pick an output line that
+            // happens to contain the command text, but at least it
+            // finds something.
+            if let Some(start) = lines
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, l)| l.contains(command))
+                .map(|(i, _)| i)
+            {
+                let end = (start + 1 + MAX_OUTPUT_LINES).min(lines.len());
+                return Ok(lines[start..end].join("\n"));
+            }
+        }
+        if attempt < MAX_ATTEMPTS {
+            sleep(RETRY_DELAY);
+        }
+    }
+    anyhow::bail!("command not found in tmux log after {} attempts", MAX_ATTEMPTS)
+}
+
+/// Strip common ANSI escape sequences from a string. Handles CSI
+/// sequences (ESC `[` ... letter) and OSC sequences (ESC `]` ...
+/// BEL or ST). This is intentionally simple: a full ANSI parser is
+/// not needed for tmux pane logs which use a predictable subset.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next();
+                    while let Some(&nc) = chars.peek() {
+                        chars.next();
+                        if ('@'..='~').contains(&nc) {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    chars.next();
+                    while let Some(nc) = chars.next() {
+                        if nc == '\x07' {
+                            break;
+                        }
+                        if nc == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Reserved field names that are computed in Rust from the raw columns
@@ -333,6 +539,7 @@ fn split_fields(fields: &[String]) -> (Vec<String>, Vec<String>) {
 fn qualify_field(name: &str) -> String {
     match name {
         "comment" => "c.comment".to_string(),
+        "output" => "o.output".to_string(),
         _ => format!("h.{}", name),
     }
 }
@@ -507,7 +714,10 @@ fn build_search_where_clause(
     exit_code: Option<&str>,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut clause = String::from(
-        " FROM history h LEFT JOIN command_comments c ON h.command = c.command WHERE 1=1",
+        " FROM history h \
+         LEFT JOIN command_comments c ON h.command = c.command \
+         LEFT JOIN history_output o ON h.id = o.history_id \
+         WHERE 1=1",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(q) = query {
@@ -565,6 +775,17 @@ fn init_db() -> anyhow::Result<Connection> {
         "CREATE TABLE IF NOT EXISTS command_comments (
             command TEXT PRIMARY KEY,
             comment TEXT NOT NULL
+        )",
+        [],
+    )?;
+    // Captured command output (up to MAX_OUTPUT_LINES lines) is stored
+    // per history row so different contexts can have different output.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS history_output (
+            history_id INTEGER PRIMARY KEY,
+            output TEXT NOT NULL,
+            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
         )",
         [],
     )?;
@@ -848,7 +1069,10 @@ fn main() -> anyhow::Result<()> {
             let qualified_fields: Vec<String> =
                 raw_fields.iter().map(|f| qualify_field(f)).collect();
             let sql = format!(
-                "SELECT {} FROM history h LEFT JOIN command_comments c ON h.command = c.command ORDER BY h.timestamp DESC",
+                "SELECT {} FROM history h \
+                 LEFT JOIN command_comments c ON h.command = c.command \
+                 LEFT JOIN history_output o ON h.id = o.history_id \
+                 ORDER BY h.timestamp DESC",
                 qualified_fields.join(", ")
             );
 
@@ -938,6 +1162,35 @@ fn main() -> anyhow::Result<()> {
                 let (next, freq) = r?;
                 println!("{}\t{}", freq, next);
             }
+        }
+        Commands::Capture { command } => {
+            let (command_str, exit_code, output) = capture_command_output(&command)?;
+
+            // Echo the command output to the terminal so capture feels
+            // like a normal execution.
+            print!("{}", output);
+            if !output.is_empty() && !output.ends_with('\n') {
+                println!();
+            }
+
+            let pwd = env::current_dir()?.to_string_lossy().into_owned();
+            let session_id =
+                env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+            let history_id = upsert_history_row(&conn, &command_str, &pwd, &session_id, exit_code,
+            )?;
+            store_output(&conn, history_id, &output)?;
+        }
+        Commands::CaptureTmux {
+            command,
+            file,
+            exit_code,
+        } => {
+            let output = extract_tmux_output(&command, &file).unwrap_or_default();
+            let pwd = env::current_dir()?.to_string_lossy().into_owned();
+            let session_id =
+                env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+            let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
+            store_output(&conn, history_id, &output)?;
         }
         Commands::Tui { mode, query } => {
             let initial_mode = mode.unwrap_or_else(|| "SESS".to_string());
@@ -1085,5 +1338,127 @@ mod tests {
         assert_ne!(u1, u2);
         assert_ne!(u2, u3);
         assert_ne!(u1, u3);
+    }
+
+    fn write_temp_log(contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "smarthistory-tmux-test-{}.log",
+            generate_uuid_v4()
+        ));
+        std::fs::write(&path, contents).expect("write log");
+        path
+    }
+
+    #[test]
+    fn extract_tmux_output_uses_last_match() {
+        let log = "some other line\necho first\necho first output\nrandom line\necho first again\nlast output\n";
+        let path = write_temp_log(log);
+        let out = extract_tmux_output("echo first again", &path).expect("extract");
+        assert!(out.contains("echo first again"));
+        assert!(out.contains("last output"));
+        assert!(!out.contains("echo first output"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_tmux_output_caps_at_twenty_lines() {
+        let mut log = String::from("$ mycommand\n");
+        for i in 0..30 {
+            log.push_str(&format!("line {}\n", i));
+        }
+        let path = write_temp_log(&log);
+        let out = extract_tmux_output("mycommand", &path).expect("extract");
+        let count = out.lines().count();
+        // The slice includes the command line itself plus up to
+        // MAX_OUTPUT_LINES following lines.
+        assert_eq!(count, MAX_OUTPUT_LINES + 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_tmux_output_retries_until_match() {
+        // Write a log without the command, then append the command
+        // after a short delay. The retry loop should pick it up.
+        let path = write_temp_log("initial content\nno match here\n");
+        let path_clone = path.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path_clone)
+                .expect("open");
+            writeln!(f, "before cmd").unwrap();
+            writeln!(f, "$ delayedcmd").unwrap();
+            writeln!(f, "output line 1").unwrap();
+        });
+        let out = extract_tmux_output("delayedcmd", &path).expect("extract");
+        handle.join().unwrap();
+        assert!(out.contains("delayedcmd"));
+        assert!(out.contains("output line 1"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_tmux_output_prefers_prompt_line_over_output() {
+        // The command `echo ls` produces an output line that is
+        // just `ls`. The search must prefer the prompt+command line
+        // (`$ echo ls`) so that the captured slice starts at the
+        // command, not at the output line.
+        let log = "$ echo ls
+ls
+$ echo next
+next output
+";
+        let path = write_temp_log(log);
+        let out = extract_tmux_output("echo ls", &path).expect("extract");
+        // Must start with the prompt+command line, not the bare
+        // output line.
+        assert!(out.starts_with("$ echo ls"), "got: {out}");
+        // The captured window should be at most 21 lines
+        // (command + 20 following).
+        assert!(out.lines().count() <= MAX_OUTPUT_LINES + 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_tmux_output_does_not_match_just_output_line() {
+        // A bare output line that happens to equal the command text
+        // must not be picked when a prompt+command line is also
+        // present later. We rely on the end-of-line heuristic to
+        // skip the bare output line.
+        let log = "some output
+ls
+$ echo ls
+real output
+";
+        let path = write_temp_log(log);
+        let out = extract_tmux_output("echo ls", &path).expect("extract");
+        assert!(out.starts_with("$ echo ls"), "got: {out}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_tmux_output_strips_ansi_before_matching() {
+        // The prompt contains ANSI colour codes; the command line
+        // after stripping is `$ ls -la`, which ends with the command.
+        let log = "\x1b[32m$\x1b[0m ls -la
+file1
+file2
+";
+        let path = write_temp_log(log);
+        let out = extract_tmux_output("ls -la", &path).expect("extract");
+        assert!(out.contains("ls -la"));
+        assert!(out.contains("file1"));
+        assert!(!out.contains("\x1b["), "ANSI should be stripped: {out}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_and_osc() {
+        let input = "before\x1b[32mgreen\x1b[0m after\x1b]0;title\x07end";
+        let out = strip_ansi(input);
+        assert_eq!(out, "beforegreen afterend");
     }
 }
