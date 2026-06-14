@@ -846,7 +846,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             [
                 Constraint::Length(1), // mode strip
                 Constraint::Fill(1),   // list: take all remaining space
-                Constraint::Length(6), // details: fixed 6 lines incl. header/borders
+                Constraint::Length(8), // details: fixed 8 lines incl. header/borders
                 Constraint::Length(3), // input
                 Constraint::Length(1), // status
             ]
@@ -856,7 +856,15 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     draw_mode_strip(f, app, chunks[0]);
     draw_list(f, app, chunks[1]);
-    draw_details(f, app, chunks[2]);
+
+    let detail_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .split(chunks[2]);
+
+    draw_details(f, app, detail_chunks[0]);
+    draw_output_preview(f, app, detail_chunks[1]);
+
     draw_input(f, app, chunks[3]);
     draw_status(f, app, chunks[4]);
 
@@ -1276,9 +1284,10 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Theme::dim());
 
     let Some(row) = app.selected_row() else {
-        let empty = Paragraph::new(
-            Line::from(vec![Span::styled("No command selected", Theme::dim())]),
-        )
+        let empty = Paragraph::new(Line::from(vec![Span::styled(
+            "No command selected",
+            Theme::dim(),
+        )]))
         .block(block);
         f.render_widget(empty, area);
         return;
@@ -1293,28 +1302,30 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Command  ", Theme::dim()),
-            Span::styled(row.command.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Cmd  ", Theme::dim()),
+            Span::styled(
+                row.command.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("Dir      ", Theme::dim()),
+            Span::styled("Dir  ", Theme::dim()),
             Span::raw(row.directory.clone()),
         ]),
         Line::from(vec![
-            Span::styled("Session  ", Theme::dim()),
+            Span::styled("Sess ", Theme::dim()),
             Span::raw(row.session_id.clone()),
         ]),
         Line::from(vec![
-            Span::styled("Time     ", Theme::dim()),
+            Span::styled("Time ", Theme::dim()),
             Span::raw(format!(
-                "{} · {} · epoch {}",
+                "{} · {}",
                 format_time(row.timestamp),
                 format_diff(row.timestamp),
-                row.timestamp
             )),
         ]),
         Line::from(vec![
-            Span::styled("Status   ", Theme::dim()),
+            Span::styled("Stat ", Theme::dim()),
             Span::styled(format!("{} {}", exit_marker, exit_text), Theme::success()),
         ]),
     ];
@@ -1322,7 +1333,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     // Add the comment line only when one exists.
     if !row.comment.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("Comment  ", Theme::dim()),
+            Span::styled("Rem  ", Theme::dim()),
             Span::styled(
                 row.comment.clone(),
                 Style::default()
@@ -1332,15 +1343,41 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Add the captured output line(s) when output exists.
-    if !row.output.is_empty() {
-        lines.push(Line::from(vec![Span::styled("Output   ", Theme::dim())]));
-        for line in row.output.lines() {
-            lines.push(Line::from(vec![Span::raw(format!("    {}", line))]));
-        }
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
+fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Output Preview ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim());
+
+    let Some(row) = app.selected_row() else {
+        f.render_widget(Paragraph::new("").block(block), area);
+        return;
+    };
+
+    if row.output.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("No output captured", Theme::dim())).block(block),
+            area,
+        );
+        return;
     }
 
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let preview_lines: Vec<Line> = row
+        .output
+        .lines()
+        .take(4) // Show up to 4 lines to fit the new larger detail pane
+        .map(|l| Line::from(Span::raw(l.to_string())))
+        .collect();
+
+    let paragraph = Paragraph::new(preview_lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
 
