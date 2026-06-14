@@ -30,7 +30,15 @@ _smarthistory_precmd() {
     # and the following output (up to 20 lines) automatically. This
     # avoids an explicit `smarthistory capture <cmd>` call.
     if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-        local tmux_log="$HOME/.cache/tmux-history/output-${TMUX_PANE}.log"
+        # Discover the configured tmux pane output directory. Falls
+        # back to the default location if the binary is unavailable
+        # or returns nothing.
+        local tmux_dir
+        tmux_dir=$(smarthistory config tmuxpaneoutputdir 2>/dev/null)
+        if [ -z "$tmux_dir" ]; then
+            tmux_dir="$HOME/.cache/tmux-history"
+        fi
+        local tmux_log="$tmux_dir/output-${TMUX_PANE}.log"
         if [ -f "$tmux_log" ]; then
             smarthistory capture-tmux "$_smarthistory_cmd" "$tmux_log" --exit-code $exit_code 2>/dev/null
         else

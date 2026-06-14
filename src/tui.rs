@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
+    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
@@ -168,7 +168,14 @@ struct App {
     comment_edit: Option<String>,
     /// When `Some`, we are viewing the captured output of a history
     /// row in a full-screen overlay.
-    output_view: Option<String>,
+    output_view: Option<OutputView>,
+}
+
+/// State for the captured-output overlay: the captured text plus a
+/// scroll offset (number of lines scrolled past the top).
+struct OutputView {
+    text: String,
+    scroll: usize,
 }
 
 impl App {
@@ -303,6 +310,18 @@ impl App {
         }
     }
 
+    /// Stage an external editor invocation as the next "selection".
+    /// The TUI prints the command on stdout and exits with the Run
+    /// exit code, so the parent shell treats it like any other
+    /// command line and runs the editor after the TUI has fully
+    /// torn down. The TUI does NOT manage the terminal while the
+    /// editor runs.
+    fn select_for_editor(&mut self, editor_cmd: String) {
+        self.selection = Some(editor_cmd);
+        self.pick_mode = Some(PickMode::Run);
+        self.close_output_view();
+    }
+
     fn select_for_edit_start(&mut self) {
         if let Some(i) = self.list_state.selected()
             && let Some(row) = self.rows.get(i)
@@ -375,7 +394,10 @@ impl App {
 
     fn show_output_view(&mut self) {
         if let Some(row) = self.selected_row().filter(|r| !r.output.is_empty()) {
-            self.output_view = Some(row.output.clone());
+            self.output_view = Some(OutputView {
+                text: row.output.clone(),
+                scroll: 0,
+            });
         }
     }
 
@@ -446,31 +468,49 @@ pub fn run_tui_to_stdout(
     }
 }
 
-fn run_loop<B>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()>
-where
-    B: Backend,
-{
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+    app: &mut App,
+) -> Result<()> {
+    let page_size = terminal
+        .size()
+        .map(|s| s.height.max(3) as usize)
+        .unwrap_or(20);
     loop {
         if let Err(e) = terminal.draw(|f| ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
 
-        if crossterm::event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && handle_key(app, key)
-        {
+        if !crossterm::event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+
+        if app.is_output_viewing() {
+            handle_output_view_key(app, key, page_size);
+            // If the overlay was closed AND a selection has been
+            // staged (e.g. by pressing ^E to open the captured
+            // output in an external editor), exit the TUI so the
+            // parent shell can run the staged command.
+            if !app.is_output_viewing() && app.selection.is_some() {
+                return Ok(());
+            }
+            continue;
+        }
+
+        if handle_key(app, key) {
             return Ok(());
         }
     }
 }
 
-/// Returns `true` if the app should exit (selection made or cancelled).
-fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    // When viewing captured output, only a small set of keys apply.
-    if app.is_output_viewing() {
-        return handle_output_view_key(app, key);
-    }
 
+/// Returns `true` if the app should exit (selection made or cancelled).
+/// The captured-output overlay is handled directly in the run loop
+/// so that it can launch an external editor.
+fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // When editing a comment, most keys go to the comment buffer.
     if app.is_comment_editing() {
         return handle_comment_edit_key(app, key);
@@ -578,21 +618,110 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
 /// Key handler used while viewing captured output. Returns `true` only
 /// when the user aborts the whole TUI with Ctrl+C.
-fn handle_output_view_key(app: &mut App, key: KeyEvent) -> bool {
+/// Result of handling a key event in the captured-output overlay.
+enum OutputViewResult {
+    /// Stay in the overlay and keep the loop running.
+    Continue,
+    /// Close the overlay and continue the main loop.
+    Close,
+}
+
+/// Key handler used while viewing captured output. Returns a result
+/// describing what the run loop should do next.
+fn handle_output_view_key(
+    app: &mut App,
+    key: KeyEvent,
+    page_size: usize,
+) -> OutputViewResult {
+    // Helper to compute the max valid scroll offset.
+    let max_scroll = |text: &str| -> usize {
+        let total = text.lines().count();
+        total.saturating_sub(page_size.max(1))
+    };
+
     match key.code {
-        KeyCode::Esc
-        | KeyCode::Enter
-        | KeyCode::Char('q') => {
-            app.close_output_view();
-            false
-        }
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => OutputViewResult::Close,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cancelled = true;
-            true
+            app.close_output_view();
+            OutputViewResult::Close
         }
-        _ => false,
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Write the captured output to a temporary file and stage
+            // the editor invocation as the next "selection". The TUI
+            // will exit normally, printing the editor command on
+            // stdout, and the parent shell runs it like any other
+            // command. This avoids all TUI terminal-mode juggling.
+            if let Some(ref view) = app.output_view {
+                let path = std::env::temp_dir().join(format!(
+                    "smarthistory-output-{}.txt",
+                    generate_tui_pane_id()
+                ));
+                if std::fs::write(&path, &view.text).is_ok() {
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .filter(|e| !e.is_empty())
+                        .unwrap_or_else(|| "vi".to_string());
+                    let cmd = format!("{} {}", editor, path.display());
+                    app.select_for_editor(cmd);
+                    return OutputViewResult::Close;
+                }
+            }
+            OutputViewResult::Continue
+        }
+        KeyCode::Up => {
+            if let Some(ref mut view) = app.output_view {
+                view.scroll = view.scroll.saturating_sub(1);
+            }
+            OutputViewResult::Continue
+        }
+        KeyCode::Down => {
+            if let Some(ref mut view) = app.output_view {
+                let max = max_scroll(&view.text);
+                view.scroll = (view.scroll + 1).min(max);
+            }
+            OutputViewResult::Continue
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut view) = app.output_view {
+                view.scroll = view.scroll.saturating_sub(page_size.max(1));
+            }
+            OutputViewResult::Continue
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut view) = app.output_view {
+                let max = max_scroll(&view.text);
+                view.scroll = (view.scroll + page_size.max(1)).min(max);
+            }
+            OutputViewResult::Continue
+        }
+        KeyCode::Home => {
+            if let Some(ref mut view) = app.output_view {
+                view.scroll = 0;
+            }
+            OutputViewResult::Continue
+        }
+        KeyCode::End => {
+            if let Some(ref mut view) = app.output_view {
+                view.scroll = max_scroll(&view.text);
+            }
+            OutputViewResult::Continue
+        }
+        _ => OutputViewResult::Continue,
     }
 }
+
+/// A short random ID used in temp file names.
+fn generate_tui_pane_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}", nanos)
+}
+
+
 
 /// Key handler used while editing a comment. Returns `true` only when
 /// the user aborts the whole TUI with Ctrl+C.
@@ -633,8 +762,8 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
-    if let Some(ref output) = app.output_view {
-        draw_output_view(f, output);
+    if let Some(ref view) = app.output_view {
+        draw_output_view(f, view);
         return;
     }
 
@@ -659,20 +788,48 @@ fn ui(f: &mut Frame, app: &mut App) {
     draw_status(f, app, chunks[4]);
 }
 
-fn draw_output_view(f: &mut Frame, output: &str) {
+fn draw_output_view(f: &mut Frame, view: &OutputView) {
+    let area = f.area();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Captured output (^L close) ")
+        .title(" Captured output (\u{2191}\u{2193} scroll, ^E edit, ^L close) ")
         .title_style(Theme::accent())
         .border_style(Theme::dim());
 
-    let lines: Vec<Line> = output
-        .lines()
+    let all_lines: Vec<&str> = view.text.lines().collect();
+    let total = all_lines.len();
+    // Inner height excludes the top and bottom borders.
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = view.scroll.min(max_scroll);
+
+    // Window of visible lines.
+    let end = (scroll + inner_h).min(total);
+    let start = scroll;
+    let visible: Vec<Line> = all_lines[start..end]
+        .iter()
         .map(|l| Line::from(Span::raw(l.to_string())))
         .collect();
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, f.area());
+
+    let paragraph = Paragraph::new(visible)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    // Footer with scroll position (only if there is room inside the
+    // border).
+    if area.height >= 3 {
+        let footer = format!(" {}/{} ", end, total);
+        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())));
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(para, footer_area);
+    }
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
@@ -841,7 +998,22 @@ fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width
         Theme::error()
     };
 
+    // Capture indicator. A bright `o ` shows the row has captured
+    // output available (press ^L to view); a dim `. ` is shown
+    // otherwise so columns stay aligned.
+    let capture_span = if !row.output.is_empty() {
+        Span::styled(
+            " o ",
+            Style::default()
+                .fg(Theme::HIGHLIGHT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" . ", Theme::dim())
+    };
+
     let mut spans = vec![
+        capture_span,
         Span::styled(format!(" {} ", age_padded), Theme::accent()),
         Span::raw(" "),
         Span::styled(format!(" {} ", exit_marker), exit_style),

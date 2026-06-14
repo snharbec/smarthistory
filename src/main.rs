@@ -165,6 +165,13 @@ enum Commands {
     Init {
         shell: String,
     },
+    /// Print the resolved value of a single configuration key. Used
+    /// by the zsh precmd hook to discover the tmux pane output
+    /// directory.
+    Config {
+        /// One of: `tmuxpaneoutputdir`, `ignorecapture`, `capturelines`.
+        key: String,
+    },
     /// Delete entries matching the given filter. With no filter, deletes
     /// every entry in the database. Prompts for confirmation unless
     /// --force is passed.
@@ -223,15 +230,190 @@ fn get_db_path() -> PathBuf {
         .join("smarthistory.db")
 }
 
-/// Maximum number of output lines stored per history entry. A higher
-/// value makes the details pane less useful, so we cap it.
-const MAX_OUTPUT_LINES: usize = 20;
+/// Default maximum number of output lines stored per history entry.
+/// A higher value makes the details pane less useful, so we cap it by
+/// default. Users can change this via `capturelines` in the config
+/// file.
+#[allow(dead_code)]
+pub(crate) const MAX_OUTPUT_LINES: usize = DEFAULT_CAPTURE_LINES;
 
-/// Run `command`, capture up to `MAX_OUTPUT_LINES` of combined
-/// stdout/stderr, and return `(command_string, exit_code, captured_output)`.
-/// The command is joined with a single space; callers that need shell
-/// features should invoke a shell explicitly.
-fn capture_command_output(command: &[String]) -> anyhow::Result<(String, i32, String)> {
+/// Path to the optional user configuration file. Lines are
+/// `key=value` pairs. Comments start with `#` and blank lines are
+/// ignored. Supported keys:
+///
+///   tmuxpaneoutputdir=~/path/to/dir
+///   ignorecapture=cmd1 cmd2 cmd3
+///   capturelines=20
+///   capturelines.<cmd>=ALL|<N>
+///
+/// When the file is absent, built-in defaults are used. When the
+/// file is present, the keys it defines override the defaults.
+fn config_path() -> Option<std::path::PathBuf> {
+    let home = env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("smarthistory")
+            .join("config"),
+    )
+}
+
+/// Expand a leading `~` or `~/<rest>` in a path to the user's home
+/// directory. Other occurrences of `~` are left untouched.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        if let Ok(home) = env::var("HOME") {
+            return std::path::PathBuf::from(home);
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+/// Commands whose output should never be captured by default. These
+/// are interactive TUI applications (editors, pagers, system
+/// monitors) whose output is either useless or harmful to store
+/// verbatim. Used when the config file is absent or does not set
+/// `ignorecapture`.
+const DEFAULT_NO_CAPTURE: &[&str] = &[
+    "vi", "nvim", "vim", "top", "htop", "emacs", "more", "less", "lazygit",
+];
+
+/// Default number of captured lines when neither `capturelines` nor a
+/// per-command override is configured.
+const DEFAULT_CAPTURE_LINES: usize = 20;
+
+/// Parse a `capturelines` value. Returns `None` for "ALL" (unlimited)
+/// or `Some(n)` for a numeric value.
+fn parse_capture_lines(s: &str) -> Option<usize> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("ALL") {
+        None
+    } else {
+        s.parse::<usize>().ok()
+    }
+}
+
+/// Resolved configuration. Constructed by `Config::load`.
+struct Config {
+    /// Directory containing per-pane tmux output log files.
+    tmux_pane_output_dir: std::path::PathBuf,
+    /// Commands whose output is never captured. Empty means capture
+    /// everything.
+    ignore_capture: std::collections::HashSet<String>,
+    /// Default number of captured lines, or `None` for unlimited.
+    default_capture_lines: Option<usize>,
+    /// Per-command override for captured lines.
+    capture_lines_per_command: std::collections::HashMap<String, Option<usize>>,
+}
+
+impl Config {
+    fn default() -> Self {
+        let dir = env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".cache").join("tmux-history"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".cache/tmux-history"));
+        let ignore: std::collections::HashSet<String> =
+            DEFAULT_NO_CAPTURE.iter().map(|s| s.to_string()).collect();
+        Config {
+            tmux_pane_output_dir: dir,
+            ignore_capture: ignore,
+            default_capture_lines: Some(DEFAULT_CAPTURE_LINES),
+            capture_lines_per_command: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Load configuration from `~/.config/smarthistory/config`,
+    /// overlaying the defaults.
+    fn load() -> Self {
+        let mut cfg = Config::default();
+        if let Some(path) = config_path() {
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                cfg.parse(&contents);
+            }
+        }
+        cfg
+    }
+
+    /// Parse INI-style lines into the config. Unknown keys are
+    /// ignored.
+    fn parse(&mut self, contents: &str) {
+        for raw_line in contents.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (key, value) = match line.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => continue,
+            };
+            if key.is_empty() {
+                continue;
+            }
+            match key {
+                "tmuxpaneoutputdir" => {
+                    self.tmux_pane_output_dir = expand_tilde(value);
+                }
+                "ignorecapture" => {
+                    self.ignore_capture = value
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect();
+                }
+                "capturelines" => {
+                    if let Some(parsed) = parse_capture_lines(value) {
+                        self.default_capture_lines = Some(parsed);
+                    } else {
+                        self.default_capture_lines = None;
+                    }
+                }
+                other => {
+                    if let Some(cmd) = other.strip_prefix("capturelines.") {
+                        if !cmd.is_empty() {
+                            self.capture_lines_per_command
+                                .insert(cmd.to_string(), parse_capture_lines(value));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Look up the configured capture-line limit for a given command
+    /// text. Per-command overrides take precedence over the default.
+    /// Returns `None` for unlimited.
+    fn capture_lines_for(&self, command: &str) -> Option<usize> {
+        let cmd = first_token(command);
+        if let Some(&val) = self.capture_lines_per_command.get(cmd) {
+            return val;
+        }
+        self.default_capture_lines
+    }
+
+    /// True if the given command is in the ignore-capture list.
+    fn ignore_capture(&self, command: &str) -> bool {
+        self.ignore_capture.contains(first_token(command))
+    }
+}
+
+/// Return the first token of a command line, stripping any leading
+/// whitespace. This is the executable name that we compare against
+/// the no-capture list.
+fn first_token(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or("")
+}
+
+/// Run `command`, capture up to `max_lines` of combined stdout/stderr,
+/// and return `(command_string, exit_code, captured_output)`. Pass
+/// `None` to capture every line. The command is joined with a single
+/// space; callers that need shell features should invoke a shell
+/// explicitly.
+fn capture_command_output(
+    command: &[String],
+    max_lines: Option<usize>,
+) -> anyhow::Result<(String, i32, String)> {
     if command.is_empty() {
         anyhow::bail!("no command provided");
     }
@@ -250,11 +432,10 @@ fn capture_command_output(command: &[String]) -> anyhow::Result<(String, i32, St
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}{}", stdout, stderr);
 
-    let limited: String = combined
-        .lines()
-        .take(MAX_OUTPUT_LINES)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let limited: String = match max_lines {
+        Some(n) => combined.lines().take(n).collect::<Vec<_>>().join("\n"),
+        None => combined,
+    };
 
     let joined = command.join(" ");
     Ok((joined, exit_code, limited))
@@ -298,7 +479,7 @@ fn store_output(conn: &Connection, history_id: i64, output: &str) -> anyhow::Res
 }
 
 /// Read `file` and extract the command line matching `command` and up
-/// to `MAX_OUTPUT_LINES` following lines. The search starts from the
+/// to the configured number of lines. The search starts from the
 /// end of the file and walks backward to find the last occurrence of
 /// a line containing `command`. The returned string includes that
 /// line and the following lines.
@@ -315,7 +496,11 @@ fn store_output(conn: &Connection, history_id: i64, output: &str) -> anyhow::Res
 /// command text (e.g. `echo ls` produces an output line `ls`).
 /// ANSI escape sequences are stripped first so that colourised
 /// prompts do not interfere with the match.
-fn extract_tmux_output(command: &str, file: &std::path::Path) -> anyhow::Result<String> {
+fn extract_tmux_output(
+    command: &str,
+    file: &std::path::Path,
+    max_lines: Option<usize>,
+) -> anyhow::Result<String> {
     use std::fs;
     use std::thread::sleep;
     use std::time::Duration;
@@ -325,35 +510,20 @@ fn extract_tmux_output(command: &str, file: &std::path::Path) -> anyhow::Result<
 
     for attempt in 1..=MAX_ATTEMPTS {
         if let Ok(contents) = fs::read_to_string(file) {
-            let cleaned = strip_ansi(&contents);
-            let lines: Vec<&str> = cleaned.lines().collect();
+            // Strip ANSI and C0 control characters from each line
+            // individually so that newline characters (which are
+            // valid line separators) survive the cleaning step.
+            let lines: Vec<String> = contents.lines().map(strip_ansi).collect();
 
-            // First pass: find a line where the command sits at the
-            // end (after the prompt). This is the most reliable
-            // signature of a command line in a tmux pane log.
-            if let Some(start) = lines
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, l)| l.trim_end().ends_with(command))
-                .map(|(i, _)| i)
-            {
-                let end = (start + 1 + MAX_OUTPUT_LINES).min(lines.len());
-                return Ok(lines[start..end].join("\n"));
-            }
+            let start = find_command_line(&lines, command);
 
-            // Second pass: fall back to a substring match. This is
-            // the legacy behaviour and may pick an output line that
-            // happens to contain the command text, but at least it
-            // finds something.
-            if let Some(start) = lines
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, l)| l.contains(command))
-                .map(|(i, _)| i)
-            {
-                let end = (start + 1 + MAX_OUTPUT_LINES).min(lines.len());
+            if let Some(start) = start {
+                let end = match max_lines {
+                    Some(n) => (start + 1 + n).min(lines.len()),
+                    // Unlimited: capture until the next prompt-like
+                    // line, or end of file.
+                    None => next_prompt_boundary(&lines, start + 1),
+                };
                 return Ok(lines[start..end].join("\n"));
             }
         }
@@ -364,16 +534,76 @@ fn extract_tmux_output(command: &str, file: &std::path::Path) -> anyhow::Result<
     anyhow::bail!("command not found in tmux log after {} attempts", MAX_ATTEMPTS)
 }
 
-/// Strip common ANSI escape sequences from a string. Handles CSI
-/// sequences (ESC `[` ... letter) and OSC sequences (ESC `]` ...
-/// BEL or ST). This is intentionally simple: a full ANSI parser is
-/// not needed for tmux pane logs which use a predictable subset.
+/// Locate the line in `lines` (scanning from the end) that best
+/// represents the execution of `command`. Returns the index of that
+/// line. Prefers lines where the command text appears at the end
+/// (prompt+command lines); falls back to a substring match.
+fn find_command_line(lines: &[String], command: &str) -> Option<usize> {
+    if let Some((i, _)) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| l.trim_end().ends_with(command))
+    {
+        return Some(i);
+    }
+    if let Some((i, _)) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| l.contains(command))
+    {
+        return Some(i);
+    }
+    None
+}
+
+/// Return the first index at or after `from` that looks like a shell
+/// prompt. Used to cap unbounded capture (`ALL`) at the next prompt
+/// rather than bleeding into the next command.
+fn next_prompt_boundary(lines: &[String], from: usize) -> usize {
+    for (i, line) in lines.iter().enumerate().skip(from) {
+        let trimmed = line.trim_end();
+        // Common prompt suffixes: `$ `, `# `, `% `, `❯ `, `> `, `]`.
+        // We require the line to be relatively short and end with
+        // one of these markers to avoid mistaking regular output for
+        // a prompt.
+        if trimmed.len() < 200
+            && (trimmed.ends_with("$ ")
+                || trimmed.ends_with("# ")
+                || trimmed.ends_with("% ")
+                || trimmed.ends_with("> ")
+                || trimmed.ends_with("\u{276f} ")
+                || trimmed.ends_with("] "))
+        {
+            return i;
+        }
+    }
+    lines.len()
+}
+
+/// Strip ANSI escape sequences and control characters from a
+/// string, returning a clean printable representation suitable for
+/// substring matching. Handles:
+///
+///   - CSI sequences: ESC `[` ... final-byte (0x40-0x7E)
+///   - OSC sequences: ESC `]` ... BEL (0x07) or ST (ESC `\`)
+///   - Two-byte ESC sequences: ESC `=` or ESC `>` (mode setters)
+///   - Standalone control characters: BEL, BS, SO, SI, etc.
+///
+/// The terminal bell (BEL, 0x07) is emitted by zsh on tab-completion
+/// and bracketed-paste transitions, and zsh also interleaves mode
+/// switches like `ESC[?2004h` around pasted input. Stripping all of
+/// these leaves a clean prompt+command line whose tail contains the
+/// actual command text. This is intentionally simple: a full ANSI
+/// parser is not needed for tmux pane logs which use a predictable
+/// subset.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.peek() {
+        match c {
+            '\x1b' => match chars.peek() {
                 Some(&'[') => {
                     chars.next();
                     while let Some(&nc) = chars.peek() {
@@ -399,9 +629,13 @@ fn strip_ansi(s: &str) -> String {
                     chars.next();
                 }
                 None => {}
-            }
-        } else {
-            out.push(c);
+            },
+            // Drop all other C0 control characters. The printable
+            // range (0x20-0x7E) and extended Unicode (>= 0x80) are
+            // kept verbatim. This removes stray BEL/BS/CR bytes that
+            // zsh and tmux occasionally inject mid-line.
+            '\x00'..='\x1f' | '\x7f' => {}
+            _ => out.push(c),
         }
     }
     out
@@ -778,7 +1012,7 @@ fn init_db() -> anyhow::Result<Connection> {
         )",
         [],
     )?;
-    // Captured command output (up to MAX_OUTPUT_LINES lines) is stored
+    // Captured command output (up to the configured line limit) is stored
     // per history row so different contexts can have different output.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS history_output (
@@ -1164,7 +1398,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Capture { command } => {
-            let (command_str, exit_code, output) = capture_command_output(&command)?;
+            let cfg = Config::load();
+            let joined = command.join(" ");
+            let max_lines = cfg.capture_lines_for(&joined);
+            let (command_str, exit_code, output) =
+                capture_command_output(&command, max_lines)?;
 
             // Echo the command output to the terminal so capture feels
             // like a normal execution.
@@ -1185,12 +1423,47 @@ fn main() -> anyhow::Result<()> {
             file,
             exit_code,
         } => {
-            let output = extract_tmux_output(&command, &file).unwrap_or_default();
+            // If the capture log file does not exist there is nothing
+            // to capture. The caller (the zsh precmd hook) is expected
+            // to fall back to a plain `add` so the history entry is
+            // still recorded; this command is a no-op in that case.
+            if !file.exists() {
+                return Ok(());
+            }
+            let cfg = Config::load();
+            // For commands in the ignore-capture list, skip output
+            // extraction entirely. The history entry is still recorded.
+            let output = if cfg.ignore_capture(&command) {
+                String::new()
+            } else {
+                let max = cfg.capture_lines_for(&command);
+                extract_tmux_output(&command, &file, max).unwrap_or_default()
+            };
             let pwd = env::current_dir()?.to_string_lossy().into_owned();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
-            let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
+            let history_id = upsert_history_row(
+                &conn, &command, &pwd, &session_id, exit_code
+            )?;
             store_output(&conn, history_id, &output)?;
+        }
+        Commands::Config { key } => {
+            let cfg = Config::load();
+            match key.as_str() {
+                "tmuxpaneoutputdir" => println!("{}", cfg.tmux_pane_output_dir.display()),
+                "ignorecapture" => {
+                    let mut cmds: Vec<&String> = cfg.ignore_capture.iter().collect();
+                    cmds.sort();
+                    println!("{}", cmds.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+                }
+                "capturelines" => {
+                    match cfg.default_capture_lines {
+                        Some(n) => println!("{}", n),
+                        None => println!("ALL"),
+                    }
+                }
+                other => anyhow::bail!("unknown config key: {other}"),
+            }
         }
         Commands::Tui { mode, query } => {
             let initial_mode = mode.unwrap_or_else(|| "SESS".to_string());
@@ -1354,7 +1627,7 @@ mod tests {
     fn extract_tmux_output_uses_last_match() {
         let log = "some other line\necho first\necho first output\nrandom line\necho first again\nlast output\n";
         let path = write_temp_log(log);
-        let out = extract_tmux_output("echo first again", &path).expect("extract");
+        let out = extract_tmux_output("echo first again", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         assert!(out.contains("echo first again"));
         assert!(out.contains("last output"));
         assert!(!out.contains("echo first output"));
@@ -1368,7 +1641,7 @@ mod tests {
             log.push_str(&format!("line {}\n", i));
         }
         let path = write_temp_log(&log);
-        let out = extract_tmux_output("mycommand", &path).expect("extract");
+        let out = extract_tmux_output("mycommand", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         let count = out.lines().count();
         // The slice includes the command line itself plus up to
         // MAX_OUTPUT_LINES following lines.
@@ -1393,7 +1666,7 @@ mod tests {
             writeln!(f, "$ delayedcmd").unwrap();
             writeln!(f, "output line 1").unwrap();
         });
-        let out = extract_tmux_output("delayedcmd", &path).expect("extract");
+        let out = extract_tmux_output("delayedcmd", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         handle.join().unwrap();
         assert!(out.contains("delayedcmd"));
         assert!(out.contains("output line 1"));
@@ -1412,7 +1685,7 @@ $ echo next
 next output
 ";
         let path = write_temp_log(log);
-        let out = extract_tmux_output("echo ls", &path).expect("extract");
+        let out = extract_tmux_output("echo ls", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         // Must start with the prompt+command line, not the bare
         // output line.
         assert!(out.starts_with("$ echo ls"), "got: {out}");
@@ -1434,7 +1707,7 @@ $ echo ls
 real output
 ";
         let path = write_temp_log(log);
-        let out = extract_tmux_output("echo ls", &path).expect("extract");
+        let out = extract_tmux_output("echo ls", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         assert!(out.starts_with("$ echo ls"), "got: {out}");
         std::fs::remove_file(&path).ok();
     }
@@ -1448,7 +1721,7 @@ file1
 file2
 ";
         let path = write_temp_log(log);
-        let out = extract_tmux_output("ls -la", &path).expect("extract");
+        let out = extract_tmux_output("ls -la", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         assert!(out.contains("ls -la"));
         assert!(out.contains("file1"));
         assert!(!out.contains("\x1b["), "ANSI should be stripped: {out}");
@@ -1460,5 +1733,82 @@ file2
         let input = "before\x1b[32mgreen\x1b[0m after\x1b]0;title\x07end";
         let out = strip_ansi(input);
         assert_eq!(out, "beforegreen afterend");
+    }
+
+    #[test]
+    fn strip_ansi_handles_bracketed_paste_prompt() {
+        // Real-world zsh prompt with bracketed-paste markers, mode
+        // switches and a BEL (from tab completion) interleaved with
+        // the command line for `head README.md`. The BEL is stripped
+        // along with all C0 control characters; the resulting line
+        // ends with the actual command.
+        let input = "har@arrakis.fritz.box in ~/smarthistory/smarthistory\x07\x1b[K\x1b[?1h\x1b=\x1b[?2004h\x1b[32mhead\x1b[39m \x1b[4mREADME.md\x1b[24m\x1b[?1l\x1b>\x1b[?2004l";
+        let out = strip_ansi(input);
+        // The BEL is removed and the prompt+command collapse together.
+        assert_eq!(out, "har@arrakis.fritz.box in ~/smarthistory/smarthistoryhead README.md");
+        assert!(out.trim_end().ends_with("head README.md"));
+    }
+
+    #[test]
+    fn first_token_strips_whitespace() {
+        assert_eq!(first_token("ls -la"), "ls");
+        assert_eq!(first_token("  vim"), "vim");
+        assert_eq!(first_token("echo hello world"), "echo");
+        assert_eq!(first_token(""), "");
+    }
+
+    #[test]
+    fn config_default_contains_no_capture() {
+        let cfg = Config::default();
+        for cmd in DEFAULT_NO_CAPTURE {
+            assert!(cfg.ignore_capture.contains(*cmd), "default {cmd} missing");
+        }
+    }
+
+    #[test]
+    fn config_parses_user_file() {
+        let dir = std::env::temp_dir().join(format!("smarthistory-test-{}", generate_uuid_v4()));
+        let cfg_dir = dir.join(".config").join("smarthistory");
+        std::fs::create_dir_all(&cfg_dir).expect("mkdir");
+        let cfg_path = cfg_dir.join("config");
+        std::fs::write(
+            &cfg_path,
+            "# comment line
+
+ignorecapture=mycustomcmd spaced
+capturelines=40
+capturelines.ps=ALL
+tmuxpaneoutputdir=~/custom-tmux
+",
+        )
+        .expect("write");
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &dir); }
+        let cfg = Config::load();
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p); },
+            None => unsafe { std::env::remove_var("HOME"); },
+        }
+        // User override replaces the default ignore list.
+        assert!(cfg.ignore_capture("mycustomcmd"));
+        assert!(cfg.ignore_capture("spaced"));
+        assert!(!cfg.ignore_capture("vim"));
+        assert_eq!(cfg.default_capture_lines, Some(40));
+        // Per-command override.
+        assert_eq!(cfg.capture_lines_for("ps -ef"), None);
+        assert_eq!(cfg.capture_lines_for("cat README"), Some(40));
+        // tilde expansion for the path.
+        let expected = dir.join("custom-tmux");
+        assert_eq!(cfg.tmux_pane_output_dir, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_capture_lines_handles_all_and_numbers() {
+        assert_eq!(parse_capture_lines("ALL"), None);
+        assert_eq!(parse_capture_lines("all"), None);
+        assert_eq!(parse_capture_lines("20"), Some(20));
+        assert_eq!(parse_capture_lines("  15  "), Some(15));
+        assert_eq!(parse_capture_lines("not a number"), None);
     }
 }

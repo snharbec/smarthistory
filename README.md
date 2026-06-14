@@ -61,6 +61,57 @@ match standard workflow expectations. This project aims to provide:
    session UUID and binds the keyboard shortcuts. Re-run it once per
    shell startup; running it twice in the same shell is a no-op.
 
+## Configuration
+
+User-specific settings live in `~/.config/smarthistory/config`. The
+file is plain INI-style `key=value` lines. Lines starting with `#`
+are comments and blank lines are ignored. When the file is absent,
+built-in defaults are used; when present, the keys it defines
+override the defaults.
+
+Supported keys:
+
+| Key | Meaning | Default |
+|-----|---------|---------|
+| `tmuxpaneoutputdir=~/path` | Directory containing per-pane tmux logs (used by the TMUX integration) | `~/.cache/tmux-history` |
+| `ignorecapture=cmd1 cmd2 ...` | Space-separated list of commands whose output is never captured (typically interactive TUIs like editors, pagers, and system monitors) | `vi nvim vim top htop emacs more less lazygit` |
+| `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
+| `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
+
+`~` and `~/...` in path values are expanded to the user's home
+directory.
+
+Example configuration:
+
+```ini
+# Where the tmux pipe-pane hooks write their per-pane logs
+tmuxpaneoutputdir=~/.cache/tmux-history
+
+# Commands whose output we never try to capture
+ignorecapture=vim top htop emacs nano more less
+
+# Default line limit
+capturelines=20
+
+# Capture every line of `ps` output (often longer than 20 lines)
+capturelines.ps=ALL
+
+# Always capture 40 lines of `cat` output
+capturelines.cat=40
+```
+
+To inspect the resolved value of a single setting, use:
+
+```bash
+smarthistory config tmuxpaneoutputdir
+smarthistory config ignorecapture
+smarthistory config capturelines
+```
+
+The zsh precmd hook calls `smarthistory config tmuxpaneoutputdir` to
+discover the tmux log directory, so changing `tmuxpaneoutputdir` in
+the config file requires no further action.
+
 ## TMUX integration
 
 To use the automatic capture feature inside tmux, the following
