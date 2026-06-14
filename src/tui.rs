@@ -169,6 +169,14 @@ struct App {
     /// When `Some`, we are viewing the captured output of a history
     /// row in a full-screen overlay.
     output_view: Option<OutputView>,
+    /// When `Some`, we are prompting for deletion confirmation.
+    confirm_delete: Option<ConfirmMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmMode {
+    DeleteSelected,
+    DeleteMatching,
 }
 
 /// State for the captured-output overlay: the captured text plus a
@@ -193,6 +201,7 @@ impl App {
             cancelled: false,
             comment_edit: None,
             output_view: None,
+            confirm_delete: None,
         };
         app.refresh();
         // Rows are ordered newest first; index 0 is the newest entry.
@@ -418,6 +427,26 @@ impl App {
     fn is_output_viewing(&self) -> bool {
         self.output_view.is_some()
     }
+
+    fn delete_selected(&mut self) -> Result<()> {
+        if let Some(row) = self.selected_row() {
+            self.conn
+                .execute("DELETE FROM history WHERE id = ?1", params![row.id])?;
+            self.refresh();
+        }
+        self.confirm_delete = None;
+        Ok(())
+    }
+
+    fn delete_matching(&mut self) -> Result<()> {
+        let (where_clause, params) = self.build_where();
+        let sql = format!("DELETE FROM history WHERE id IN (SELECT h.id FROM history h LEFT JOIN command_comments c ON h.command = c.command{})", where_clause);
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        self.conn.execute(&sql, &params_ref[..])?;
+        self.refresh();
+        self.confirm_delete = None;
+        Ok(())
+    }
 }
 
 /// Run the TUI.
@@ -511,6 +540,11 @@ fn run_loop(
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
+    if let Some(mode) = app.confirm_delete {
+        return handle_confirm_delete_key(app, key, mode);
+    }
+
     // When editing a comment, most keys go to the comment buffer.
     if app.is_comment_editing() {
         return handle_comment_edit_key(app, key);
@@ -550,7 +584,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.move_selection(-1);
                 return false;
             }
-            _ => return false,
+            KeyCode::Char('d') => {
+                app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+                return false;
+            }
+            KeyCode::Char('x') => {
+                app.confirm_delete = Some(ConfirmMode::DeleteMatching);
+                return false;
+            }
+            _ => {
+                return false;
+            }
         }
     }
 
@@ -611,6 +655,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char(c) => {
             app.push_char(c);
             false
+        }
+        _ => false,
+    }
+}
+
+fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) -> bool {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            match mode {
+                ConfirmMode::DeleteSelected => {
+                    let _ = app.delete_selected();
+                }
+                ConfirmMode::DeleteMatching => {
+                    let _ = app.delete_matching();
+                }
+            }
+            false
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.confirm_delete = None;
+            false
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
         }
         _ => false,
     }
@@ -771,11 +840,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Length(1),   // mode strip
-                Constraint::Fill(1),     // list: take all remaining space
-                Constraint::Length(6),   // details: fixed 6 lines incl. header/borders
-                Constraint::Length(3),   // input
-                Constraint::Length(1),   // status
+                Constraint::Length(1), // mode strip
+                Constraint::Fill(1),   // list: take all remaining space
+                Constraint::Length(6), // details: fixed 6 lines incl. header/borders
+                Constraint::Length(3), // input
+                Constraint::Length(1), // status
             ]
             .as_ref(),
         )
@@ -786,6 +855,87 @@ fn ui(f: &mut Frame, app: &mut App) {
     draw_details(f, app, chunks[2]);
     draw_input(f, app, chunks[3]);
     draw_status(f, app, chunks[4]);
+
+    if let Some(mode) = app.confirm_delete {
+        draw_confirm_delete(f, app, mode);
+    }
+}
+
+fn draw_confirm_delete(f: &mut Frame, app: &App, mode: ConfirmMode) {
+    let area = centered_rect(60, 25, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let (title, message) = match mode {
+        ConfirmMode::DeleteSelected => (
+            " Delete selected entry ",
+            "Are you sure you want to delete the selected history entry?".to_string(),
+        ),
+        ConfirmMode::DeleteMatching => (
+            " Delete ALL matching entries ",
+            format!(
+                "Are you sure you want to delete all {} matching entries?",
+                app.rows.len()
+            ),
+        ),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .title_style(Theme::error())
+        .border_style(Theme::error());
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            message,
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Press "),
+            Span::styled("y", Theme::highlight()),
+            Span::raw(" to confirm, "),
+            Span::styled("n", Theme::highlight()),
+            Span::raw(" or "),
+            Span::styled("Esc", Theme::highlight()),
+            Span::raw(" to cancel."),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(popup_layout[1])[1]
 }
 
 fn draw_output_view(f: &mut Frame, view: &OutputView) {
@@ -1218,8 +1368,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^L output · ^U clear · Esc cancel",
-        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
+        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^L output · ^D del · ^X del matching · ^U clear · Esc cancel",
+        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^D del · ^X del matching · ^U clear · Esc cancel",
         None => "Type to search · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
     };
 

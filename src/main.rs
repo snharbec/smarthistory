@@ -265,11 +265,10 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
         if let Ok(home) = env::var("HOME") {
             return std::path::PathBuf::from(home);
         }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
+    } else if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME") {
             return std::path::PathBuf::from(home).join(rest);
         }
-    }
     std::path::PathBuf::from(path)
 }
 
@@ -329,11 +328,10 @@ impl Config {
     /// overlaying the defaults.
     fn load() -> Self {
         let mut cfg = Config::default();
-        if let Some(path) = config_path() {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
+        if let Some(path) = config_path()
+            && let Ok(contents) = std::fs::read_to_string(&path) {
                 cfg.parse(&contents);
             }
-        }
         cfg
     }
 
@@ -370,12 +368,11 @@ impl Config {
                     }
                 }
                 other => {
-                    if let Some(cmd) = other.strip_prefix("capturelines.") {
-                        if !cmd.is_empty() {
+                    if let Some(cmd) = other.strip_prefix("capturelines.")
+                        && !cmd.is_empty() {
                             self.capture_lines_per_command
                                 .insert(cmd.to_string(), parse_capture_lines(value));
                         }
-                    }
                 }
             }
         }

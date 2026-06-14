@@ -193,6 +193,8 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |
 | `Right`   | TUI     | Prefill the line with the selection, cursor at the end.        |
+| `Ctrl+D`  | TUI     | Delete the selected entry (with confirmation).                 |
+| `Ctrl+X`  | TUI     | Delete all matching entries (with confirmation).               |
 | `Esc`     | TUI     | Cancel the picker (no command printed).                        |
 
 The current scope is shown in the RPROMPT. `Up` and `Down` always use
