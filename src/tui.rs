@@ -258,10 +258,14 @@ impl App {
         let mut clause = String::from(" WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if !self.query.is_empty() {
-            let escaped = crate::util::escape_like(&self.query);
-            clause.push_str(" AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')");
-            params.push(Box::new(format!("%{}%", escaped)));
-            params.push(Box::new(format!("%{}%", escaped)));
+            for word in self.query.split_whitespace() {
+                let escaped = crate::util::escape_like(word);
+                clause.push_str(
+                    " AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
+                );
+                params.push(Box::new(format!("%{}%", escaped)));
+                params.push(Box::new(format!("%{}%", escaped)));
+            }
         }
         match self.exit_filter {
             ExitFilter::Success => clause.push_str(" AND h.exit_code = 0"),
@@ -1206,38 +1210,58 @@ fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>> {
         return vec![Span::raw(text)];
     }
 
-    let lower_query: Vec<char> = query.to_lowercase().chars().collect();
-    let lower_text: Vec<char> = text.to_lowercase().chars().collect();
-    let text_chars: Vec<char> = text.chars().collect();
-    let qlen = lower_query.len();
-    let mut spans: Vec<Span<'a>> = Vec::new();
-    let mut i = 0;
-    let mut pending_start = 0;
+    let words: Vec<String> = query
+        .split_whitespace()
+        .map(|s| s.to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    while i + qlen <= lower_text.len() {
-        if lower_text[i..i + qlen] == lower_query[..] {
-            // Emit pending non-matching prefix, if any.
-            if i > pending_start {
-                let prefix: String = text_chars[pending_start..i].iter().collect();
-                spans.push(Span::raw(prefix));
+    if words.is_empty() {
+        return vec![Span::raw(text)];
+    }
+
+    let lower_text = text.to_lowercase();
+    let text_chars: Vec<char> = text.chars().collect();
+    let mut highlights = vec![false; text_chars.len()];
+
+    for word in words {
+        let word_chars: Vec<char> = word.chars().collect();
+        if word_chars.is_empty() {
+            continue;
+        }
+        let mut i = 0;
+        while i + word_chars.len() <= text_chars.len() {
+            if lower_text.chars().skip(i).take(word_chars.len()).collect::<Vec<char>>() == word_chars
+            {
+                for j in 0..word_chars.len() {
+                    highlights[i + j] = true;
+                }
+                i += word_chars.len();
+            } else {
+                i += 1;
             }
-            let matched: String = text_chars[i..i + qlen].iter().collect();
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < text_chars.len() {
+        let start = i;
+        let is_highlight = highlights[i];
+        while i < text_chars.len() && highlights[i] == is_highlight {
+            i += 1;
+        }
+        let segment: String = text_chars[start..i].iter().collect();
+        if is_highlight {
             spans.push(Span::styled(
-                matched,
+                segment,
                 Style::default()
                     .fg(Theme::HIGHLIGHT)
                     .add_modifier(Modifier::BOLD),
             ));
-            i += qlen;
-            pending_start = i;
         } else {
-            i += 1;
+            spans.push(Span::raw(segment));
         }
-    }
-
-    if pending_start < text_chars.len() {
-        let tail: String = text_chars[pending_start..].iter().collect();
-        spans.push(Span::raw(tail));
     }
 
     spans
@@ -1417,5 +1441,19 @@ mod tests {
         let spans = highlight_matches("hello world", "xyz");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "hello world".to_string());
+    }
+
+    #[test]
+    fn highlight_matches_multi_word() {
+        let spans = highlight_matches("git commit -m", "git commit");
+        let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(content, vec!["git", " ", "commit", " -m"]);
+    }
+
+    #[test]
+    fn highlight_matches_multi_word_out_of_order() {
+        let spans = highlight_matches("git commit -m", "commit git");
+        let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(content, vec!["git", " ", "commit", " -m"]);
     }
 }
