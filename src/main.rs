@@ -1283,12 +1283,21 @@ fn main() -> anyhow::Result<()> {
                 ))
             })?;
 
+            // Atuin stores its timestamps as Unix epoch *nanoseconds*,
+            // while the smarthistory `history.timestamp` column stores
+            // Unix epoch *seconds*. Converting ns -> s here keeps the
+            // ordering and the age / diff formatting in the TUI sane.
+            // We also use `INSERT OR IGNORE` so that re-running the
+            // import doesn't trip the unique index on
+            // (command, directory, session_id) for entries that are
+            // already present.
             let mut count = 0;
             for entry in history_iter {
                 let (command, cwd, session, exit, timestamp) = entry?;
+                let ts_seconds = timestamp / 1_000_000_000;
                 conn.execute(
-                    "INSERT INTO history (command, directory, session_id, exit_code, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![command, cwd, session, exit, timestamp],
+                    "INSERT OR IGNORE INTO history (command, directory, session_id, exit_code, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![command, cwd, session, exit, ts_seconds],
                 )?;
                 count += 1;
             }
