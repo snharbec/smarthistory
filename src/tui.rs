@@ -30,7 +30,135 @@ struct TuiSession {
     /// Last duplicate-filter state. `None` means "no preference" and
     /// falls back to the config-file default.
     duplicate_filter: Option<bool>,
+    /// Last selected theme slug (e.g. `"dracula"`, `"tokyo-night"`,
+    /// or `"none"` for the manual-config palette). Persisted across
+    /// TUI invocations so the user always lands back on their
+    /// preferred colors.
+    theme: Option<String>,
 }
+
+/// All theme choices available in the TUI. The first entry, `None`,
+/// represents the "no theme" mode where the manually-configured
+/// `tuicolor.*` settings from `~/.config/smarthistory/config` are
+/// used. Every other entry corresponds to a built-in theme from
+/// the `ratatui-themes` crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
+enum SelectedTheme {
+    /// Manually-configured palette (built-in defaults if no config).
+    #[default]
+    None,
+    /// One of the themes from `ratatui-themes`.
+    Builtin(ratatui_themes::ThemeName),
+}
+
+impl SelectedTheme {
+    fn slug(&self) -> &'static str {
+        match self {
+            SelectedTheme::None => "none",
+            SelectedTheme::Builtin(name) => name.slug(),
+        }
+    }
+
+    fn display_name(&self) -> &'static str {
+        match self {
+            SelectedTheme::None => "no theme",
+            SelectedTheme::Builtin(name) => match name {
+                ratatui_themes::ThemeName::Dracula => "Dracula",
+                ratatui_themes::ThemeName::OneDarkPro => "One Dark Pro",
+                ratatui_themes::ThemeName::Nord => "Nord",
+                ratatui_themes::ThemeName::CatppuccinMocha => "Catppuccin Mocha",
+                ratatui_themes::ThemeName::CatppuccinLatte => "Catppuccin Latte",
+                ratatui_themes::ThemeName::GruvboxDark => "Gruvbox Dark",
+                ratatui_themes::ThemeName::GruvboxLight => "Gruvbox Light",
+                ratatui_themes::ThemeName::TokyoNight => "Tokyo Night",
+                ratatui_themes::ThemeName::SolarizedDark => "Solarized Dark",
+                ratatui_themes::ThemeName::SolarizedLight => "Solarized Light",
+                ratatui_themes::ThemeName::MonokaiPro => "Monokai Pro",
+                ratatui_themes::ThemeName::RosePine => "Rosé Pine",
+                ratatui_themes::ThemeName::Kanagawa => "Kanagawa",
+                ratatui_themes::ThemeName::Everforest => "Everforest",
+                ratatui_themes::ThemeName::Cyberpunk => "Cyberpunk",
+                _ => "unknown",
+            },
+        }
+    }
+
+    /// Cycle to the next theme in the list, wrapping around. The
+    /// order is `None` (manual) followed by the canonical
+    /// `ratatui-themes::ThemeName::all()` list.
+    fn next(self) -> Self {
+        match self {
+            SelectedTheme::None => {
+                // First builtin
+                if let Some(first) = ratatui_themes::ThemeName::all().first() {
+                    SelectedTheme::Builtin(*first)
+                } else {
+                    SelectedTheme::None
+                }
+            }
+            SelectedTheme::Builtin(current) => {
+                let themes = ratatui_themes::ThemeName::all();
+                if let Some(pos) = themes.iter().position(|t| *t == current) {
+                    if pos + 1 < themes.len() {
+                        SelectedTheme::Builtin(themes[pos + 1])
+                    } else {
+                        // Wrap back to None
+                        SelectedTheme::None
+                    }
+                } else {
+                    SelectedTheme::None
+                }
+            }
+        }
+    }
+
+    /// Cycle to the previous theme.
+    fn prev(self) -> Self {
+        match self {
+            SelectedTheme::None => {
+                // Wrap to the last builtin
+                if let Some(last) = ratatui_themes::ThemeName::all().last() {
+                    SelectedTheme::Builtin(*last)
+                } else {
+                    SelectedTheme::None
+                }
+            }
+            SelectedTheme::Builtin(current) => {
+                let themes = ratatui_themes::ThemeName::all();
+                if let Some(pos) = themes.iter().position(|t| *t == current) {
+                    if pos == 0 {
+                        SelectedTheme::None
+                    } else {
+                        SelectedTheme::Builtin(themes[pos - 1])
+                    }
+                } else {
+                    SelectedTheme::None
+                }
+            }
+        }
+    }
+
+    /// Parse a slug back into a `SelectedTheme`. Unknown values
+    /// (e.g. from a future theme that was removed) silently fall
+    /// back to `None` so the TUI can always start.
+    fn from_slug(s: &str) -> Self {
+        let normalized: String = s
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect();
+        if normalized == "none" || normalized.is_empty() {
+            return SelectedTheme::None;
+        }
+        // Try ratatui-themes' own FromStr first.
+        if let Ok(name) = normalized.parse::<ratatui_themes::ThemeName>() {
+            return SelectedTheme::Builtin(name);
+        }
+        SelectedTheme::None
+    }
+}
+
 
 impl TuiSession {
     fn path() -> Option<PathBuf> {
@@ -66,6 +194,7 @@ impl TuiSession {
                 "mode" => s.mode = Some(value.to_string()),
                 "query" => s.query = Some(value.to_string()),
                 "duplicatefilter" => s.duplicate_filter = Some(parse_bool(value, true)),
+                "theme" => s.theme = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -89,6 +218,9 @@ impl TuiSession {
         }
         if let Some(d) = self.duplicate_filter {
             out.push_str(&format!("duplicatefilter={}\n", if d { "on" } else { "off" }));
+        }
+        if let Some(ref t) = self.theme {
+            out.push_str(&format!("theme={}\n", t));
         }
         if let Err(e) = std::fs::write(&path, out) {
             eprintln!("warning: failed to persist TUI session: {}", e);
@@ -319,6 +451,41 @@ thread_local! {
     static PALETTE: std::cell::RefCell<Palette> = std::cell::RefCell::new(Palette::builtin());
 }
 
+/// Rebuild the active palette for the chosen theme and store it in
+/// the `PALETTE` thread-local. When `theme` is `SelectedTheme::None`
+/// the palette is rebuilt from the user's manually-configured
+/// `tuicolor.*` settings (the same source `Config::theme()`).
+/// Otherwise the `ratatui-themes` palette for the matching
+/// `ThemeName` is used; the per-pane backgrounds and `dim` color
+/// come from the manual config so the user can still fine-tune
+/// individual panes regardless of the theme.
+fn install_palette(theme: SelectedTheme) {
+    let cfg = Config::load();
+    let manual = Palette::from_config(cfg.theme(), &cfg);
+    let palette = match theme {
+        SelectedTheme::None => manual,
+        SelectedTheme::Builtin(name) => {
+            let p = name.palette();
+            Palette {
+                bg: manual.bg,
+                fg: manual.fg,
+                accent: p.accent,
+                success: p.success,
+                error: p.error,
+                warning: p.warning,
+                dim: manual.dim,
+                dimmer: manual.dimmer,
+                highlight: p.info,
+                list_bg: manual.list_bg,
+                details_bg: manual.details_bg,
+                input_bg: manual.input_bg,
+                status_bg: manual.status_bg,
+            }
+        }
+    };
+    PALETTE.with(|c| *c.borrow_mut() = palette);
+}
+
 /// Style helpers used throughout the TUI. Each reads the current
 /// color from the active `Palette`. Keeping the original call-site
 /// signatures (`Theme::error()`, etc.) means none of the rendering
@@ -442,6 +609,10 @@ struct App {
     /// failed to compile (in which case we silently fall back to
     /// the plain-text path so the user can keep editing).
     query_regex: Option<Regex>,
+    /// The currently-selected TUI palette. Defaults to
+    /// `SelectedTheme::None`, which means the manually-configured
+    /// colors from `tuicolor.*` are used.
+    theme: SelectedTheme,
 }
 
 impl App {
@@ -480,6 +651,21 @@ impl App {
                 // bracket.
             }
         }
+    }
+
+    /// Cycle to the next theme. `Ctrl-N` calls this; `Ctrl-P` calls
+    /// `cycle_theme_prev`. Updates the global palette immediately so
+    /// the change is visible on the next frame, and triggers a full
+    /// repaint by marking the terminal as needing a redraw.
+    fn cycle_theme_next(&mut self) {
+        self.theme = self.theme.next();
+        install_palette(self.theme);
+    }
+
+    /// Cycle to the previous theme.
+    fn cycle_theme_prev(&mut self) {
+        self.theme = self.theme.prev();
+        install_palette(self.theme);
     }
 
     /// Return true if the given text matches the current query:
@@ -521,7 +707,7 @@ struct OutputView {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool, theme: SelectedTheme) -> Self {
         let list_state = ListState::default();
         let mut app = App {
             conn,
@@ -541,6 +727,7 @@ impl App {
             query_prefilled,
             query_touched: false,
             query_regex: None,
+            theme,
         };
         app.recompile_regex();
         app.refresh();
@@ -968,8 +1155,12 @@ pub fn run_tui_to_stdout(
     // Install the user-configured TUI palette (or built-in defaults)
     // into a thread-local so the draw helpers can read it without
     // needing it threaded through every signature.
-    let palette = Palette::from_config(cfg.theme(), &cfg);
-    PALETTE.with(|p| *p.borrow_mut() = palette);
+    let initial_theme = session
+        .theme
+        .as_deref()
+        .map(SelectedTheme::from_slug)
+        .unwrap_or(SelectedTheme::None);
+    install_palette(initial_theme);
     // The effective initial mode is decided by precedence:
     //   1. The `initial_mode` argument (already resolved by `main`
     //      from --mode / env / config).
@@ -990,6 +1181,7 @@ pub fn run_tui_to_stdout(
         effective_query,
         duplicate_filter,
         prefilled_query.is_some(),
+        initial_theme,
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -1037,6 +1229,7 @@ pub fn run_tui_to_stdout(
         }),
         query: Some(app.query.clone()),
         duplicate_filter: Some(app.duplicate_filter),
+        theme: Some(app.theme.slug().to_string()),
     };
     session.save();
 
@@ -1106,6 +1299,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.cycle_mode();
                 return false;
             }
+            KeyCode::Char('n') => {
+                app.cycle_theme_next();
+                return false;
+            }
+            KeyCode::Char('p') => {
+                app.cycle_theme_prev();
+                return false;
+            }
             KeyCode::Char('s') => {
                 app.toggle_duplicate_filter();
                 return false;
@@ -1120,14 +1321,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('u') => {
                 app.clear_query();
-                return false;
-            }
-            KeyCode::Char('p') => {
-                app.move_selection(1);
-                return false;
-            }
-            KeyCode::Char('n') => {
-                app.move_selection(-1);
                 return false;
             }
             KeyCode::Char('d') => {
@@ -2062,14 +2255,19 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S dedup · ^E comment · ^L output · ^D del · ^X del matching · ^U clear · Esc cancel",
-        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S dedup · ^E comment · ^D del · ^X del matching · ^U clear · Esc cancel",
-        None => "Type to search · ^G scope · ^S dedup · ^E comment · ^U clear · Esc cancel",
+        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^L output · ^D del · ^X del matching · ^U clear · Esc cancel",
+        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^D del · ^X del matching · ^U clear · Esc cancel",
+        None => "Type to search · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^U clear · Esc cancel",
     };
+
+    // Active theme badge. Rendered at the right edge of the status
+    // bar so the help text keeps its existing left-anchored layout.
+    let theme_label = format!(" theme: {} ", app.theme.display_name());
 
     let line = Line::from(vec![
         Span::styled(format!(" {}  ", count), Theme::highlight()),
         Span::styled(help, Theme::dim()),
+        Span::styled(theme_label, Theme::accent()),
     ]);
     f.render_widget(
         Paragraph::new(line).style(Style::default().bg(PALETTE.with(|p| p.borrow().status_bg))),

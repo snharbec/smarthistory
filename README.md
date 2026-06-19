@@ -207,6 +207,8 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
 | `Ctrl+G`  | Widget  | Cycle the search scope: SESS → DIR → GLOBAL → SESS.            |
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
+| `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
+| `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |
@@ -387,6 +389,35 @@ that ephemeral per-invocation state doesn't pollute the user-edited
 2. `initialmode=` from `~/.config/smarthistory/config`
 3. `mode=` from `~/.local/cache/smarthistory/session`
 4. Built-in default (`SESS`)
+
+### TUI themes
+
+The TUI can be themed in one of two ways:
+
+1. **Manually**: set individual `tuicolor.<field>=<color>` entries
+   in `~/.config/smarthistory/config` (see the Configuration table).
+   The first entry in the cycling list, **"no theme"**, uses these
+   colors verbatim.
+
+2. **Built-in themes**: press `Ctrl-N` (next) or `Ctrl-P` (previous)
+   in the TUI to cycle through the curated themes from the
+   `ratatui-themes` crate: Dracula, One Dark Pro, Nord,
+   Catppuccin Mocha/Latte, Gruvbox Dark/Light, Tokyo Night,
+   Solarized Dark/Light, Monokai Pro, Rosé Pine, Kanagawa,
+   Everforest, Cyberpunk. The order is
+
+   ```
+   no theme → Dracula → One Dark Pro → Nord → … → Cyberpunk → no theme
+   ```
+
+   The active theme is shown on the right side of the status bar
+   (`theme: <Name>`) and is persisted to
+   `~/.local/cache/smarthistory/session` so the next TUI launch
+   starts on the same theme. Selecting a theme overrides the
+   semantic colors (`accent`, `success`, `error`, `warning`,
+   `highlight`); the per-pane background colors and the dim
+   foreground still come from the manual `tuicolor.*` config so
+   you can fine-tune individual panes regardless of the theme.
 
 ### TUI search syntax
 
