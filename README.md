@@ -188,7 +188,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Up`      | Widget  | Walk back through matches for the current line.                 |
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
 | `Ctrl+G`  | Widget  | Cycle the search scope: SESS → DIR → GLOBAL → SESS.            |
-| `Ctrl+S`  | Widget  | Insert the most probable next command; press again to cycle.  |
+| `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |

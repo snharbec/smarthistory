@@ -13,6 +13,7 @@ use rusqlite::{params, Connection};
 use std::time::Duration;
 
 use crate::util::{format_diff, format_time};
+use crate::Config;
 
 /// Search scope for the TUI. Mirrors the line-editor widget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +145,7 @@ enum ExitFilter {
 }
 
 impl ExitFilter {
+    #[allow(dead_code)]
     fn next(self) -> Self {
         match self {
             ExitFilter::All => ExitFilter::Success,
@@ -156,7 +158,7 @@ impl ExitFilter {
 struct App {
     conn: Connection,
     mode: Mode,
-    exit_filter: ExitFilter,
+    duplicate_filter: bool,
     query: String,
     rows: Vec<HistoryRow>,
     list_state: ListState,
@@ -193,12 +195,12 @@ struct OutputView {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode, initial_query: String) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool) -> Self {
         let list_state = ListState::default();
         let mut app = App {
             conn,
             mode: initial_mode,
-            exit_filter: ExitFilter::All,
+            duplicate_filter,
             query: initial_query,
             rows: Vec::new(),
             list_state,
@@ -273,6 +275,8 @@ impl App {
     /// When the user has typed a query, labeled entries are filtered to
     /// only those whose command matches the query — they should only
     /// appear if they actually match what the user is searching for.
+    /// When the duplicate filter is on, only the newest instance of each
+    /// command is kept.
     fn merged_rows(&self) -> Vec<HistoryRow> {
         let mut merged = self.rows.clone();
         let existing_ids: std::collections::HashSet<i64> =
@@ -295,6 +299,12 @@ impl App {
         }
         // Newest first.
         merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        if self.duplicate_filter {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            merged.retain(|r| seen.insert(r.command.clone()));
+        }
+
         merged
     }
 
@@ -310,11 +320,6 @@ impl App {
                 params.push(Box::new(format!("%{}%", escaped)));
                 params.push(Box::new(format!("%{}%", escaped)));
             }
-        }
-        match self.exit_filter {
-            ExitFilter::Success => clause.push_str(" AND h.exit_code = 0"),
-            ExitFilter::Failed => clause.push_str(" AND h.exit_code != 0"),
-            ExitFilter::All => {}
         }
         match self.mode {
             Mode::Sess => {
@@ -343,9 +348,21 @@ impl App {
         self.refresh();
     }
 
-    fn cycle_exit_filter(&mut self) {
-        self.exit_filter = self.exit_filter.next();
+    /// Toggle the duplicate filter on or off. When on (default), only
+    /// the newest instance of each command is shown. When off, every
+    /// history row is shown as-is.
+    fn toggle_duplicate_filter(&mut self) {
+        self.duplicate_filter = !self.duplicate_filter;
+        // Adjust the selection so it stays on a valid index even after
+        // the list shrinks (when turning the filter on).
+        let target = self.list_state.selected().unwrap_or(0);
         self.refresh();
+        let n = self.rows.len();
+        if n == 0 {
+            self.list_state.select(None);
+        } else {
+            self.list_state.select(Some(target.min(n - 1)));
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -558,7 +575,8 @@ pub fn run_tui_to_stdout(
             initial_mode
         )
     })?;
-    let mut app = App::new(conn, mode, initial_query);
+    let cfg = Config::load();
+    let mut app = App::new(conn, mode, initial_query, cfg.duplicate_filter);
 
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;
@@ -654,7 +672,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Char('s') => {
-                app.cycle_exit_filter();
+                app.toggle_duplicate_filter();
                 return false;
             }
             KeyCode::Char('e') => {
@@ -1090,13 +1108,14 @@ fn draw_output_view(f: &mut Frame, view: &OutputView) {
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
+    let dup_label = if app.duplicate_filter { "last only" } else { "all entries" };
     let spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
         Span::styled("  ", Theme::default()),
         mode_badge(app.mode),
         Span::styled("  ", Theme::default()),
-        exit_filter_badge(app.exit_filter),
+        duplicate_filter_badge(app.duplicate_filter),
         Span::styled(
             format!(
                 "  {} · {} ",
@@ -1105,11 +1124,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
                     Mode::Dir => "current directory only",
                     Mode::Global => "all history",
                 },
-                match app.exit_filter {
-                    ExitFilter::All => "all exit codes",
-                    ExitFilter::Success => "successful only",
-                    ExitFilter::Failed => "failed only",
-                }
+                dup_label,
             ),
             Theme::dim(),
         ),
@@ -1119,6 +1134,15 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+fn duplicate_filter_badge(on: bool) -> Span<'static> {
+    let (label, color) = if on { ("LAST", Theme::SUCCESS) } else { ("ALL", Theme::ACCENT) };
+    Span::styled(
+        format!(" {} ", label),
+        Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+#[allow(dead_code)]
 fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
     let (label, color) = match filter {
         ExitFilter::All => ("ALL", Theme::ACCENT),
@@ -1534,9 +1558,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^L output · ^D del · ^X del matching · ^U clear · Esc cancel",
-        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S status · ^E comment · ^D del · ^X del matching · ^U clear · Esc cancel",
-        None => "Type to search · ^G scope · ^S status · ^E comment · ^U clear · Esc cancel",
+        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S dedup · ^E comment · ^L output · ^D del · ^X del matching · ^U clear · Esc cancel",
+        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^S dedup · ^E comment · ^D del · ^X del matching · ^U clear · Esc cancel",
+        None => "Type to search · ^G scope · ^S dedup · ^E comment · ^U clear · Esc cancel",
     };
 
     let line = Line::from(vec![

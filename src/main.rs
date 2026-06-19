@@ -296,6 +296,18 @@ fn parse_capture_lines(s: &str) -> Option<usize> {
     }
 }
 
+/// Parse a boolean config value. Accepts "on", "true", "1", "yes"
+/// (case-insensitive, also with leading/trailing whitespace) as true;
+/// "off", "false", "0", "no" as false. Anything else falls back to
+/// `default` rather than failing to parse the whole config file.
+fn parse_bool(s: &str, default: bool) -> bool {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => true,
+        "off" | "false" | "0" | "no" => false,
+        _ => default,
+    }
+}
+
 /// Resolved configuration. Constructed by `Config::load`.
 struct Config {
     /// Directory containing per-pane tmux output log files.
@@ -307,6 +319,11 @@ struct Config {
     default_capture_lines: Option<usize>,
     /// Per-command override for captured lines.
     capture_lines_per_command: std::collections::HashMap<String, Option<usize>>,
+    /// When true, only the newest instance of each command is shown in
+    /// the TUI; older duplicates are hidden. Toggleable from the TUI
+    /// at runtime via Ctrl-S, and seeded from the config file's
+    /// `duplicatefilter=on|off` setting.
+    duplicate_filter: bool,
 }
 
 impl Config {
@@ -321,6 +338,7 @@ impl Config {
             ignore_capture: ignore,
             default_capture_lines: Some(DEFAULT_CAPTURE_LINES),
             capture_lines_per_command: std::collections::HashMap::new(),
+            duplicate_filter: true,
         }
     }
 
@@ -366,6 +384,9 @@ impl Config {
                     } else {
                         self.default_capture_lines = None;
                     }
+                }
+                "duplicatefilter" => {
+                    self.duplicate_filter = parse_bool(value, true);
                 }
                 other => {
                     if let Some(cmd) = other.strip_prefix("capturelines.")
