@@ -711,13 +711,19 @@ impl App {
     /// the query buffer changes. Failures (invalid regex) leave the
     /// previous compiled regex in place so the user can keep typing
     /// without the list flickering empty.
+    ///
+    /// The query is the post-slash text. Implicit `.*` anchors are
+    /// added at both ends unless the user provided an explicit
+    /// anchor (`^` at the start, `$` at the end), so a query like
+    /// `git commit` behaves as `.*git commit.*` instead of needing
+    /// to match from the very first character.
     fn recompile_regex(&mut self) {
         if !self.is_regex_query() {
             self.query_regex = None;
             return;
         }
-        let pattern = self.regex_pattern();
-        match Regex::new(pattern) {
+        let pattern = build_implicit_regex(self.regex_pattern());
+        match Regex::new(&pattern) {
             Ok(re) => self.query_regex = Some(re),
             Err(_) => {
                 // Leave the previous regex (if any) in place; the
@@ -767,6 +773,25 @@ impl App {
             .split_whitespace()
             .all(|w| lower.contains(&w.to_lowercase()))
     }
+}
+
+/// Wrap `pattern` with implicit `.*` anchors unless the user
+/// already provided an explicit anchor (`^` at the start, `$` at
+/// the end). This means `/git commit/` matches any command that
+/// contains `git commit` (i.e. behaves as `/.*git commit.*/`),
+/// while `/^git commit/` still only matches commands that start
+/// with `git commit`, and `/git commit$/` only matches commands
+/// that end with `git commit`.
+fn build_implicit_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 4);
+    if !pattern.starts_with('^') {
+        out.push_str(".*");
+    }
+    out.push_str(pattern);
+    if !pattern.ends_with('$') {
+        out.push_str(".*");
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2108,6 +2133,7 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
+    let bg = PALETTE.with(|p| p.borrow().bg);
     let dup_label = if app.duplicate_filter { "last only" } else { "all entries" };
     let spans = vec![
         Span::styled("smart", Theme::dim()),
@@ -2130,7 +2156,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         ),
     ];
     let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
+    let paragraph = Paragraph::new(line).style(Style::default().bg(bg));
     f.render_widget(paragraph, area);
 }
 
@@ -2577,7 +2603,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         }
         None => {
             if is_regex {
-                ("// ", " regex ", app.query.as_str())
+                ("/", " regex ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -2631,9 +2657,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^L output · ^H help · ^D del · ^X del matching · ^U clear · Esc cancel",
-        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^H help · ^D del · ^X del matching · ^U clear · Esc cancel",
-        None => "Type to search · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^H help · ^U clear · Esc cancel",
+        Some(row) if !row.output.is_empty() => " ^H help · ^D del · ^X del all · ^U clear",
+        Some(_) => " ^H help · ^D del · ^X del all · ^U clear",
+        None => " ^H help · ^D del · ^X del all · ^U clear",
     };
 
     // Active theme badge. Rendered at the right edge of the status
@@ -2702,5 +2728,40 @@ mod tests {
         let spans = highlight_matches("git commit -m", "commit git");
         let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(content, vec!["git", " ", "commit", " -m"]);
+    }
+
+    #[test]
+    fn build_implicit_regex_plain() {
+        // No anchors → wrap with `.*` on both sides.
+        assert_eq!(build_implicit_regex("git commit"), ".*git commit.*");
+        assert_eq!(build_implicit_regex("foo"), ".*foo.*");
+    }
+
+    #[test]
+    fn build_implicit_regex_start_anchor() {
+        // Leading `^` suppresses the implicit `.*` on the left.
+        assert_eq!(build_implicit_regex("^git commit"), "^git commit.*");
+        assert_eq!(build_implicit_regex("^foo"), "^foo.*");
+    }
+
+    #[test]
+    fn build_implicit_regex_end_anchor() {
+        // Trailing `$` suppresses the implicit `.*` on the right.
+        assert_eq!(build_implicit_regex("git$"), ".*git$");
+        assert_eq!(build_implicit_regex("foo bar$"), ".*foo bar$");
+    }
+
+    #[test]
+    fn build_implicit_regex_both_anchors() {
+        // Both anchors present → no implicit `.*` added.
+        assert_eq!(build_implicit_regex("^git$"), "^git$");
+        assert_eq!(build_implicit_regex("^foo bar$"), "^foo bar$");
+    }
+
+    #[test]
+    fn build_implicit_regex_empty() {
+        // Empty pattern still gets `.*` wrappers — useful for
+        // `/` alone (matches everything).
+        assert_eq!(build_implicit_regex(""), ".*.*");
     }
 }

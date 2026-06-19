@@ -437,17 +437,28 @@ The TUI can be themed in one of two ways:
 By default, the TUI search field matches every whitespace-separated
 word as a separate substring (case-insensitive, AND-combined across
 both the command and its comment). To switch to regular-expression
-mode, start the query with a forward slash:
+mode, start the query with `/`:
 
 ```
 > git commit          # plain text: rows containing both `git` AND `commit`
 > /^git\s+commit/     # regex: rows matching the pattern `^git\s+commit`
 > /kubectl (apply|delete)/  # regex with alternation
+> /git commit/        # regex: rows containing `git commit`
+                       #   (implicit `.*` on both sides)
 ```
+
+In regex mode, the search adds implicit `.*` anchors at both ends
+of the pattern unless you provide your own explicit anchor:
+
+- `/git commit/` matches any command that **contains** `git commit`
+  (equivalent to `/.*git commit.*/`).
+- `/^git commit/` only matches commands that **start with** `git commit`.
+- `/git commit$/` only matches commands that **end with** `git commit`.
+- `/^git commit$/` only matches the exact `git commit` command.
 
 When the leading `/` is present:
 
-- The prompt changes to `//` and the input border is tinted
+- The prompt changes to `/` and the input border is tinted
   yellow so you can see you're in regex mode.
 - Each match is highlighted individually (the regex's match range,
   not the full row).
