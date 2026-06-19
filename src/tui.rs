@@ -398,6 +398,11 @@ struct Palette {
     #[allow(dead_code)]
     dimmer: Color,
     highlight: Color,
+    /// Background color for the currently-selected row in the list.
+    selection: Color,
+    /// Foreground color used for badge text. Defaults to `bg` so
+    /// the text always contrasts with the bright badge background.
+    badge_fg: Color,
     /// Background color for the history list pane. Defaults to
     /// `bg` when the user does not set `tuicolor.listbg=`.
     list_bg: Color,
@@ -421,6 +426,8 @@ impl Palette {
             dim: Color::Gray,
             dimmer: Color::DarkGray,
             highlight: Color::Yellow,
+            selection: Color::DarkGray,
+            badge_fg: Color::Black,
             list_bg: Color::Black,
             details_bg: Color::Black,
             input_bg: Color::Black,
@@ -428,7 +435,11 @@ impl Palette {
         }
     }
 
-    fn from_config(theme: &crate::TuiTheme, cfg: &Config) -> Self {
+    /// Construct the resolved palette for the manually-configured
+    /// "no theme" case. All fallbacks come from the user's own
+    /// `tuicolor.*` settings (so the manual-config defaults are
+    /// self-consistent even without any user override).
+    fn from_manual(theme: &crate::TuiTheme, cfg: &Config) -> Self {
         Palette {
             bg: resolve_color(&theme.bg),
             fg: resolve_color(&theme.fg),
@@ -439,10 +450,12 @@ impl Palette {
             dim: resolve_color(&theme.dim),
             dimmer: Color::DarkGray,
             highlight: resolve_color(&theme.highlight),
-            list_bg: resolve_color(cfg.list_bg()),
-            details_bg: resolve_color(cfg.details_bg()),
-            input_bg: resolve_color(cfg.input_bg()),
-            status_bg: resolve_color(cfg.status_bg()),
+            selection: resolve_color(&cfg.selection(&theme.bg)),
+            badge_fg: resolve_color(&cfg.badge_fg(&theme.bg)),
+            list_bg: resolve_color(&cfg.list_bg(&theme.bg)),
+            details_bg: resolve_color(&cfg.details_bg(&theme.bg)),
+            input_bg: resolve_color(&cfg.input_bg(&theme.bg)),
+            status_bg: resolve_color(&cfg.status_bg(&theme.bg)),
         }
     }
 }
@@ -454,37 +467,83 @@ thread_local! {
 /// Rebuild the active palette for the chosen theme and store it in
 /// the `PALETTE` thread-local. When `theme` is `SelectedTheme::None`
 /// the palette is rebuilt from the user's manually-configured
-/// `tuicolor.*` settings (the same source `Config::theme()`).
-/// Otherwise the `ratatui-themes` palette for the matching
-/// `ThemeName` is used; the per-pane backgrounds and `dim` color
-/// come from the manual config so the user can still fine-tune
-/// individual panes regardless of the theme.
+/// `tuicolor.*` settings. Otherwise the `ratatui-themes` palette
+/// for the matching `ThemeName` supplies the **base** bg / fg /
+/// selection / badge-fg / per-pane-bg values, and the user's
+/// manual `tuicolor.*` settings override them where set. This way
+/// built-in light themes (Gruvbox Light, Catppuccin Latte, …)
+/// actually look light in the TUI — not painted on top of the
+/// dark defaults that the manual config ships with.
 fn install_palette(theme: SelectedTheme) {
     let cfg = Config::load();
-    let manual = Palette::from_config(cfg.theme(), &cfg);
     let palette = match theme {
-        SelectedTheme::None => manual,
+        SelectedTheme::None => Palette::from_manual(cfg.theme(), &cfg),
         SelectedTheme::Builtin(name) => {
             let p = name.palette();
+            // Build the palette with the theme's own colors as the
+            // fallbacks for every slot. The user's `tuicolor.*`
+            // overrides still win where set, so fine-tuning is
+            // preserved.
+            let cfg_theme = cfg.theme();
             Palette {
-                bg: manual.bg,
-                fg: manual.fg,
-                accent: p.accent,
-                success: p.success,
-                error: p.error,
-                warning: p.warning,
-                dim: manual.dim,
-                dimmer: manual.dimmer,
-                highlight: p.info,
-                list_bg: manual.list_bg,
-                details_bg: manual.details_bg,
-                input_bg: manual.input_bg,
-                status_bg: manual.status_bg,
+                bg: if cfg.has_bg_override() {
+                    resolve_color(&cfg_theme.bg)
+                } else {
+                    p.bg
+                },
+                fg: if cfg.has_fg_override() {
+                    resolve_color(&cfg_theme.fg)
+                } else {
+                    p.fg
+                },
+                accent: resolve_color(&cfg_theme.accent),
+                success: resolve_color(&cfg_theme.success),
+                error: resolve_color(&cfg_theme.error),
+                warning: resolve_color(&cfg_theme.warning),
+                dim: if cfg.has_dim_override() {
+                    resolve_color(&cfg_theme.dim)
+                } else {
+                    p.muted
+                },
+                dimmer: Color::DarkGray,
+                highlight: resolve_color(&cfg_theme.highlight),
+                selection: if cfg_theme.selection.is_empty() {
+                    p.selection
+                } else {
+                    resolve_color(&cfg_theme.selection)
+                },
+                badge_fg: if cfg_theme.badge_fg.is_empty() {
+                    p.bg
+                } else {
+                    resolve_color(&cfg_theme.badge_fg)
+                },
+                list_bg: if cfg_theme.list_bg.is_empty() {
+                    p.bg
+                } else {
+                    resolve_color(&cfg_theme.list_bg)
+                },
+                details_bg: if cfg_theme.details_bg.is_empty() {
+                    p.bg
+                } else {
+                    resolve_color(&cfg_theme.details_bg)
+                },
+                input_bg: if cfg_theme.input_bg.is_empty() {
+                    p.bg
+                } else {
+                    resolve_color(&cfg_theme.input_bg)
+                },
+                status_bg: if cfg_theme.status_bg.is_empty() {
+                    p.bg
+                } else {
+                    resolve_color(&cfg_theme.status_bg)
+                },
             }
         }
     };
     PALETTE.with(|c| *c.borrow_mut() = palette);
 }
+
+
 
 /// Style helpers used throughout the TUI. Each reads the current
 /// color from the active `Palette`. Keeping the original call-site
@@ -568,6 +627,20 @@ impl Theme {
     #[allow(dead_code)]
     fn dim_color() -> Color {
         PALETTE.with(|c| c.borrow().dim)
+    }
+
+    /// Background color used to highlight the currently-selected
+    /// row in the history list. Always comes from the active
+    /// theme / palette so it follows theme changes.
+    fn selection_color() -> Color {
+        PALETTE.with(|c| c.borrow().selection)
+    }
+
+    /// Foreground color for badge text (inside the bright
+    /// mode/scope/dedup chips). Defaults to the global background
+    /// so the text always contrasts with the bright background.
+    fn badge_fg_color() -> Color {
+        PALETTE.with(|c| c.borrow().badge_fg)
     }
 }
 
@@ -1838,13 +1911,16 @@ fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
     let area = f.area();
     f.render_widget(ratatui::widgets::Clear, area);
 
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .title(" Help — Esc/Enter/q to close ")
         .title_style(Theme::accent())
         .border_style(Theme::dim())
-        .style(Style::default().bg(PALETTE.with(|p| p.borrow().bg)));
+        .style(Style::default().bg(bg));
 
     let inner_h = area.height.saturating_sub(2) as usize;
     let lines = build_help_lines(app);
@@ -1854,14 +1930,38 @@ fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
     let max_scroll = total.saturating_sub(inner_h);
     let scroll = view.scroll.min(max_scroll);
 
+    // Color the default text (rows that have no per-span style)
+    // using the theme foreground so the help is readable on any
+    // background — including light themes.
     let visible: Vec<Line> = lines
         .into_iter()
         .skip(scroll)
         .take(inner_h)
+        .map(|line| {
+            let spans: Vec<Span> = line
+                .spans
+                .into_iter()
+                .map(|s| {
+                    if s.style.fg.is_none() && s.style.bg.is_none() {
+                        Span::styled(s.content, Style::default().fg(fg).bg(bg))
+                    } else {
+                        // Make sure spans that already have a style
+                        // also pick up the theme background, so
+                        // gaps between styled runs don't show
+                        // through to the terminal's default.
+                        let mut style = s.style;
+                        style = style.bg(bg);
+                        Span::styled(s.content, style)
+                    }
+                })
+                .collect();
+            Line::from(spans)
+        })
         .collect();
 
     let paragraph = Paragraph::new(visible)
         .block(block)
+        .style(Style::default().bg(bg))
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 
@@ -1873,7 +1973,8 @@ fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
             (scroll + inner_h).min(total),
             total
         );
-        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())));
+        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())))
+            .style(Style::default().bg(bg));
         let footer_area = Rect {
             x: area.x,
             y: area.y + area.height - 1,
@@ -2037,7 +2138,7 @@ fn duplicate_filter_badge(on: bool) -> Span<'static> {
     let (label, color) = if on { ("LAST", Theme::success_color()) } else { ("ALL", Theme::accent_color()) };
     Span::styled(
         format!(" {} ", label),
-        Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+        Style::default().fg(Theme::badge_fg_color()).bg(color).add_modifier(Modifier::BOLD),
     )
 }
 
@@ -2050,7 +2151,7 @@ fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
     };
     Span::styled(
         format!(" {} ", label),
-        Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+        Style::default().fg(Theme::badge_fg_color()).bg(color).add_modifier(Modifier::BOLD),
     )
 }
 
@@ -2062,7 +2163,7 @@ fn mode_badge(mode: Mode) -> Span<'static> {
     };
     Span::styled(
         format!(" {} ", label),
-        Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+        Style::default().fg(Theme::badge_fg_color()).bg(color).add_modifier(Modifier::BOLD),
     )
 }
 
@@ -2138,7 +2239,8 @@ let title = format!(" History — {} ", merged.len());
         )
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(Theme::selection_color())
+                .fg(PALETTE.with(|p| p.borrow().fg))
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(symbols::line::THICK_VERTICAL_RIGHT)
@@ -2430,16 +2532,24 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         .border_type(ratatui::widgets::BorderType::Rounded)
         .title(" Output Preview ")
         .title_style(Theme::accent())
-        .border_style(Theme::dim());
+        .border_style(Theme::dim())
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)));
 
     let Some(row) = app.selected_row() else {
-        f.render_widget(Paragraph::new("").block(block), area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("", Theme::default())))
+                .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)))
+                .block(block),
+            area,
+        );
         return;
     };
 
     if row.output.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("No output captured", Theme::dim())).block(block),
+            Paragraph::new(Span::styled("No output captured", Theme::dim()))
+                .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)))
+                .block(block),
             area,
         );
         return;
@@ -2449,11 +2559,12 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         .output
         .lines()
         .take(4) // Show up to 4 lines to fit the new larger detail pane
-        .map(|l| Line::from(Span::raw(l.to_string())))
+        .map(|l| Line::from(Span::styled(l.to_string(), Theme::default())))
         .collect();
 
     let paragraph = Paragraph::new(preview_lines)
         .block(block)
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)))
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }

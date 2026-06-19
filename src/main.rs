@@ -7,6 +7,7 @@ use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -347,6 +348,14 @@ pub struct TuiTheme {
     warning: String,
     dim: String,
     highlight: String,
+    /// Background color used for the currently-selected row in the
+    /// history list. Falls back to `bg` when unset.
+    selection: String,
+    /// Foreground color used for badge text (the dark-on-bright or
+    /// light-on-dim text inside mode/scope/dedup chips). Falls back
+    /// to `bg` when unset so it always contrasts with the badge's
+    /// bright background.
+    badge_fg: String,
     /// Background color for the history list pane. Falls back to
     /// `bg` when unset.
     list_bg: String,
@@ -372,6 +381,8 @@ impl Default for TuiTheme {
             warning: "yellow".to_string(),
             dim: "gray".to_string(),
             highlight: "yellow".to_string(),
+            selection: "darkgray".to_string(),
+            badge_fg: String::new(),
             list_bg: String::new(),
             details_bg: String::new(),
             input_bg: String::new(),
@@ -485,42 +496,87 @@ impl Config {
         &self.theme
     }
 
-    /// Effective background color for the history list pane.
-    /// Falls back to the global `bg` when the user did not set
-    /// `tuicolor.listbg=`.
-    pub fn list_bg(&self) -> &str {
+    /// Effective selection-row background color. Falls back to the
+    /// theme's own selection color when the user did not set
+    /// `tuicolor.selection=`. The TUI passes `theme_default` so the
+    /// active theme's palette is the fallback (rather than always
+    /// `bg`), so built-in light themes like Gruvbox Light don't end
+    /// up with a dark-gray selection on a light background.
+    pub fn selection<'a>(&self, theme_default: &'a str) -> Cow<'a, str> {
+        if self.theme.selection.is_empty() {
+            Cow::Borrowed(theme_default)
+        } else {
+            // Owned: the field is on `&self`, so we can't return a
+            // borrow with the caller's lifetime `'a` without tying
+            // the accessor to a self-borrow of that lifetime, which
+            // is not what callers expect. An owned Cow clone is
+            // fine since this is called once per palette install.
+            Cow::Owned(self.theme.selection.clone())
+        }
+    }
+
+    /// Effective badge foreground color. Falls back to the supplied
+    /// theme default when unset.
+    pub fn badge_fg<'a>(&self, theme_default: &'a str) -> Cow<'a, str> {
+        if self.theme.badge_fg.is_empty() {
+            Cow::Borrowed(theme_default)
+        } else {
+            Cow::Owned(self.theme.badge_fg.clone())
+        }
+    }
+
+    /// Effective per-pane background color, falling back to the
+    /// supplied theme default when unset.
+    pub fn list_bg<'a>(&self, theme_default: &'a str) -> Cow<'a, str> {
         if self.theme.list_bg.is_empty() {
-            &self.theme.bg
+            Cow::Borrowed(theme_default)
         } else {
-            &self.theme.list_bg
+            Cow::Owned(self.theme.list_bg.clone())
         }
     }
 
-    /// Effective background color for the details pane.
-    pub fn details_bg(&self) -> &str {
+    /// Effective details-pane background color.
+    pub fn details_bg<'a>(&self, theme_default: &'a str) -> Cow<'a, str> {
         if self.theme.details_bg.is_empty() {
-            &self.theme.bg
+            Cow::Borrowed(theme_default)
         } else {
-            &self.theme.details_bg
+            Cow::Owned(self.theme.details_bg.clone())
         }
     }
 
-    /// Effective background color for the input pane.
-    pub fn input_bg(&self) -> &str {
+    /// Effective input-pane background color.
+    pub fn input_bg<'a>(&self, theme_default: &'a str) -> Cow<'a, str> {
         if self.theme.input_bg.is_empty() {
-            &self.theme.bg
+            Cow::Borrowed(theme_default)
         } else {
-            &self.theme.input_bg
+            Cow::Owned(self.theme.input_bg.clone())
         }
     }
 
-    /// Effective background color for the status bar.
-    pub fn status_bg(&self) -> &str {
+    /// Effective status-bar background color.
+    pub fn status_bg<'a>(&self, theme_default: &'a str) -> Cow<'a, str> {
         if self.theme.status_bg.is_empty() {
-            &self.theme.bg
+            Cow::Borrowed(theme_default)
         } else {
-            &self.theme.status_bg
+            Cow::Owned(self.theme.status_bg.clone())
         }
+    }
+
+    /// True if the user explicitly set `tuicolor.bg=`. Used by the
+    /// TUI to decide whether the manual value should override a
+    /// built-in theme's `bg`.
+    pub fn has_bg_override(&self) -> bool {
+        !self.theme.bg.is_empty()
+    }
+
+    /// True if the user explicitly set `tuicolor.fg=`.
+    pub fn has_fg_override(&self) -> bool {
+        !self.theme.fg.is_empty()
+    }
+
+    /// True if the user explicitly set `tuicolor.dim=`.
+    pub fn has_dim_override(&self) -> bool {
+        !self.theme.dim.is_empty()
     }
 
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
@@ -540,6 +596,8 @@ impl Config {
             "warning" => theme.warning = value,
             "dim" => theme.dim = value,
             "highlight" => theme.highlight = value,
+            "selection" => theme.selection = value,
+            "badgefg" | "badge_fg" => theme.badge_fg = value,
             "listbg" | "list_bg" => theme.list_bg = value,
             "detailsbg" | "details_bg" => theme.details_bg = value,
             "inputbg" | "input_bg" => theme.input_bg = value,

@@ -78,7 +78,7 @@ Supported keys:
 | `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
-| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
+| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -116,6 +116,14 @@ tuicolor.listbg=#101010
 tuicolor.detailsbg=#101010
 tuicolor.inputbg=#101010
 tuicolor.statusbg=#101010
+
+# Selection-row background (the highlighted entry in the list).
+tuicolor.selection=#264f78
+
+# Badge foreground (the dark text inside the bright mode/scope
+# chips). Defaults to the global `bg` so the text always contrasts
+# with the bright badge background.
+tuicolor.badgefg=#0a0a0a
 ```
 
 To inspect the resolved value of a single setting, use:
@@ -414,11 +422,15 @@ The TUI can be themed in one of two ways:
    The active theme is shown on the right side of the status bar
    (`theme: <Name>`) and is persisted to
    `~/.local/cache/smarthistory/session` so the next TUI launch
-   starts on the same theme. Selecting a theme overrides the
-   semantic colors (`accent`, `success`, `error`, `warning`,
-   `highlight`); the per-pane background colors and the dim
-   foreground still come from the manual `tuicolor.*` config so
-   you can fine-tune individual panes regardless of the theme.
+   starts on the same theme.
+
+   Built-in themes supply **all** the palette colors — background,
+   foreground, selection, badge foreground, and the per-pane
+   backgrounds — so light themes like Gruvbox Light actually look
+   light in the TUI. The user's manual `tuicolor.*` settings still
+   override any of those on a per-slot basis: for example,
+   `tuicolor.bg=#1a1a1a` forces the background dark even on a
+   light theme.
 
 ### TUI search syntax
 
