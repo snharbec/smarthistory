@@ -77,6 +77,7 @@ Supported keys:
 | `ignorecapture=cmd1 cmd2 ...` | Space-separated list of commands whose output is never captured (typically interactive TUIs like editors, pagers, and system monitors) | `vi nvim vim top htop emacs more less lazygit` |
 | `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
+| `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -98,6 +99,9 @@ capturelines.ps=ALL
 
 # Always capture 40 lines of `cat` output
 capturelines.cat=40
+
+# Start the TUI in global mode by default (instead of SESS).
+initialmode=GLOBAL
 ```
 
 To inspect the resolved value of a single setting, use:

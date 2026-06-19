@@ -235,10 +235,13 @@ impl App {
     }
 
     /// Re-query the database with the current mode + query.
-    /// After re-querying, land on the newest match (index 0).
+    /// After re-querying, land on the newest match (index 0 in the
+    /// merged list, which is the bottom of the bottom-aligned render).
     fn refresh(&mut self) {
         self.rows = self.fetch().unwrap_or_default();
-        if self.rows.is_empty() {
+        self.refresh_labeled();
+        let n = self.merged_rows().len();
+        if n == 0 {
             self.list_state.select(None);
         } else {
             self.list_state.select(Some(0));
@@ -372,15 +375,21 @@ impl App {
         }
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let n = self.rows.len();
-        let cur = self.list_state.selected().unwrap_or(0) as isize;
-        let next = (cur + delta).clamp(0, n as isize - 1) as usize;
-        self.list_state.select(Some(next));
+    /// Move the selection by `delta` rows within the visible list.
+/// The visible list is the union of `rows` (current search results)
+/// and `labeled_rows` (entries with comments not already in `rows`),
+/// filtered by `duplicate_filter` and the user's `query` on labels.
+/// We compute the merged list here so that navigation matches the
+/// rendered order exactly, and clamp to the merged length.
+fn move_selection(&mut self, delta: isize) {
+    let merged_len = self.merged_rows().len();
+    if merged_len == 0 {
+        return;
     }
+    let cur = self.list_state.selected().unwrap_or(0) as isize;
+    let next = (cur + delta).clamp(0, merged_len as isize - 1) as usize;
+    self.list_state.select(Some(next));
+}
 
     fn select_for_run(&mut self) {
         if let Some(i) = self.list_state.selected()
@@ -1214,15 +1223,16 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         pad + (real_count.saturating_sub(1) - data_idx)
     });
 
-    // Anchor the visible window so the selected row appears at the
-    // bottom. If we padded, start from the top; otherwise start from
-    // the position that puts the selection at the bottom of the view.
-    let offset = if let Some(ri) = rendered_idx {
-        if real_count >= visible_height {
-            ri.saturating_sub(visible_height.saturating_sub(1))
-        } else {
-            0
-        }
+    // Always start the list from the bottom of the visible window.
+    // When the list fits within the visible height we pad with empty
+    // items above; when it is taller, we anchor the offset so the
+    // last entry sits at the bottom and the user scrolls upward to
+    // see older entries.
+    let offset = if real_count >= visible_height {
+        // Anchor at the bottom: offset = real_count - visible_height.
+        // This positions the newest entry at the bottom row and leaves
+        // older entries visible above as the user scrolls up.
+        real_count.saturating_sub(visible_height)
     } else {
         0
     };

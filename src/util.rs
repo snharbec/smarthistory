@@ -5,11 +5,13 @@
 use chrono::Datelike;
 
 /// Format a Unix epoch (seconds) as "dd.Mon.YYYY HH:MM:SS" in UTC, e.g.
-/// "03.Jun.2026 17:43:01". Returns "N/A" if the value is out of range.
+/// "03.Jun.2026 17:43:01". Returns a placeholder string for invalid
+/// timestamps so that history items with no valid time stamp can still
+/// be displayed and treated as very old.
 pub fn format_time(epoch: i64) -> String {
     match chrono::DateTime::from_timestamp(epoch, 0) {
         Some(dt) => dt.naive_utc().format("%d.%b.%Y %H:%M:%S").to_string(),
-        None => "N/A".to_string(),
+        None => "(unknown)".to_string(),
     }
 }
 
@@ -20,14 +22,15 @@ pub fn format_time(epoch: i64) -> String {
 ///   hour   -> "1h", 2h, ...
 ///   minute -> "1m", 2m, ...
 ///   second -> "1s", 2s, ...
-/// Returns "N/A" for non-positive or out-of-range timestamps.
+/// Returns a placeholder "9999M" for non-positive or out-of-range
+/// timestamps so they sort as the oldest possible entries.
 pub fn format_diff(epoch: i64) -> String {
     let now = chrono::Utc::now().naive_utc();
     let Some(then) = chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.naive_utc()) else {
-        return "N/A".to_string();
+        return "9999M".to_string();
     };
     if epoch <= 0 {
-        return "N/A".to_string();
+        return "9999M".to_string();
     }
 
     // Calendar-month diff first, since it's non-uniform in seconds.
@@ -97,10 +100,10 @@ mod tests {
     fn format_time_out_of_range() {
         // i64::MIN is guaranteed to be out of range for any reasonable
         // timestamp formatter.
-        assert_eq!(format_time(i64::MIN), "N/A");
+        assert_eq!(format_time(i64::MIN), "(unknown)");
         // A timestamp of 0 (the Unix epoch) is in range; the helper
-        // must NOT return "N/A" for it.
-        assert_ne!(format_time(0), "N/A");
+        // must NOT return "(unknown)" for it.
+        assert_ne!(format_time(0), "(unknown)");
     }
 
     #[test]

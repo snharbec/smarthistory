@@ -309,7 +309,8 @@ fn parse_bool(s: &str, default: bool) -> bool {
 }
 
 /// Resolved configuration. Constructed by `Config::load`.
-struct Config {
+#[derive(Debug, Clone)]
+pub struct Config {
     /// Directory containing per-pane tmux output log files.
     tmux_pane_output_dir: std::path::PathBuf,
     /// Commands whose output is never captured. Empty means capture
@@ -324,10 +325,14 @@ struct Config {
     /// at runtime via Ctrl-S, and seeded from the config file's
     /// `duplicatefilter=on|off` setting.
     duplicate_filter: bool,
+    /// Initial search scope for the TUI. Honored by `smarthistory tui`
+    /// when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set.
+    /// One of "SESS", "DIR", "GLOBAL".
+    initial_mode: String,
 }
 
 impl Config {
-    fn default() -> Self {
+    pub fn default() -> Self {
         let dir = env::var("HOME")
             .map(|h| std::path::PathBuf::from(h).join(".cache").join("tmux-history"))
             .unwrap_or_else(|_| std::path::PathBuf::from(".cache/tmux-history"));
@@ -339,12 +344,13 @@ impl Config {
             default_capture_lines: Some(DEFAULT_CAPTURE_LINES),
             capture_lines_per_command: std::collections::HashMap::new(),
             duplicate_filter: true,
+            initial_mode: "SESS".to_string(),
         }
     }
 
     /// Load configuration from `~/.config/smarthistory/config`,
     /// overlaying the defaults.
-    fn load() -> Self {
+    pub fn load() -> Self {
         let mut cfg = Config::default();
         if let Some(path) = config_path()
             && let Ok(contents) = std::fs::read_to_string(&path) {
@@ -387,6 +393,12 @@ impl Config {
                 }
                 "duplicatefilter" => {
                     self.duplicate_filter = parse_bool(value, true);
+                }
+                "initialmode" => {
+                    let upper = value.trim().to_ascii_uppercase();
+                    if matches!(upper.as_str(), "SESS" | "SESSION" | "DIR" | "DIRECTORY" | "GLOBAL") {
+                        self.initial_mode = upper;
+                    }
                 }
                 other => {
                     if let Some(cmd) = other.strip_prefix("capturelines.")
@@ -1493,7 +1505,19 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Tui { mode, query } => {
-            let initial_mode = mode.unwrap_or_else(|| "SESS".to_string());
+            // Honor an explicit --mode flag first. Otherwise consult
+            // the user's environment for a preferred starting scope:
+            //   $SMARTHISTORY_TUI_MODE      — explicit override
+            //   $SMARTHISTORY_MODE          — alias
+            // Otherwise fall back to the config file's `initialmode`
+            // (or `SESS` if unset).
+            let initial_mode = mode
+                .or_else(|| std::env::var("SMARTHISTORY_TUI_MODE").ok().filter(|s| !s.is_empty()))
+                .or_else(|| std::env::var("SMARTHISTORY_MODE").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| {
+                    let cfg = Config::load();
+                    cfg.initial_mode
+                });
             let initial_query = query.unwrap_or_else(|| "".to_string());
             match tui::run_tui_to_stdout(initial_mode, initial_query, conn)? {
                 Some((command, pick_mode)) => {
