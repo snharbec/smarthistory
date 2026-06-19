@@ -502,8 +502,8 @@ fn extract_tmux_output(
     use std::thread::sleep;
     use std::time::Duration;
 
-    const MAX_ATTEMPTS: u32 = 20;
-    const RETRY_DELAY: Duration = Duration::from_millis(100);
+    const MAX_ATTEMPTS: u32 = 10;
+    const RETRY_DELAY: Duration = Duration::from_millis(50);
 
     for attempt in 1..=MAX_ATTEMPTS {
         if let Ok(contents) = fs::read_to_string(file) {

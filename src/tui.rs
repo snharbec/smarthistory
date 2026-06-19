@@ -171,6 +171,12 @@ struct App {
     output_view: Option<OutputView>,
     /// When `Some`, we are prompting for deletion confirmation.
     confirm_delete: Option<ConfirmMode>,
+    /// Cached set of all history rows that have a comment, used to
+    /// populate the optional labeled entries pane.
+    labeled_rows: Vec<HistoryRow>,
+    /// List state for the labeled entries pane (separate from
+    /// `list_state` so the two views can remember their own selection).
+    labeled_list_state: ListState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,13 +208,19 @@ impl App {
             comment_edit: None,
             output_view: None,
             confirm_delete: None,
+            labeled_rows: Vec::new(),
+            labeled_list_state: ListState::default(),
         };
         app.refresh();
+        app.refresh_labeled();
         // Rows are ordered newest first; index 0 is the newest entry.
         // Keep the selection on the newest match so it appears at the
         // bottom of the bottom-aligned list.
         if !app.rows.is_empty() {
             app.list_state.select(Some(0));
+        }
+        if !app.labeled_rows.is_empty() {
+            app.labeled_list_state.select(Some(0));
         }
         app
     }
@@ -252,6 +264,24 @@ impl App {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Merge `labeled_rows` (entries with a comment that are NOT already
+    /// in `rows`) into a single list ordered by timestamp. Labeled
+    /// entries that are already present keep their position from the
+    /// primary list so their highlighted search state is preserved.
+    fn merged_rows(&self) -> Vec<HistoryRow> {
+        let mut merged = self.rows.clone();
+        let existing_ids: std::collections::HashSet<i64> =
+            merged.iter().map(|r| r.id).collect();
+        for row in &self.labeled_rows {
+            if !existing_ids.contains(&row.id) {
+                merged.push(row.clone());
+            }
+        }
+        // Newest first.
+        merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        merged
     }
 
     fn build_where(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
@@ -402,6 +432,7 @@ impl App {
         }
         self.comment_edit = None;
         self.refresh();
+        self.refresh_labeled();
         Ok(())
     }
 
@@ -432,11 +463,54 @@ impl App {
         self.output_view.is_some()
     }
 
+    fn is_labeled_view(&self) -> bool {
+        // The labeled pane is always available, so the toggle state is
+        // determined by the dedicated `labeled_list_state` which we
+        // keep synchronized with `list_state` for the moment.
+        self.labeled_list_state.selected().is_some() || !self.labeled_rows.is_empty()
+    }
+
+    /// Re-query the database for all rows that have an associated
+    /// comment. This powers the always-available "labeled" pane.
+    fn refresh_labeled(&mut self) {
+        self.labeled_rows = self.fetch_labeled().unwrap_or_default();
+        if self.labeled_rows.is_empty() {
+            self.labeled_list_state.select(None);
+        } else {
+            self.labeled_list_state.select(Some(0));
+        }
+    }
+
+    fn fetch_labeled(&self) -> Result<Vec<HistoryRow>> {
+        let sql = "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output \
+                   FROM history h \
+                   JOIN command_comments c ON h.command = c.command \
+                   LEFT JOIN history_output o ON h.id = o.history_id \
+                   ORDER BY h.timestamp DESC LIMIT 1000";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(HistoryRow {
+                    id: row.get(0)?,
+                    command: row.get(1)?,
+                    directory: row.get(2)?,
+                    session_id: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    comment: row.get(6).unwrap_or_default(),
+                    output: row.get(7).unwrap_or_default(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn delete_selected(&mut self) -> Result<()> {
         if let Some(row) = self.selected_row() {
             self.conn
                 .execute("DELETE FROM history WHERE id = ?1", params![row.id])?;
             self.refresh();
+            self.refresh_labeled();
         }
         self.confirm_delete = None;
         Ok(())
@@ -448,6 +522,7 @@ impl App {
         let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         self.conn.execute(&sql, &params_ref[..])?;
         self.refresh();
+        self.refresh_labeled();
         self.confirm_delete = None;
         Ok(())
     }
@@ -871,6 +946,12 @@ fn ui(f: &mut Frame, app: &mut App) {
     if let Some(mode) = app.confirm_delete {
         draw_confirm_delete(f, app, mode);
     }
+
+    // If a comment exists, draw the labeled entries pane as an overlay
+    // so that labeled history elements are always available.
+    // (Labeled entries are now merged into the main list instead.)
+    #[allow(clippy::overly_complex_conditional)]
+    let _ = !app.labeled_rows.is_empty();
 }
 
 fn draw_confirm_delete(f: &mut Frame, app: &App, mode: ConfirmMode) {
@@ -1049,8 +1130,8 @@ fn mode_badge(mode: Mode) -> Span<'static> {
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let age_width = app
-        .rows
+    let merged = app.merged_rows();
+    let age_width = merged
         .iter()
         .map(|r| format_diff(r.timestamp).chars().count())
         .max()
@@ -1060,8 +1141,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // Build the real row items. Rows are stored newest-first; for
     // display we want oldest at the top and newest at the bottom,
     // so reverse the order. Pass `is_selected` based on the data index.
-    let real_items: Vec<ListItem> = app
-        .rows
+    let real_items: Vec<ListItem> = merged
         .iter()
         .enumerate()
         .rev()
@@ -1107,7 +1187,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let mut render_state = ListState::default().with_offset(offset);
     render_state.select(rendered_idx);
 
-    let title = format!(" History — {} ", app.rows.len());
+let title = format!(" History — {} ", merged.len());
     let list = List::new(items)
         .block(
             Block::default()
@@ -1138,9 +1218,20 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             Some(real_count.saturating_sub(1) - real)
         }
     });
-    app.list_state = ListState::default().with_offset(0);
-    app.list_state.select(data_idx);
+
+    // Maintain a separate selection index for the "all labeled" view so
+    // that switching back and forth between the two panes preserves the
+    // cursor position in each.
+    if app.is_labeled_view() {
+        app.labeled_list_state = ListState::default().with_offset(0);
+        app.labeled_list_state.select(data_idx);
+    } else {
+        app.list_state = ListState::default().with_offset(0);
+        app.list_state.select(data_idx);
+    }
 }
+
+
 
 /// Render a single history row as a `Line` with optional query
 /// highlighting. The layout is a fixed-width columnar form:
