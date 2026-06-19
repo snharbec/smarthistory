@@ -347,20 +347,36 @@ pub struct TuiTheme {
     warning: String,
     dim: String,
     highlight: String,
+    /// Background color for the history list pane. Falls back to
+    /// `bg` when unset.
+    list_bg: String,
+    /// Background color for the details pane. Falls back to `bg`
+    /// when unset.
+    details_bg: String,
+    /// Background color for the search/comment input pane. Falls
+    /// back to `bg` when unset.
+    input_bg: String,
+    /// Background color for the status bar. Falls back to `bg`
+    /// when unset.
+    status_bg: String,
 }
 
 impl Default for TuiTheme {
     fn default() -> Self {
-TuiTheme {
-bg: "black".to_string(),
-fg: "gray".to_string(),
-accent: "cyan".to_string(),
-success: "green".to_string(),
-error: "red".to_string(),
-warning: "yellow".to_string(),
-dim: "gray".to_string(),
-highlight: "yellow".to_string(),
-}
+        TuiTheme {
+            bg: "black".to_string(),
+            fg: "gray".to_string(),
+            accent: "cyan".to_string(),
+            success: "green".to_string(),
+            error: "red".to_string(),
+            warning: "yellow".to_string(),
+            dim: "gray".to_string(),
+            highlight: "yellow".to_string(),
+            list_bg: String::new(),
+            details_bg: String::new(),
+            input_bg: String::new(),
+            status_bg: String::new(),
+        }
     }
 }
 
@@ -469,6 +485,44 @@ impl Config {
         &self.theme
     }
 
+    /// Effective background color for the history list pane.
+    /// Falls back to the global `bg` when the user did not set
+    /// `tuicolor.listbg=`.
+    pub fn list_bg(&self) -> &str {
+        if self.theme.list_bg.is_empty() {
+            &self.theme.bg
+        } else {
+            &self.theme.list_bg
+        }
+    }
+
+    /// Effective background color for the details pane.
+    pub fn details_bg(&self) -> &str {
+        if self.theme.details_bg.is_empty() {
+            &self.theme.bg
+        } else {
+            &self.theme.details_bg
+        }
+    }
+
+    /// Effective background color for the input pane.
+    pub fn input_bg(&self) -> &str {
+        if self.theme.input_bg.is_empty() {
+            &self.theme.bg
+        } else {
+            &self.theme.input_bg
+        }
+    }
+
+    /// Effective background color for the status bar.
+    pub fn status_bg(&self) -> &str {
+        if self.theme.status_bg.is_empty() {
+            &self.theme.bg
+        } else {
+            &self.theme.status_bg
+        }
+    }
+
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
     /// fields are silently ignored so a typo doesn't break the rest
     /// of the config.
@@ -486,6 +540,10 @@ impl Config {
             "warning" => theme.warning = value,
             "dim" => theme.dim = value,
             "highlight" => theme.highlight = value,
+            "listbg" | "list_bg" => theme.list_bg = value,
+            "detailsbg" | "details_bg" => theme.details_bg = value,
+            "inputbg" | "input_bg" => theme.input_bg = value,
+            "statusbg" | "status_bg" => theme.status_bg = value,
             _ => {}
         }
     }

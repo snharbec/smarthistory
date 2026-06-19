@@ -266,6 +266,15 @@ struct Palette {
     #[allow(dead_code)]
     dimmer: Color,
     highlight: Color,
+    /// Background color for the history list pane. Defaults to
+    /// `bg` when the user does not set `tuicolor.listbg=`.
+    list_bg: Color,
+    /// Background color for the details pane.
+    details_bg: Color,
+    /// Background color for the search/comment input pane.
+    input_bg: Color,
+    /// Background color for the status bar.
+    status_bg: Color,
 }
 
 impl Palette {
@@ -280,10 +289,14 @@ impl Palette {
             dim: Color::Gray,
             dimmer: Color::DarkGray,
             highlight: Color::Yellow,
+            list_bg: Color::Black,
+            details_bg: Color::Black,
+            input_bg: Color::Black,
+            status_bg: Color::Black,
         }
     }
 
-    fn from_config(theme: &crate::TuiTheme) -> Self {
+    fn from_config(theme: &crate::TuiTheme, cfg: &Config) -> Self {
         Palette {
             bg: resolve_color(&theme.bg),
             fg: resolve_color(&theme.fg),
@@ -294,6 +307,10 @@ impl Palette {
             dim: resolve_color(&theme.dim),
             dimmer: Color::DarkGray,
             highlight: resolve_color(&theme.highlight),
+            list_bg: resolve_color(cfg.list_bg()),
+            details_bg: resolve_color(cfg.details_bg()),
+            input_bg: resolve_color(cfg.input_bg()),
+            status_bg: resolve_color(cfg.status_bg()),
         }
     }
 }
@@ -951,7 +968,7 @@ pub fn run_tui_to_stdout(
     // Install the user-configured TUI palette (or built-in defaults)
     // into a thread-local so the draw helpers can read it without
     // needing it threaded through every signature.
-    let palette = Palette::from_config(cfg.theme());
+    let palette = Palette::from_config(cfg.theme(), &cfg);
     PALETTE.with(|p| *p.borrow_mut() = palette);
     // The effective initial mode is decided by precedence:
     //   1. The `initial_mode` argument (already resolved by `main`
@@ -1658,7 +1675,8 @@ let title = format!(" History — {} ", merged.len());
                 .border_type(ratatui::widgets::BorderType::Rounded)
                 .title(title)
                 .title_style(Theme::accent())
-                .border_style(Theme::dim()),
+                .border_style(Theme::dim())
+                .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg))),
         )
         .highlight_style(
             Style::default()
@@ -1881,7 +1899,8 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         .border_type(ratatui::widgets::BorderType::Rounded)
         .title(" Details ")
         .title_style(Theme::accent())
-        .border_style(Theme::dim());
+        .border_style(Theme::dim())
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)));
 
     let Some(row) = app.selected_row() else {
         let empty = Paragraph::new(Line::from(vec![Span::styled(
@@ -2016,7 +2035,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::warning_color())
             } else {
                 Theme::dim()
-            }),
+            })
+            .style(Style::default().bg(PALETTE.with(|p| p.borrow().input_bg))),
     )
     .wrap(Wrap { trim: false });
     f.render_widget(input, area);
@@ -2051,7 +2071,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {}  ", count), Theme::highlight()),
         Span::styled(help, Theme::dim()),
     ]);
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().bg(PALETTE.with(|p| p.borrow().status_bg))),
+        area,
+    );
 }
 
 #[cfg(test)]

@@ -78,7 +78,7 @@ Supported keys:
 | `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
-| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
+| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -109,6 +109,13 @@ initialmode=GLOBAL
 # error, warning, dim, highlight can be set.
 tuicolor.accent=magenta
 tuicolor.highlight=#ffee00
+
+# Per-pane background colors for the TUI's main sections. Falls
+# back to the global `bg` color when unset.
+tuicolor.listbg=#101010
+tuicolor.detailsbg=#101010
+tuicolor.inputbg=#101010
+tuicolor.statusbg=#101010
 ```
 
 To inspect the resolved value of a single setting, use:
