@@ -1,10 +1,8 @@
 # Smart History ZSH Init
-# Generate a unique session ID if not already set.
+# Generate a unique session ID 
 # The UUID is produced by the smarthistory binary itself (no uuidgen,
 # no /dev/urandom, no OS RNG), so it works in any minimal environment.
-if [ -z "$SMART_HISTORY_SESSION" ]; then
-    export SMART_HISTORY_SESSION="{session_id}"
-fi
+export SMART_HISTORY_SESSION="{session_id}"
 
 # Debug logging. Set SMARTHISTORY_DEBUG=1 in the environment to enable
 # the line-editor widget to log its decisions to

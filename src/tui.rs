@@ -104,7 +104,9 @@ impl Theme {
     const SUCCESS: Color = Color::Green;
     const ERROR: Color = Color::Red;
     const WARNING: Color = Color::Yellow;
-    const DIM: Color = Color::DarkGray;
+    const DIM: Color = Color::Gray;
+    #[allow(dead_code)]
+    const DIMMER: Color = Color::DarkGray;
     const HIGHLIGHT: Color = Color::Yellow;
 
     fn default() -> Style {
@@ -125,6 +127,11 @@ impl Theme {
 
     fn dim() -> Style {
         Style::default().fg(Self::DIM)
+    }
+
+    #[allow(dead_code)]
+    fn dimmer() -> Style {
+        Style::default().fg(Self::DIMMER)
     }
 
     fn highlight() -> Style {
