@@ -209,6 +209,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
+| `Ctrl+H`  | TUI     | Open the help overlay (current settings + shortcut reference). |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |

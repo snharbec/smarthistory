@@ -587,6 +587,9 @@ struct App {
     /// When `Some`, we are viewing the captured output of a history
     /// row in a full-screen overlay.
     output_view: Option<OutputView>,
+    /// When `Some`, the help overlay is open. The contained `scroll`
+    /// tracks how far down the user has scrolled.
+    help_view: Option<HelpView>,
     /// When `Some`, we are prompting for deletion confirmation.
     confirm_delete: Option<ConfirmMode>,
     /// Cached set of all history rows that have a comment, used to
@@ -706,6 +709,13 @@ struct OutputView {
     scroll: usize,
 }
 
+/// State for the help overlay. Just a scroll offset; the help text
+/// is computed from the live app state on each render so the
+/// "current settings" section is always accurate.
+struct HelpView {
+    scroll: usize,
+}
+
 impl App {
     fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool, theme: SelectedTheme) -> Self {
         let list_state = ListState::default();
@@ -721,6 +731,7 @@ impl App {
             cancelled: false,
             comment_edit: None,
             output_view: None,
+            help_view: None,
             confirm_delete: None,
             labeled_rows: Vec::new(),
             labeled_list_state: ListState::default(),
@@ -1066,6 +1077,18 @@ fn move_selection(&mut self, delta: isize) {
         self.output_view.is_some()
     }
 
+    fn is_help_viewing(&self) -> bool {
+        self.help_view.is_some()
+    }
+
+    fn open_help(&mut self) {
+        self.help_view = Some(HelpView { scroll: 0 });
+    }
+
+    fn close_help(&mut self) {
+        self.help_view = None;
+    }
+
     fn is_labeled_view(&self) -> bool {
         // The labeled pane is always available, so the toggle state is
         // determined by the dedicated `labeled_list_state` which we
@@ -1279,6 +1302,12 @@ fn run_loop(
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // When the help overlay is open, route all input to its handler
+    // (Esc / q / Enter / Ctrl-C close it, arrows scroll).
+    if app.is_help_viewing() {
+        return handle_help_view_key(app, key);
+    }
+
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
     if let Some(mode) = app.confirm_delete {
         return handle_confirm_delete_key(app, key, mode);
@@ -1317,6 +1346,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('l') => {
                 app.show_output_view();
+                return false;
+            }
+            KeyCode::Char('h') => {
+                app.open_help();
                 return false;
             }
             KeyCode::Char('u') => {
@@ -1425,6 +1458,61 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cancelled = true;
             true
+        }
+        _ => false,
+    }
+}
+
+/// Key handler used while the help overlay is open. Returns `true`
+/// only when the user aborts the whole TUI with Ctrl+C.
+fn handle_help_view_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+            app.close_help();
+            false
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            app.close_help();
+            true
+        }
+        KeyCode::Up => {
+            if let Some(ref mut view) = app.help_view {
+                view.scroll = view.scroll.saturating_sub(1);
+            }
+            false
+        }
+        KeyCode::Down => {
+            if let Some(ref mut view) = app.help_view {
+                view.scroll = view.scroll.saturating_add(1);
+            }
+            false
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut view) = app.help_view {
+                view.scroll = view.scroll.saturating_sub(10);
+            }
+            false
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut view) = app.help_view {
+                view.scroll = view.scroll.saturating_add(10);
+            }
+            false
+        }
+        KeyCode::Home => {
+            if let Some(ref mut view) = app.help_view {
+                view.scroll = 0;
+            }
+            false
+        }
+        KeyCode::End => {
+            // Clamped on render. We just push the scroll forward so
+            // the user can always reach the bottom.
+            if let Some(ref mut view) = app.help_view {
+                view.scroll = view.scroll.saturating_add(usize::MAX / 2);
+            }
+            false
         }
         _ => false,
     }
@@ -1613,6 +1701,10 @@ fn ui(f: &mut Frame, app: &mut App) {
         draw_confirm_delete(f, app, mode);
     }
 
+    if let Some(view) = app.help_view.as_ref() {
+        draw_help_view(f, app, view);
+    }
+
     // If a comment exists, draw the labeled entries pane as an overlay
     // so that labeled history elements are always available.
     // (Labeled entries are now merged into the main list instead.)
@@ -1739,6 +1831,179 @@ fn draw_output_view(f: &mut Frame, view: &OutputView) {
         };
         f.render_widget(para, footer_area);
     }
+}
+
+fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
+    // Cover the whole screen so the help is the only thing visible.
+    let area = f.area();
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Help — Esc/Enter/q to close ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().bg)));
+
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let lines = build_help_lines(app);
+    let total = lines.len();
+
+    // Clamp the scroll position to a valid range.
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = view.scroll.min(max_scroll);
+
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(inner_h)
+        .collect();
+
+    let paragraph = Paragraph::new(visible)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    // Footer with scroll position.
+    if area.height >= 3 {
+        let footer = format!(
+            " {}-{} / {}  ↑↓ scroll · PgUp/PgDn page · Home/End jump ",
+            scroll + 1,
+            (scroll + inner_h).min(total),
+            total
+        );
+        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())));
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(para, footer_area);
+    }
+}
+
+/// Build the lines shown in the help overlay. The first section
+/// reflects the user's current settings; the second section is the
+/// canonical shortcut reference.
+fn build_help_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let accent = Theme::accent();
+    let dim = Theme::dim();
+    let warning = Style::default().fg(Theme::warning_color());
+
+    // ----- Current settings -----
+    lines.push(Line::from(vec![Span::styled(
+        "Current settings",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+
+    let mode_str = match app.mode {
+        Mode::Sess => "SESS  (current session only)",
+        Mode::Dir => "DIR  (current directory only)",
+        Mode::Global => "GLOBAL  (all history)",
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Mode            ", dim),
+        Span::styled(mode_str, accent),
+    ]));
+
+    let dup_str = if app.duplicate_filter {
+        "ON  (newest entry per command)"
+    } else {
+        "OFF  (every entry shown)"
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Duplicate filter", dim),
+        Span::styled(dup_str, accent),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("  Theme          ", dim),
+        Span::styled(app.theme.display_name(), accent),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Keyboard shortcuts",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+
+    // Helper to render a shortcut row.
+    fn row(lines: &mut Vec<Line<'static>>, keys: &'static str, desc: &'static str) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<14}", keys),
+                Style::default().fg(Theme::highlight_color()),
+            ),
+            Span::raw(desc),
+        ]));
+    }
+
+    // ----- Search / navigation -----
+    row(&mut lines, "type", "type to filter (plain text multi-word AND; prefix `/` for regex)");
+    row(&mut lines, "Backspace", "delete one character from the query");
+    row(&mut lines, "Ctrl-U", "clear the query");
+    row(&mut lines, "Up / Down", "move the cursor through the history list");
+    row(&mut lines, "PageUp / PageDn", "jump 10 rows at a time");
+    row(&mut lines, "Home / End", "jump to oldest / newest entry");
+    row(&mut lines, "Left / Right", "prefill the line for editing (cursor at start / end)");
+    row(&mut lines, "Enter", "run the selected command");
+
+    lines.push(Line::from(""));
+
+    // ----- Scopes / filters -----
+    row(&mut lines, "Ctrl-G", "cycle search scope: SESS → DIR → GLOBAL → SESS");
+    row(&mut lines, "Ctrl-S", "toggle duplicate filter (LAST only ↔ ALL entries)");
+    row(&mut lines, "Ctrl-N", "cycle to the next theme");
+    row(&mut lines, "Ctrl-P", "cycle to the previous theme");
+
+    lines.push(Line::from(""));
+
+    // ----- Annotations / output -----
+    row(&mut lines, "Ctrl-E", "edit the comment of the selected entry");
+    row(&mut lines, "Ctrl-L", "open the captured-output view (when available)");
+    row(&mut lines, "Ctrl-H", "open this help overlay");
+
+    lines.push(Line::from(""));
+
+    // ----- Deletion -----
+    row(&mut lines, "Ctrl-D", "delete the selected entry (with confirmation)");
+    row(&mut lines, "Ctrl-X", "delete ALL matching entries (with confirmation)");
+
+    lines.push(Line::from(""));
+
+    // ----- Cancel -----
+    row(&mut lines, "Esc / Ctrl-C", "cancel without selecting (closes overlays too)");
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Tips",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "  • When the search starts with `/`, the rest is treated as a regular expression.",
+    ));
+    lines.push(Line::from(
+        "  • Highlighted matches are bold; the match range is shown exactly.",
+    ));
+    lines.push(Line::from(
+        "  • The session file (~/.local/cache/smarthistory/session) remembers",
+    ));
+    lines.push(Line::from("    mode, query, duplicate filter, and theme between launches."));
+    lines.push(Line::from("  • Config-file colors are used when the theme is \"no theme\"."));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Press Esc, Enter, or q to close this help.",
+        warning,
+    )]));
+
+    lines
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
@@ -2255,9 +2520,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let help = match app.selected_row() {
-        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^L output · ^D del · ^X del matching · ^U clear · Esc cancel",
-        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^D del · ^X del matching · ^U clear · Esc cancel",
-        None => "Type to search · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^U clear · Esc cancel",
+        Some(row) if !row.output.is_empty() => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^L output · ^H help · ^D del · ^X del matching · ^U clear · Esc cancel",
+        Some(_) => "Enter run · ←→ edit · ↑↓ nav · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^H help · ^D del · ^X del matching · ^U clear · Esc cancel",
+        None => "Type to search · ^G scope · ^N/^P theme · ^S dedup · ^E comment · ^H help · ^U clear · Esc cancel",
     };
 
     // Active theme badge. Rendered at the right edge of the status
