@@ -381,10 +381,29 @@ that ephemeral per-invocation state doesn't pollute the user-edited
 3. `mode=` from `~/.local/cache/smarthistory/session`
 4. Built-in default (`SESS`)
 
-1. `--mode` flag (or `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE`)
-2. `initialmode=` from `~/.config/smarthistory/config`
-3. `mode=` from `~/.local/cache/smarthistory/session`
-4. Built-in default (`SESS`)
+### TUI search syntax
+
+By default, the TUI search field matches every whitespace-separated
+word as a separate substring (case-insensitive, AND-combined across
+both the command and its comment). To switch to regular-expression
+mode, start the query with a forward slash:
+
+```
+> git commit          # plain text: rows containing both `git` AND `commit`
+> /^git\s+commit/     # regex: rows matching the pattern `^git\s+commit`
+> /kubectl (apply|delete)/  # regex with alternation
+```
+
+When the leading `/` is present:
+
+- The prompt changes to `//` and the input border is tinted
+  yellow so you can see you're in regex mode.
+- Each match is highlighted individually (the regex's match range,
+  not the full row).
+- Invalid regexes are tolerated: the previous valid regex stays in
+  place while you finish typing, so the list doesn't flicker empty
+  for a transient typo like an unbalanced bracket.
+- The search is applied to both the command and the comment text.
 
 ### Example session
 

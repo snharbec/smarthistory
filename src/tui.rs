@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::util::{format_diff, format_time};
 use crate::Config;
+use regex::Regex;
 use std::path::PathBuf;
 
 /// Persistent state of the last TUI session. Stored in
@@ -419,6 +420,74 @@ struct App {
     /// deleted, or cleared). After this point, additional input
     /// appends normally — even if the buffer is later emptied.
     query_touched: bool,
+    /// Compiled regex when the query starts with `/`. `None` when
+    /// the query is plain text, the query is empty, or the regex
+    /// failed to compile (in which case we silently fall back to
+    /// the plain-text path so the user can keep editing).
+    query_regex: Option<Regex>,
+}
+
+impl App {
+    /// True if the current query is a regex (prefixed with `/`).
+    fn is_regex_query(&self) -> bool {
+        self.query.starts_with('/')
+    }
+
+    /// The regex pattern, i.e. everything after the leading `/`.
+    /// Empty when the query is just `/`.
+    fn regex_pattern(&self) -> &str {
+        if self.is_regex_query() {
+            &self.query[1..]
+        } else {
+            ""
+        }
+    }
+
+    /// Recompile the regex from the current query. Called whenever
+    /// the query buffer changes. Failures (invalid regex) leave the
+    /// previous compiled regex in place so the user can keep typing
+    /// without the list flickering empty.
+    fn recompile_regex(&mut self) {
+        if !self.is_regex_query() {
+            self.query_regex = None;
+            return;
+        }
+        let pattern = self.regex_pattern();
+        match Regex::new(pattern) {
+            Ok(re) => self.query_regex = Some(re),
+            Err(_) => {
+                // Leave the previous regex (if any) in place; the
+                // user is mid-edit and we'll retry on the next
+                // keystroke. This avoids the list briefly going
+                // empty for a transient typo like an unbalanced
+                // bracket.
+            }
+        }
+    }
+
+    /// Return true if the given text matches the current query:
+    /// either the plain-text substring search (multi-word, AND),
+    /// or the compiled regex when the query starts with `/`.
+    fn query_matches_text(&self, text: &str) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        if self.is_regex_query() {
+            if let Some(ref re) = self.query_regex {
+                return re.is_match(text);
+            }
+            // Regex mode but no valid compiled regex yet — treat
+            // the entire post-slash text as a literal pattern so
+            // the user sees at least the matches that contain it.
+            return text.to_lowercase().contains(&self.query[1..].to_lowercase());
+        }
+        // Plain text: every whitespace-separated word must appear
+        // (case-insensitive).
+        let lower = text.to_lowercase();
+        self.query
+            .split_whitespace()
+            .all(|w| lower.contains(&w.to_lowercase()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,7 +523,9 @@ impl App {
             labeled_list_state: ListState::default(),
             query_prefilled,
             query_touched: false,
+            query_regex: None,
         };
+        app.recompile_regex();
         app.refresh();
         app.refresh_labeled();
         // Rows are ordered newest first; index 0 is the newest entry.
@@ -472,8 +543,34 @@ impl App {
     /// Re-query the database with the current mode + query.
     /// After re-querying, land on the newest match (index 0 in the
     /// merged list, which is the bottom of the bottom-aligned render).
+    /// When the query is a regex, post-filter the SQL results using
+    /// `query_matches_text` so the regex can match anywhere in the
+    /// command or comment text.
     fn refresh(&mut self) {
         self.rows = self.fetch().unwrap_or_default();
+        if self.is_regex_query() {
+            // Two-phase borrow: copy the rows out, then post-filter.
+            // Avoids the borrow checker complaining about
+            // simultaneously borrowing `self.rows` and `self`.
+            let query = self.query.clone();
+            let regex = self.query_regex.clone();
+            self.rows.retain(|r| {
+                if let Some(ref re) = regex {
+                    re.is_match(&r.command) || re.is_match(&r.comment)
+                } else {
+                    // No valid regex yet (in-progress typo) — fall
+                    // back to a literal substring match on the
+                    // post-slash text so the user sees *something*.
+                    r.command
+                        .to_lowercase()
+                        .contains(&query[1..].to_lowercase())
+                        || r
+                            .comment
+                            .to_lowercase()
+                            .contains(&query[1..].to_lowercase())
+                }
+            });
+        }
         self.refresh_labeled();
         let n = self.merged_rows().len();
         if n == 0 {
@@ -518,8 +615,8 @@ impl App {
     /// entries that are already present keep their position from the
     /// primary list so their highlighted search state is preserved.
     /// When the user has typed a query, labeled entries are filtered to
-    /// only those whose command matches the query — they should only
-    /// appear if they actually match what the user is searching for.
+    /// only those whose command or comment matches the query (plain
+    /// text or regex, depending on whether the query starts with `/`).
     /// When the duplicate filter is on, only the newest instance of each
     /// command is kept.
     fn merged_rows(&self) -> Vec<HistoryRow> {
@@ -528,13 +625,9 @@ impl App {
             merged.iter().map(|r| r.id).collect();
         for row in &self.labeled_rows {
             if !existing_ids.contains(&row.id) {
-                // Apply the user's query filter to supplemental labeled
-                // entries so we don't pollute a focused search with
-                // unrelated labeled commands.
                 if !self.query.is_empty() {
-                    let lower_query = self.query.to_lowercase();
-                    let in_command = row.command.to_lowercase().contains(&lower_query);
-                    let in_comment = row.comment.to_lowercase().contains(&lower_query);
+                    let in_command = self.query_matches_text(&row.command);
+                    let in_comment = self.query_matches_text(&row.comment);
                     if !in_command && !in_comment {
                         continue;
                     }
@@ -556,7 +649,12 @@ impl App {
     fn build_where(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut clause = String::from(" WHERE 1=1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if !self.query.is_empty() {
+        // When the query is a regex (prefixed with `/`) we skip the
+        // SQL `LIKE` clause entirely and post-filter the rows in
+        // `refresh()` via `query_matches_text`. Otherwise we issue
+        // one `LIKE` clause per whitespace-separated word so the
+        // search is AND-by-word.
+        if !self.query.is_empty() && !self.is_regex_query() {
             for word in self.query.split_whitespace() {
                 let escaped = crate::util::escape_like(word);
                 clause.push_str(
@@ -678,6 +776,7 @@ fn move_selection(&mut self, delta: isize) {
             }
             self.query_touched = true;
             self.query.push(c);
+            self.recompile_regex();
             self.refresh();
         }
     }
@@ -693,6 +792,7 @@ fn move_selection(&mut self, delta: isize) {
             if !self.query.is_empty() {
                 self.query_touched = true;
                 self.query.pop();
+                self.recompile_regex();
                 self.refresh();
             }
         }
@@ -704,6 +804,7 @@ fn move_selection(&mut self, delta: isize) {
         } else {
             self.query.clear();
             self.query_touched = true;
+            self.query_regex = None;
             self.refresh();
         }
     }
@@ -1508,7 +1609,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .rev()
         .map(|(data_idx, r)| {
             let is_selected = app.list_state.selected() == Some(data_idx);
-            ListItem::new(render_row(r, &app.query, is_selected, age_width))
+            ListItem::new(render_row(r, app, is_selected, age_width))
         })
         .collect();
 
@@ -1602,7 +1703,7 @@ let title = format!(" History — {} ", merged.len());
 ///
 /// `age_width` is the right-aligned width of the age column so rows
 /// line up.
-fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width: usize) -> Line<'a> {
+fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: usize) -> Line<'a> {
     let age = format_diff(row.timestamp);
     let age_padded = format!("{:>age_width$}", age);
 
@@ -1635,8 +1736,18 @@ fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width
         Span::raw(" "),
     ];
 
-    // Highlight query matches inside the command.
-    spans.extend(highlight_matches(&row.command, query));
+    // Highlight query matches inside the command. When the query is
+    // a regex (prefixed with `/`) we use the compiled regex to find
+    // all matches and bold each one. Otherwise the standard plain-
+    // text multi-word highlight runs.
+    if app.is_regex_query() {
+        spans.extend(highlight_regex_matches(
+            &row.command,
+            app.query_regex.as_ref(),
+        ));
+    } else {
+        spans.extend(highlight_matches(&row.command, &app.query));
+    }
 
     spans.push(Span::styled(
         format!("  · {} ", format_time(row.timestamp)),
@@ -1666,6 +1777,42 @@ fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width
 /// in `text` with a highlight style. Matching is case-insensitive and
 /// based on Unicode scalar values. Adjacent non-matching characters
 /// are coalesced into a single span.
+fn highlight_regex_matches<'a>(text: &'a str, regex: Option<&Regex>) -> Vec<Span<'a>> {
+    let Some(re) = regex else {
+        return vec![Span::raw(text)];
+    };
+    let text_chars: Vec<char> = text.chars().collect();
+    let mut spans = Vec::new();
+    let mut last_end = 0usize;
+    for m in re.find_iter(text) {
+        // `m.start()`/`m.end()` are byte offsets; convert to char
+        // indices so we slice `text_chars` (a `Vec<char>`).
+        let start_char = text[..m.start()].chars().count();
+        let end_char = start_char + m.as_str().chars().count();
+        if start_char > last_end {
+            let prefix: String = text_chars[last_end..start_char].iter().collect();
+            spans.push(Span::raw(prefix));
+        }
+        let matched: String = text_chars[start_char..end_char].iter().collect();
+        spans.push(Span::styled(
+            matched,
+            Style::default()
+                .fg(Theme::highlight_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+        last_end = end_char;
+    }
+    if last_end < text_chars.len() {
+        let tail: String = text_chars[last_end..].iter().collect();
+        spans.push(Span::raw(tail));
+    }
+    if spans.is_empty() {
+        spans.push(Span::raw(text));
+    }
+    spans
+}
+
+/// Return a sequence of spans that wrap every occurrence of `query`
 fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>> {
     if query.is_empty() {
         return vec![Span::raw(text)];
@@ -1835,11 +1982,18 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    let is_regex = app.is_regex_query();
     let (prompt, title, content) = match app.comment_edit {
         Some(ref buf) => {
             ("comment> ", " comment ", buf.as_str())
         }
-        None => ("> ", " search ", app.query.as_str()),
+        None => {
+            if is_regex {
+                ("// ", " regex ", app.query.as_str())
+            } else {
+                ("> ", " search ", app.query.as_str())
+            }
+        }
     };
 
     let input = Paragraph::new(Line::from(vec![
@@ -1851,8 +2005,14 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
             .title(title)
-            .title_style(Theme::accent())
+            .title_style(if is_regex {
+                Style::default().fg(Theme::warning_color())
+            } else {
+                Theme::accent()
+            })
             .border_style(if app.comment_edit.is_some() {
+                Style::default().fg(Theme::warning_color())
+            } else if is_regex {
                 Style::default().fg(Theme::warning_color())
             } else {
                 Theme::dim()
