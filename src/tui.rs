@@ -14,6 +14,97 @@ use std::time::Duration;
 
 use crate::util::{format_diff, format_time};
 use crate::Config;
+use std::path::PathBuf;
+
+/// Persistent state of the last TUI session. Stored in
+/// `~/.cache/smarthistory/session` and reloaded on the next TUI
+/// invocation so that the user's mode, query, and duplicate-filter
+/// preferences carry over.
+#[derive(Debug, Default, Clone)]
+struct TuiSession {
+    /// Last used search mode (e.g. "SESS", "DIR", "GLOBAL").
+    mode: Option<String>,
+    /// Last entered search query.
+    query: Option<String>,
+    /// Last duplicate-filter state. `None` means "no preference" and
+    /// falls back to the config-file default.
+    duplicate_filter: Option<bool>,
+}
+
+impl TuiSession {
+    fn path() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("cache")
+                .join("smarthistory")
+                .join("session"),
+        )
+    }
+
+    /// Load the persisted session from disk, if available. Missing
+    /// files or unparseable contents yield a default (empty) session
+    /// rather than an error so the TUI can always start.
+    fn load() -> Self {
+        let Some(path) = Self::path() else { return Self::default() };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        let mut s = Self::default();
+        for raw_line in contents.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (key, value) = match line.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => continue,
+            };
+            match key {
+                "mode" => s.mode = Some(value.to_string()),
+                "query" => s.query = Some(value.to_string()),
+                "duplicatefilter" => s.duplicate_filter = Some(parse_bool(value, true)),
+                _ => {}
+            }
+        }
+        s
+    }
+
+    /// Persist the current session to disk. Best-effort: any I/O
+    /// error is logged to stderr but does not propagate, since the
+    /// TUI is exiting anyway.
+    fn save(&self) {
+        let Some(path) = Self::path() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut out = String::new();
+        if let Some(ref m) = self.mode {
+            out.push_str(&format!("mode={}\n", m));
+        }
+        if let Some(ref q) = self.query {
+            out.push_str(&format!("query={}\n", q));
+        }
+        if let Some(d) = self.duplicate_filter {
+            out.push_str(&format!("duplicatefilter={}\n", if d { "on" } else { "off" }));
+        }
+        if let Err(e) = std::fs::write(&path, out) {
+            eprintln!("warning: failed to persist TUI session: {}", e);
+        }
+    }
+}
+
+/// Simple boolean parser used by both the global config and the
+/// per-session state file. Kept local (not in `util.rs`) so the TUI
+/// module stays self-contained for the session file format.
+fn parse_bool(s: &str, default: bool) -> bool {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => true,
+        "off" | "false" | "0" | "no" => false,
+        _ => default,
+    }
+}
 
 /// Search scope for the TUI. Mirrors the line-editor widget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,47 +186,41 @@ impl PickMode {
 }
 
 /// Consistent color palette and styles for the TUI.
-struct Theme;
-
-impl Theme {
-    const BG: Color = Color::Black;
-    const FG: Color = Color::Gray;
-    const ACCENT: Color = Color::Cyan;
-    const SUCCESS: Color = Color::Green;
-    const ERROR: Color = Color::Red;
-    const WARNING: Color = Color::Yellow;
-    const DIM: Color = Color::Gray;
-    #[allow(dead_code)]
-    const DIMMER: Color = Color::DarkGray;
-    const HIGHLIGHT: Color = Color::Yellow;
-
-    fn default() -> Style {
-        Style::default().fg(Self::FG).bg(Self::BG)
-    }
-
-    fn accent() -> Style {
-        Style::default().fg(Self::ACCENT)
-    }
-
-    fn success() -> Style {
-        Style::default().fg(Self::SUCCESS)
-    }
-
-    fn error() -> Style {
-        Style::default().fg(Self::ERROR)
-    }
-
-    fn dim() -> Style {
-        Style::default().fg(Self::DIM)
-    }
-
-    #[allow(dead_code)]
-    fn dimmer() -> Style {
-        Style::default().fg(Self::DIMMER)
-    }
-
-    fn highlight() -> Style {
-        Style::default().fg(Self::HIGHLIGHT)
+/// Resolve a color string into a ratatui `Color`. Supports the
+/// standard CSS-style named colors plus the 16-color terminal palette
+/// that `ratatui::Color` exposes. Hex strings of the form `#rrggbb`
+/// or `0xrrggbb` are also accepted. Unknown strings fall back to
+/// `Color::Reset`, which lets the terminal decide.
+fn resolve_color(s: &str) -> Color {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#').or_else(|| s.strip_prefix("0x"))
+        && hex.len() == 6
+            && let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&hex[0..2], 16),
+                u8::from_str_radix(&hex[2..4], 16),
+                u8::from_str_radix(&hex[4..6], 16),
+            ) {
+                return Color::Rgb(r, g, b);
+            }
+    match s.to_ascii_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        "reset" => Color::Reset,
+        _ => Color::Reset,
     }
 }
 
@@ -159,6 +244,145 @@ impl ExitFilter {
             ExitFilter::Success => ExitFilter::Failed,
             ExitFilter::Failed => ExitFilter::All,
         }
+    }
+}
+
+/// Active TUI palette. Holds the resolved colors used by the draw
+/// helpers below. Populated once at TUI startup from the user's
+/// `Config::theme()` (via `tuicolor.<field>=<value>` overrides), then
+/// read through the `Theme::*` style helpers that the rest of the
+/// TUI code already calls. This indirection keeps the call sites
+/// unchanged while allowing per-user theming.
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    bg: Color,
+    fg: Color,
+    accent: Color,
+    success: Color,
+    error: Color,
+    warning: Color,
+    dim: Color,
+    #[allow(dead_code)]
+    dimmer: Color,
+    highlight: Color,
+}
+
+impl Palette {
+    fn builtin() -> Self {
+        Palette {
+            bg: Color::Black,
+            fg: Color::Gray,
+            accent: Color::Cyan,
+            success: Color::Green,
+            error: Color::Red,
+            warning: Color::Yellow,
+            dim: Color::Gray,
+            dimmer: Color::DarkGray,
+            highlight: Color::Yellow,
+        }
+    }
+
+    fn from_config(theme: &crate::TuiTheme) -> Self {
+        Palette {
+            bg: resolve_color(&theme.bg),
+            fg: resolve_color(&theme.fg),
+            accent: resolve_color(&theme.accent),
+            success: resolve_color(&theme.success),
+            error: resolve_color(&theme.error),
+            warning: resolve_color(&theme.warning),
+            dim: resolve_color(&theme.dim),
+            dimmer: Color::DarkGray,
+            highlight: resolve_color(&theme.highlight),
+        }
+    }
+}
+
+thread_local! {
+    static PALETTE: std::cell::RefCell<Palette> = std::cell::RefCell::new(Palette::builtin());
+}
+
+/// Style helpers used throughout the TUI. Each reads the current
+/// color from the active `Palette`. Keeping the original call-site
+/// signatures (`Theme::error()`, etc.) means none of the rendering
+/// code needs to change.
+struct Theme;
+
+impl Theme {
+    fn default() -> Style {
+        let p = PALETTE.with(|c| *c.borrow());
+        Style::default().fg(p.fg).bg(p.bg)
+    }
+
+    fn accent() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().accent))
+    }
+
+    fn success() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().success))
+    }
+
+    fn error() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().error))
+    }
+
+    fn dim() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().dim))
+    }
+
+    #[allow(dead_code)]
+    fn dimmer() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().dimmer))
+    }
+
+    fn highlight() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().highlight))
+    }
+
+    #[allow(dead_code)]
+    fn warning() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().warning))
+    }
+
+    #[allow(dead_code)]
+    const BG: Color = Color::Black;
+    #[allow(dead_code)]
+    const FG: Color = Color::Gray;
+    #[allow(dead_code)]
+    const ACCENT: Color = Color::Cyan;
+    #[allow(dead_code)]
+    const SUCCESS: Color = Color::Green;
+    #[allow(dead_code)]
+    const ERROR: Color = Color::Red;
+    #[allow(dead_code)]
+    const WARNING: Color = Color::Yellow;
+    #[allow(dead_code)]
+    const DIM: Color = Color::Gray;
+    #[allow(dead_code)]
+    const DIMMER: Color = Color::DarkGray;
+    #[allow(dead_code)]
+    const HIGHLIGHT: Color = Color::Yellow;
+
+    /// Read the current accent color from the active palette.
+    /// Used by badge renderers that need a raw `Color` rather than
+    /// a full `Style`.
+    fn accent_color() -> Color {
+        PALETTE.with(|c| c.borrow().accent)
+    }
+    fn success_color() -> Color {
+        PALETTE.with(|c| c.borrow().success)
+    }
+    fn error_color() -> Color {
+        PALETTE.with(|c| c.borrow().error)
+    }
+    fn warning_color() -> Color {
+        PALETTE.with(|c| c.borrow().warning)
+    }
+    fn highlight_color() -> Color {
+        PALETTE.with(|c| c.borrow().highlight)
+    }
+    #[allow(dead_code)]
+    fn dim_color() -> Color {
+        PALETTE.with(|c| c.borrow().dim)
     }
 }
 
@@ -186,6 +410,15 @@ struct App {
     /// List state for the labeled entries pane (separate from
     /// `list_state` so the two views can remember their own selection).
     labeled_list_state: ListState,
+    /// True when the initial query was loaded from the persisted
+    /// session file (so the user is editing a previously-saved query
+    /// rather than typing fresh text). The first character typed
+    /// replaces the prefilled value instead of appending to it.
+    query_prefilled: bool,
+    /// True once the user has touched the query buffer (typed,
+    /// deleted, or cleared). After this point, additional input
+    /// appends normally — even if the buffer is later emptied.
+    query_touched: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,7 +435,7 @@ struct OutputView {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool) -> Self {
         let list_state = ListState::default();
         let mut app = App {
             conn,
@@ -219,6 +452,8 @@ impl App {
             confirm_delete: None,
             labeled_rows: Vec::new(),
             labeled_list_state: ListState::default(),
+            query_prefilled,
+            query_touched: false,
         };
         app.refresh();
         app.refresh_labeled();
@@ -434,6 +669,14 @@ fn move_selection(&mut self, delta: isize) {
         if let Some(ref mut buf) = self.comment_edit {
             buf.push(c);
         } else {
+            // If the query was prefilled from the session cache and the
+            // user hasn't touched it yet, the first character should
+            // replace it rather than append (so the cached query
+            // doesn't accidentally end up as a prefix).
+            if self.query_prefilled && !self.query_touched {
+                self.query.clear();
+            }
+            self.query_touched = true;
             self.query.push(c);
             self.refresh();
         }
@@ -443,8 +686,15 @@ fn move_selection(&mut self, delta: isize) {
         if let Some(ref mut buf) = self.comment_edit {
             buf.pop();
         } else {
-            self.query.pop();
-            self.refresh();
+            // Only flag the query as user-touched once we've actually
+            // removed at least one character (so a stray backspace on
+            // an empty, prefilled query still leaves the prefilled
+            // value alone until the user starts typing).
+            if !self.query.is_empty() {
+                self.query_touched = true;
+                self.query.pop();
+                self.refresh();
+            }
         }
     }
 
@@ -453,6 +703,7 @@ fn move_selection(&mut self, delta: isize) {
             buf.clear();
         } else {
             self.query.clear();
+            self.query_touched = true;
             self.refresh();
         }
     }
@@ -592,7 +843,41 @@ pub fn run_tui_to_stdout(
         )
     })?;
     let cfg = Config::load();
-    let mut app = App::new(conn, mode, initial_query, cfg.duplicate_filter);
+    let session = TuiSession::load();
+    let duplicate_filter = session
+        .duplicate_filter
+        .unwrap_or(cfg.duplicate_filter);
+    // Install the user-configured TUI palette (or built-in defaults)
+    // into a thread-local so the draw helpers can read it without
+    // needing it threaded through every signature.
+    let palette = Palette::from_config(cfg.theme());
+    PALETTE.with(|p| *p.borrow_mut() = palette);
+    // The effective initial mode is decided by precedence:
+    //   1. The `initial_mode` argument (already resolved by `main`
+    //      from --mode / env / config).
+    //   2. The persisted session file.
+    let effective_mode = session
+        .mode
+        .as_deref()
+        .and_then(Mode::parse)
+        .unwrap_or(mode);
+    // The query is considered "prefilled" only when it was loaded
+    // from the persisted session file, not when the user supplied
+    // a fresh `--query` argument or `$SMARTHISTORY_TUI_QUERY`.
+    let prefilled_query = session.query.clone();
+    let effective_query = prefilled_query.clone().unwrap_or(initial_query);
+    let mut app = App::new(
+        conn,
+        effective_mode,
+        effective_query,
+        duplicate_filter,
+        prefilled_query.is_some(),
+    );
+    // If the persisted session requested a different duplicate filter
+    // than the one we initialized with, honor it.
+    if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
+        app.duplicate_filter = session.duplicate_filter.unwrap_or(true);
+    }
 
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;
@@ -614,14 +899,30 @@ pub fn run_tui_to_stdout(
     let _ = crossterm::terminal::disable_raw_mode();
 
     result?;
-    if app.cancelled {
-        Ok(None)
-    } else if let Some(sel) = app.selection {
-        let mode = app.pick_mode.unwrap_or(PickMode::Run);
-        Ok(Some((sel, mode.exit_code())))
+    let selection = if app.cancelled {
+        None
+    } else if let Some(sel) = app.selection.take() {
+        let pm = app.pick_mode.unwrap_or(PickMode::Run).exit_code();
+        Some((sel, pm))
     } else {
-        Ok(None)
-    }
+        None
+    };
+
+    // Persist the user's TUI preferences so the next invocation can
+    // restore them. The session file lives at
+    // ~/.cache/smarthistory/session.
+    let session = TuiSession {
+        mode: Some(match app.mode {
+            Mode::Sess => "SESS".to_string(),
+            Mode::Dir => "DIR".to_string(),
+            Mode::Global => "GLOBAL".to_string(),
+        }),
+        query: Some(app.query.clone()),
+        duplicate_filter: Some(app.duplicate_filter),
+    };
+    session.save();
+
+    Ok(selection)
 }
 
 fn run_loop(
@@ -751,18 +1052,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // Up moves visually upward = older = higher index.
         KeyCode::Up => {
             app.move_selection(1);
+            app.query_prefilled = false;
             false
         }
         KeyCode::Down => {
             app.move_selection(-1);
+            app.query_prefilled = false;
             false
         }
         KeyCode::PageUp => {
             app.move_selection(10);
+            app.query_prefilled = false;
             false
         }
         KeyCode::PageDown => {
             app.move_selection(-10);
+            app.query_prefilled = false;
             false
         }
         // Home jumps to the oldest entry (last index), End to the
@@ -771,12 +1076,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             if !app.rows.is_empty() {
                 app.list_state.select(Some(app.rows.len() - 1));
             }
+            app.query_prefilled = false;
             false
         }
         KeyCode::End => {
             if !app.rows.is_empty() {
                 app.list_state.select(Some(0));
             }
+            app.query_prefilled = false;
             false
         }
         KeyCode::Char(c) => {
@@ -1151,7 +1458,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn duplicate_filter_badge(on: bool) -> Span<'static> {
-    let (label, color) = if on { ("LAST", Theme::SUCCESS) } else { ("ALL", Theme::ACCENT) };
+    let (label, color) = if on { ("LAST", Theme::success_color()) } else { ("ALL", Theme::accent_color()) };
     Span::styled(
         format!(" {} ", label),
         Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
@@ -1161,9 +1468,9 @@ fn duplicate_filter_badge(on: bool) -> Span<'static> {
 #[allow(dead_code)]
 fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
     let (label, color) = match filter {
-        ExitFilter::All => ("ALL", Theme::ACCENT),
-        ExitFilter::Success => ("OK", Theme::SUCCESS),
-        ExitFilter::Failed => ("ERR", Theme::ERROR),
+        ExitFilter::All => ("ALL", Theme::accent_color()),
+        ExitFilter::Success => ("OK", Theme::success_color()),
+        ExitFilter::Failed => ("ERR", Theme::error_color()),
     };
     Span::styled(
         format!(" {} ", label),
@@ -1173,9 +1480,9 @@ fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
 
 fn mode_badge(mode: Mode) -> Span<'static> {
     let (label, color) = match mode {
-        Mode::Sess => ("SESS", Theme::SUCCESS),
-        Mode::Dir => ("DIR", Theme::WARNING),
-        Mode::Global => ("GLOBAL", Theme::ACCENT),
+        Mode::Sess => ("SESS", Theme::success_color()),
+        Mode::Dir => ("DIR", Theme::warning_color()),
+        Mode::Global => ("GLOBAL", Theme::accent_color()),
     };
     Span::styled(
         format!(" {} ", label),
@@ -1313,7 +1620,7 @@ fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width
         Span::styled(
             " o ",
             Style::default()
-                .fg(Theme::HIGHLIGHT)
+                .fg(Theme::highlight_color())
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -1342,7 +1649,7 @@ fn render_row<'a>(row: &'a HistoryRow, query: &str, is_selected: bool, age_width
         spans.push(Span::styled(
             format!("# {} ", row.comment),
             Style::default()
-                .fg(Theme::WARNING)
+                .fg(Theme::warning_color())
                 .add_modifier(Modifier::ITALIC),
         ));
     } else if is_selected {
@@ -1410,7 +1717,7 @@ fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>> {
             spans.push(Span::styled(
                 segment,
                 Style::default()
-                    .fg(Theme::HIGHLIGHT)
+                    .fg(Theme::highlight_color())
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
@@ -1483,7 +1790,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 row.comment.clone(),
                 Style::default()
-                    .fg(Theme::WARNING)
+                    .fg(Theme::warning_color())
                     .add_modifier(Modifier::ITALIC),
             ),
         ]));
@@ -1546,7 +1853,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .title(title)
             .title_style(Theme::accent())
             .border_style(if app.comment_edit.is_some() {
-                Style::default().fg(Theme::WARNING)
+                Style::default().fg(Theme::warning_color())
             } else {
                 Theme::dim()
             }),

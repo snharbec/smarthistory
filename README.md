@@ -78,6 +78,7 @@ Supported keys:
 | `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
+| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -102,6 +103,12 @@ capturelines.cat=40
 
 # Start the TUI in global mode by default (instead of SESS).
 initialmode=GLOBAL
+
+# TUI theme overrides — change the accent to magenta and make
+# highlights use bright yellow. Any of bg, fg, accent, success,
+# error, warning, dim, highlight can be set.
+tuicolor.accent=magenta
+tuicolor.highlight=#ffee00
 ```
 
 To inspect the resolved value of a single setting, use:
@@ -346,6 +353,38 @@ Each line is timestamped and tagged with the widget that emitted it
 (`prime_cache`, `up`, `down`, `cycle_mode`, `next_history`, etc.).
 The log is appended, so you can watch it from a second terminal while
 you interact.
+
+### TUI session persistence
+
+When the TUI exits, it writes the user's last-used settings to
+`~/.local/cache/smarthistory/session`:
+
+```ini
+# Example ~/.local/cache/smarthistory/session
+mode=GLOBAL
+query=git
+duplicatefilter=on
+```
+
+On the next `smarthistory tui` invocation, this file is read and the
+session is restored — the user opens the TUI in the same scope,
+with the same search query, and with the same duplicate-filter state
+they had before. The file is best-effort: missing or unparseable
+contents simply yield defaults.
+
+The session file is separate from the main configuration file so
+that ephemeral per-invocation state doesn't pollute the user-edited
+`~/.config/smarthistory/config`. The precedence order on TUI start is:
+
+1. `--mode` flag (or `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE`)
+2. `initialmode=` from `~/.config/smarthistory/config`
+3. `mode=` from `~/.local/cache/smarthistory/session`
+4. Built-in default (`SESS`)
+
+1. `--mode` flag (or `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE`)
+2. `initialmode=` from `~/.config/smarthistory/config`
+3. `mode=` from `~/.local/cache/smarthistory/session`
+4. Built-in default (`SESS`)
 
 ### Example session
 

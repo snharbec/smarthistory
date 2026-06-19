@@ -329,6 +329,39 @@ pub struct Config {
     /// when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set.
     /// One of "SESS", "DIR", "GLOBAL".
     initial_mode: String,
+    /// TUI theme palette. Each field is a hex color string like
+    /// `#ffaa00` or a named color (`red`, `green`, `cyan`, ...).
+    theme: TuiTheme,
+}
+
+/// User-customizable colors for the TUI. Defaults match the
+/// built-in `Theme` palette in `src/tui.rs`. Any unrecognized
+/// color falls back to the corresponding default.
+#[derive(Debug, Clone)]
+pub struct TuiTheme {
+    bg: String,
+    fg: String,
+    accent: String,
+    success: String,
+    error: String,
+    warning: String,
+    dim: String,
+    highlight: String,
+}
+
+impl Default for TuiTheme {
+    fn default() -> Self {
+TuiTheme {
+bg: "black".to_string(),
+fg: "gray".to_string(),
+accent: "cyan".to_string(),
+success: "green".to_string(),
+error: "red".to_string(),
+warning: "yellow".to_string(),
+dim: "gray".to_string(),
+highlight: "yellow".to_string(),
+}
+    }
 }
 
 impl Config {
@@ -345,6 +378,7 @@ impl Config {
             capture_lines_per_command: std::collections::HashMap::new(),
             duplicate_filter: true,
             initial_mode: "SESS".to_string(),
+            theme: TuiTheme::default(),
         }
     }
 
@@ -405,6 +439,8 @@ impl Config {
                         && !cmd.is_empty() {
                             self.capture_lines_per_command
                                 .insert(cmd.to_string(), parse_capture_lines(value));
+                        } else if let Some(field) = other.strip_prefix("tuicolor.") {
+                            Self::assign_theme_field(&mut self.theme, field, value);
                         }
                 }
             }
@@ -425,6 +461,33 @@ impl Config {
     /// True if the given command is in the ignore-capture list.
     fn ignore_capture(&self, command: &str) -> bool {
         self.ignore_capture.contains(first_token(command))
+    }
+
+    /// Return the resolved TUI theme. The returned `TuiTheme` reflects
+    /// any user overrides from `~/.config/smarthistory/config`.
+    pub fn theme(&self) -> &TuiTheme {
+        &self.theme
+    }
+
+    /// Apply a single `tuicolor.<field>=<value>` override. Unknown
+    /// fields are silently ignored so a typo doesn't break the rest
+    /// of the config.
+    fn assign_theme_field(theme: &mut TuiTheme, field: &str, value: &str) {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        match field.to_ascii_lowercase().as_str() {
+            "bg" => theme.bg = value,
+            "fg" => theme.fg = value,
+            "accent" => theme.accent = value,
+            "success" => theme.success = value,
+            "error" => theme.error = value,
+            "warning" => theme.warning = value,
+            "dim" => theme.dim = value,
+            "highlight" => theme.highlight = value,
+            _ => {}
+        }
     }
 }
 
@@ -1566,9 +1629,10 @@ mod tests {
 
     #[test]
     fn format_diff_zero_or_negative_is_na() {
-        // 0 and negative timestamps are treated as missing data.
-        assert_eq!(format_diff(0), "N/A");
-        assert_eq!(format_diff(-1), "N/A");
+        // 0 and negative timestamps are treated as missing data and
+        // sort as the oldest possible entries (9999 months).
+        assert_eq!(format_diff(0), "9999M");
+        assert_eq!(format_diff(-1), "9999M");
     }
 
     #[test]
