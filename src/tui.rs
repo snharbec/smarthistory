@@ -270,12 +270,26 @@ impl App {
     /// in `rows`) into a single list ordered by timestamp. Labeled
     /// entries that are already present keep their position from the
     /// primary list so their highlighted search state is preserved.
+    /// When the user has typed a query, labeled entries are filtered to
+    /// only those whose command matches the query — they should only
+    /// appear if they actually match what the user is searching for.
     fn merged_rows(&self) -> Vec<HistoryRow> {
         let mut merged = self.rows.clone();
         let existing_ids: std::collections::HashSet<i64> =
             merged.iter().map(|r| r.id).collect();
         for row in &self.labeled_rows {
             if !existing_ids.contains(&row.id) {
+                // Apply the user's query filter to supplemental labeled
+                // entries so we don't pollute a focused search with
+                // unrelated labeled commands.
+                if !self.query.is_empty() {
+                    let lower_query = self.query.to_lowercase();
+                    let in_command = row.command.to_lowercase().contains(&lower_query);
+                    let in_comment = row.comment.to_lowercase().contains(&lower_query);
+                    if !in_command && !in_comment {
+                        continue;
+                    }
+                }
                 merged.push(row.clone());
             }
         }
