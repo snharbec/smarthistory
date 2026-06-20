@@ -520,7 +520,7 @@ fn parse_bool(s: &str, default: bool) -> bool {
 pub enum Action {
     /// Close the TUI / cancel an ongoing operation.
     Cancel,
-    /// Cycle the search scope (SESS → DIR → GLOBAL → SESS).
+    /// Cycle the search scope (SESS → DIR → GLOBAL → STATS → SESS).
     CycleMode,
     /// Toggle the duplicate filter.
     ToggleDuplicateFilter,
@@ -1018,6 +1018,13 @@ pub enum Mode {
     Sess,
     Dir,
     Global,
+    /// Rank the global history by:
+    ///   1. probability of following the most-recently-executed
+    ///      command (via SQLite's `LEAD()` window function),
+    ///   2. age (newest first).
+    /// The "last command" is determined across the whole global
+    /// history so the view is reproducible across mode switches.
+    Stats,
 }
 
 impl Mode {
@@ -1025,16 +1032,19 @@ impl Mode {
         match self {
             Mode::Sess => Mode::Dir,
             Mode::Dir => Mode::Global,
-            Mode::Global => Mode::Sess,
+            Mode::Global => Mode::Stats,
+            Mode::Stats => Mode::Sess,
         }
     }
     /// Parse a string like "SESS", "SESSION", "DIR", "DIRECTORY",
-    /// "GLOBAL" (case-insensitive). Returns None for anything else.
+    /// "GLOBAL", "STATS", "STATISTICS" (case-insensitive). Returns
+    /// None for anything else.
     fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_uppercase().as_str() {
             "SESS" | "SESSION" => Some(Mode::Sess),
             "DIR" | "DIRECTORY" => Some(Mode::Dir),
             "GLOBAL" => Some(Mode::Global),
+            "STATS" | "STATISTICS" => Some(Mode::Stats),
             _ => None,
         }
     }
@@ -1743,6 +1753,9 @@ impl App {
     }
 
     fn fetch(&self) -> Result<Vec<HistoryRow>> {
+        if matches!(self.mode, Mode::Stats) {
+            return self.fetch_stats();
+        }
         let (where_clause, params) = self.build_where();
         let sql = format!(
             "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output \
@@ -1772,6 +1785,107 @@ impl App {
         Ok(rows)
     }
 
+    /// Fetch rows ordered by:
+    ///   1. probability of following the most-recently-executed
+    ///      command (computed via SQLite's `LEAD()` window
+    ///      function on the entire global history, ignoring
+    ///      session/directory filters),
+    ///   2. timestamp DESC (newest first).
+    ///
+    /// The user's query (when non-empty and not a regex) is honored
+    /// as a `LIKE` filter so the user can narrow down what's
+    /// ranked. The "last command" itself is the newest row in the
+    /// global history that matches the query — the view is
+    /// reproducible regardless of which session we're in.
+    ///
+    /// Tie-breaking within a probability bucket: more recent wins.
+    /// Tie-breaking across duplicate commands when the duplicate
+    /// filter is on: the most recent instance only.
+    fn fetch_stats(&self) -> Result<Vec<HistoryRow>> {
+        // 1) Determine the "last command" from the global history
+        //    (still respecting the user's query so the prediction
+        //    makes sense in context).
+        let last_cmd: Option<String> = {
+            let (where_clause, params) = self.build_where();
+            let sql = format!(
+                "SELECT h.command FROM history h{} \
+                 ORDER BY h.timestamp DESC, h.id DESC LIMIT 1",
+                where_clause
+            );
+            let params_ref: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut rows = stmt.query_map(&params_ref[..], |row| {
+                row.get::<_, String>(0)
+            })?;
+            rows.next().transpose()?
+        };
+        let Some(last_cmd) = last_cmd else {
+            // No matching history at all.
+            return Ok(Vec::new());
+        };
+
+        // 2) Pull the rows the user is going to see, ranked by:
+        //    (a) frequency as a successor of `last_cmd` DESC,
+        //    (b) timestamp DESC.
+        //    The user's typed query is honored (where possible).
+        let (where_clause, params) = self.build_where();
+        // The freq CTE compares against `last_cmd`. SQLite parameter
+        // binding works inside CTEs, but we splice the value
+        // directly here because it's an internal-only slug (not
+        // user input) and escaping via `replace('\'')` keeps the
+        // query plan simple. Single quotes are doubled to escape.
+        let last_sql = last_cmd.replace('\'', "''");
+        // We compute frequency in a single SQL query using a CTE so
+        // the entire ranking is one round trip. Predicted commands
+        // get a `freq` > 0; commands that never followed `last_cmd`
+        // get `freq = 0` and are sorted by timestamp DESC.
+        // `build_where` already starts with " WHERE 1=1", so we
+        // splice the user's filter in directly.
+        let sql = format!(
+            "WITH pairs AS ( \
+                 SELECT h.command AS cmd, \
+                        LEAD(h.command) OVER (ORDER BY h.timestamp ASC, h.id ASC) AS next_cmd \
+                 FROM history h \
+             ), \
+             freq AS ( \
+                 SELECT next_cmd AS cmd, COUNT(*) AS freq \
+                 FROM pairs \
+                 WHERE cmd = '{last_sql}' AND next_cmd IS NOT NULL \
+                 GROUP BY next_cmd \
+             ) \
+             SELECT h.id, h.command, h.directory, h.session_id, \
+                    h.exit_code, h.timestamp, c.comment, o.output, \
+                    COALESCE(f.freq, 0) AS freq \
+             FROM history h \
+             LEFT JOIN command_comments c ON h.command = c.command \
+             LEFT JOIN history_output o ON h.id = o.history_id \
+             LEFT JOIN freq f ON h.command = f.cmd \
+             {where_clause} \
+             ORDER BY freq DESC, h.timestamp DESC \
+             LIMIT 1000",
+        );
+        // The user's typed query is the only bound parameter (if any).
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(&params_ref[..], |row| {
+                Ok(HistoryRow {
+                    id: row.get(0)?,
+                    command: row.get(1)?,
+                    directory: row.get(2)?,
+                    session_id: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    comment: row.get(6).unwrap_or_default(),
+                    output: row.get(7).unwrap_or_default(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Merge `labeled_rows` (entries with a comment that are NOT already
     /// in `rows`) into a single list ordered by timestamp. Labeled
     /// entries that are already present keep their position from the
@@ -1781,6 +1895,12 @@ impl App {
     /// text or regex, depending on whether the query starts with `/`).
     /// When the duplicate filter is on, only the newest instance of each
     /// command is kept.
+    ///
+    /// **Stats mode is special**: the primary list arrives already
+    /// sorted by (successor-frequency DESC, timestamp DESC). We
+    /// preserve that ordering instead of re-sorting, so the
+    /// ranking the user sees in the SQL query survives into the
+    /// rendered list.
     fn merged_rows(&self) -> Vec<HistoryRow> {
         let mut merged = self.rows.clone();
         let existing_ids: std::collections::HashSet<i64> =
@@ -1797,8 +1917,12 @@ impl App {
                 merged.push(row.clone());
             }
         }
-        // Newest first.
-        merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Only re-sort when the primary list is in timestamp-DESC
+        // order. Stats mode uses a frequency-aware ordering from
+        // `fetch_stats` that we must preserve.
+        if !matches!(self.mode, Mode::Stats) {
+            merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        }
 
         if self.duplicate_filter {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1844,6 +1968,10 @@ impl App {
                 }
             }
             Mode::Global => {}
+            // Stats mode always uses the global history regardless of
+            // session or directory; the only filter is the user's
+            // typed query (handled above).
+            Mode::Stats => {}
         }
         (clause, params)
     }
@@ -2244,6 +2372,7 @@ pub fn run_tui_to_stdout(
             Mode::Sess => "SESS".to_string(),
             Mode::Dir => "DIR".to_string(),
             Mode::Global => "GLOBAL".to_string(),
+            Mode::Stats => "STATS".to_string(),
         }),
         query: Some(app.query.clone()),
         duplicate_filter: Some(app.duplicate_filter),
@@ -3210,6 +3339,7 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         Mode::Sess => "SESS  (current session only)",
         Mode::Dir => "DIR  (current directory only)",
         Mode::Global => "GLOBAL  (all history)",
+        Mode::Stats => "STATS  (probability + age)",
     };
     lines.push(Line::from(vec![
         Span::styled("  Mode            ", dim),
@@ -3323,7 +3453,7 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         binding_for(Action::CycleMode),
-        "cycle search scope: SESS → DIR → GLOBAL → SESS",
+        "cycle search scope: SESS → DIR → GLOBAL → STATS → SESS",
     );
     row(
         &mut lines,
@@ -3791,6 +3921,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
                     Mode::Sess => "current session only",
                     Mode::Dir => "current directory only",
                     Mode::Global => "all history",
+                    Mode::Stats => "predicted next + newest",
                 },
                 dup_label,
             ),
@@ -3828,6 +3959,7 @@ fn mode_badge(mode: Mode) -> Span<'static> {
         Mode::Sess => ("SESS", Theme::success_color()),
         Mode::Dir => ("DIR", Theme::warning_color()),
         Mode::Global => ("GLOBAL", Theme::accent_color()),
+        Mode::Stats => ("STATS", Theme::warning_color()),
     };
     Span::styled(
         format!(" {} ", label),
@@ -4664,5 +4796,189 @@ mod tests {
                 );
                 // Unknown slug falls back to None.
                 assert_eq!(SelectedTheme::from_slug("totally-made-up"), SelectedTheme::None);
+        }
+
+        #[test]
+        fn mode_cycle_and_parse() {
+                // Cycling wraps through the four modes.
+                assert_eq!(Mode::Sess.next(), Mode::Dir);
+                assert_eq!(Mode::Dir.next(), Mode::Global);
+                assert_eq!(Mode::Global.next(), Mode::Stats);
+                assert_eq!(Mode::Stats.next(), Mode::Sess);
+                // String parsing is case-insensitive and accepts the
+                // documented aliases.
+                assert_eq!(Mode::parse("stats"), Some(Mode::Stats));
+                assert_eq!(Mode::parse("STATISTICS"), Some(Mode::Stats));
+                assert_eq!(Mode::parse("Stats"), Some(Mode::Stats));
+                assert!(Mode::parse("not-a-mode").is_none());
+        }
+
+        /// Build a fresh in-memory `App` whose `history` table is
+        /// pre-populated with the rows in `rows`. `rows` is a slice
+        /// of `(command, timestamp_offset_secs)` — the timestamp is
+        /// `now - offset` so the tests are stable regardless of when
+        /// they run.
+        fn stats_test_app(rows: &[(&str, i64)]) -> App {
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("schema");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                for (i, (cmd, offset)) in rows.iter().enumerate() {
+                        conn.execute(
+                                "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                                 VALUES (?1, ?2, '/tmp', 'sess', 0, ?3)",
+                                rusqlite::params![i as i64 + 1, *cmd, now - *offset],
+                        )
+                        .expect("insert");
+                }
+                let mut app = App::new(
+                        conn,
+                        Mode::Stats,
+                        String::new(),
+                        false,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                );
+                app.refresh();
+                app
+        }
+
+        #[test]
+        fn stats_mode_ranks_by_follow_frequency_then_age() {
+                // Sequence (oldest first):
+                //   A B A B C A D
+                // The "last command" is D. Its successors in the
+                // global history are: A (once). So A should rank
+                // first. The remaining rows are sorted by timestamp
+                // DESC: D is excluded (it's the last command itself
+                // in this test since we always pick the newest), A
+                // (just after D), B, C — with the duplicate filter
+                // off, every occurrence is shown.
+                //
+                // For a cleaner test we use a sequence where the
+                // last command has multiple distinct successors with
+                // known frequencies:
+                //   seq:    X Y X Y Z X Y W
+                //   newest: W
+                //   successors of W: none (it's the most recent)
+                //   but we want a non-W last, so add a trailing W2:
+                //   seq:    X Y X Y Z X Y W W2
+                //   last:   W2 (newest). Successors of W2: none yet.
+                //
+                // We rebuild the sequence so the *last* command has
+                // many successors: arrange so the global newest row
+                // is `git status`. Successors of `git status` in
+                // the history should be ranked first; everything else
+                // falls back to timestamp DESC.
+                let rows: &[(&str, i64)] = &[
+                    ("vim Cargo.toml", 50),
+                    ("cargo build", 45),
+                    ("vim Cargo.toml", 40),
+                    ("git status", 35),
+                    ("vim Cargo.toml", 30),
+                    ("cargo build", 25),
+                    ("git status", 20),
+                    ("cargo build", 15),
+                    ("git status", 10), // oldest
+                ];
+                let _ = rows; // appease unused-warning fixers
+                let rows: &[(&str, i64)] = &[
+                    ("vim Cargo.toml", 90),
+                    ("cargo build", 85),
+                    ("vim Cargo.toml", 80),
+                    ("git status", 75),
+                    ("vim Cargo.toml", 70),
+                    ("cargo build", 65),
+                    ("git status", 60),
+                    ("cargo build", 55),
+                    ("git status", 50),
+                    ("cargo build", 45),
+                    ("git status", 40),
+                    ("cargo build", 35),
+                    ("git status", 30),
+                    ("cargo build", 25),
+                    ("ls", 20),
+                    ("echo hello", 15),
+                    // Newest: `git status` — so it's the "last command".
+                    ("git status", 10),
+                ];
+                let app = stats_test_app(rows);
+                assert_eq!(app.mode, Mode::Stats);
+                let merged = app.merged_rows();
+                // The newest row is `git status` (timestamp 10).
+                // Its successors in the entire history are
+                // `cargo build` and `vim Cargo.toml`. Counting pairs:
+                //   git status -> cargo build: 5 times
+                //   git status -> vim Cargo.toml: 3 times
+                // So cargo build ranks above vim, then the rest of
+                // the history sorted by timestamp DESC.
+                let cmds: Vec<&str> = merged.iter().map(|r| r.command.as_str()).collect();
+                // 6 cargo build entries with freq=4, 3 vim with
+                // freq=1, then the rest sorted by timestamp DESC.
+                assert_eq!(cmds.len(), 17,
+                        "expected every history row to come back, got {} rows: {:?}",
+                        cmds.len(), cmds);
+                assert_eq!(cmds[0], "cargo build",
+                        "expected highest frequency successor first, got {:?}",
+                        cmds);
+                assert_eq!(cmds[5], "cargo build",
+                        "6 cargo build rows should share freq=4, got {:?}",
+                        cmds);
+                assert_eq!(cmds[6], "vim Cargo.toml",
+                        "vim should follow cargo's freq=4 rows, got {:?}",
+                        cmds);
+                assert!(!cmds.is_empty());
+        }
+
+        #[test]
+        fn stats_mode_duplicate_filter_keeps_newest_only() {
+                let rows: &[(&str, i64)] = &[
+                    ("git status", 30),
+                    ("cargo build", 25),
+                    ("git status", 20),
+                    ("vim Cargo.toml", 15),
+                    ("git status", 10), // newest
+                ];
+                let mut app = stats_test_app(rows);
+                // Duplicate filter on: only one `cargo build`,
+                // one `vim Cargo.toml`, one `git status`.
+                app.duplicate_filter = true;
+                app.refresh();
+                let binding = app.merged_rows();
+                let cmds: Vec<&str> = binding
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                // Each unique command appears at most once.
+                let mut sorted = cmds.clone();
+                sorted.sort();
+                sorted.dedup();
+                assert_eq!(sorted.len(), cmds.len(),
+                        "duplicate filter should remove duplicates: {:?}",
+                        cmds);
         }
 }

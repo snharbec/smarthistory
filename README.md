@@ -29,8 +29,12 @@ match standard workflow expectations. This project aims to provide:
   `/dev/urandom`).
 - **Line-editor Up/Down traversal** that always uses the smarthistory DB
   (never falls through to zsh's native history).
-- **Scope cycle on `Ctrl+G`:** `SESS` → `DIR` → `GLOBAL` → `SESS`. The
-  active mode is shown in the RPROMPT.
+- **Scope cycle on `Ctrl+G`:** `SESS` → `DIR` → `GLOBAL` → `STATS` →
+  `SESS`. The active mode is shown in the RPROMPT.
+- **Statistics mode (`STATS`):** rank the entire global history by
+  successor frequency (via SQLite's `LEAD()` window function) and
+  age. "What did I usually run after `make build`?" answered
+  immediately. The query field still narrows the ranking.
 - **Substring search with derived columns:** `time` (formatted timestamp),
   `diff` (age like `5m`, `2h`, `3d`, `2M`), `base` (leaf directory).
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker
@@ -244,7 +248,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Ctrl+R`  | TUI     | Open the smarthistory TUI picker.                              |
 | `Up`      | Widget  | Walk back through matches for the current line.                 |
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
-| `Ctrl+G`  | Widget  | Cycle the search scope: SESS → DIR → GLOBAL → SESS.            |
+| `Ctrl+G`  | Widget  | Cycle search scope: SESS → DIR → GLOBAL → STATS → SESS.            |
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
