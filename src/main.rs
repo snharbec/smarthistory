@@ -485,9 +485,9 @@ pub fn validate_config() -> ConfigReport {
     }
 
     // --- Key-binding collision detection ---
-    use crate::tui::ALL_ACTIONS;
+    use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
-    let mut seen_specs: std::collections::HashMap<String, tui::Action> =
+    let mut seen_specs: std::collections::HashMap<String, tui::bindings::Action> =
         std::collections::HashMap::new();
     for (action, spec) in bindings.iter() {
         let spec_str = tui::format_key_spec(spec);
@@ -636,7 +636,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         if cfg.duplicate_filter { "on" } else { "off" }
     );
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
-    use crate::tui::ALL_ACTIONS;
+    use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
     for a in ALL_ACTIONS {
         if bindings.is_unbound(*a) {
@@ -680,7 +680,7 @@ pub struct Config {
     /// entries in the config file; defaults match the original
     /// hard-coded Ctrl-* bindings.
     #[allow(dead_code)]
-    key_bindings: tui::KeyBindings,
+    key_bindings: tui::bindings::KeyBindings,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -754,7 +754,7 @@ impl Config {
             duplicate_filter: true,
             initial_mode: "SESS".to_string(),
             theme: TuiTheme::default(),
-            key_bindings: tui::KeyBindings::defaults(),
+            key_bindings: tui::bindings::KeyBindings::defaults(),
         }
     }
 
@@ -835,7 +835,7 @@ impl Config {
         // entries that match a known action and parses cleanly;
         // invalid values produce a warning on stderr but don't
         // stop the rest of the config from taking effect.
-        self.key_bindings = tui::key_bindings_from_config(&key_entries);
+        self.key_bindings = tui::bindings::key_bindings_from_config(&key_entries);
     }
 
     /// Look up the configured capture-line limit for a given command
@@ -960,7 +960,7 @@ impl Config {
 
     /// Resolved key bindings for the TUI.
     #[allow(dead_code)]
-    pub fn key_bindings(&self) -> &tui::KeyBindings {
+    pub fn key_bindings(&self) -> &tui::bindings::KeyBindings {
         &self.key_bindings
     }
 
@@ -1483,38 +1483,84 @@ fn append_order_and_limit(sql: &mut String, limit: usize) {
     }
 }
 
-/// Build the shared `WHERE 1=1 [AND ...]` clause and its bound parameters
-/// for the history filter (`query`, `directory`, `session`, `exit_code`).
-/// Returns the clause (including the leading ` WHERE `) and the params in
-/// order. The session filter reads `$SMART_HISTORY_SESSION` at call time
-/// and emits a warning to stderr if the flag was passed but the env var
-/// is unset/empty. `query` is wrapped in `%...%` for `LIKE`; the others
-/// are matched exactly. `exit_code` accepts "OK" (=0) or "ERROR" (!=0);
-/// any other value is ignored.
-fn build_where_clause(
+/// Build the shared `AND …` filter clause and its bound parameters for
+/// the history filter (`query`, `directory`, `session`, `exit_code`).
+/// Returns the clause (leading ` AND `) and the params in order.
+/// Callers prepend the surrounding `FROM … WHERE 1=1` themselves so
+/// they can add table-specific JOINs and aliases.
+///
+/// `query_column` controls which columns participate in the
+/// substring filter:
+///   * `Some(("command", _))` — match only the command column.
+///   * `Some(("command", Some("comment")))` — match the command OR
+///     the (joined) comment column.
+///
+/// `qualified_column_prefix` is prepended to every non-query column
+/// reference (e.g. `"h."` for joined queries, `""` for plain).
+///
+/// `exit_code` accepts "OK" (=0) or "ERROR" (!=0); any other value is
+/// ignored. The session filter reads `$SMART_HISTORY_SESSION` at call
+/// time and emits a warning to stderr if the flag was passed but the
+/// env var is unset/empty.
+fn build_filter_sql(
     query: Option<&str>,
-    directory: Option<String>,
+    directory: Option<&str>,
     session_flag: bool,
     exit_code: Option<&str>,
+    query_column: Option<(&str, Option<&str>)>,
+    qualified_column_prefix: &str,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut clause = String::from(" WHERE 1=1");
+    let mut clause = String::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    // Substring filter on the command (and optionally the joined
+    // comment column).
     if let Some(q) = query {
-        // Escape LIKE wildcards in the user's query so `100%` matches
-        // a literal `100%` rather than anything starting with `100`.
-        // The ESCAPE clause tells SQLite to use `\` as the escape
-        // character (default is no escape).
-        clause.push_str(" AND command LIKE ? ESCAPE '\\'");
-        params.push(Box::new(format!("%{}%", escape_like(q))));
+        let escaped = escape_like(q);
+        match query_column {
+            Some(("command", None)) => {
+                clause.push_str(&format!(
+                    " AND {prefix}command LIKE ? ESCAPE '\\'",
+                    prefix = qualified_column_prefix
+                ));
+                params.push(Box::new(format!("%{}%", escaped)));
+            }
+            Some(("command", Some("comment"))) => {
+                let p = qualified_column_prefix;
+                clause.push_str(&format!(
+                    " AND ({p}command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
+                ));
+                params.push(Box::new(format!("%{}%", escaped)));
+                params.push(Box::new(format!("%{}%", escaped)));
+            }
+            Some((col, _)) => {
+                // Caller asked for an unknown column; fall back to
+                // a plain command match so the rest of the filter
+                // keeps working.
+                eprintln!("warning: unsupported query column {:?}, falling back to command", col);
+                clause.push_str(&format!(
+                    " AND {prefix}command LIKE ? ESCAPE '\\'",
+                    prefix = qualified_column_prefix
+                ));
+                params.push(Box::new(format!("%{}%", escaped)));
+            }
+            None => { /* no query filter */ }
+        }
     }
     if let Some(dir) = directory {
-        clause.push_str(" AND directory = ?");
-        params.push(Box::new(dir));
+        clause.push_str(&format!(
+            " AND {prefix}directory = ?",
+            prefix = qualified_column_prefix
+        ));
+        params.push(Box::new(dir.to_string()));
     }
     if session_flag {
         match env::var("SMART_HISTORY_SESSION") {
             Ok(s) if !s.is_empty() => {
-                clause.push_str(" AND session_id = ?");
+                clause.push_str(&format!(
+                    " AND {prefix}session_id = ?",
+                    prefix = qualified_column_prefix
+                ));
                 params.push(Box::new(s));
             }
             _ => eprintln!(
@@ -1524,12 +1570,39 @@ fn build_where_clause(
     }
     if let Some(ec) = exit_code {
         if ec == "OK" {
-            clause.push_str(" AND exit_code = 0");
+            clause.push_str(&format!(
+                " AND {prefix}exit_code = 0",
+                prefix = qualified_column_prefix
+            ));
         } else if ec == "ERROR" {
-            clause.push_str(" AND exit_code != 0");
+            clause.push_str(&format!(
+                " AND {prefix}exit_code != 0",
+                prefix = qualified_column_prefix
+            ));
         }
     }
     (clause, params)
+}
+
+/// Build the shared `WHERE 1=1 [AND ...]` clause and its bound parameters
+/// for the plain history filter (`query`, `directory`, `session`,
+/// `exit_code`). Returns the clause (including the leading ` WHERE `)
+/// and the params in order.
+fn build_where_clause(
+    query: Option<&str>,
+    directory: Option<String>,
+    session_flag: bool,
+    exit_code: Option<&str>,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let (extra, params) = build_filter_sql(
+        query,
+        directory.as_deref(),
+        session_flag,
+        exit_code,
+        Some(("command", None)),
+        "",
+    );
+    (format!(" WHERE 1=1{}", extra), params)
 }
 
 /// Build the `FROM ... WHERE ...` clause used by searches that can also
@@ -1541,42 +1614,20 @@ fn build_search_where_clause(
     session_flag: bool,
     exit_code: Option<&str>,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut clause = String::from(
-        " FROM history h \
-         LEFT JOIN command_comments c ON h.command = c.command \
-         LEFT JOIN history_output o ON h.id = o.history_id \
-         WHERE 1=1",
+    let (extra, params) = build_filter_sql(
+        query,
+        directory.as_deref(),
+        session_flag,
+        exit_code,
+        // Match command OR the joined comment column.
+        Some(("command", Some("comment"))),
+        "h.",
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(q) = query {
-        let escaped = escape_like(q);
-        clause.push_str(" AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')");
-        params.push(Box::new(format!("%{}%", escaped)));
-        params.push(Box::new(format!("%{}%", escaped)));
-    }
-    if let Some(dir) = directory {
-        clause.push_str(" AND h.directory = ?");
-        params.push(Box::new(dir));
-    }
-    if session_flag {
-        match env::var("SMART_HISTORY_SESSION") {
-            Ok(s) if !s.is_empty() => {
-                clause.push_str(" AND h.session_id = ?");
-                params.push(Box::new(s));
-            }
-            _ => eprintln!(
-                "warning: --session requested but SMART_HISTORY_SESSION is not set; ignoring"
-            ),
-        }
-    }
-    if let Some(ec) = exit_code {
-        if ec == "OK" {
-            clause.push_str(" AND h.exit_code = 0");
-        } else if ec == "ERROR" {
-            clause.push_str(" AND h.exit_code != 0");
-        }
-    }
-    (clause, params)
+    let prefix = " FROM history h \
+                   LEFT JOIN command_comments c ON h.command = c.command \
+                   LEFT JOIN history_output o ON h.id = o.history_id \
+                   WHERE 1=1";
+    (format!("{}{}", prefix, extra), params)
 }
 
 fn init_db() -> anyhow::Result<Connection> {

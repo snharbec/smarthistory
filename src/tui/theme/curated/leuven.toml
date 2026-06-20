@@ -1,0 +1,18 @@
+# Leuven theme: warm academic-light with sepia/red accents,
+# inspired by Leuven's `~/.Xresources` style. Soft paper
+# background that's easy on the eyes during long reading
+# sessions.
+name = "leuven"
+display_name = "Leuven"
+
+[colors]
+accent = "#aa4139"
+secondary = "#226666"
+bg = "#fffaf0"
+fg = "#222222"
+muted = "#968c78"
+selection = "#f0dcb4"
+error = "#aa1e1e"
+warning = "#b4781e"
+success = "#3c823c"
+info = "#3c5aa0"

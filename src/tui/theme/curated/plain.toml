@@ -1,0 +1,17 @@
+# Minimalist theme with no decoration. Just black, white,
+# and one accent color. Useful for accessibility or
+# recording demos where color noise is distracting.
+name = "plain"
+display_name = "Plain"
+
+[colors]
+accent = "#ffffff"
+secondary = "#ffffff"
+bg = "#000000"
+fg = "#ffffff"
+muted = "#ffffff"
+selection = "#282828"
+error = "#ffffff"
+warning = "#ffffff"
+success = "#ffffff"
+info = "#ffffff"

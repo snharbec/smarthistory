@@ -1,0 +1,16 @@
+# Doom Emacs' `doom-solarized-light` theme. Cream paper
+# background with the classic Solarized accent palette.
+name = "doom-solarized-light"
+display_name = "Doom Solarized Light"
+
+[colors]
+accent = "#268bd2"
+secondary = "#6c71c4"
+bg = "#fdf6e3"
+fg = "#657b83"
+muted = "#93a1a1"
+selection = "#eee8d5"
+error = "#dc322f"
+warning = "#b58900"
+success = "#859900"
+info = "#2aa198"

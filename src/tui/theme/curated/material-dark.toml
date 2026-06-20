@@ -1,0 +1,18 @@
+# Material Design 3-inspired dark theme. Deep purple accents
+# on a near-black background. The background is a deep
+# neutral grey rather than pure black to match M3's
+# "surface" guidance.
+name = "material-dark"
+display_name = "Material Dark"
+
+[colors]
+accent = "#d0bcff"
+secondary = "#03dac6"
+bg = "#1c1b22"
+fg = "#e6e1e5"
+muted = "#cac4d0"
+selection = "#373443"
+error = "#f2b8b5"
+warning = "#ffd599"
+success = "#a5d6a7"
+info = "#95dee3"

@@ -1,0 +1,16 @@
+# Material Design 3-inspired light theme. Same purple
+# primary as Material Dark, on a soft off-white background.
+name = "material-light"
+display_name = "Material Light"
+
+[colors]
+accent = "#6750a4"
+secondary = "#00897b"
+bg = "#fef7ff"
+fg = "#1c1b22"
+muted = "#49454f"
+selection = "#e7e0ec"
+error = "#b3261e"
+warning = "#f57c00"
+success = "#2e7d32"
+info = "#018786"

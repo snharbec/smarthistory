@@ -1,0 +1,16 @@
+# Doom Emacs' `doom-one` theme. Deep indigo background with
+# soft blue accents; popular among Doom users.
+name = "doom-one"
+display_name = "Doom One"
+
+[colors]
+accent = "#73bfff"
+secondary = "#ff79c6"
+bg = "#282c34"
+fg = "#bbbbbb"
+muted = "#636d83"
+selection = "#383c4a"
+error = "#ff5454"
+warning = "#e5c07b"
+success = "#98c379"
+info = "#73bfff"
