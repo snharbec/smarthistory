@@ -15,7 +15,7 @@ use regex::Regex;
 use std::path::PathBuf;
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{Mode, HistoryRow, PickMode, exit_code};
+pub use state::{ExitFilter, Mode, HistoryRow, PickMode, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -31,6 +31,11 @@ struct TuiSession {
     /// Last duplicate-filter state. `None` means "no preference" and
     /// falls back to the config-file default.
     duplicate_filter: Option<bool>,
+    /// Last exit-code filter, persisted as the lowercase
+    /// `ExitFilter::as_str()` ("all", "ok", "err"). `None` means
+    /// "no preference" and falls back to `ExitFilter::default()`
+    /// (i.e. `All`, no filter).
+    exit_filter: Option<String>,
     /// Last selected theme slug (e.g. `"dracula"`, `"tokyo-night"`,
     /// or `"none"` for the manual-config palette). Persisted across
     /// TUI invocations so the user always lands back on their
@@ -81,6 +86,15 @@ impl TuiSession {
                 "mode" => s.mode = Some(value.to_string()),
                 "query" => s.query = Some(value.to_string()),
                 "duplicatefilter" => s.duplicate_filter = Some(parse_bool(value, true)),
+                // Accept the lowercase canonical form ("all"/"ok"/"err")
+                // and any alias `ExitFilter::parse` recognises.
+                // Garbled values are silently dropped so a hand-edited
+                // session file can't wedge the TUI on startup.
+                "exitfilter" => {
+                    if ExitFilter::parse(value).is_some() {
+                        s.exit_filter = Some(value.to_string());
+                    }
+                }
                 "theme" => s.theme = Some(value.to_string()),
                 _ => {}
             }
@@ -105,6 +119,9 @@ impl TuiSession {
         }
         if let Some(d) = self.duplicate_filter {
             out.push_str(&format!("duplicatefilter={}\n", if d { "on" } else { "off" }));
+        }
+        if let Some(ref f) = self.exit_filter {
+            out.push_str(&format!("exitfilter={}\n", f));
         }
         if let Some(ref t) = self.theme {
             out.push_str(&format!("theme={}\n", t));
@@ -135,6 +152,9 @@ struct App {
     conn: Connection,
     mode: Mode,
     duplicate_filter: bool,
+    /// Active exit-code filter. Defaults to `ExitFilter::All`.
+    /// Cycled with `Action::CycleExitFilter` (default key `Ctrl-J`).
+    exit_filter: ExitFilter,
     query: String,
     rows: Vec<HistoryRow>,
     list_state: ListState,
@@ -375,12 +395,13 @@ impl CommandMenu {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool, theme: SelectedTheme, bindings: KeyBindings) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, exit_filter: ExitFilter, query_prefilled: bool, theme: SelectedTheme, bindings: KeyBindings) -> Self {
         let list_state = ListState::default();
         let mut app = App {
             conn,
             mode: initial_mode,
             duplicate_filter,
+            exit_filter,
             query: initial_query,
             rows: Vec::new(),
             list_state,
@@ -677,6 +698,17 @@ impl App {
             // typed query (handled above).
             Mode::Stats => {}
         }
+        // Exit-code filter. Applies to every mode — including
+        // Stats — so the user can flip between "all history",
+        // "only green commands", and "only red commands" without
+        // having to leave the Stats view. `All` is a no-op (no
+        // clause added) so the SQL plan stays as simple as
+        // possible for the common case.
+        match self.exit_filter {
+            ExitFilter::All => {}
+            ExitFilter::Success => clause.push_str(" AND h.exit_code = 0"),
+            ExitFilter::Failed => clause.push_str(" AND h.exit_code != 0"),
+        }
         (clause, params)
     }
 
@@ -686,13 +718,20 @@ impl App {
     }
 
     /// Cycle the exit-code filter (All → Success → Failed → All).
-    /// Wired up but not yet bound to a key by default; users can
-    /// bind it via `key.cycle-exit-filter=...` in the config file.
+    /// The current filter is also reflected in the badge rendered
+    /// in the mode strip, so the user can see at a glance whether
+    /// they're looking at the full history, only the green
+    /// commands, or only the red ones.
+    ///
+    /// Persistence: the new value is written to the session file
+    /// in `~.cache/smarthistory/session` when the TUI exits, and
+    /// restored on the next launch.
     fn cycle_exit_filter(&mut self) {
-        // The exit-filter field has been removed in favor of just
-        // the SQL query; this action is now a no-op kept for
-        // backward compatibility with any existing key binding.
-        let _ = self;
+        self.exit_filter = self.exit_filter.next();
+        // `refresh` resets `list_state` to a valid index (or
+        // `None` when the new filter is empty), so we don't need
+        // to clamp the selection ourselves.
+        self.refresh();
     }
 
     /// Toggle the duplicate filter on or off. When on (default), only
@@ -1024,11 +1063,20 @@ pub fn run_tui_to_stdout(
     // a fresh `--query` argument or `$SMARTHISTORY_TUI_QUERY`.
     let prefilled_query = session.query.clone();
     let effective_query = prefilled_query.clone().unwrap_or(initial_query);
+    // Honor the persisted exit filter. `None` means "no
+    // preference" — fall back to the global default, which is
+    // "no filter" (every row shown).
+    let initial_exit_filter = session
+        .exit_filter
+        .as_deref()
+        .and_then(ExitFilter::parse)
+        .unwrap_or_default();
     let mut app = App::new(
         conn,
         effective_mode,
         effective_query,
         duplicate_filter,
+        initial_exit_filter,
         prefilled_query.is_some(),
         initial_theme,
         bindings,
@@ -1080,6 +1128,16 @@ pub fn run_tui_to_stdout(
         }),
         query: Some(app.query.clone()),
         duplicate_filter: Some(app.duplicate_filter),
+        // Persist only when the user has changed the filter
+        // away from the default — same policy as the other
+        // session fields (we only remember what differs from
+        // the config-file defaults, so deleting the file resets
+        // the user to the same state they'd get on first run).
+        exit_filter: if app.exit_filter == ExitFilter::default() {
+            None
+        } else {
+            Some(app.exit_filter.as_str().to_string())
+        },
         theme: Some(app.theme.slug().to_string()),
     };
     session.save();
@@ -2153,6 +2211,35 @@ mod tests {
                 assert!(Mode::parse("not-a-mode").is_none());
         }
 
+        #[test]
+        fn exit_filter_cycles_through_three_states() {
+                // The action is bound to Ctrl-J by default; the
+                // user cycles All → OK → ERR → All.
+                assert_eq!(ExitFilter::All.next(), ExitFilter::Success);
+                assert_eq!(ExitFilter::Success.next(), ExitFilter::Failed);
+                assert_eq!(ExitFilter::Failed.next(), ExitFilter::All);
+                // Default is `All` (no filter, see every row).
+                assert_eq!(ExitFilter::default(), ExitFilter::All);
+        }
+
+        #[test]
+        fn exit_filter_as_str_round_trips_through_parse() {
+                // The session file and any future config-file knob
+                // use the lowercase form returned by `as_str()`.
+                for value in [ExitFilter::All, ExitFilter::Success, ExitFilter::Failed] {
+                        assert_eq!(ExitFilter::parse(value.as_str()), Some(value));
+                }
+                // `parse` is case-insensitive and accepts aliases.
+                assert_eq!(ExitFilter::parse("OK"), Some(ExitFilter::Success));
+                assert_eq!(ExitFilter::parse("success"), Some(ExitFilter::Success));
+                assert_eq!(ExitFilter::parse("err"), Some(ExitFilter::Failed));
+                assert_eq!(ExitFilter::parse("FAILED"), Some(ExitFilter::Failed));
+                // Unknown values fall through to `None` so the
+                // caller can keep the default.
+                assert!(ExitFilter::parse("maybe").is_none());
+                assert!(ExitFilter::parse("").is_none());
+        }
+
         /// Build a fresh in-memory `App` whose `history` table is
         /// pre-populated with the rows in `rows`. `rows` is a slice
         /// of `(command, timestamp_offset_secs)` — the timestamp is
@@ -2199,6 +2286,7 @@ mod tests {
                         Mode::Stats,
                         String::new(),
                         false,
+                        ExitFilter::All,
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
@@ -2320,5 +2408,152 @@ mod tests {
                 assert_eq!(sorted.len(), cmds.len(),
                         "duplicate filter should remove duplicates: {:?}",
                         cmds);
+        }
+
+        /// The exit-code filter is implemented in SQL: the
+        /// `build_where` helper appends a clause to the SELECT
+        /// statement. These tests confirm the clause is present
+        /// (or absent, in the All case) regardless of mode.
+        #[test]
+        fn exit_filter_all_adds_no_clause() {
+                let app = stats_test_app(&[("git status", 1)]);
+                let (clause, _) = app.build_where();
+                assert!(
+                        !clause.contains("exit_code"),
+                        "All should not add an exit_code clause, got: {:?}",
+                        clause
+                );
+        }
+
+        #[test]
+        fn exit_filter_success_matches_only_zero() {
+                let mut app = stats_test_app(&[("true", 1), ("false", 1)]);
+                // Cycle from All → Success.
+                app.cycle_exit_filter();
+                let (clause, _) = app.build_where();
+                assert!(
+                        clause.contains("h.exit_code = 0"),
+                        "Success should add `h.exit_code = 0`, got: {:?}",
+                        clause
+                );
+        }
+
+        #[test]
+        fn exit_filter_failed_matches_only_nonzero() {
+                let mut app = stats_test_app(&[("true", 1), ("false", 1)]);
+                app.cycle_exit_filter(); // All → Success
+                app.cycle_exit_filter(); // Success → Failed
+                let (clause, _) = app.build_where();
+                assert!(
+                        clause.contains("h.exit_code != 0"),
+                        "Failed should add `h.exit_code != 0`, got: {:?}",
+                        clause
+                );
+        }
+
+        /// End-to-end: cycle the filter and confirm `refresh`
+        /// actually changes the row set. The test inserts rows
+        /// with a mix of exit codes, so the filter should split
+        /// them cleanly.
+        #[test]
+        fn cycle_exit_filter_refreshes_rows() {
+                // The `stats_test_app` helper hard-codes
+                // `exit_code = 0` for every row, which would make
+                // "Success" and "All" indistinguishable. Insert
+                // our own mixed table here.
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                // (command, timestamp_offset, exit_code)
+                let rows: &[(&str, i64, i32)] = &[
+                    ("true",         30, 0),  // success
+                    ("false",        25, 1),  // failure
+                    ("git status",   20, 0),  // success
+                    ("segfault",     15, 139), // failure
+                ];
+                for (i, (cmd, offset, code)) in rows.iter().enumerate() {
+                        conn.execute(
+                                "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                                 VALUES (?1, ?2, '/tmp', 'sess', ?3, ?4)",
+                                rusqlite::params![
+                                        i as i64 + 1,
+                                        *cmd,
+                                        *code,
+                                        now - *offset,
+                                ],
+                        )
+                        .expect("insert");
+                }
+                let mut app = App::new(
+                        conn,
+                        Mode::Stats,
+                        String::new(),
+                        false,
+                        ExitFilter::All,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                );
+                app.refresh();
+                let all_count = app.merged_rows().len();
+                assert_eq!(all_count, 4, "All should show every row");
+
+                app.cycle_exit_filter(); // → Success
+                let ok_count = app.merged_rows().len();
+                assert_eq!(ok_count, 2, "Success should keep only exit_code == 0");
+                for r in app.merged_rows() {
+                        assert_eq!(r.exit_code, 0, "Success row had nonzero exit_code");
+                }
+
+                app.cycle_exit_filter(); // → Failed
+                let err_count = app.merged_rows().len();
+                assert_eq!(err_count, 2, "Failed should keep only exit_code != 0");
+                for r in app.merged_rows() {
+                        assert_ne!(r.exit_code, 0, "Failed row had zero exit_code");
+                }
+
+                app.cycle_exit_filter(); // → All (wraps)
+                assert_eq!(app.merged_rows().len(), 4);
+                assert_eq!(app.exit_filter, ExitFilter::All);
+        }
+
+        /// The default key for `CycleExitFilter` is `Ctrl-J`; make
+        /// sure that still works after the refactor.
+        #[test]
+        fn cycle_exit_filter_default_key_routes() {
+                let bindings = KeyBindings::defaults();
+                assert_eq!(
+                        format_key_specs(bindings.specs(Action::CycleExitFilter)),
+                        "C-j"
+                );
+                let evt = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+                assert_eq!(
+                        action_for_key(&bindings, &evt),
+                        Some(Action::CycleExitFilter)
+                );
         }
 }

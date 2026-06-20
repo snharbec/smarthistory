@@ -92,14 +92,21 @@ impl PickMode {
     }
 }
 
-/// Consistent color palette and styles for the TUI.
-/// Resolve a color string into a ratatui `Color`. Supports the
-/// standard CSS-style named colors plus the 16-color terminal palette
-/// that `ratatui::Color` exposes. Hex strings of the form `#rrggbb`
-/// or `0xrrggbb` are also accepted. Unknown strings fall back to
-/// `Color::Reset`, which lets the terminal decide.
+/// Filter the visible history by exit status. Cycled with
+/// `Ctrl-J` (the `CycleExitFilter` action).
+///
+/// - `All`     — no filter; every row is shown (the default).
+/// - `Success` — only rows with `exit_code == 0`.
+/// - `Failed`  — only rows with `exit_code != 0`.
+///
+/// `next()` advances through the cycle in this order. The
+/// `as_str()` and `parse()` helpers round-trip the value
+/// through the persisted session file (`~/.cache/smarthistory/
+/// session`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExitFilter {
     /// No exit-code filter.
+    #[default]
     All,
     /// Only successful commands (exit_code == 0).
     Success,
@@ -108,12 +115,40 @@ pub enum ExitFilter {
 }
 
 impl ExitFilter {
-    #[allow(dead_code)]
+    /// Cycle to the next value. `All` → `Success` → `Failed` → `All`.
     pub fn next(self) -> Self {
         match self {
             ExitFilter::All => ExitFilter::Success,
             ExitFilter::Success => ExitFilter::Failed,
             ExitFilter::Failed => ExitFilter::All,
+        }
+    }
+
+    /// Lowercase identifier for the session file and any future
+    /// config-file knob: `all`, `ok`, `err`. Short and stable so
+    /// it doesn't churn on display-name tweaks.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExitFilter::All => "all",
+            ExitFilter::Success => "ok",
+            ExitFilter::Failed => "err",
+        }
+    }
+
+    /// Parse the persisted/config form. Accepts the canonical
+    /// `as_str()` value plus a few friendly aliases (`success`/
+    /// `failed` for the same thing as `ok`/`err`, and the
+    /// upper-case versions for hand-edited session files).
+    /// Returns `None` for anything else so the caller can fall
+    /// back to the default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" | "any" | "none" => Some(ExitFilter::All),
+            "ok" | "success" | "0" => Some(ExitFilter::Success),
+            "err" | "error" | "fail" | "failed" | "nonzero" | "non-zero" => {
+                Some(ExitFilter::Failed)
+            }
+            _ => None,
         }
     }
 }

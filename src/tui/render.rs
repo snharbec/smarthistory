@@ -435,6 +435,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
     row(
         &mut lines,
+        binding_for(Action::CycleExitFilter),
+        "cycle exit-code filter: ALL → OK → ERR → ALL",
+    );
+    row(
+        &mut lines,
         binding_for(Action::CycleThemeNext),
         "cycle to the next theme",
     );
@@ -901,27 +906,40 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         "all entries"
     };
-    let spans = vec![
+    // Exit-filter chip is hidden entirely when the filter is at
+    // its default (`All`). Showing it always would be visual
+    // noise — the All/OK/ERR distinction only matters once the
+    // user has changed it away from "show everything".
+    let exit_chip = if app.exit_filter == ExitFilter::default() {
+        None
+    } else {
+        Some(exit_filter_badge(app.exit_filter))
+    };
+    let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
         Span::styled("  ", Theme::default()),
         mode_badge(app.mode),
         Span::styled("  ", Theme::default()),
         duplicate_filter_badge(app.duplicate_filter),
-        Span::styled(
-            format!(
-                "  {} · {} ",
-                match app.mode {
-                    Mode::Sess => "current session only",
-                    Mode::Dir => "current directory only",
-                    Mode::Global => "all history",
-                    Mode::Stats => "predicted next + newest",
-                },
-                dup_label,
-            ),
-            Theme::dim(),
-        ),
     ];
+    if let Some(chip) = exit_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    spans.push(Span::styled(
+        format!(
+            "  {} · {} ",
+            match app.mode {
+                Mode::Sess => "current session only",
+                Mode::Dir => "current directory only",
+                Mode::Global => "all history",
+                Mode::Stats => "predicted next + newest",
+            },
+            dup_label,
+        ),
+        Theme::dim(),
+    ));
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(bg));
     f.render_widget(paragraph, area);
@@ -942,7 +960,6 @@ fn duplicate_filter_badge(on: bool) -> Span<'static> {
     )
 }
 
-#[allow(dead_code)]
 fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
     let (label, color) = match filter {
         ExitFilter::All => ("ALL", Theme::accent_color()),
