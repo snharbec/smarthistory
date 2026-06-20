@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-use super::bindings::{format_key_spec, Action};
+use super::bindings::{format_key_specs, Action};
 use super::state::{ExitFilter, HistoryRow, Mode};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
@@ -330,6 +330,10 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "  (key.<action>=<C-/M-/Esc/Up/...>). Use `key.<action>=none`",
     ));
     lines.push(Line::from("  to disable a default binding entirely."));
+    lines.push(Line::from(
+        "  Comma-separate multiple keys to bind the same action to",
+    ));
+    lines.push(Line::from("  several, e.g. `key.open-help=C-h, F1`."));
     lines.push(Line::from(""));
 
     // Helper to render a single shortcut row from the live binding
@@ -349,10 +353,12 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         if app.bindings.is_unbound(a) {
             "(unbound)".to_string()
         } else {
-            app.bindings
-                .get(a)
-                .map(format_key_spec)
-                .unwrap_or_else(|| "?".to_string())
+            let specs = app.bindings.specs(a);
+            if specs.is_empty() {
+                "?".to_string()
+            } else {
+                format_key_specs(specs)
+            }
         }
     };
 
@@ -631,12 +637,16 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     for (row_pos, &idx) in filtered.iter().enumerate().skip(start).take(end - start) {
         let action = menu.actions[idx];
         let label = action.display_name();
-        let key = app
-            .bindings
-            .get(action)
-            .map(format_key_spec)
-            .map(|s| format!(" {}", s))
-            .unwrap_or_else(|| " (unbound)".to_string());
+        let key = if app.bindings.is_unbound(action) {
+            " (unbound)".to_string()
+        } else {
+            let specs = app.bindings.specs(action);
+            if specs.is_empty() {
+                " (?)".to_string()
+            } else {
+                format!(" {}", format_key_specs(specs))
+            }
+        };
         let is_selected = row_pos == menu.selected;
         let category = action.category();
         // Pad the action label so the key column lines up. Width

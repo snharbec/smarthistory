@@ -14,7 +14,7 @@ use crate::Config;
 use regex::Regex;
 use std::path::PathBuf;
 
-pub use bindings::{action_for_key, format_key_spec, Action, KeyBindings, ALL_ACTIONS};
+pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
 pub use state::{Mode, HistoryRow, PickMode, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
@@ -1873,17 +1873,17 @@ mod tests {
         entries.insert("cancel".to_string(), "C-q".to_string());
         let bindings = bindings::key_bindings_from_config(&entries);
         assert_eq!(
-            bindings.get(Action::OpenHelp).map(format_key_spec),
-            Some("M-h".to_string())
+            format_key_specs(bindings.specs(Action::OpenHelp)),
+            "M-h".to_string()
         );
         assert_eq!(
-            bindings.get(Action::Cancel).map(format_key_spec),
-            Some("C-q".to_string())
+            format_key_specs(bindings.specs(Action::Cancel)),
+            "C-q".to_string()
         );
         // Unmentioned actions keep their defaults.
         assert_eq!(
-            bindings.get(Action::DeleteSelected).map(format_key_spec),
-            Some("C-d".to_string())
+            format_key_specs(bindings.specs(Action::DeleteSelected)),
+            "C-d".to_string()
         );
     }
 
@@ -1901,8 +1901,8 @@ mod tests {
         let bindings = bindings::key_bindings_from_config(&entries);
         // Unknown action does not pollute any known action.
         assert_eq!(
-            bindings.get(Action::ToggleDuplicateFilter).map(format_key_spec),
-            Some(Action::ToggleDuplicateFilter.default_key().to_string())
+            format_key_specs(bindings.specs(Action::ToggleDuplicateFilter)),
+            Action::ToggleDuplicateFilter.default_key().to_string()
         );
     }
 
@@ -1923,13 +1923,100 @@ mod tests {
                 entries.insert("open-help".to_string(), "none".to_string());
                 let bindings = bindings::key_bindings_from_config(&entries);
                 assert!(bindings.is_unbound(Action::OpenHelp));
-                assert!(bindings.get(Action::OpenHelp).is_none());
+                assert!(bindings.specs(Action::OpenHelp).is_empty());
                 // Unbinding one action must not affect siblings.
                 assert!(!bindings.is_unbound(Action::Cancel));
-                assert!(bindings.get(Action::Cancel).is_some());
+                assert!(!bindings.specs(Action::Cancel).is_empty());
                 // `action_for_key` must not fire for unbound actions.
                 let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
                 assert_eq!(action_for_key(&bindings, &evt), None);
+        }
+
+        #[test]
+        fn key_bindings_from_config_multi_key() {
+                // `key.open-help=C-h, F1` binds the help overlay to
+                // both Ctrl-H and F1. Whitespace around the comma
+                // is allowed.
+                let mut entries = std::collections::HashMap::new();
+                entries.insert(
+                        "open-help".to_string(),
+                        "C-h, F1".to_string(),
+                );
+                let bindings = bindings::key_bindings_from_config(&entries);
+                let specs = bindings.specs(Action::OpenHelp);
+                assert_eq!(specs.len(), 2);
+                // Both keys must fire the action.
+                let ctrl_h = KeyEvent::new(
+                        KeyCode::Char('h'),
+                        KeyModifiers::CONTROL,
+                );
+                let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+                assert_eq!(
+                        action_for_key(&bindings, &ctrl_h),
+                        Some(Action::OpenHelp)
+                );
+                assert_eq!(
+                        action_for_key(&bindings, &f1),
+                        Some(Action::OpenHelp)
+                );
+                // The display string is comma-joined.
+                assert_eq!(format_key_specs(specs), "C-h, F1");
+        }
+
+        #[test]
+        fn key_bindings_from_config_multi_key_three_way() {
+                // Three specs in one entry, no surrounding spaces.
+                let mut entries = std::collections::HashMap::new();
+                entries.insert(
+                        "cancel".to_string(),
+                        "Esc,C-c,C-g".to_string(),
+                );
+                let bindings = bindings::key_bindings_from_config(&entries);
+                assert_eq!(
+                        bindings.specs(Action::Cancel).len(),
+                        3
+                );
+                assert_eq!(
+                        format_key_specs(bindings.specs(Action::Cancel)),
+                        "Esc, C-c, C-g"
+                );
+        }
+
+        #[test]
+        fn key_bindings_from_config_multi_key_with_none_unbinds() {
+                // The unbind sentinel anywhere in a comma list
+                // means the action is unbound. `Esc` is silently
+                // discarded — we don't want to half-apply a
+                // binding the user thought they disabled.
+                let mut entries = std::collections::HashMap::new();
+                entries.insert(
+                        "cancel".to_string(),
+                        "none,Esc".to_string(),
+                );
+                let bindings = bindings::key_bindings_from_config(&entries);
+                assert!(bindings.is_unbound(Action::Cancel));
+                assert!(bindings.specs(Action::Cancel).is_empty());
+        }
+
+        #[test]
+        fn key_bindings_from_config_multi_key_bad_spec_drops_all() {
+                // One bad spec in a list drops the whole binding
+                // (no half-applied config). The default wins.
+                let mut entries = std::collections::HashMap::new();
+                entries.insert(
+                        "open-help".to_string(),
+                        "C-h,not-a-key,F1".to_string(),
+                );
+                let bindings = bindings::key_bindings_from_config(&entries);
+                assert_eq!(
+                        bindings.specs(Action::OpenHelp).len(),
+                        1,
+                        "should keep only the default for OpenHelp"
+                );
+                assert_eq!(
+                        format_key_specs(bindings.specs(Action::OpenHelp)),
+                        Action::OpenHelp.default_key()
+                );
         }
 
         #[test]
@@ -1981,8 +2068,8 @@ mod tests {
                 // The default key for CommandAction is ":" (matches the
                 // vim-style command palette convention).
                 assert_eq!(
-                        bindings.get(Action::CommandAction).map(format_key_spec),
-                        Some(":".to_string())
+                        format_key_specs(bindings.specs(Action::CommandAction)),
+                        ":".to_string()
                 );
                 // Pressing ":" fires the CommandAction.
                 let evt = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::empty());
@@ -1998,8 +2085,8 @@ mod tests {
                 // Default key is `T` so it doesn't collide with the
                 // Ctrl-N / Ctrl-P cycling shortcuts.
                 assert_eq!(
-                        bindings.get(Action::ThemePicker).map(format_key_spec),
-                        Some("T".to_string())
+                        format_key_specs(bindings.specs(Action::ThemePicker)),
+                        "T".to_string()
                 );
                 // Pressing T fires the ThemePicker.
                 let evt = KeyEvent::new(KeyCode::Char('T'), KeyModifiers::empty());

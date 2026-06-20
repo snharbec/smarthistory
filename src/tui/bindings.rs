@@ -201,7 +201,7 @@ pub struct KeySpec {
 /// - Prefixed modifiers: `C-<x>` (Ctrl), `M-<x>` (Alt/Meta),
 ///   `S-<x>` (Shift). Multiple modifiers can be chained:
 ///   `C-M-h` = Ctrl+Alt+h.
-    /// - Named keys: `Esc`, `Enter`, `Tab`, `Backspace`, `Up`,
+/// - Named keys: `Esc`, `Enter`, `Tab`, `Backspace`, `Up`,
 ///   `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`,
 ///   `Space`, `BackTab`. `C-Esc`, `S-Tab`, etc. are also accepted.
 ///
@@ -227,7 +227,10 @@ pub(crate) fn parse_key_spec(s: &str) -> Result<KeySpec, String> {
 pub(crate) fn parse_key_spec_opt(s: &str) -> Result<Option<KeySpec>, String> {
     let s = s.trim();
     let lower = s.to_ascii_lowercase();
-    if matches!(lower.as_str(), "none" | "off" | "disable" | "-" | "disabled") {
+    if matches!(
+        lower.as_str(),
+        "none" | "off" | "disable" | "-" | "disabled"
+    ) {
         return Ok(None);
     }
     if s.is_empty() {
@@ -349,60 +352,68 @@ fn format_key_code(code: KeyCode) -> String {
 /// from the config file; defaults match the original hard-coded
 /// `Ctrl-*` bindings so the TUI still behaves the same when no
 /// `key.*` entries are configured.
+///
+/// Each action is associated with a `Vec<KeySpec>` (possibly
+/// empty) so a single action can fire on several keys at once.
+/// The empty `Vec` means the action is unbound — the user wrote
+/// `key.<action>=none` to disable it, or the unbind sentinel
+/// `none` appeared in a multi-key value like
+/// `key.cancel=none,Esc`. The action still appears in `iter()`
+/// (so the help overlay can render it as "unbound") but
+/// `action_for_key` will never produce it.
 #[derive(Debug, Clone)]
 pub struct KeyBindings {
-    /// `Some(spec)` = action is bound to that key.
-    /// `None` = action is unbound (the user wrote
-    /// `key.<action>=none` to disable it).
-    by_action: HashMap<Action, Option<KeySpec>>,
+    by_action: HashMap<Action, Vec<KeySpec>>,
 }
 
 impl KeyBindings {
     /// Build a fresh binding table with every action wired to its
-    /// default key.
+    /// default key (one spec per action).
     pub fn defaults() -> Self {
         let mut by_action = HashMap::new();
         for a in ALL_ACTIONS {
-            let spec = parse_key_spec(a.default_key())
-                .expect("default key bindings must always parse");
-            by_action.insert(*a, Some(spec));
+            let spec =
+                parse_key_spec(a.default_key()).expect("default key bindings must always parse");
+            by_action.insert(*a, vec![spec]);
         }
         KeyBindings { by_action }
     }
 
-    /// Override the binding for `action`. Used while parsing the
-    /// config file. Unrecognized values are silently kept at their
-    /// previous binding (the parser logs a warning elsewhere).
-    pub fn set(&mut self, action: Action, spec: KeySpec) {
-        self.by_action.insert(action, Some(spec));
+    /// Replace the binding list for `action` with the given specs.
+    /// An empty vec unbinds the action; a non-empty vec replaces
+    /// any previous bindings for that action. Used by the config
+    /// parser when the user writes `key.<action>=<spec>,…`.
+    pub fn set(&mut self, action: Action, specs: Vec<KeySpec>) {
+        self.by_action.insert(action, specs);
     }
 
     /// Unbind `action` so it never fires when its key is pressed.
     /// The action is still in the table (so the help overlay can
-    /// report it as "unbound") but `action_for_key` and `get`
-    /// will treat it as if no binding exists.
+    /// report it as "unbound") but `action_for_key` and `specs`
+    /// will return nothing for it.
     pub fn unbind(&mut self, action: Action) {
-        self.by_action.insert(action, None);
+        self.by_action.insert(action, Vec::new());
     }
 
-    /// Look up the spec bound to `action`. Returns `Some(spec)`
-    /// when the action is bound and `None` when it has been
-    /// explicitly unbound (or never bound).
-    pub fn get(&self, action: Action) -> Option<KeySpec> {
-        self.by_action.get(&action).and_then(|opt| *opt)
+    /// All key specs currently bound to `action`. Empty slice when
+    /// the action is unbound.
+    pub fn specs(&self, action: Action) -> &[KeySpec] {
+        self.by_action
+            .get(&action)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
-    /// True when `action` is currently unbound.
+    /// True when `action` is currently unbound (zero specs).
     pub fn is_unbound(&self, action: Action) -> bool {
-        matches!(self.by_action.get(&action), Some(None))
+        self.specs(action).is_empty()
     }
 
-    /// All (action, spec) pairs for currently-bound actions, in a
-    /// stable iteration order.
-    pub fn iter(&self) -> impl Iterator<Item = (Action, KeySpec)> + '_ {
-        ALL_ACTIONS.iter().filter_map(move |a| {
-            self.by_action.get(a).and_then(|opt| opt.map(|s| (*a, s)))
-        })
+    /// `(action, specs)` for every action, in the stable
+    /// `ALL_ACTIONS` order. Used by the help overlay, the command
+    /// palette, and the `smarthistory config check` tool.
+    pub fn iter(&self) -> impl Iterator<Item = (Action, &[KeySpec])> + '_ {
+        ALL_ACTIONS.iter().map(move |a| (*a, self.specs(*a)))
     }
 }
 
@@ -437,10 +448,19 @@ pub const ALL_ACTIONS: &[Action] = &[
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
-/// `key.<action>` → `<spec>` strings. Unknown keys and unparseable
-/// specs are silently dropped so the rest of the config still
-/// applies; defaults are filled in first so the result is always
-/// complete.
+/// `key.<action>` → `<spec-list>` strings. Each spec-list is a
+/// comma-separated list of key specs (e.g. `"C-h,F1"` or
+/// `"C-h, F1"`); every spec in the list is bound to the action
+/// in the order given. Whitespace around the commas is ignored.
+///
+/// Unknown actions are reported on stderr and dropped. Unbind
+/// sentinels (`none`, `off`, `disable`, `-`, `disabled`,
+/// case-insensitive) anywhere in the list mean the whole action
+/// is unbound — there's no meaningful interpretation of
+/// `key.cancel=none,Esc` since the user clearly wanted to
+/// disable the action, so we honor that. Any other parse error
+/// drops the whole binding with a warning rather than
+/// half-applying a broken config.
 pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBindings {
     let mut bindings = KeyBindings::defaults();
     // Build a quick lookup so we can detect `key.<unknown>` typos
@@ -450,10 +470,8 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
     // The `entries` map is keyed by the bare action name (without
     // the `key.` prefix) — see `Config::parse` — so we compare
     // against the action's `config_key()` directly.
-    let known_keys: std::collections::HashSet<&'static str> = ALL_ACTIONS
-        .iter()
-        .map(|a| a.config_key())
-        .collect();
+    let known_keys: std::collections::HashSet<&'static str> =
+        ALL_ACTIONS.iter().map(|a| a.config_key()).collect();
     for (k, v) in entries {
         if !known_keys.contains(k.as_str()) {
             eprintln!(
@@ -470,18 +488,57 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
         }
     }
     for a in ALL_ACTIONS {
-        if let Some(value) = entries.get(a.config_key()) {
-            match parse_key_spec_opt(value) {
-                Ok(Some(spec)) => bindings.set(*a, spec),
-                Ok(None) => bindings.unbind(*a),
-                Err(e) => eprintln!(
-                    "warning: ignoring key.{}={:?}: {}",
-                    a.config_key(),
-                    value,
-                    e
-                ),
+        let Some(value) = entries.get(a.config_key()) else {
+            continue;
+        };
+        // Split on commas, trim each piece, drop empties. The
+        // outer trim handles a leading/trailing comma.
+        let parts: Vec<&str> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if parts.is_empty() {
+            eprintln!(
+                "warning: ignoring key.{}={:?}: no key specs after splitting on ','",
+                a.config_key(),
+                value,
+            );
+            continue;
+        }
+        let mut specs: Vec<KeySpec> = Vec::with_capacity(parts.len());
+        let mut unbind_requested = false;
+        let mut bad_piece: Option<String> = None;
+        for part in &parts {
+            match parse_key_spec_opt(part) {
+                Ok(Some(spec)) => specs.push(spec),
+                Ok(None) => unbind_requested = unbind_requested || specs.is_empty(),
+                Err(e) => {
+                    bad_piece = Some(format!("{:?}: {}", part, e));
+                    break;
+                }
             }
         }
+        if let Some(msg) = bad_piece {
+            eprintln!(
+                "warning: ignoring key.{}={:?}: bad spec {}",
+                a.config_key(),
+                value,
+                msg,
+            );
+            continue;
+        }
+        if unbind_requested {
+            // An unbind sentinel anywhere in the list means the
+            // user wants this action disabled. The other keys in
+            // the list are silently discarded so that
+            // `key.cancel=none,Esc` (a likely accidental mix-up)
+            // doesn't bind Esc to cancel after the user thought
+            // they'd disabled it.
+            bindings.unbind(*a);
+            continue;
+        }
+        bindings.set(*a, specs);
     }
     bindings
 }
@@ -491,12 +548,33 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
 /// `ALL_ACTIONS` order, so earlier entries win on collisions. (We
 /// don't currently try to detect collisions; the help overlay lists
 /// every binding so the user can spot duplicates themselves.)
+///
+/// An action with several bound specs is matched if the event
+/// matches *any* of them — pressing F1 or C-h both fire
+/// `Action::OpenHelp` if the user wrote `key.open-help=C-h,F1`.
 pub fn action_for_key(bindings: &KeyBindings, key: &KeyEvent) -> Option<Action> {
     for a in ALL_ACTIONS {
-        if let Some(spec) = bindings.get(*a)
-            && spec.code == key.code && spec.modifiers == key.modifiers {
+        for spec in bindings.specs(*a) {
+            if spec.code == key.code && spec.modifiers == key.modifiers {
                 return Some(*a);
             }
+        }
     }
     None
+}
+
+/// Join a slice of `KeySpec` into the canonical display form
+/// (`"C-h, F1, M-x"`) for the help overlay and the command
+/// palette. Empty slice returns the empty string; use
+/// `KeyBindings::is_unbound` to render the "unbound" label
+/// separately.
+pub fn format_key_specs(specs: &[KeySpec]) -> String {
+    let mut out = String::new();
+    for (i, spec) in specs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format_key_spec(*spec));
+    }
+    out
 }

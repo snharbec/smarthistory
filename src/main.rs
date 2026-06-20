@@ -489,21 +489,21 @@ pub fn validate_config() -> ConfigReport {
     let bindings = cfg.key_bindings();
     let mut seen_specs: std::collections::HashMap<String, tui::bindings::Action> =
         std::collections::HashMap::new();
-    for (action, spec) in bindings.iter() {
-        let spec_str = tui::format_key_spec(spec);
-        if let Some(prev) = seen_specs.get(&spec_str) {
-            issues.push(ConfigIssue {
-                level: ConfigIssueLevel::Warning,
-                category: "key".into(),
-                message: format!(
-                    "{:?} is bound to the same key ({}) as {:?}; only the first action wins",
-                    action,
-                    spec_str,
-                    prev
-                ),
-            });
-        } else {
-            seen_specs.insert(spec_str.clone(), action);
+    for (action, specs) in bindings.iter() {
+        for spec in specs {
+            let spec_str = tui::format_key_spec(*spec);
+            if let Some(prev) = seen_specs.get(&spec_str) {
+                issues.push(ConfigIssue {
+                    level: ConfigIssueLevel::Warning,
+                    category: "key".into(),
+                    message: format!(
+                        "{:?} is bound to the same key ({}) as {:?}; only the first action wins",
+                        action, spec_str, prev
+                    ),
+                });
+            } else {
+                seen_specs.insert(spec_str.clone(), action);
+            }
         }
     }
 
@@ -641,12 +641,15 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     for a in ALL_ACTIONS {
         if bindings.is_unbound(*a) {
             let _ = writeln!(f, "  key.{} = none", a.config_key());
-        } else if let Some(spec) = bindings.get(*a) {
+        } else {
+            // Multi-key bindings print as a comma-separated list,
+            // matching the input format the user can paste back
+            // into the config file.
             let _ = writeln!(
                 f,
                 "  key.{} = {}",
                 a.config_key(),
-                tui::format_key_spec(spec)
+                tui::format_key_specs(bindings.specs(*a))
             );
         }
     }
