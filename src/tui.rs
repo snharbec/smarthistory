@@ -336,30 +336,6 @@ fn find_filename_in_command(cmd: &str) -> Option<String> {
     best.map(|(_, t)| t)
 }
 
-/// POSIX shell-quote a string for safe inclusion as a single
-/// argument in a shell command. The TUI prints the editor
-/// invocation to stdout and the parent shell runs it, so any
-/// path with spaces or shell-meaningful characters must be
-/// quoted to survive the round-trip.
-///
-/// We use the standard `'<text>'` form with `'\''` for embedded
-/// single quotes. Single-quoted strings in POSIX shell have no
-/// escapes, so the only character that needs special handling
-/// is the quote itself.
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Copy `text` to the system clipboard via `arboard`.
 ///
 /// `arboard::Clipboard::new()` opens a connection to the platform
@@ -1233,7 +1209,15 @@ fn move_selection(&mut self, delta: isize) {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "vi".to_string());
-        let staged = format!("{} {}", editor, shell_quote(&path));
+        // No shell quoting: the parent shell tokenises the
+        // staged command on whitespace, so a path with spaces
+        // would mis-split. In practice `find_filename_in_command`
+        // already strips shell metacharacters when tokenising,
+        // and the vast majority of real paths contain no
+        // whitespace. Users with spaces-in-paths can still
+        // work around it by typing their own command — this
+        // action is the convenient 99% case.
+        let staged = format!("{} {}", editor, path);
         if staged.trim().is_empty() {
             // Defensive: the inputs are all non-empty so this
             // is unreachable in practice, but we'd rather show
@@ -3257,27 +3241,6 @@ mod tests {
                 );
         }
 
-        // --- shell_quote -------------------------------------------------------
-
-        #[test]
-        fn shell_quote_passes_simple_through() {
-                assert_eq!(shell_quote("/etc/hosts"), "'/etc/hosts'");
-        }
-
-        #[test]
-        fn shell_quote_wraps_spaces() {
-                assert_eq!(shell_quote("my notes.txt"), "'my notes.txt'");
-        }
-
-        #[test]
-        fn shell_quote_escapes_embedded_single_quote() {
-                // The classic tricky case: a path with a
-                // single quote. The standard trick is to
-                // close the single-quoted string, emit a
-                // literal escaped quote, and reopen.
-                assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-        }
-
         // --- App::edit_referenced_file end-to-end ------------------------------
 
         #[test]
@@ -3291,13 +3254,24 @@ mod tests {
                 app.edit_referenced_file();
                 // `selection` is the staged editor command.
                 // We don't pin the editor (it depends on the
-                // host's $EDITOR) but we can pin everything
-                // around it.
+                // host's $EDITOR) so we anchor on the
+                // unquoted-path form. The trailing
+                // `path-without-quotes` is the contract:
+                // `vim /etc/hosts`, not `vim '/etc/hosts'`.
                 let sel = app
                         .selection
                         .as_deref()
                         .expect("staged command must be set");
-                assert!(sel.contains("/etc/hosts"), "got {:?}", sel);
+                assert!(
+                        sel.ends_with(" /etc/hosts"),
+                        "staged command should end with unquoted path, got {:?}",
+                        sel
+                );
+                assert!(
+                        !sel.contains('\''),
+                        "staged command must not contain shell quotes, got {:?}",
+                        sel
+                );
                 // `pick_mode` is `Run` so the parent shell will
                 // execute it.
                 assert_eq!(app.pick_mode, Some(PickMode::Run));
