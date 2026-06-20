@@ -41,108 +41,379 @@ struct TuiSession {
 /// All theme choices available in the TUI. The first entry, `None`,
 /// represents the "no theme" mode where the manually-configured
 /// `tuicolor.*` settings from `~/.config/smarthistory/config` are
-/// used. Every other entry corresponds to a built-in theme from
-/// the `ratatui-themes` crate.
+/// used. Every other entry corresponds to a built-in theme —
+/// see `BuiltinTheme` for the full list (upstream `ratatui-themes`
+/// plus a small set of hand-curated themes shipped with this
+/// crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(Default)]
 enum SelectedTheme {
     /// Manually-configured palette (built-in defaults if no config).
     #[default]
     None,
-    /// One of the themes from `ratatui-themes`.
-    Builtin(ratatui_themes::ThemeName),
+    /// One of the built-in themes.
+    Builtin(BuiltinTheme),
+}
+
+/// Every built-in theme smarthistory knows about. The upstream
+/// variants come from `ratatui-themes`; the rest live in this
+/// crate so users get a wider palette out of the box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinTheme {
+    // --- Upstream themes (from `ratatui-themes`) ---
+    Dracula,
+    OneDarkPro,
+    Nord,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    GruvboxDark,
+    GruvboxLight,
+    TokyoNight,
+    SolarizedDark,
+    SolarizedLight,
+    MonokaiPro,
+    RosePine,
+    Kanagawa,
+    Everforest,
+    Cyberpunk,
+    // --- smarthistory hand-curated themes ---
+    /// Doom Emacs' `doom-one` theme: deep blues on a near-black
+    /// background, popular among Doom users.
+    DoomOne,
+    /// Doom Emacs' `doom-solarized-light` theme: warm cream
+    /// background with the classic Solarized accent palette.
+    DoomSolarizedLight,
+    /// Minimalist theme with no decoration — just black, white,
+    /// and one accent color. Useful for accessibility or
+    /// recording demos where color noise is distracting.
+    Plain,
+    /// Leuven theme: a warm, paper-like light theme with sepia
+    /// accents inspired by academic reading.
+    Leuven,
+    /// Google Material Design 3-inspired dark theme: deep purple
+    /// accents on a near-black background.
+    MaterialDark,
+    /// Google Material Design 3-inspired light theme: purple
+    /// accents on a soft off-white background.
+    MaterialLight,
+}
+
+impl BuiltinTheme {
+    /// The 15 upstream themes, in the canonical
+    /// `ratatui-themes::ThemeName::all()` order. Listed first so
+    /// existing session files keep working unchanged.
+    pub fn upstream() -> &'static [BuiltinTheme] {
+        &[
+            BuiltinTheme::Dracula,
+            BuiltinTheme::OneDarkPro,
+            BuiltinTheme::Nord,
+            BuiltinTheme::CatppuccinMocha,
+            BuiltinTheme::CatppuccinLatte,
+            BuiltinTheme::GruvboxDark,
+            BuiltinTheme::GruvboxLight,
+            BuiltinTheme::TokyoNight,
+            BuiltinTheme::SolarizedDark,
+            BuiltinTheme::SolarizedLight,
+            BuiltinTheme::MonokaiPro,
+            BuiltinTheme::RosePine,
+            BuiltinTheme::Kanagawa,
+            BuiltinTheme::Everforest,
+            BuiltinTheme::Cyberpunk,
+        ]
+    }
+
+    /// The hand-curated themes shipped with smarthistory. Listed
+    /// after the upstream ones so they appear in the theme picker
+    /// in the same order as in `all()`.
+    pub fn curated() -> &'static [BuiltinTheme] {
+        &[
+            BuiltinTheme::DoomOne,
+            BuiltinTheme::DoomSolarizedLight,
+            BuiltinTheme::Plain,
+            BuiltinTheme::Leuven,
+            BuiltinTheme::MaterialDark,
+            BuiltinTheme::MaterialLight,
+        ]
+    }
+
+    /// Every theme, upstream first then curated. Returned as a
+    /// `Vec` so callers can iterate without thinking about
+    /// slices-of-slices.
+    pub fn all() -> Vec<BuiltinTheme> {
+        let mut out = Vec::with_capacity(Self::upstream().len() + Self::curated().len());
+        out.extend_from_slice(Self::upstream());
+        out.extend_from_slice(Self::curated());
+        out
+    }
+
+    /// Map back to the corresponding `ratatui-themes::ThemeName`
+    /// for the upstream subset. Returns `None` for the curated
+    /// themes — they don't exist upstream and fall back to
+    /// `Self::curated_palette()`.
+    fn as_upstream(self) -> Option<ratatui_themes::ThemeName> {
+        match self {
+            BuiltinTheme::Dracula => Some(ratatui_themes::ThemeName::Dracula),
+            BuiltinTheme::OneDarkPro => Some(ratatui_themes::ThemeName::OneDarkPro),
+            BuiltinTheme::Nord => Some(ratatui_themes::ThemeName::Nord),
+            BuiltinTheme::CatppuccinMocha => {
+                Some(ratatui_themes::ThemeName::CatppuccinMocha)
+            }
+            BuiltinTheme::CatppuccinLatte => {
+                Some(ratatui_themes::ThemeName::CatppuccinLatte)
+            }
+            BuiltinTheme::GruvboxDark => Some(ratatui_themes::ThemeName::GruvboxDark),
+            BuiltinTheme::GruvboxLight => Some(ratatui_themes::ThemeName::GruvboxLight),
+            BuiltinTheme::TokyoNight => Some(ratatui_themes::ThemeName::TokyoNight),
+            BuiltinTheme::SolarizedDark => Some(ratatui_themes::ThemeName::SolarizedDark),
+            BuiltinTheme::SolarizedLight => {
+                Some(ratatui_themes::ThemeName::SolarizedLight)
+            }
+            BuiltinTheme::MonokaiPro => Some(ratatui_themes::ThemeName::MonokaiPro),
+            BuiltinTheme::RosePine => Some(ratatui_themes::ThemeName::RosePine),
+            BuiltinTheme::Kanagawa => Some(ratatui_themes::ThemeName::Kanagawa),
+            BuiltinTheme::Everforest => Some(ratatui_themes::ThemeName::Everforest),
+            BuiltinTheme::Cyberpunk => Some(ratatui_themes::ThemeName::Cyberpunk),
+            BuiltinTheme::DoomOne
+            | BuiltinTheme::DoomSolarizedLight
+            | BuiltinTheme::Plain
+            | BuiltinTheme::Leuven
+            | BuiltinTheme::MaterialDark
+            | BuiltinTheme::MaterialLight => None,
+        }
+    }
+
+    /// Resolve the canonical `ThemePalette` for this theme.
+    /// Upstream themes use `ratatui_themes::ThemeName::palette()`;
+    /// curated themes have their palettes defined locally in
+    /// `Self::curated_palette()`.
+    pub fn palette(self) -> ratatui_themes::ThemePalette {
+        if let Some(name) = self.as_upstream() {
+            return name.palette();
+        }
+        self.curated_palette()
+    }
+
+    /// Palettes for the curated (hand-written) themes. The colors
+    /// below are inspired by the upstream projects' own
+    /// documentation so the look is recognisable.
+    fn curated_palette(self) -> ratatui_themes::ThemePalette {
+        use ratatui::style::Color;
+        match self {
+            // Doom One: dark indigo background with soft blue
+            // accents. Source: doom-emacs `doom-one`.
+            BuiltinTheme::DoomOne => ratatui_themes::ThemePalette {
+                accent: Color::Rgb(115, 191, 255),
+                secondary: Color::Rgb(255, 121, 198),
+                bg: Color::Rgb(40, 44, 52),
+                fg: Color::Rgb(187, 187, 187),
+                muted: Color::Rgb(99, 109, 131),
+                selection: Color::Rgb(56, 60, 74),
+                error: Color::Rgb(255, 84, 84),
+                warning: Color::Rgb(229, 192, 123),
+                success: Color::Rgb(152, 195, 121),
+                info: Color::Rgb(115, 191, 255),
+            },
+            // Doom Solarized Light: cream paper background with
+            // the Solarized base palette. Source: doom-emacs
+            // `doom-solarized-light`.
+            BuiltinTheme::DoomSolarizedLight => ratatui_themes::ThemePalette {
+                accent: Color::Rgb(38, 139, 210),
+                secondary: Color::Rgb(108, 113, 196),
+                bg: Color::Rgb(253, 246, 227),
+                fg: Color::Rgb(101, 123, 131),
+                muted: Color::Rgb(147, 161, 161),
+                selection: Color::Rgb(238, 232, 213),
+                error: Color::Rgb(220, 50, 47),
+                warning: Color::Rgb(181, 137, 0),
+                success: Color::Rgb(133, 153, 0),
+                info: Color::Rgb(42, 161, 152),
+            },
+            // Plain: deliberately minimal. Pure black
+            // background, white foreground, single accent color.
+            // No fancy gradients or muted tones.
+            BuiltinTheme::Plain => ratatui_themes::ThemePalette {
+                accent: Color::White,
+                secondary: Color::White,
+                bg: Color::Black,
+                fg: Color::White,
+                muted: Color::White,
+                selection: Color::Rgb(40, 40, 40),
+                error: Color::White,
+                warning: Color::White,
+                success: Color::White,
+                info: Color::White,
+            },
+            // Leuven: warm academic-light theme. Soft paper
+            // background with sepia/red accents. Inspired by
+            // Leuven's `~/.Xresources` style.
+            BuiltinTheme::Leuven => ratatui_themes::ThemePalette {
+                accent: Color::Rgb(170, 65, 57),
+                secondary: Color::Rgb(34, 102, 102),
+                bg: Color::Rgb(255, 250, 240),
+                fg: Color::Rgb(34, 34, 34),
+                muted: Color::Rgb(150, 140, 120),
+                selection: Color::Rgb(240, 220, 180),
+                error: Color::Rgb(170, 30, 30),
+                warning: Color::Rgb(180, 120, 30),
+                success: Color::Rgb(60, 130, 60),
+                info: Color::Rgb(60, 90, 160),
+            },
+            // Material Dark: Material Design 3 dark theme with
+            // purple primary. Background is a deep neutral grey,
+            // not pure black.
+            BuiltinTheme::MaterialDark => ratatui_themes::ThemePalette {
+                accent: Color::Rgb(208, 188, 255),
+                secondary: Color::Rgb(3, 218, 198),
+                bg: Color::Rgb(28, 27, 34),
+                fg: Color::Rgb(230, 225, 229),
+                muted: Color::Rgb(202, 196, 208),
+                selection: Color::Rgb(55, 52, 67),
+                error: Color::Rgb(242, 184, 181),
+                warning: Color::Rgb(255, 213, 153),
+                success: Color::Rgb(165, 214, 167),
+                info: Color::Rgb(149, 222, 227),
+            },
+            // Material Light: M3 light theme. Off-white
+            // background with the same purple primary.
+            BuiltinTheme::MaterialLight => ratatui_themes::ThemePalette {
+                accent: Color::Rgb(103, 80, 164),
+                secondary: Color::Rgb(0, 137, 123),
+                bg: Color::Rgb(254, 247, 255),
+                fg: Color::Rgb(28, 27, 34),
+                muted: Color::Rgb(73, 69, 79),
+                selection: Color::Rgb(231, 224, 236),
+                error: Color::Rgb(179, 38, 30),
+                warning: Color::Rgb(245, 124, 0),
+                success: Color::Rgb(46, 125, 50),
+                info: Color::Rgb(1, 135, 134),
+            },
+            // Upstream themes shouldn't reach here (their
+            // palettes come from `ratatui-themes::ThemeName::palette()`
+            // via `Self::palette()`). This defensive arm keeps
+            // the match exhaustive so the type checker is happy.
+            _ => {
+                if let Some(name) = self.as_upstream() {
+                    name.palette()
+                } else {
+                    // Truly unreachable.
+                    ratatui_themes::ThemePalette {
+                        accent: Color::Reset,
+                        secondary: Color::Reset,
+                        bg: Color::Reset,
+                        fg: Color::Reset,
+                        muted: Color::Reset,
+                        selection: Color::Reset,
+                        error: Color::Reset,
+                        warning: Color::Reset,
+                        success: Color::Reset,
+                        info: Color::Reset,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Slug used in the session file and the config key. Lowercase,
+    /// hyphen-separated.
+    pub fn slug(self) -> &'static str {
+        match self {
+            BuiltinTheme::Dracula => "dracula",
+            BuiltinTheme::OneDarkPro => "one-dark-pro",
+            BuiltinTheme::Nord => "nord",
+            BuiltinTheme::CatppuccinMocha => "catppuccin-mocha",
+            BuiltinTheme::CatppuccinLatte => "catppuccin-latte",
+            BuiltinTheme::GruvboxDark => "gruvbox-dark",
+            BuiltinTheme::GruvboxLight => "gruvbox-light",
+            BuiltinTheme::TokyoNight => "tokyo-night",
+            BuiltinTheme::SolarizedDark => "solarized-dark",
+            BuiltinTheme::SolarizedLight => "solarized-light",
+            BuiltinTheme::MonokaiPro => "monokai-pro",
+            BuiltinTheme::RosePine => "rose-pine",
+            BuiltinTheme::Kanagawa => "kanagawa",
+            BuiltinTheme::Everforest => "everforest",
+            BuiltinTheme::Cyberpunk => "cyberpunk",
+            BuiltinTheme::DoomOne => "doom-one",
+            BuiltinTheme::DoomSolarizedLight => "doom-solarized-light",
+            BuiltinTheme::Plain => "plain",
+            BuiltinTheme::Leuven => "leuven",
+            BuiltinTheme::MaterialDark => "material-dark",
+            BuiltinTheme::MaterialLight => "material-light",
+        }
+    }
+
+    /// Human-readable display name.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            BuiltinTheme::Dracula => "Dracula",
+            BuiltinTheme::OneDarkPro => "One Dark Pro",
+            BuiltinTheme::Nord => "Nord",
+            BuiltinTheme::CatppuccinMocha => "Catppuccin Mocha",
+            BuiltinTheme::CatppuccinLatte => "Catppuccin Latte",
+            BuiltinTheme::GruvboxDark => "Gruvbox Dark",
+            BuiltinTheme::GruvboxLight => "Gruvbox Light",
+            BuiltinTheme::TokyoNight => "Tokyo Night",
+            BuiltinTheme::SolarizedDark => "Solarized Dark",
+            BuiltinTheme::SolarizedLight => "Solarized Light",
+            BuiltinTheme::MonokaiPro => "Monokai Pro",
+            BuiltinTheme::RosePine => "Rosé Pine",
+            BuiltinTheme::Kanagawa => "Kanagawa",
+            BuiltinTheme::Everforest => "Everforest",
+            BuiltinTheme::Cyberpunk => "Cyberpunk",
+            BuiltinTheme::DoomOne => "Doom One",
+            BuiltinTheme::DoomSolarizedLight => "Doom Solarized Light",
+            BuiltinTheme::Plain => "Plain",
+            BuiltinTheme::Leuven => "Leuven",
+            BuiltinTheme::MaterialDark => "Material Dark",
+            BuiltinTheme::MaterialLight => "Material Light",
+        }
+    }
 }
 
 impl SelectedTheme {
     fn slug(&self) -> &'static str {
         match self {
             SelectedTheme::None => "none",
-            SelectedTheme::Builtin(name) => name.slug(),
+            SelectedTheme::Builtin(t) => t.slug(),
         }
     }
 
     fn display_name(&self) -> &'static str {
         match self {
             SelectedTheme::None => "no theme",
-            SelectedTheme::Builtin(name) => match name {
-                ratatui_themes::ThemeName::Dracula => "Dracula",
-                ratatui_themes::ThemeName::OneDarkPro => "One Dark Pro",
-                ratatui_themes::ThemeName::Nord => "Nord",
-                ratatui_themes::ThemeName::CatppuccinMocha => "Catppuccin Mocha",
-                ratatui_themes::ThemeName::CatppuccinLatte => "Catppuccin Latte",
-                ratatui_themes::ThemeName::GruvboxDark => "Gruvbox Dark",
-                ratatui_themes::ThemeName::GruvboxLight => "Gruvbox Light",
-                ratatui_themes::ThemeName::TokyoNight => "Tokyo Night",
-                ratatui_themes::ThemeName::SolarizedDark => "Solarized Dark",
-                ratatui_themes::ThemeName::SolarizedLight => "Solarized Light",
-                ratatui_themes::ThemeName::MonokaiPro => "Monokai Pro",
-                ratatui_themes::ThemeName::RosePine => "Rosé Pine",
-                ratatui_themes::ThemeName::Kanagawa => "Kanagawa",
-                ratatui_themes::ThemeName::Everforest => "Everforest",
-                ratatui_themes::ThemeName::Cyberpunk => "Cyberpunk",
-                _ => "unknown",
-            },
+            SelectedTheme::Builtin(t) => t.display_name(),
         }
     }
 
     /// Cycle to the next theme in the list, wrapping around. The
-    /// order is `None` (manual) followed by the canonical
-    /// `ratatui-themes::ThemeName::all()` list.
+    /// order is `None` (manual) followed by every theme in
+    /// `BuiltinTheme::all()` (upstream first, then curated).
     fn next(self) -> Self {
-        match self {
-            SelectedTheme::None => {
-                // First builtin
-                if let Some(first) = ratatui_themes::ThemeName::all().first() {
-                    SelectedTheme::Builtin(*first)
-                } else {
-                    SelectedTheme::None
-                }
-            }
-            SelectedTheme::Builtin(current) => {
-                let themes = ratatui_themes::ThemeName::all();
-                if let Some(pos) = themes.iter().position(|t| *t == current) {
-                    if pos + 1 < themes.len() {
-                        SelectedTheme::Builtin(themes[pos + 1])
-                    } else {
-                        // Wrap back to None
-                        SelectedTheme::None
-                    }
-                } else {
-                    SelectedTheme::None
-                }
-            }
-        }
+        let themes = Self::ordered_list();
+        let pos = themes.iter().position(|t| *t == self).unwrap_or(0);
+        themes[(pos + 1) % themes.len()]
     }
 
     /// Cycle to the previous theme.
     fn prev(self) -> Self {
-        match self {
-            SelectedTheme::None => {
-                // Wrap to the last builtin
-                if let Some(last) = ratatui_themes::ThemeName::all().last() {
-                    SelectedTheme::Builtin(*last)
-                } else {
-                    SelectedTheme::None
-                }
-            }
-            SelectedTheme::Builtin(current) => {
-                let themes = ratatui_themes::ThemeName::all();
-                if let Some(pos) = themes.iter().position(|t| *t == current) {
-                    if pos == 0 {
-                        SelectedTheme::None
-                    } else {
-                        SelectedTheme::Builtin(themes[pos - 1])
-                    }
-                } else {
-                    SelectedTheme::None
-                }
-            }
-        }
+        let themes = Self::ordered_list();
+        let pos = themes.iter().position(|t| *t == self).unwrap_or(0);
+        themes[(pos + themes.len() - 1) % themes.len()]
     }
 
-    /// Parse a slug back into a `SelectedTheme`. Unknown values
-    /// (e.g. from a future theme that was removed) silently fall
-    /// back to `None` so the TUI can always start.
+    /// The full ordered list: `None` first, then every entry in
+    /// `BuiltinTheme::all()` in canonical order.
+    fn ordered_list() -> Vec<SelectedTheme> {
+        let mut themes: Vec<SelectedTheme> = Vec::with_capacity(BuiltinTheme::all().len() + 1);
+        themes.push(SelectedTheme::None);
+        for t in BuiltinTheme::all() {
+            themes.push(SelectedTheme::Builtin(t));
+        }
+        themes
+    }
+
+    /// Parse a slug back into a `SelectedTheme`. Unknown slugs
+    /// (including ones from a future theme that was removed)
+    /// fall back to `None` so the TUI can always start.
     fn from_slug(s: &str) -> Self {
         let normalized: String = s
             .to_lowercase()
@@ -152,13 +423,15 @@ impl SelectedTheme {
         if normalized == "none" || normalized.is_empty() {
             return SelectedTheme::None;
         }
-        // Try ratatui-themes' own FromStr first.
-        if let Ok(name) = normalized.parse::<ratatui_themes::ThemeName>() {
-            return SelectedTheme::Builtin(name);
+        for t in BuiltinTheme::all() {
+            if t.slug() == normalized {
+                return SelectedTheme::Builtin(t);
+            }
         }
         SelectedTheme::None
     }
 }
+
 
 
 impl TuiSession {
@@ -289,6 +562,14 @@ pub enum Action {
     End,
     /// Delete one character from the query (Backspace).
     Backspace,
+    /// Open the command palette: a menu where the user can pick
+    /// any action by name, with its current binding displayed.
+    /// Useful when the user has forgotten (or rebound) a shortcut.
+    CommandAction,
+    /// Open the theme picker: a list of every available theme
+    /// (manual + built-in) where navigating the list applies the
+    /// theme live, Enter commits, Esc reverts to the original.
+    ThemePicker,
 }
 
 impl Action {
@@ -319,6 +600,8 @@ impl Action {
             Action::Home => "home",
             Action::End => "end",
             Action::Backspace => "backspace",
+            Action::CommandAction => "command-action",
+            Action::ThemePicker => "theme-picker",
         }
     }
 
@@ -347,6 +630,38 @@ impl Action {
             Action::Home => "Home",
             Action::End => "End",
             Action::Backspace => "Backspace",
+            Action::CommandAction => "Command palette",
+            Action::ThemePicker => "Theme picker",
+        }
+    }
+
+    /// Category used to group actions in the command palette.
+    /// Stable across builds so the menu ordering is predictable.
+    #[allow(dead_code)]
+    fn category(self) -> &'static str {
+        match self {
+            Action::Cancel
+            | Action::Run
+            | Action::EditStart
+            | Action::EditEnd
+            | Action::Up
+            | Action::Down
+            | Action::PageUp
+            | Action::PageDown
+            | Action::Home
+            | Action::End
+            | Action::Backspace => "navigation",
+            Action::CycleMode
+            | Action::ToggleDuplicateFilter
+            | Action::CycleExitFilter
+            | Action::ClearQuery => "search",
+            Action::CycleThemeNext | Action::CycleThemePrev => "theme",
+            Action::EditComment
+            | Action::ShowOutput
+            | Action::OpenHelp
+            | Action::CommandAction
+            | Action::ThemePicker => "tools",
+            Action::DeleteSelected | Action::DeleteMatching => "delete",
         }
     }
 
@@ -376,6 +691,8 @@ impl Action {
             Action::Home => "Home",
             Action::End => "End",
             Action::Backspace => "Backspace",
+            Action::CommandAction => ":",
+            Action::ThemePicker => "T",
         }
     }
 }
@@ -626,6 +943,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::Home,
     Action::End,
     Action::Backspace,
+    Action::CommandAction,
+    Action::ThemePicker,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
@@ -1117,6 +1436,12 @@ struct App {
     /// When `Some`, the help overlay is open. The contained `scroll`
     /// tracks how far down the user has scrolled.
     help_view: Option<HelpView>,
+    /// When `Some`, the command-palette overlay is open.
+    command_menu: Option<CommandMenu>,
+    /// When `Some`, the theme-picker overlay is open. Navigating
+    /// the list applies the selected theme live; `Enter` commits,
+    /// `Esc` reverts to the original.
+    theme_picker: Option<ThemePicker>,
     /// When `Some`, we are prompting for deletion confirmation.
     confirm_delete: Option<ConfirmMode>,
     /// Cached set of all history rows that have a comment, used to
@@ -1271,6 +1596,70 @@ struct HelpView {
     scroll: usize,
 }
 
+/// State for the command-palette overlay. The user types into
+/// `query` to filter the action list; `selected` is the index of
+/// the currently-highlighted action (relative to the filtered
+/// list). Pressing Enter runs the highlighted action; Esc closes
+/// the overlay; arrows navigate.
+struct CommandMenu {
+    query: String,
+    selected: usize,
+    /// The full ordered list of actions shown in the palette. We
+    /// snapshot this when the menu opens so the displayed order
+    /// stays stable while the user types.
+    actions: Vec<Action>,
+    /// Whether the user has typed anything. Once true, the first
+    /// character no longer replaces a cached query — same
+    /// behavior as the main search box.
+    touched: bool,
+}
+
+impl CommandMenu {
+    fn new() -> Self {
+        CommandMenu {
+            query: String::new(),
+            selected: 0,
+            actions: ALL_ACTIONS.to_vec(),
+            touched: false,
+        }
+    }
+
+    /// Return the indices (into `self.actions`) of the actions that
+    /// match `query`. Matching is case-insensitive substring AND
+    /// across words, against either the action's display name or
+    /// its `config_key`. Empty query returns every action.
+    fn filtered_indices(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..self.actions.len()).collect();
+        }
+        let q = self.query.to_lowercase();
+        let words: Vec<&str> = q.split_whitespace().collect();
+        self.actions
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                let name = a.display_name().to_lowercase();
+                let key = a.config_key().to_lowercase();
+                words
+                    .iter()
+                    .all(|w| name.contains(w) || key.contains(w))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Clamp `self.selected` so it remains a valid index into the
+    /// filtered list (which may shrink as the user types).
+    fn clamp_selection(&mut self) {
+        let n = self.filtered_indices().len();
+        if n == 0 {
+            self.selected = 0;
+        } else if self.selected >= n {
+            self.selected = n - 1;
+        }
+    }
+}
+
 impl App {
     fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool, theme: SelectedTheme, bindings: KeyBindings) -> Self {
         let list_state = ListState::default();
@@ -1287,6 +1676,8 @@ impl App {
             comment_edit: None,
             output_view: None,
             help_view: None,
+            command_menu: None,
+            theme_picker: None,
             confirm_delete: None,
             labeled_rows: Vec::new(),
             labeled_list_state: ListState::default(),
@@ -1655,6 +2046,42 @@ fn move_selection(&mut self, delta: isize) {
         self.help_view = None;
     }
 
+    fn is_command_menu_open(&self) -> bool {
+        self.command_menu.is_some()
+    }
+
+    fn open_command_menu(&mut self) {
+        self.command_menu = Some(CommandMenu::new());
+    }
+
+    fn close_command_menu(&mut self) {
+        self.command_menu = None;
+    }
+
+    fn is_theme_picker_open(&self) -> bool {
+        self.theme_picker.is_some()
+    }
+
+    fn open_theme_picker(&mut self) {
+        self.theme_picker = Some(ThemePicker::new(self.theme));
+    }
+
+    /// Restore the picker to the theme that was active when it
+    /// opened, then close. Used on `Esc`.
+    fn close_theme_picker_revert(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            self.theme = picker.original;
+            install_palette(self.theme);
+        }
+    }
+
+    /// Commit the currently selected theme and close the picker.
+    /// The picker is already applying live updates as the user
+    /// navigates, so on `Enter` we just close the overlay.
+    fn close_theme_picker_commit(&mut self) {
+        self.theme_picker = None;
+    }
+
     fn is_labeled_view(&self) -> bool {
         // The labeled pane is always available, so the toggle state is
         // determined by the dedicated `labeled_list_state` which we
@@ -1870,6 +2297,20 @@ fn run_loop(
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // The command palette sits above the help overlay so it can
+    // dispatch actions (including open-help) without the overlay
+    // intercepting keys.
+    if app.is_command_menu_open() {
+        return handle_command_menu_key(app, key);
+    }
+
+    // The theme picker also takes precedence over the help
+    // overlay so it can receive the same arrow / Ctrl-N / Ctrl-P
+    // keys that the cycling actions use.
+    if app.is_theme_picker_open() {
+        return handle_theme_picker_key(app, key);
+    }
+
     // When the help overlay is open, route all input to its handler
     // (Esc / q / Enter / Ctrl-C close it, arrows scroll).
     if app.is_help_viewing() {
@@ -2013,6 +2454,14 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.backspace();
             false
         }
+        Action::CommandAction => {
+            app.open_command_menu();
+            false
+        }
+        Action::ThemePicker => {
+            app.open_theme_picker();
+            false
+        }
     }
 }
 
@@ -2104,6 +2553,248 @@ enum OutputViewResult {
     Continue,
     /// Close the overlay and continue the main loop.
     Close,
+}
+
+/// Key handler used while the command palette is open. Mirrors
+/// the help-overlay pattern but executes the highlighted action
+/// instead of scrolling.
+fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
+    // Esc / q / Ctrl-C close the palette without running anything.
+    if matches!(
+        key.code,
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')
+    ) {
+        app.close_command_menu();
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_command_menu();
+        return true;
+    }
+
+    // Capture a mutable borrow of the menu once so the closures
+    // below can use it without conflicting with the immutable
+    // borrow on `app`.
+    let menu = match app.command_menu.as_mut() {
+        Some(m) => m,
+        None => return false,
+    };
+
+    match key.code {
+        KeyCode::Enter => {
+            // Run the highlighted action.
+            let indices = menu.filtered_indices();
+            if let Some(&idx) = indices.get(menu.selected) {
+                let action = menu.actions[idx];
+                // Close the palette BEFORE dispatching so the
+                // action runs against the un-modified app state.
+                app.close_command_menu();
+                return dispatch_action(app, action);
+            }
+            // Empty list — just close the palette.
+            app.close_command_menu();
+            false
+        }
+        KeyCode::Up => {
+            if menu.selected > 0 {
+                menu.selected -= 1;
+            }
+            false
+        }
+        KeyCode::Down => {
+            let n = menu.filtered_indices().len();
+            if n > 0 && menu.selected + 1 < n {
+                menu.selected += 1;
+            }
+            false
+        }
+        KeyCode::PageUp => {
+            menu.selected = menu.selected.saturating_sub(5);
+            menu.clamp_selection();
+            false
+        }
+        KeyCode::PageDown => {
+            let n = menu.filtered_indices().len();
+            menu.selected = (menu.selected + 5).min(n.saturating_sub(1));
+            false
+        }
+        KeyCode::Home => {
+            menu.selected = 0;
+            false
+        }
+        KeyCode::End => {
+            let n = menu.filtered_indices().len();
+            if n > 0 {
+                menu.selected = n - 1;
+            }
+            false
+        }
+        KeyCode::Backspace => {
+            if !menu.query.is_empty() {
+                menu.touched = true;
+                menu.query.pop();
+                menu.clamp_selection();
+            }
+            false
+        }
+        KeyCode::Char(c) => {
+            // Allow plain printable characters; ignore Ctrl/Alt
+            // so we don't trigger accidental shortcuts.
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                if menu.query_prefilled_replacement_armed() {
+                    menu.query.clear();
+                }
+                menu.touched = true;
+                menu.query.push(c);
+                menu.clamp_selection();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+impl CommandMenu {
+    /// Internal helper: `true` when the user has just opened the
+    /// palette and not yet typed anything, so the first character
+    /// should replace any prefilled value rather than append.
+    /// (We always start with an empty query, so this is currently
+    /// a synonym for `!self.touched`, but keeping the indirection
+    /// leaves room for future "last-used query" support.)
+    fn query_prefilled_replacement_armed(&self) -> bool {
+        !self.touched && !self.query.is_empty()
+    }
+}
+
+/// State for the theme-picker overlay.
+///
+/// The picker keeps two snapshots:
+///
+/// - `original` is the theme that was active when the picker
+///   opened. On `Esc` we restore it; on `Enter` we keep whatever
+///   the user navigated to.
+/// - `selected` is the index into `themes` and drives the live
+///   preview: every time it changes we call `install_palette` so
+///   the TUI re-renders with the new theme while the picker stays
+///   open.
+struct ThemePicker {
+    /// Theme in effect when the picker opened. Used by Esc.
+    original: SelectedTheme,
+    /// Snapshot of the list to display, in stable order. The
+    /// first entry is always `None` ("no theme"), then the
+    /// canonical `ratatui-themes::ThemeName::all()` list.
+    themes: Vec<SelectedTheme>,
+    /// Index into `themes`. Always a valid index.
+    selected: usize,
+}
+
+impl ThemePicker {
+    fn new(current: SelectedTheme) -> Self {
+        let mut themes = Vec::with_capacity(BuiltinTheme::all().len() + 1);
+        themes.push(SelectedTheme::None);
+        for t in BuiltinTheme::all() {
+            themes.push(SelectedTheme::Builtin(t));
+        }
+        // Land on the user's current theme so the picker
+        // initially highlights the row that matches the visible
+        // palette.
+        let selected = themes
+            .iter()
+            .position(|t| *t == current)
+            .unwrap_or(0);
+        ThemePicker {
+            original: current,
+            themes,
+            selected,
+        }
+    }
+
+    fn current(&self) -> SelectedTheme {
+        self.themes[self.selected]
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        let n = self.themes.len() as isize;
+        let cur = self.selected as isize;
+        let mut next = cur + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= n {
+            next = n - 1;
+        }
+        self.selected = next as usize;
+    }
+}
+
+/// Key handler for the theme picker. Up/Down (and the Ctrl-N /
+/// Ctrl-P shortcuts that also drive the live cycling) move the
+/// selection and immediately apply the new theme via
+/// `install_palette`. Enter commits, Esc reverts to the original
+/// theme, Home/End jump to the first/last entry.
+fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
+    // Esc / Ctrl-C always revert to the original theme and
+    // close. Ctrl-C additionally aborts the whole TUI.
+    if key.code == KeyCode::Esc {
+        app.close_theme_picker_revert();
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_theme_picker_revert();
+        return true;
+    }
+
+    // Enter commits the currently-highlighted theme. The live
+    // preview is already in effect because we apply each move
+    // immediately, so "commit" just means "close the overlay".
+    if key.code == KeyCode::Enter {
+        app.close_theme_picker_commit();
+        return false;
+    }
+
+    // Determine the navigation delta. We treat the same keys as the
+    // standalone cycling actions so muscle memory works either way:
+    //   Down / C-n  -> next theme
+    //   Up / C-p    -> previous theme
+    //   Home        -> first theme (the manual "no theme" entry)
+    //   End         -> last theme
+    let delta: Option<isize> = match key.code {
+        KeyCode::Down => Some(1),
+        KeyCode::Up => Some(-1),
+        KeyCode::PageDown => Some(5),
+        KeyCode::PageUp => Some(-5),
+        KeyCode::Home => {
+            if let Some(picker) = app.theme_picker.as_mut() {
+                picker.selected = 0;
+                app.theme = picker.current();
+                install_palette(app.theme);
+            }
+            return false;
+        }
+        KeyCode::End => {
+            if let Some(picker) = app.theme_picker.as_mut() {
+                picker.selected = picker.themes.len().saturating_sub(1);
+                app.theme = picker.current();
+                install_palette(app.theme);
+            }
+            return false;
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(1),
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(-1),
+        _ => None,
+    };
+
+    if let Some(delta) = delta
+        && let Some(picker) = app.theme_picker.as_mut() {
+            picker.move_by(delta);
+            app.theme = picker.current();
+            install_palette(app.theme);
+        }
+    false
 }
 
 /// Key handler used while viewing captured output. Returns a result
@@ -2281,6 +2972,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(view) = app.help_view.as_ref() {
         draw_help_view(f, app, view);
+    }
+
+    if let Some(menu) = app.command_menu.as_ref() {
+        draw_command_menu(f, app, menu);
+    }
+
+    if let Some(picker) = app.theme_picker.as_ref() {
+        draw_theme_picker(f, app, picker);
     }
 
     // If a comment exists, draw the labeled entries pane as an overlay
@@ -2660,6 +3359,16 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         binding_for(Action::OpenHelp),
         "open this help overlay",
     );
+    row(
+        &mut lines,
+        binding_for(Action::CommandAction),
+        "open the command palette (run any action by name)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::ThemePicker),
+        "open the theme picker (live preview, Enter commits, Esc reverts)",
+    );
 
     lines.push(Line::from(""));
 
@@ -2719,6 +3428,350 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     )]));
 
     lines
+}
+
+fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
+    use ratatui::widgets::List;
+
+    // The palette is centered horizontally and vertically. The
+    // width is generous so even long action names fit on one line.
+    let area = centered_rect(70, 70, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Command palette  Esc/q to close ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split the inner area into:
+    //   [0] query input (3 lines: border, prompt+text, border)
+    //   [1] action list  (everything else)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(1),
+            ]
+            .as_ref(),
+        )
+        .split(inner);
+
+    // ---- Query line ----
+    let prompt = if menu.query.is_empty() {
+        Span::styled("> ", Theme::accent())
+    } else {
+        Span::styled("> ", Theme::accent())
+    };
+    let placeholder = if menu.query.is_empty() {
+        Span::styled(
+            "Type an action name (e.g. \"cycle\", \"delete\") or a key",
+            Style::default()
+                .fg(Theme::dim_color())
+                .add_modifier(Modifier::ITALIC),
+        )
+    } else {
+        Span::styled(menu.query.clone(), Style::default().fg(fg))
+    };
+    let query_line = Line::from(vec![prompt, placeholder]);
+    let query_para = Paragraph::new(query_line)
+        .style(Style::default().bg(bg))
+        .wrap(Wrap { trim: false });
+    f.render_widget(query_para, chunks[0]);
+
+    // Place the cursor at the end of the typed query so the user
+    // sees where their next character will go.
+    if menu.touched || !menu.query.is_empty() {
+        let prompt_width = "> ".chars().count() as u16;
+        let cursor_x = chunks[0].x + prompt_width + menu.query.chars().count() as u16;
+        let cursor_y = chunks[0].y;
+        f.set_cursor_position((cursor_x.min(chunks[0].x.saturating_add(chunks[0].width).saturating_sub(2)), cursor_y));
+    }
+
+    // ---- Action list ----
+    let filtered = menu.filtered_indices();
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .fg(fg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(Theme::dim_color());
+    let accent_style = Theme::accent();
+    let warning_style = Style::default().fg(Theme::warning_color());
+
+    // Show only what fits, scrolling so the selected row is
+    // always visible.
+    let visible_rows = chunks[1].height as usize;
+    let start = if filtered.is_empty() || visible_rows == 0 {
+        0
+    } else {
+        menu.selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(filtered.len().saturating_sub(visible_rows))
+    };
+    let end = (start + visible_rows).min(filtered.len());
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (row_pos, &idx) in filtered.iter().enumerate().skip(start).take(end - start) {
+        let action = menu.actions[idx];
+        let label = action.display_name();
+        let key = app
+            .bindings
+            .get(action)
+            .map(format_key_spec)
+            .map(|s| format!(" {}", s))
+            .unwrap_or_else(|| " (unbound)".to_string());
+        let is_selected = row_pos == menu.selected;
+        let category = action.category();
+        // Pad the action label so the key column lines up. Width
+        // 22 is enough for "Edit (cursor at start)" plus a space.
+        let mut spans = vec![
+            Span::styled(
+                format!("  {:<22}", label),
+                if is_selected {
+                    highlight_style
+                } else {
+                    Style::default().fg(fg)
+                },
+            ),
+            Span::styled(
+                format!("{:>14}", key),
+                if is_selected {
+                    highlight_style
+                } else {
+                    accent_style
+                },
+            ),
+            Span::styled(
+                format!("  [{}]", category),
+                if is_selected {
+                    highlight_style
+                } else {
+                    dim_style
+                },
+            ),
+        ];
+        if app.bindings.is_unbound(action) {
+            spans.insert(
+                1,
+                Span::styled(" ⚠ ", if is_selected { highlight_style } else { warning_style }),
+            );
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(vec![Span::styled(
+            "  (no action matches your query)",
+            dim_style,
+        )])));
+    }
+
+    let list = List::new(items)
+        .style(Style::default().bg(bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("> ")
+        .repeat_highlight_symbol(false);
+
+    let mut list_state = ListState::default();
+    if !filtered.is_empty() {
+        list_state.select(Some(menu.selected.saturating_sub(start)));
+    }
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    // ---- Footer ----
+    let footer = Line::from(vec![
+        Span::styled(
+            format!(" {}/{} actions", filtered.len(), menu.actions.len()),
+            dim_style,
+        ),
+        Span::raw("  up/down move  Enter run  Esc close"),
+    ]);
+    let footer_para = Paragraph::new(footer).style(Style::default().bg(bg));
+    f.render_widget(footer_para, chunks[2]);
+}
+
+fn draw_theme_picker(f: &mut Frame, _app: &App, picker: &ThemePicker) {
+    use ratatui::widgets::List;
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
+    // Centered popup. Two horizontal columns:
+    //   [0] the list of themes (55% of width)
+    //   [1] a preview pane (45% of width) showing the live
+    //       palette in action.
+    let outer = centered_rect(75, 70, f.area());
+    f.render_widget(ratatui::widgets::Clear, outer);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Theme picker  Enter commits / Esc reverts ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+    let inner = block.inner(outer);
+    f.render_widget(block, outer);
+
+    let inner = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage(55),
+                Constraint::Percentage(45),
+            ]
+            .as_ref(),
+        )
+        .split(inner);
+
+    // ---- Theme list (left column) ----
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .fg(fg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(Theme::dim_color());
+
+    // Scroll so the selected row stays visible.
+    let visible_rows = inner[0].height as usize;
+    let total = picker.themes.len();
+    let start = picker
+        .selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(total.saturating_sub(visible_rows));
+    let end = (start + visible_rows).min(total);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (row_pos, theme) in picker
+        .themes
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
+        let is_selected = row_pos == picker.selected;
+        let is_original = *theme == picker.original;
+        let mut spans = Vec::new();
+        // Selection marker.
+        spans.push(Span::styled(
+            if is_selected { " > " } else { "   " },
+            if is_selected { highlight_style } else { dim_style },
+        ));
+        // Slug (left-aligned) so the eye scans down a column.
+        spans.push(Span::styled(
+            format!("{:<14}", theme.slug()),
+            if is_selected {
+                highlight_style
+            } else {
+                Style::default().fg(fg)
+            },
+        ));
+        // Display name.
+        spans.push(Span::styled(
+            theme.display_name(),
+            if is_selected {
+                highlight_style
+            } else {
+                Style::default().fg(fg)
+            },
+        ));
+        // "(current)" marker on the row that matches the
+        // pre-picker theme.
+        if is_original && !is_selected {
+            spans.push(Span::styled("  (current)", dim_style));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    let list = List::new(items)
+        .style(Style::default().bg(bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("")
+        .repeat_highlight_symbol(false);
+    let mut list_state = ListState::default();
+    if end > start {
+        list_state.select(Some(picker.selected.saturating_sub(start)));
+    }
+    f.render_stateful_widget(list, inner[0], &mut list_state);
+
+    // ---- Preview pane (right column) ----
+    // The preview shows the *active* palette colors (the live
+    // preview already installed by `install_palette`), which is
+    // exactly what the user is about to commit to.
+    let preview_lines: Vec<Line> = {
+        let p = PALETTE.with(|c| *c.borrow());
+        vec![
+            Line::from(vec![
+                Span::styled("  Theme preview", Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  fg   ", dim_style),
+                Span::styled("the quick brown fox", Style::default().fg(p.fg)),
+            ]),
+            Line::from(vec![
+                Span::styled("  acc  ", dim_style),
+                Span::styled("jumps over the lazy dog", Style::default().fg(p.accent)),
+            ]),
+            Line::from(vec![
+                Span::styled("  succ ", dim_style),
+                Span::styled("git status: clean", Style::default().fg(p.success)),
+            ]),
+            Line::from(vec![
+                Span::styled("  err  ", dim_style),
+                Span::styled("error: something broke", Style::default().fg(p.error)),
+            ]),
+            Line::from(vec![
+                Span::styled("  warn ", dim_style),
+                Span::styled("warning: check the docs", Style::default().fg(p.warning)),
+            ]),
+            Line::from(vec![
+                Span::styled("  dim  ", dim_style),
+                Span::styled("(dimmed text)", Style::default().fg(p.dim)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Current selection: ", dim_style),
+                Span::styled(
+                    picker.current().display_name(),
+                    Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  Original theme:   ", dim_style),
+                Span::styled(
+                    picker.original.display_name(),
+                    Style::default().fg(p.fg),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Press ", dim_style),
+                Span::styled("Enter", Style::default().fg(p.accent)),
+                Span::styled(" to commit, ", dim_style),
+                Span::styled("Esc", Style::default().fg(p.accent)),
+                Span::styled(" to revert.", dim_style),
+            ]),
+        ]
+    };
+    let preview = Paragraph::new(preview_lines)
+        .style(Style::default().bg(bg))
+        .block(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Theme::dim())
+                .style(Style::default().bg(bg)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(preview, inner[1]);
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
@@ -3480,17 +4533,136 @@ mod tests {
     }
 
     #[test]
-    fn key_bindings_from_config_unbind_action() {
-        let mut entries = std::collections::HashMap::new();
-        entries.insert("open-help".to_string(), "none".to_string());
-        let bindings = key_bindings_from_config(&entries);
-        assert!(bindings.is_unbound(Action::OpenHelp));
-        assert!(bindings.get(Action::OpenHelp).is_none());
-        // Unbinding one action must not affect siblings.
-        assert!(!bindings.is_unbound(Action::Cancel));
-        assert!(bindings.get(Action::Cancel).is_some());
-        // `action_for_key` must not fire for unbound actions.
-        let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
-        assert_eq!(action_for_key(&bindings, &evt), None);
-    }
+        fn key_bindings_from_config_unbind_action() {
+                let mut entries = std::collections::HashMap::new();
+                entries.insert("open-help".to_string(), "none".to_string());
+                let bindings = key_bindings_from_config(&entries);
+                assert!(bindings.is_unbound(Action::OpenHelp));
+                assert!(bindings.get(Action::OpenHelp).is_none());
+                // Unbinding one action must not affect siblings.
+                assert!(!bindings.is_unbound(Action::Cancel));
+                assert!(bindings.get(Action::Cancel).is_some());
+                // `action_for_key` must not fire for unbound actions.
+                let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+                assert_eq!(action_for_key(&bindings, &evt), None);
+        }
+
+        #[test]
+        fn command_menu_filter_matches() {
+                let menu = CommandMenu::new();
+                // Empty query returns every action.
+                assert_eq!(menu.filtered_indices().len(), ALL_ACTIONS.len());
+                // Substring match against the display name.
+                let m = CommandMenu {
+                        query: "delete".into(),
+                        ..CommandMenu::new()
+                };
+                let filtered = m.filtered_indices();
+                assert!(filtered
+                        .iter()
+                        .all(|&i| ALL_ACTIONS[i].display_name().to_lowercase().contains("delete")));
+                assert!(filtered
+                        .iter()
+                        .any(|&i| ALL_ACTIONS[i] == Action::DeleteSelected));
+                assert!(filtered
+                        .iter()
+                        .any(|&i| ALL_ACTIONS[i] == Action::DeleteMatching));
+                // Multi-word AND: "open help" matches OpenHelp (also
+                // ShowOutput because its name contains "open"? — actually
+                // it doesn't, so only OpenHelp should match).
+                let m = CommandMenu {
+                        query: "open help".into(),
+                        ..CommandMenu::new()
+                };
+                let filtered = m.filtered_indices();
+                assert!(filtered
+                        .iter()
+                        .any(|&i| ALL_ACTIONS[i] == Action::OpenHelp));
+                assert!(!filtered
+                        .iter()
+                        .any(|&i| ALL_ACTIONS[i] == Action::ShowOutput));
+                // `clamp_selection` keeps the cursor inside the filtered
+                // list when items disappear (e.g. user deletes the last char).
+                let mut m = CommandMenu::new();
+                m.selected = ALL_ACTIONS.len() - 1;
+                m.query = "no-such-action".into();
+                m.clamp_selection();
+                assert_eq!(m.selected, 0);
+        }
+
+        #[test]
+        fn command_action_has_default_binding_and_routes() {
+                let bindings = KeyBindings::defaults();
+                // The default key for CommandAction is ":" (matches the
+                // vim-style command palette convention).
+                assert_eq!(
+                        bindings.get(Action::CommandAction).map(format_key_spec),
+                        Some(":".to_string())
+                );
+                // Pressing ":" fires the CommandAction.
+                let evt = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::empty());
+                assert_eq!(
+                        action_for_key(&bindings, &evt),
+                        Some(Action::CommandAction)
+                );
+        }
+
+        #[test]
+        fn theme_picker_default_binding_and_list_layout() {
+                let bindings = KeyBindings::defaults();
+                // Default key is `T` so it doesn't collide with the
+                // Ctrl-N / Ctrl-P cycling shortcuts.
+                assert_eq!(
+                        bindings.get(Action::ThemePicker).map(format_key_spec),
+                        Some("T".to_string())
+                );
+                // Pressing T fires the ThemePicker.
+                let evt = KeyEvent::new(KeyCode::Char('T'), KeyModifiers::empty());
+                assert_eq!(
+                        action_for_key(&bindings, &evt),
+                        Some(Action::ThemePicker)
+                );
+                // Picker contains every theme: `None` plus the
+                // canonical `ratatui-themes::ThemeName::all()` list.
+                let p = ThemePicker::new(SelectedTheme::None);
+                assert_eq!(p.themes.len(), BuiltinTheme::all().len() + 1);
+                assert_eq!(p.themes[0], SelectedTheme::None);
+                assert!(p
+                        .themes
+                        .iter()
+                        .skip(1)
+                        .all(|t| matches!(t, SelectedTheme::Builtin(_))));
+                // `move_by` clamps to the list bounds.
+                let mut p = ThemePicker::new(SelectedTheme::None);
+                p.move_by(-10);
+                assert_eq!(p.selected, 0);
+                p.move_by(9999);
+                assert_eq!(p.selected, p.themes.len() - 1);
+        }
+
+        #[test]
+        fn curated_themes_parse_and_cycle() {
+                // Every curated theme must:
+                //   * have a unique, kebab-case slug,
+                //   * round-trip through `from_slug`,
+                //   * show up in `BuiltinTheme::all()` exactly once.
+                let mut seen = std::collections::HashSet::new();
+                for t in BuiltinTheme::curated() {
+                        let s = t.slug();
+                        assert!(!s.is_empty(), "empty slug for {:?}", t);
+                        assert!(s.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                                "slug {:?} not kebab-case", s);
+                        assert!(seen.insert(s), "duplicate slug {}", s);
+                        let parsed = SelectedTheme::from_slug(s);
+                        assert_eq!(parsed, SelectedTheme::Builtin(*t),
+                                "from_slug round-trip failed for {:?}", s);
+                }
+                // Upstream themes still parse (regression check).
+                assert_eq!(
+                        SelectedTheme::from_slug("dracula"),
+                        SelectedTheme::Builtin(BuiltinTheme::Dracula)
+                );
+                // Unknown slug falls back to None.
+                assert_eq!(SelectedTheme::from_slug("totally-made-up"), SelectedTheme::None);
+        }
 }

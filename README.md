@@ -79,7 +79,7 @@ Supported keys:
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
 | `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
-| `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
+| `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -138,6 +138,12 @@ key.edit-end=Right
 # (also: `off`, `disable`, `-`). The action simply never fires;
 # the help overlay lists the action as `(unbound)`.
 key.delete-matching=none
+
+# Rebind the command palette to Ctrl-P (default is `:`).
+key.command-action=C-p
+
+# Rebind the theme picker (default is `T`) to F4.
+key.theme-picker=F4
 ```
 
 To inspect the resolved value of a single setting, use:
@@ -243,6 +249,8 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
 | `Ctrl+H`  | TUI     | Open the help overlay (current settings + shortcut reference). |
+| `:`       | TUI     | Open the command palette (run any action by name).        |
+| `T`       | TUI     | Open the theme picker (live preview, Enter commits, Esc reverts). |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |
@@ -434,15 +442,24 @@ The TUI can be themed in one of two ways:
    colors verbatim.
 
 2. **Built-in themes**: press `Ctrl-N` (next) or `Ctrl-P` (previous)
-   in the TUI to cycle through the curated themes from the
-   `ratatui-themes` crate: Dracula, One Dark Pro, Nord,
-   Catppuccin Mocha/Latte, Gruvbox Dark/Light, Tokyo Night,
-   Solarized Dark/Light, Monokai Pro, Rosé Pine, Kanagawa,
-   Everforest, Cyberpunk. The order is
+   in the TUI to cycle through **21 built-in themes** (15 from the
+   `ratatui-themes` crate plus 6 curated themes shipped with
+   smarthistory):
 
    ```
-   no theme → Dracula → One Dark Pro → Nord → … → Cyberpunk → no theme
+   Upstream (ratatui-themes):
+     Dracula, One Dark Pro, Nord, Catppuccin Mocha/Latte,
+     Gruvbox Dark/Light, Tokyo Night, Solarized Dark/Light,
+     Monokai Pro, Rosé Pine, Kanagawa, Everforest, Cyberpunk
+
+   Curated (shipped with smarthistory):
+     Doom One, Doom Solarized Light, Plain, Leuven,
+     Material Dark, Material Light
    ```
+
+   The cycle order is `no theme → Dracula → … → Cyberpunk → Doom
+   One → … → Material Light → no theme`. Slugs are kebab-case
+   (e.g. `doom-one`, `material-dark`, `leuven`).
 
    The active theme is shown on the right side of the status bar
    (`theme: <Name>`) and is persisted to
@@ -451,11 +468,11 @@ The TUI can be themed in one of two ways:
 
    Built-in themes supply **all** the palette colors — background,
    foreground, selection, badge foreground, and the per-pane
-   backgrounds — so light themes like Gruvbox Light actually look
-   light in the TUI. The user's manual `tuicolor.*` settings still
-   override any of those on a per-slot basis: for example,
-   `tuicolor.bg=#1a1a1a` forces the background dark even on a
-   light theme.
+   backgrounds — so light themes like Gruvbox Light or Leuven
+   actually look light in the TUI. The user's manual
+   `tuicolor.*` settings still override any of those on a
+   per-slot basis: for example, `tuicolor.bg=#1a1a1a` forces the
+   background dark even on a light theme.
 
 ### TUI search syntax
 
