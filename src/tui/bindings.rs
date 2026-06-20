@@ -21,6 +21,17 @@ pub enum Action {
     EditComment,
     /// Open the captured-output view.
     ShowOutput,
+    /// Copy the current selection to the system clipboard.
+    ///
+    /// "Selection" picks the most useful thing to copy at the
+    /// moment: if the captured-output view is open, the output
+    /// text is copied; otherwise the selected history row's
+    /// command is copied. When nothing is selected the action
+    /// is a no-op (with a status message so the user knows).
+    ///
+    /// The default key (`Ctrl-Y`) is the canonical readline/vim
+    /// "yank" shortcut, so the muscle memory transfers.
+    YankSelection,
     /// Open the help overlay.
     OpenHelp,
     /// Delete the selected entry (with confirmation).
@@ -74,6 +85,7 @@ impl Action {
             Action::CycleThemePrev => "cycle-theme-prev",
             Action::EditComment => "edit-comment",
             Action::ShowOutput => "show-output",
+            Action::YankSelection => "yank-selection",
             Action::OpenHelp => "open-help",
             Action::DeleteSelected => "delete-selected",
             Action::DeleteMatching => "delete-matching",
@@ -104,6 +116,7 @@ impl Action {
             Action::CycleThemePrev => "Previous theme",
             Action::EditComment => "Edit comment",
             Action::ShowOutput => "Show output",
+            Action::YankSelection => "Yank selection",
             Action::OpenHelp => "Open help",
             Action::DeleteSelected => "Delete entry",
             Action::DeleteMatching => "Delete matches",
@@ -149,7 +162,8 @@ impl Action {
             | Action::ShowOutput
             | Action::OpenHelp
             | Action::CommandAction
-            | Action::ThemePicker => "tools",
+            | Action::ThemePicker
+            | Action::YankSelection => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
         }
     }
@@ -165,6 +179,7 @@ impl Action {
             Action::CycleThemePrev => "C-p",
             Action::EditComment => "C-e",
             Action::ShowOutput => "C-l",
+            Action::YankSelection => "C-y",
             Action::OpenHelp => "C-h",
             Action::DeleteSelected => "C-d",
             Action::DeleteMatching => "C-x",
@@ -428,6 +443,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CycleThemePrev,
     Action::EditComment,
     Action::ShowOutput,
+    Action::YankSelection,
     Action::OpenHelp,
     Action::DeleteSelected,
     Action::DeleteMatching,

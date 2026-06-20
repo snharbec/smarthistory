@@ -464,6 +464,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
     row(
         &mut lines,
+        binding_for(Action::YankSelection),
+        "yank the output (or selected command) to the clipboard",
+    );
+    row(
+        &mut lines,
         binding_for(Action::OpenHelp),
         "open this help overlay",
     );
@@ -1465,9 +1470,23 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // bar so the help text keeps its existing left-anchored layout.
     let theme_label = format!(" theme: {} ", app.theme.display_name());
 
+    // Transient feedback (e.g. "Yanked 12 chars") takes
+    // precedence over the help hint when present, so the user
+    // can't miss the result of an action like yank. The
+    // success / failure colour is chosen by the message
+    // contents: anything that starts with "Yank failed" is
+    // treated as an error so the user notices even on a
+    // brief glance.
+    let status = app.status_message.as_ref().map(|(m, _)| m.as_str());
+    let (middle_text, middle_style) = match status {
+        Some(m) if m.starts_with("Yank failed") => (format!(" {} ", m), Theme::error()),
+        Some(m) => (format!(" {} ", m), Theme::success()),
+        None => (help.to_string(), Theme::dim()),
+    };
+
     let line = Line::from(vec![
         Span::styled(format!(" {}  ", count), Theme::highlight()),
-        Span::styled(help, Theme::dim()),
+        Span::styled(middle_text, middle_style),
         Span::styled(theme_label, Theme::accent()),
     ]);
     f.render_widget(

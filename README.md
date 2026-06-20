@@ -40,6 +40,12 @@ match standard workflow expectations. This project aims to provide:
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker
   replacing `fzf`. Supports live filtering, mode cycle (`Ctrl+G`), enter
   to run, left/right to prefill for editing.
+- **Clipboard yank on `Ctrl+Y`:** copy the most useful piece of the
+  current view to the system clipboard via `arboard`. When the
+  captured-output view is open, the output text is copied; otherwise
+  the selected row's command is copied. Useful for snagging a long
+  build log or pulling a command back into the line editor when
+  fzf-style preview isn't available.
 - **Most-probable-next on `Ctrl+S`:** after running a command, pressing
   `Ctrl+S` inserts the most frequent command that followed it in the
   history, ordered by frequency. Each subsequent press cycles through the
@@ -53,14 +59,18 @@ match standard workflow expectations. This project aims to provide:
 ## Installation
 
 1. Clone the repository and build:
+
    ```bash
    cargo build --release
    ```
+
 2. Add the binary to your path.
 3. Initialize in your `~/.zshrc`:
+
    ```bash
    eval "$(smarthistory init zsh)"
    ```
+
    The init snippet is self-contained: it embeds a freshly-generated
    session UUID and binds the keyboard shortcuts. Re-run it once per
    shell startup; running it twice in the same shell is a no-op.
@@ -148,6 +158,10 @@ key.command-action=C-p
 
 # Rebind the theme picker (default is `T`) to F4.
 key.theme-picker=F4
+
+# Rebind the clipboard yank (default is `Ctrl-Y`). Multi-key
+# bindings are supported — this also fires on `F2`.
+key.yank-selection=C-y,F2
 ```
 
 To inspect the resolved value of a single setting, use:
@@ -255,6 +269,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Ctrl+H`  | TUI     | Open the help overlay (current settings + shortcut reference). |
 | `:`       | TUI     | Open the command palette (run any action by name).        |
 | `T`       | TUI     | Open the theme picker (live preview, Enter commits, Esc reverts). |
+| `Ctrl+Y`  | TUI     | Yank the captured output (or the selected command) to the system clipboard via `arboard`. Shows a "Yanked N chars" message in the status bar; falls back to "Nothing to yank" when no row is selected. |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |
@@ -369,12 +384,12 @@ frequency in the history. The `Ctrl+S` widget uses this internally:
 ```
 # History: CMD1, CMD2, CMD3, CMD1, CMD2, CMD1, CMD3
 $ smarthistory next CMD1
-2	CMD2
-1	CMD3
+2 CMD2
+1 CMD3
 
 $ smarthistory next CMD2
-1	CMD1
-1	CMD3
+1 CMD1
+1 CMD3
 ```
 
 The first 8 lines of `smarthistory init zsh` show the generated session

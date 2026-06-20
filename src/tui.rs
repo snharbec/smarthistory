@@ -143,6 +143,53 @@ fn parse_bool(s: &str, default: bool) -> bool {
     }
 }
 
+/// Decide what text `yank_to_clipboard` should copy.
+///
+/// Priority:
+/// 1. The captured-output overlay, if open. This is "the output
+///    of this command" — the user is looking at the output and
+///    yanking it is the natural action.
+/// 2. The command of the currently-selected history row. This
+///    is "the current document" — the command line itself,
+///    in the same sense as a text editor's "current buffer".
+/// 3. `None` — nothing to yank.
+///
+/// Kept as a free function (not a method) so the decision logic
+/// is testable without standing up a full `App` and a SQLite
+/// database. The caller in `App::yank_to_clipboard` just passes
+/// `&self`.
+fn pick_text_to_yank(app: &App) -> Option<String> {
+    if let Some(view) = &app.output_view
+        && !view.text.is_empty()
+    {
+        return Some(view.text.clone());
+    }
+    app.selected_row().map(|r| r.command.clone())
+}
+
+/// Copy `text` to the system clipboard via `arboard`.
+///
+/// `arboard::Clipboard::new()` opens a connection to the platform
+/// clipboard daemon (X11, Wayland, macOS pasteboard, Windows
+/// clipboard, …). On headless systems or when no clipboard
+/// daemon is running, the call returns an error. We surface that
+/// to the user as a status-bar message rather than a panic, so a
+/// broken clipboard never crashes the TUI.
+///
+/// The clipboard handle is created fresh on every yank rather
+/// than being held for the TUI's lifetime. arboard's connection
+/// model is "open → write → close" and some platforms (notably
+/// X11) require the connection to be released promptly so other
+/// applications can read the clipboard contents. Re-opening per
+/// yank is also cheap (a single syscall on every platform).
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new()
+        .map_err(|e| format!("clipboard unavailable: {}", e))?;
+    cb.set_text(text.to_string())
+        .map_err(|e| format!("write failed: {}", e))?;
+    Ok(())
+}
+
 /// A high-level action that the TUI can take in response to a key
 /// press. Action names appear in the user-facing config file as
 /// `key.<action>=<key-spec>`, e.g. `key.help=C-h`.
@@ -205,6 +252,11 @@ struct App {
     /// Active key bindings, resolved from the user's config file.
     /// Defaults match the original hard-coded Ctrl-* shortcuts.
     bindings: KeyBindings,
+    /// Transient message rendered in the status bar (e.g.
+    /// "Yanked 23 chars" or "Yank failed: …"). `Some` while the
+    /// message is fresh; cleared after a short delay by
+    /// `tick_status_message()`.
+    status_message: Option<(String, std::time::Instant)>,
 }
 
 impl App {
@@ -421,6 +473,7 @@ impl App {
             query_regex: None,
             theme,
             bindings,
+            status_message: None,
         };
         app.recompile_regex();
         app.refresh();
@@ -891,6 +944,51 @@ fn move_selection(&mut self, delta: isize) {
         self.output_view = None;
     }
 
+    /// Copy something useful to the system clipboard. The pick
+    /// order mirrors the user's mental model: if the captured-
+    /// output overlay is open, copy its text; otherwise copy the
+    /// command of the currently-selected history row. When
+    /// nothing is selected, the action is a no-op and a status
+    /// message tells the user why.
+    ///
+    /// Status messages:
+    /// - `"Yanked N chars"`  on success
+    /// - `"Yank failed: …"`   when arboard cannot reach a clipboard
+    /// - `"Nothing to yank"`  when there's no row and no output view
+    fn yank_to_clipboard(&mut self) {
+        let Some(text) = pick_text_to_yank(self) else {
+            self.set_status_message("Nothing to yank".to_string());
+            return;
+        };
+        match copy_to_clipboard(&text) {
+            Ok(()) => self.set_status_message(format!(
+                "Yanked {} chars to clipboard",
+                text.chars().count()
+            )),
+            Err(e) => self.set_status_message(format!("Yank failed: {}", e)),
+        }
+    }
+
+    /// Set the transient status message. The status bar shows
+    /// it for a few seconds and then it's automatically cleared
+    /// by `tick_status_message`.
+    fn set_status_message(&mut self, msg: String) {
+        self.status_message = Some((msg, std::time::Instant::now()));
+    }
+
+    /// Drop the status message if it has been on screen long
+    /// enough. Called from the input loop so the user always
+    /// sees fresh feedback after a yank (or any other action that
+    /// sets a message), but the message doesn't linger forever.
+    fn tick_status_message(&mut self) {
+        const MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        if let Some((_, when)) = &self.status_message
+            && when.elapsed() > MESSAGE_TTL
+        {
+            self.status_message = None;
+        }
+    }
+
     fn selected_row(&self) -> Option<&HistoryRow> {
         self.list_state
             .selected()
@@ -1188,6 +1286,13 @@ fn run_loop(
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // Every keypress is a chance to clear a stale status message
+    // (e.g. the "Yanked 12 chars" feedback that should fade after
+    // a few seconds). Doing this at the top of the input loop
+    // means the message stays visible while the user is reading
+    // it and disappears as soon as they interact again.
+    app.tick_status_message();
+
     // The command palette sits above the help overlay so it can
     // dispatch actions (including open-help) without the overlay
     // intercepting keys.
@@ -1271,6 +1376,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::ShowOutput => {
             app.show_output_view();
+            false
+        }
+        Action::YankSelection => {
+            app.yank_to_clipboard();
             false
         }
         Action::OpenHelp => {
@@ -2555,5 +2664,110 @@ mod tests {
                         action_for_key(&bindings, &evt),
                         Some(Action::CycleExitFilter)
                 );
+        }
+
+        /// `YankSelection` is bound to `Ctrl-Y` (the canonical
+        /// readline/vim yank shortcut) and the action_for_key
+        /// lookup routes the keystroke correctly.
+        #[test]
+        fn yank_selection_default_key_routes() {
+                let bindings = KeyBindings::defaults();
+                assert_eq!(
+                        format_key_specs(bindings.specs(Action::YankSelection)),
+                        "C-y"
+                );
+                let evt = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+                assert_eq!(
+                        action_for_key(&bindings, &evt),
+                        Some(Action::YankSelection)
+                );
+        }
+
+        /// `pick_text_to_yank` falls back to the selected row's
+        /// command when the output view is closed.
+        #[test]
+        fn pick_text_to_yank_uses_selected_row() {
+                let app = stats_test_app(&[("echo hello", 30)]);
+                // Default `list_state` from `App::new` selects
+                // index 0, so the first row is the selection.
+                let text = pick_text_to_yank(&app).expect("a row is selected");
+                assert_eq!(text, "echo hello");
+        }
+
+        /// `pick_text_to_yank` prefers the output view text over
+        /// the selected row's command. This is the "or the
+        /// output of this command" branch the user asked for.
+        #[test]
+        fn pick_text_to_yank_prefers_output_view() {
+                let mut app = stats_test_app(&[("cargo test", 30)]);
+                // Simulate the output overlay being open with a
+                // specific captured text. We use a string that
+                // differs from any command in the table so the
+                // test catches a mix-up between the two sources.
+                let output_text = "test result: ok. 12 passed; 0 failed";
+                app.output_view = Some(OutputView {
+                        text: output_text.to_string(),
+                        scroll: 0,
+                });
+                let text = pick_text_to_yank(&app).expect("output view is set");
+                assert_eq!(text, output_text);
+                // Even though there's a selected row, the
+                // output view wins.
+                assert_ne!(text, "cargo test");
+        }
+
+        /// `pick_text_to_yank` returns `None` when there's no
+        /// output view and no selected row. The caller surfaces
+        /// this as a "Nothing to yank" status message.
+        #[test]
+        fn pick_text_to_yank_returns_none_when_empty() {
+                // Empty history — no rows, no selection.
+                let app = stats_test_app(&[]);
+                assert!(pick_text_to_yank(&app).is_none());
+        }
+
+        /// `App::yank_to_clipboard` with no output view and a
+        /// selected row sets a "Yanked N chars" status message
+        /// on success. The actual clipboard write goes through
+        /// arboard; in CI without a display server it may fail,
+        /// so the test accepts either outcome but always
+        /// confirms that *some* feedback was surfaced (the
+        /// yank never crashes the TUI).
+        #[test]
+        fn yank_to_clipboard_with_selected_row_sets_status() {
+                let mut app = stats_test_app(&[("ls -la", 30)]);
+                assert!(app.status_message.is_none());
+                app.yank_to_clipboard();
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.clone())
+                        .expect("yank must set a status message");
+                // On success: "Yanked N chars to clipboard".
+                // On failure: "Yank failed: <reason>".
+                // Either is acceptable — we just want to confirm
+                // the action did not silently no-op.
+                assert!(
+                        msg.starts_with("Yanked ") || msg.starts_with("Yank failed"),
+                        "unexpected status message: {:?}",
+                        msg
+                );
+        }
+
+        /// `yank_to_clipboard` is a no-op with a clear status
+        /// message when there's nothing to copy. The clipboard
+        /// must never be touched in that case (we'd just be
+        /// putting whatever stale data was already on the
+        /// clipboard back).
+        #[test]
+        fn yank_to_clipboard_with_nothing_to_copy() {
+                let mut app = stats_test_app(&[]);
+                app.yank_to_clipboard();
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("yank must report when there's nothing to copy");
+                assert_eq!(msg, "Nothing to yank");
         }
 }
