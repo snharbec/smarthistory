@@ -32,6 +32,24 @@ pub enum Action {
     /// The default key (`Ctrl-Y`) is the canonical readline/vim
     /// "yank" shortcut, so the muscle memory transfers.
     YankSelection,
+    /// Find a filename referenced in the selected history row
+    /// and stage `$EDITOR <filename>` as the next selection. The
+    /// TUI exits so the parent shell runs the command, which
+    /// launches the editor on the file.
+    ///
+    /// The pick algorithm tokenizes the row's command,
+    /// discards tokens containing shell metacharacters
+    /// (globs, redirects, subshells, …), and scores the rest by
+    /// how "path-like" each looks (starts with `/`, `~`, `./`,
+    /// `../`; contains a `/`; has a file extension). The
+    /// highest-scoring token wins. A no-op with a status
+    /// message is surfaced when no row is selected or no
+    /// filename-shaped token is found.
+    ///
+    /// The default key (`Ctrl-O`) is mnemonic for "Open" in
+    /// editor. `$EDITOR` falls back to `vi` (POSIX-mandated)
+    /// when unset.
+    EditFileReference,
     /// Open the help overlay.
     OpenHelp,
     /// Delete the selected entry (with confirmation).
@@ -86,6 +104,7 @@ impl Action {
             Action::EditComment => "edit-comment",
             Action::ShowOutput => "show-output",
             Action::YankSelection => "yank-selection",
+            Action::EditFileReference => "edit-file-reference",
             Action::OpenHelp => "open-help",
             Action::DeleteSelected => "delete-selected",
             Action::DeleteMatching => "delete-matching",
@@ -117,6 +136,7 @@ impl Action {
             Action::EditComment => "Edit comment",
             Action::ShowOutput => "Show output",
             Action::YankSelection => "Yank selection",
+            Action::EditFileReference => "Edit referenced file",
             Action::OpenHelp => "Open help",
             Action::DeleteSelected => "Delete entry",
             Action::DeleteMatching => "Delete matches",
@@ -163,7 +183,8 @@ impl Action {
             | Action::OpenHelp
             | Action::CommandAction
             | Action::ThemePicker
-            | Action::YankSelection => "tools",
+            | Action::YankSelection
+            | Action::EditFileReference => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
         }
     }
@@ -180,6 +201,7 @@ impl Action {
             Action::EditComment => "C-e",
             Action::ShowOutput => "C-l",
             Action::YankSelection => "C-y",
+            Action::EditFileReference => "C-o",
             Action::OpenHelp => "C-h",
             Action::DeleteSelected => "C-d",
             Action::DeleteMatching => "C-x",
@@ -444,6 +466,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::EditComment,
     Action::ShowOutput,
     Action::YankSelection,
+    Action::EditFileReference,
     Action::OpenHelp,
     Action::DeleteSelected,
     Action::DeleteMatching,

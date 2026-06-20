@@ -469,6 +469,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
     row(
         &mut lines,
+        binding_for(Action::EditFileReference),
+        "open a filename referenced in the selected command in $EDITOR",
+    );
+    row(
+        &mut lines,
         binding_for(Action::OpenHelp),
         "open this help overlay",
     );

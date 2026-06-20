@@ -167,6 +167,199 @@ fn pick_text_to_yank(app: &App) -> Option<String> {
     app.selected_row().map(|r| r.command.clone())
 }
 
+/// Truncate a string for use in a status-bar message, with a
+/// trailing ellipsis when it doesn't fit. The status bar is one
+/// line tall and a long shell command can be 200+ characters;
+/// the user already has the full text in their history list,
+/// so the status only needs a useful hint.
+fn truncate_for_status(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Tokenize a command line into shell-quote-aware tokens.
+///
+/// Returns one entry per whitespace-separated word, with
+/// surrounding ASCII single or double quotes stripped (so
+/// `"my file.txt"` becomes the single token `my file.txt`).
+/// Backslash escapes are honoured inside double quotes per the
+/// POSIX rules; backslash is literal inside single quotes.
+///
+/// This is a deliberately small tokenizer. It handles the
+/// shapes we care about for filename detection (a path passed
+/// as a bare token, a path passed as a single quoted argument)
+/// and ignores everything else. It does not parse redirections
+/// or subshells.
+fn tokenize_command(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut had_content = false;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                had_content = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                had_content = true;
+            }
+            '\\' if !in_single => {
+                // Inside double quotes only certain chars are
+                // escapable per POSIX; outside quotes the
+                // backslash is also literal. We just take the
+                // next character verbatim either way.
+                if let Some(&next) = chars.peek() {
+                    current.push(next);
+                    chars.next();
+                    had_content = true;
+                }
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if had_content {
+                    tokens.push(std::mem::take(&mut current));
+                    had_content = false;
+                }
+            }
+            _ => {
+                current.push(c);
+                had_content = true;
+            }
+        }
+    }
+    if had_content {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// True when `token` contains a shell metacharacter that
+/// disqualifies it from being treated as a literal filename.
+/// The list is intentionally conservative: any token that
+/// contains one of these is a glob, a redirect, a subshell, a
+/// variable reference, or similar — not a literal file path.
+fn has_shell_metachar(token: &str) -> bool {
+    const META: &[char] = &[
+        '*', '?', '[', ']', '{', '}', ';', '|', '&', '<', '>',
+        '(', ')', '`', '$', '=', '\'', '"', '\\', '!', '#',
+    ];
+    token.chars().any(|c| META.contains(&c))
+}
+
+/// Score a token for "how path-like" it is. Higher scores are
+/// better. The score is composed of bonuses for path-shaped
+/// features (leading slash, tilde, directory separator) and
+/// penalties for obviously non-file shapes (flags, lone `.` or
+/// `..`).
+///
+/// Returns a negative score for tokens that should never be
+/// picked, so the caller can use `> 0` as a sanity filter.
+fn score_filename_token(token: &str) -> i32 {
+    if token.is_empty() {
+        return -100;
+    }
+    if token == "." || token == ".." {
+        // The literal current/parent directory entries are not
+        // files to edit. `cd ..` and `cd .` would otherwise pick
+        // these, which is nonsense.
+        return -10;
+    }
+    if token.starts_with('-') {
+        // Looks like a flag (`-rf`, `--all`, etc.). Even
+        // `--file=foo` is more usefully interpreted as a flag
+        // than a path.
+        return -5;
+    }
+    let mut score = 0;
+    if token.starts_with('/')
+        || token.starts_with("~/")
+        || token == "~"
+        || token.starts_with("./")
+        || token == "."
+        || token.starts_with("../")
+        || token == ".."
+    {
+        // Absolute, home-relative, or current/parent relative
+        // paths are the most reliable indicators that this
+        // token is a file the user wants to edit.
+        score += 10;
+    }
+    if token.contains('/') {
+        // Anything with a directory separator in it is
+        // `dir/...` shaped and almost certainly a path.
+        score += 5;
+    }
+    if let Some(slash) = token.rfind('/') {
+        let tail = &token[slash + 1..];
+        if tail.contains('.') {
+            // `foo.txt`, `.bashrc`, `Makefile.in` all qualify.
+            // The dot in the directory part (`/home/user/.config`)
+            // doesn't count, which is what we want.
+            score += 3;
+        }
+    } else if token.contains('.') {
+        // No directory separator but a dot — probably a
+        // filename like `README.md` invoked from cwd. Worth
+        // a small bonus.
+        score += 2;
+    }
+    score
+}
+
+/// Pick the most filename-shaped token in `cmd`.
+///
+/// See `Action::EditFileReference` for the rationale. Returns
+/// `None` when no row, no command, or no path-like token. Kept
+/// as a free function so it can be unit-tested in isolation.
+fn find_filename_in_command(cmd: &str) -> Option<String> {
+    let mut best: Option<(i32, String)> = None;
+    for token in tokenize_command(cmd) {
+        if has_shell_metachar(&token) {
+            continue;
+        }
+        let score = score_filename_token(&token);
+        if score <= 0 {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            best = Some((score, token));
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+/// POSIX shell-quote a string for safe inclusion as a single
+/// argument in a shell command. The TUI prints the editor
+/// invocation to stdout and the parent shell runs it, so any
+/// path with spaces or shell-meaningful characters must be
+/// quoted to survive the round-trip.
+///
+/// We use the standard `'<text>'` form with `'\''` for embedded
+/// single quotes. Single-quoted strings in POSIX shell have no
+/// escapes, so the only character that needs special handling
+/// is the quote itself.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Copy `text` to the system clipboard via `arboard`.
 ///
 /// `arboard::Clipboard::new()` opens a connection to the platform
@@ -231,6 +424,19 @@ struct App {
     /// List state for the labeled entries pane (separate from
     /// `list_state` so the two views can remember their own selection).
     labeled_list_state: ListState,
+    /// Cached merged view (`rows` + filtered `labeled_rows`,
+    /// sorted by timestamp). The cursor in `list_state` is an
+    /// index into this list. Caching avoids rebuilding the merged
+    /// list on every render and on every action that needs to
+    /// look up the selected row.
+    ///
+    /// This is the source of truth for `selected_row()`. A row
+    /// that's in `labeled_rows` but excluded from `self.rows`
+    /// (e.g. by a session/directory filter) lives in this list
+    /// but not in `self.rows`; the old `selected_row()` read
+    /// from `self.rows` alone and silently returned `None` for
+    /// such rows, which is the bug the cache fixes.
+    merged_rows: Vec<HistoryRow>,
     /// True when the initial query was loaded from the persisted
     /// session file (so the user is editing a previously-saved query
     /// rather than typing fresh text). The first character typed
@@ -468,6 +674,10 @@ impl App {
             confirm_delete: None,
             labeled_rows: Vec::new(),
             labeled_list_state: ListState::default(),
+            // Refreshed by `refresh()`; initialized empty so a
+            // `selected_row()` call before the first refresh
+            // returns `None` cleanly.
+            merged_rows: Vec::new(),
             query_prefilled,
             query_touched: false,
             query_regex: None,
@@ -522,12 +732,52 @@ impl App {
             });
         }
         self.refresh_labeled();
-        let n = self.merged_rows().len();
+        // Rebuild the merged list once per refresh so subsequent
+        // `selected_row()` lookups are O(1). The previous design
+        // re-allocated this on every action dispatch (and three
+        // times per render frame); caching is a measurable win
+        // for long lists and also gives us a stable borrow for
+        // `selected_row()`.
+        self.merged_rows = self.build_merged_rows();
+        let n = self.merged_rows.len();
         if n == 0 {
             self.list_state.select(None);
         } else {
             self.list_state.select(Some(0));
         }
+    }
+
+    /// Compute the merged view: primary list + labeled rows
+    /// (filtered by the current query, deduped by id, sorted by
+    /// timestamp). Extracted from `merged_rows()` so we can
+    /// compute it once per `refresh()` and cache the result.
+    fn build_merged_rows(&self) -> Vec<HistoryRow> {
+        let mut merged = self.rows.clone();
+        let existing_ids: std::collections::HashSet<i64> =
+            merged.iter().map(|r| r.id).collect();
+        for row in &self.labeled_rows {
+            if !existing_ids.contains(&row.id) {
+                if !self.query.is_empty() {
+                    let in_command = self.query_matches_text(&row.command);
+                    let in_comment = self.query_matches_text(&row.comment);
+                    if !in_command && !in_comment {
+                        continue;
+                    }
+                }
+                merged.push(row.clone());
+            }
+        }
+        // Only re-sort when the primary list is in timestamp-DESC
+        // order. Stats mode uses a frequency-aware ordering from
+        // `fetch_stats` that we must preserve.
+        if !matches!(self.mode, Mode::Stats) {
+            merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        }
+        if self.duplicate_filter {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            merged.retain(|r| seen.insert(r.command.clone()));
+        }
+        merged
     }
 
     fn fetch(&self) -> Result<Vec<HistoryRow>> {
@@ -679,35 +929,15 @@ impl App {
     /// preserve that ordering instead of re-sorting, so the
     /// ranking the user sees in the SQL query survives into the
     /// rendered list.
-    fn merged_rows(&self) -> Vec<HistoryRow> {
-        let mut merged = self.rows.clone();
-        let existing_ids: std::collections::HashSet<i64> =
-            merged.iter().map(|r| r.id).collect();
-        for row in &self.labeled_rows {
-            if !existing_ids.contains(&row.id) {
-                if !self.query.is_empty() {
-                    let in_command = self.query_matches_text(&row.command);
-                    let in_comment = self.query_matches_text(&row.comment);
-                    if !in_command && !in_comment {
-                        continue;
-                    }
-                }
-                merged.push(row.clone());
-            }
-        }
-        // Only re-sort when the primary list is in timestamp-DESC
-        // order. Stats mode uses a frequency-aware ordering from
-        // `fetch_stats` that we must preserve.
-        if !matches!(self.mode, Mode::Stats) {
-            merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        }
-
-        if self.duplicate_filter {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            merged.retain(|r| seen.insert(r.command.clone()));
-        }
-
-        merged
+    /// The merged view of the history list: `self.rows` plus
+    /// labeled rows (deduped by id, filtered by the current
+    /// query, sorted by timestamp).
+    ///
+    /// Returns a slice into the cache; the cache is rebuilt by
+    /// `refresh()`. Callers that need an owned list (rare) can
+    /// clone via `.to_vec()`.
+    fn merged_rows(&self) -> &[HistoryRow] {
+        &self.merged_rows
     }
 
     fn build_where(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
@@ -821,9 +1051,7 @@ fn move_selection(&mut self, delta: isize) {
 }
 
     fn select_for_run(&mut self) {
-        if let Some(i) = self.list_state.selected()
-            && let Some(row) = self.rows.get(i)
-        {
+        if let Some(row) = self.selected_row() {
             self.selection = Some(row.command.clone());
             self.pick_mode = Some(PickMode::Run);
         }
@@ -969,6 +1197,54 @@ fn move_selection(&mut self, delta: isize) {
         }
     }
 
+    /// Find a filename referenced in the selected history row
+    /// and stage `$EDITOR <filename>` as the next selection. The
+    /// TUI exits so the parent shell runs the command, which
+    /// launches the editor on the file.
+    ///
+    /// Failure modes (all surfaced as status messages; the TUI
+    /// never panics and never silently does nothing):
+    /// - No row is selected.
+    /// - The row's command has no path-like token.
+    /// - The staged command is otherwise empty (defensive).
+    ///
+    /// On success, `selection` and `pick_mode` are set so the
+    /// caller (the dispatcher) returns `true` to terminate the
+    /// TUI. The parent shell sees the editor command on stdout
+    /// and runs it after the TUI has torn down.
+    fn edit_referenced_file(&mut self) {
+        let Some(row) = self.selected_row() else {
+            self.set_status_message("No command selected".to_string());
+            return;
+        };
+        let Some(path) = find_filename_in_command(&row.command) else {
+            self.set_status_message(format!(
+                "No filename found in: {}",
+                truncate_for_status(&row.command, 40)
+            ));
+            return;
+        };
+        // `vi` is POSIX-mandated, so it exists on every
+        // supported platform even when the user hasn't set
+        // `$EDITOR`. Failing the action with a status message
+        // would be a regression vs. the current behaviour where
+        // most users get a working editor out of the box.
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "vi".to_string());
+        let staged = format!("{} {}", editor, shell_quote(&path));
+        if staged.trim().is_empty() {
+            // Defensive: the inputs are all non-empty so this
+            // is unreachable in practice, but we'd rather show
+            // a message than stage an empty command and let the
+            // shell do something unexpected.
+            self.set_status_message("Refusing to stage empty editor command".to_string());
+            return;
+        }
+        self.select_for_editor(staged);
+    }
+
     /// Set the transient status message. The status bar shows
     /// it for a few seconds and then it's automatically cleared
     /// by `tick_status_message`.
@@ -989,10 +1265,25 @@ fn move_selection(&mut self, delta: isize) {
         }
     }
 
+    /// The row the user is currently looking at, regardless of
+    /// whether it came from the primary list or the labeled
+    /// list. Returns `None` when no row is selected (e.g. empty
+    /// history, or the cursor was reset to `None`).
+    ///
+    /// The cursor in `list_state` is an index into the *merged*
+    /// list, not just `self.rows`. That's important when a row
+    /// lives only in `self.labeled_rows` (e.g. a "very old"
+    /// labeled row from a different session that the active
+    /// `Mode::Sess` filter excludes from `self.rows`). The old
+    /// `self.rows.get(i)` lookup silently returned `None` for
+    /// such rows, which made `select_for_run` and friends do
+    /// nothing — the user reported the resulting symptom as
+    /// "the command line stays empty when I select a very old
+    /// labelled item". Reading from the merged list fixes it.
     fn selected_row(&self) -> Option<&HistoryRow> {
         self.list_state
             .selected()
-            .and_then(|i| self.rows.get(i))
+            .and_then(|i| self.merged_rows.get(i))
     }
 
     fn is_comment_editing(&self) -> bool {
@@ -1381,6 +1672,16 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         Action::YankSelection => {
             app.yank_to_clipboard();
             false
+        }
+        Action::EditFileReference => {
+            // The action stages `$EDITOR <path>` as the next
+            // selection. When `selection` is set, the TUI is
+            // done and the parent shell runs the command. When
+            // the action is a no-op (no row, no path, …) the
+            // status message has been set and the TUI stays
+            // open so the user can react to the feedback.
+            app.edit_referenced_file();
+            app.selection.is_some()
         }
         Action::OpenHelp => {
             app.open_help();
@@ -2769,5 +3070,500 @@ mod tests {
                         .map(|(m, _)| m.as_str())
                         .expect("yank must report when there's nothing to copy");
                 assert_eq!(msg, "Nothing to yank");
+        }
+
+        // --- tokenize_command -------------------------------------------------
+
+        #[test]
+        fn tokenize_splits_on_whitespace() {
+                assert_eq!(
+                        tokenize_command("git log --oneline"),
+                        vec!["git", "log", "--oneline"]
+                );
+        }
+
+        #[test]
+        fn tokenize_strips_double_quotes() {
+                assert_eq!(
+                        tokenize_command("cat \"my file.txt\""),
+                        vec!["cat", "my file.txt"]
+                );
+        }
+
+        #[test]
+        fn tokenize_strips_single_quotes() {
+                assert_eq!(
+                        tokenize_command("vim 'weird name'"),
+                        vec!["vim", "weird name"]
+                );
+        }
+
+        #[test]
+        fn tokenize_handles_multiple_spaces_and_tabs() {
+                assert_eq!(
+                        tokenize_command("  git\tlog  \t  oneline  "),
+                        vec!["git", "log", "oneline"]
+                );
+        }
+
+        #[test]
+        fn tokenize_empty_command() {
+                assert_eq!(tokenize_command(""), Vec::<String>::new());
+                assert_eq!(tokenize_command("   \t  "), Vec::<String>::new());
+        }
+
+        // --- find_filename_in_command -----------------------------------------
+
+        #[test]
+        fn find_filename_picks_absolute_path() {
+                assert_eq!(
+                        find_filename_in_command("cat /etc/hosts"),
+                        Some("/etc/hosts".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_picks_tilde_path() {
+                assert_eq!(
+                        find_filename_in_command("vim ~/.bashrc"),
+                        Some("~/.bashrc".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_picks_relative_path() {
+                assert_eq!(
+                        find_filename_in_command("less ./README.md"),
+                        Some("./README.md".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_picks_dotdot_path() {
+                assert_eq!(
+                        find_filename_in_command("vim ../sibling.txt"),
+                        Some("../sibling.txt".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_picks_subdir_path() {
+                // No leading slash, but contains a separator
+                // and a dot in the filename. The directory part
+                // is `notes`, the file part is `plan.md`.
+                assert_eq!(
+                        find_filename_in_command("cat notes/plan.md"),
+                        Some("notes/plan.md".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_picks_bare_filename_with_extension() {
+                // No slash, but a dot in the name: README.md
+                // invoked from the working directory.
+                assert_eq!(
+                        find_filename_in_command("code README.md"),
+                        Some("README.md".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_skips_flags() {
+                // `-rf` starts with `-` and is rejected. The
+                // path after it still wins.
+                assert_eq!(
+                        find_filename_in_command("rm -rf /tmp/foo"),
+                        Some("/tmp/foo".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_skips_glob() {
+                // `/tmp/foo*` is a glob, not a file. The TUI
+                // should not pick it.
+                assert_eq!(
+                        find_filename_in_command("rm /tmp/foo*"),
+                        None
+                );
+        }
+
+        #[test]
+        fn find_filename_skips_variable_interpolation() {
+                // `$HOME` is a shell variable reference, not a
+                // literal path. We don't try to resolve it.
+                assert_eq!(
+                        find_filename_in_command("vim $HOME/.profile"),
+                        None
+                );
+        }
+
+        #[test]
+        fn find_filename_skips_command_substitution() {
+                // `$(echo foo)` is a subshell expansion, not a
+                // path.
+                assert_eq!(
+                        find_filename_in_command("cat $(echo /etc/hosts)"),
+                        None
+                );
+        }
+
+        #[test]
+        fn find_filename_skips_redirect_operator() {
+                // The `>` token is a redirect, not a file.
+                assert_eq!(
+                        find_filename_in_command("echo hello > /tmp/out"),
+                        Some("/tmp/out".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_handles_lone_dot() {
+                // `cd .` — the `.` is the current directory, not
+                // a file. The algorithm should not pick it.
+                assert_eq!(find_filename_in_command("cd ."), None);
+        }
+
+        #[test]
+        fn find_filename_handles_lone_dotdot() {
+                // `cd ..` — same as above for `..`.
+                assert_eq!(find_filename_in_command("cd .."), None);
+        }
+
+        #[test]
+        fn find_filename_picks_best_among_multiple() {
+                // Both `/etc/passwd` and `temp.txt` look like
+                // paths. The absolute one scores higher (leading
+                // `/` +10 vs leading-with-`.`/extension +5+3)
+                // and wins.
+                assert_eq!(
+                        find_filename_in_command("diff /etc/passwd temp.txt"),
+                        Some("/etc/passwd".to_string())
+                );
+        }
+
+        #[test]
+        fn find_filename_returns_none_for_pure_command() {
+                // `ls -la` has no path-like token at all.
+                assert_eq!(find_filename_in_command("ls -la"), None);
+        }
+
+        #[test]
+        fn find_filename_handles_quoted_path_with_spaces() {
+                // Quoted form is collapsed into one token by the
+                // tokenizer, so the score picks it up.
+                assert_eq!(
+                        find_filename_in_command("cat \"my notes.txt\""),
+                        Some("my notes.txt".to_string())
+                );
+        }
+
+        // --- shell_quote -------------------------------------------------------
+
+        #[test]
+        fn shell_quote_passes_simple_through() {
+                assert_eq!(shell_quote("/etc/hosts"), "'/etc/hosts'");
+        }
+
+        #[test]
+        fn shell_quote_wraps_spaces() {
+                assert_eq!(shell_quote("my notes.txt"), "'my notes.txt'");
+        }
+
+        #[test]
+        fn shell_quote_escapes_embedded_single_quote() {
+                // The classic tricky case: a path with a
+                // single quote. The standard trick is to
+                // close the single-quoted string, emit a
+                // literal escaped quote, and reopen.
+                assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        }
+
+        // --- App::edit_referenced_file end-to-end ------------------------------
+
+        #[test]
+        fn edit_referenced_file_stages_editor_command() {
+                // Use a row whose command has a clear path.
+                // We can't easily inject an arbitrary command
+                // through `stats_test_app` (it hard-codes
+                // `exit_code = 0`); use a row whose command
+                // shape is the only thing we care about.
+                let mut app = stats_test_app(&[("vim /etc/hosts", 30)]);
+                app.edit_referenced_file();
+                // `selection` is the staged editor command.
+                // We don't pin the editor (it depends on the
+                // host's $EDITOR) but we can pin everything
+                // around it.
+                let sel = app
+                        .selection
+                        .as_deref()
+                        .expect("staged command must be set");
+                assert!(sel.contains("/etc/hosts"), "got {:?}", sel);
+                // `pick_mode` is `Run` so the parent shell will
+                // execute it.
+                assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        #[test]
+        fn edit_referenced_file_with_no_row_is_a_no_op() {
+                let mut app = stats_test_app(&[]);
+                // Empty history — no row selected.
+                app.edit_referenced_file();
+                assert!(app.selection.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("must surface a status message");
+                assert_eq!(msg, "No command selected");
+        }
+
+        #[test]
+        fn edit_referenced_file_with_no_path_surfaces_message() {
+                let mut app = stats_test_app(&[("ls -la", 30)]);
+                app.edit_referenced_file();
+                assert!(app.selection.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("must surface a status message");
+                assert!(
+                        msg.starts_with("No filename found in:"),
+                        "got {:?}",
+                        msg
+                );
+        }
+
+        // --- Action routing ---------------------------------------------------
+
+        #[test]
+        fn edit_file_reference_default_key_routes() {
+                let bindings = KeyBindings::defaults();
+                assert_eq!(
+                        format_key_specs(bindings.specs(Action::EditFileReference)),
+                        "C-o"
+                );
+                let evt = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+                assert_eq!(
+                        action_for_key(&bindings, &evt),
+                        Some(Action::EditFileReference)
+                );
+        }
+
+        // --- Labeled-only selection bug ---------------------------------------
+        //
+        // Regression test: when the user navigates down to a row
+        // that lives in `self.labeled_rows` but not `self.rows`
+        // (i.e. a "very old" entry that's only surfaced because it
+        // has a comment), the actions that operate on the
+        // selected row used to silently no-op. The cursor stores
+        // an index into the *merged* list (rows + labeled_rows),
+        // but `selected_row()` was reading from `self.rows` alone.
+        // The fix: `selected_row()` looks at the merged list
+        // directly, so any index in `self.list_state` resolves
+        // to the row the user is actually looking at.
+        // --- Labeled-only selection bug ---------------------------------------
+        //
+        // Regression test: when the user navigates down to a
+        // row that lives in `self.labeled_rows` but not
+        // `self.rows` (e.g. a "very old" labeled row from a
+        // different session), the actions that operate on the
+        // selected row used to silently no-op. The cursor
+        // stores an index into the *merged* list (rows +
+        // labeled_rows), but `selected_row()` was reading from
+        // `self.rows` alone. The fix: `selected_row()` looks
+        // at the merged list directly, so any index in
+        // `self.list_state` resolves to the row the user is
+        // actually looking at.
+        #[test]
+        fn selected_row_finds_labeled_only_rows() {
+                // Build a DB with two rows that both match
+                // the search query "git": one in the current
+                // session (recent) and one in a *different*
+                // session (ancient, with a comment). The
+                // ancient row matches the query but is
+                // excluded by the `Mode::Sess` SQL filter
+                // (different session_id). So it appears in
+                // `self.labeled_rows` and in `merged_rows`,
+                // but NOT in `self.rows` — exactly the shape
+                // that triggered the user's bug report.
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp)                          VALUES (1, 'git status', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 10],
+                )
+                .expect("insert recent");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp)                          VALUES (2, 'git pull', '/tmp', 'ancient', 0, ?1)",
+                        rusqlite::params![now - 100_000],
+                )
+                .expect("insert ancient");
+                conn.execute(
+                        "INSERT INTO command_comments (command, comment)                          VALUES ('git pull', 'remembered for the README example')",
+                        [],
+                )
+                .expect("insert comment");
+
+                // Pin `SMART_HISTORY_SESSION` so the SQL
+                // filter consistently excludes the ancient
+                // row. `set_var` is `unsafe` in Rust 2024 but
+                // safe in practice for tests (single-threaded
+                // test runner, restored at the end).
+                let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+                unsafe { std::env::set_var("SMART_HISTORY_SESSION", "current"); }
+                let mut app = App::new(
+                        conn,
+                        Mode::Sess,
+                        "git".to_string(),
+                        false,
+                        ExitFilter::All,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                );
+                app.refresh();
+                // Restore the env var as soon as the initial
+                // state is built so we don't leak the override
+                // into the rest of the test run.
+                unsafe {
+                        match prev_session {
+                                Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+                                None => std::env::remove_var("SMART_HISTORY_SESSION"),
+                        }
+                }
+                assert_eq!(app.rows.len(), 1, "primary list excludes the ancient row");
+                assert_eq!(app.labeled_rows.len(), 1, "labeled list has the ancient row");
+
+                // Simulate the user pressing Down to move
+                // the cursor past the primary list. This is
+                // what `move_selection` does when the user
+                // navigates through the merged view.
+                app.move_selection(1);
+                let merged_len = app.merged_rows().len();
+                assert!(merged_len >= 2, "merged list should have both rows");
+                assert_eq!(
+                        app.list_state.selected().unwrap(),
+                        merged_len - 1,
+                        "cursor should be on the last merged row"
+                );
+                // The cursor's index is past `self.rows.len()`
+                // — this is the position where the bug used
+                // to make `selected_row()` return `None`.
+                assert!(app.list_state.selected().unwrap() >= app.rows.len());
+
+                // `selected_row()` MUST find the labeled-only
+                // row. This is the regression assertion.
+                let row = app
+                        .selected_row()
+                        .expect("selected_row must find the labeled row");
+                assert_eq!(row.command, "git pull");
+        }
+
+        /// Companion to the test above: when the action is
+        /// `Run`, staging a selection from a labeled-only row
+        /// works — which is the user-visible symptom the bug
+        /// report described ("the command line stays empty").
+        #[test]
+        fn select_for_run_on_labeled_only_row_stages_command() {
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp)                          VALUES (1, 'git status', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 10],
+                )
+                .expect("insert recent");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp)                          VALUES (2, 'git pull', '/tmp', 'ancient', 0, ?1)",
+                        rusqlite::params![now - 100_000],
+                )
+                .expect("insert ancient");
+                conn.execute(
+                        "INSERT INTO command_comments (command, comment)                          VALUES ('git pull', 'remembered for the README example')",
+                        [],
+                )
+                .expect("insert comment");
+
+                let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+                unsafe { std::env::set_var("SMART_HISTORY_SESSION", "current"); }
+                let mut app = App::new(
+                        conn,
+                        Mode::Sess,
+                        "git".to_string(),
+                        false,
+                        ExitFilter::All,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                );
+                app.refresh();
+                unsafe {
+                        match prev_session {
+                                Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+                                None => std::env::remove_var("SMART_HISTORY_SESSION"),
+                        }
+                }
+                // Navigate to the labeled-only row.
+                app.move_selection(1);
+                // The bug: `select_for_run` would leave
+                // `self.selection = None` because
+                // `self.rows.get(idx)` returned `None`.
+                app.select_for_run();
+                let staged = app
+                        .selection
+                        .as_deref()
+                        .expect("Run on a labeled-only row must stage its command");
+                assert_eq!(staged, "git pull");
+                assert_eq!(app.pick_mode, Some(PickMode::Run));
         }
 }
