@@ -32,7 +32,7 @@ _smarthistory_precmd() {
         # back to the default location if the binary is unavailable
         # or returns nothing.
         local tmux_dir
-        tmux_dir=$(smarthistory config tmuxpaneoutputdir 2>/dev/null)
+        tmux_dir=$(smarthistory config get tmuxpaneoutputdir 2>/dev/null)
         if [ -z "$tmux_dir" ]; then
             tmux_dir="$HOME/.cache/tmux-history"
         fi

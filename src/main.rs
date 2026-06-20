@@ -169,9 +169,18 @@ enum Commands {
     /// Print the resolved value of a single configuration key. Used
     /// by the zsh precmd hook to discover the tmux pane output
     /// directory.
+    ///
+    /// Sub-commands:
+    ///
+    ///   get <key>    Print the resolved value of a single key
+    ///                (used by the zsh precmd hook).
+    ///   check        Validate ~/.config/smarthistory/config and
+    ///                exit non-zero if any problems are found.
+    ///                Prints a human-readable report on stdout.
+    ///   list         Print every known key with its resolved value.
     Config {
-        /// One of: `tmuxpaneoutputdir`, `ignorecapture`, `capturelines`.
-        key: String,
+        #[command(subcommand)]
+        action: ConfigAction,
     },
     /// Delete entries matching the given filter. With no filter, deletes
     /// every entry in the database. Prompts for confirmation unless
@@ -220,6 +229,28 @@ enum Commands {
         #[arg(short, long)]
         exit_code: i32,
     },
+}
+
+/// Sub-commands of `smarthistory config`. `Get` preserves the
+/// original `config <key>` interface (used by the zsh precmd
+/// hook). `Check` validates the config file end-to-end and exits
+/// non-zero when anything is wrong. `List` prints the full
+/// resolved configuration.
+#[derive(clap::Subcommand, Debug)]
+enum ConfigAction {
+    /// Print the resolved value of a single configuration key.
+    /// Used by the zsh precmd hook to discover the tmux pane
+    /// output directory.
+    Get {
+        /// One of: `tmuxpaneoutputdir`, `ignorecapture`, `capturelines`.
+        key: String,
+    },
+    /// Validate ~/.config/smarthistory/config and exit non-zero if
+    /// any problems are found. Prints a human-readable report on
+    /// stdout.
+    Check,
+    /// Print every known configuration key with its resolved value.
+    List,
 }
 
 fn get_db_path() -> PathBuf {
@@ -309,6 +340,318 @@ fn parse_bool(s: &str, default: bool) -> bool {
     }
 }
 
+/// Severity of a config-validation finding. `Error` entries
+/// cause `smarthistory config check` to exit non-zero. `Warning`
+/// entries are surfaced for the user's information but don't
+/// fail the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigIssueLevel {
+    Warning,
+    Error,
+}
+
+/// One row in the validation report: a level, a short category
+/// (printed as a tag), and the human-readable message.
+#[derive(Debug, Clone)]
+pub struct ConfigIssue {
+    pub level: ConfigIssueLevel,
+    pub category: String,
+    pub message: String,
+}
+
+/// Aggregate result of `validate_config`. Use `has_errors()` to
+/// decide the exit code; otherwise iterate `issues()` to print the
+/// report. Also exposes the resolved `Config` so callers can
+/// print the effective values once validation passes.
+pub struct ConfigReport {
+    cfg: Config,
+    issues: Vec<ConfigIssue>,
+    /// True when the config file at the canonical path is
+    /// absent. `issues` will contain a Warning noting that the
+    /// built-in defaults are in effect.
+    file_missing: bool,
+}
+
+impl ConfigReport {
+    pub fn has_errors(&self) -> bool {
+        self.issues
+            .iter()
+            .any(|i| i.level == ConfigIssueLevel::Error)
+    }
+
+    pub fn has_warnings(&self) -> bool {
+        self.issues
+            .iter()
+            .any(|i| i.level == ConfigIssueLevel::Warning)
+    }
+
+    pub fn issues(&self) -> &[ConfigIssue] {
+        &self.issues
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    pub fn file_missing(&self) -> bool {
+        self.file_missing
+    }
+}
+
+impl std::fmt::Display for ConfigReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Configuration report")?;
+        writeln!(f, "===================")?;
+        writeln!(f)?;
+        if self.file_missing {
+            writeln!(
+                f,
+                "  No config file at {} \u{2014} using built-in defaults.",
+                config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(unknown HOME)".into())
+            )?;
+            writeln!(f)?;
+        }
+        if self.issues.is_empty() {
+            writeln!(f, "  No issues found.")?;
+        } else {
+            let mut counts = [0usize; 2];
+            for issue in &self.issues {
+                counts[issue.level as usize] += 1;
+                let tag = match issue.level {
+                    ConfigIssueLevel::Warning => "warning",
+                    ConfigIssueLevel::Error => "  error",
+                };
+                writeln!(f, "  [{}] {}: {}", tag, issue.category, issue.message)?;
+            }
+            writeln!(f)?;
+            writeln!(
+                f,
+                "  {} error(s), {} warning(s)",
+                counts[ConfigIssueLevel::Error as usize],
+                counts[ConfigIssueLevel::Warning as usize],
+            )?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Effective values")?;
+        writeln!(f, "----------------")?;
+        print_config_list(f, &self.cfg);
+        Ok(())
+    }
+}
+
+/// Validate `~/.config/smarthistory/config`. Loads the file (so
+/// unknown keys, invalid values, and typos in `key.*` action
+/// names are all caught), then runs a battery of semantic checks
+/// (e.g. tmux pane directory exists and is writable, regex
+/// bindings parse cleanly, theme colors parse). Always returns a
+/// `ConfigReport` — callers consult `has_errors()` for the exit
+/// status.
+pub fn validate_config() -> ConfigReport {
+    let path = config_path();
+    let file_missing = match path.as_ref() {
+        Some(p) => !p.exists(),
+        None => true,
+    };
+    let cfg = Config::load();
+    let mut issues = Vec::new();
+
+    // --- File-level checks ---
+    if let Some(ref p) = path {
+        if !file_missing {
+            match std::fs::metadata(p) {
+                Ok(meta) if meta.is_dir() => {
+                    issues.push(ConfigIssue {
+                        level: ConfigIssueLevel::Error,
+                        category: "file".into(),
+                        message: format!("{} is a directory, not a file", p.display()),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => issues.push(ConfigIssue {
+                    level: ConfigIssueLevel::Error,
+                    category: "file".into(),
+                    message: format!("cannot read {}: {}", p.display(), e),
+                }),
+            }
+        }
+    } else {
+        issues.push(ConfigIssue {
+            level: ConfigIssueLevel::Warning,
+            category: "file".into(),
+            message: "HOME is not set; cannot resolve config path".into(),
+        });
+    }
+
+    // --- Key-binding collision detection ---
+    use crate::tui::ALL_ACTIONS;
+    let bindings = cfg.key_bindings();
+    let mut seen_specs: std::collections::HashMap<String, tui::Action> =
+        std::collections::HashMap::new();
+    for (action, spec) in bindings.iter() {
+        let spec_str = tui::format_key_spec(spec);
+        if let Some(prev) = seen_specs.get(&spec_str) {
+            issues.push(ConfigIssue {
+                level: ConfigIssueLevel::Warning,
+                category: "key".into(),
+                message: format!(
+                    "{:?} is bound to the same key ({}) as {:?}; only the first action wins",
+                    action,
+                    spec_str,
+                    prev
+                ),
+            });
+        } else {
+            seen_specs.insert(spec_str.clone(), action);
+        }
+    }
+
+    // --- Unknown key.* action names ---
+    if let Some(ref p) = path
+        && p.is_file()
+            && let Ok(contents) = std::fs::read_to_string(p) {
+                let known: std::collections::HashSet<&'static str> = ALL_ACTIONS
+                    .iter()
+                    .map(|a| a.config_key())
+                    .collect();
+                for raw in contents.lines() {
+                    let line = raw.split('#').next().unwrap_or("").trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let (k, _) = match line.split_once('=') {
+                        Some(kv) => kv,
+                        None => continue,
+                    };
+                    let k = k.trim();
+                    if let Some(name) = k.strip_prefix("key.")
+                        && !name.is_empty() && !known.contains(name) {
+                            issues.push(ConfigIssue {
+                                level: ConfigIssueLevel::Error,
+                                category: "key".into(),
+                                message: format!(
+                                    "unknown key action {:?}: did you mean one of {:?}?",
+                                    name,
+                                    ALL_ACTIONS
+                                        .iter()
+                                        .map(|a| a.config_key())
+                                        .collect::<Vec<_>>()
+                                ),
+                            });
+                        }
+                }
+            }
+
+    // --- tmux pane output directory checks ---
+    let dir = &cfg.tmux_pane_output_dir;
+    if dir.as_os_str().is_empty() {
+        issues.push(ConfigIssue {
+            level: ConfigIssueLevel::Error,
+            category: "tmuxpaneoutputdir".into(),
+            message: "tmuxpaneoutputdir is empty".into(),
+        });
+    } else if dir.exists() && !dir.is_dir() {
+        issues.push(ConfigIssue {
+            level: ConfigIssueLevel::Error,
+            category: "tmuxpaneoutputdir".into(),
+            message: format!("{} is not a directory", dir.display()),
+        });
+    } else if !dir.exists() {
+        issues.push(ConfigIssue {
+            level: ConfigIssueLevel::Warning,
+            category: "tmuxpaneoutputdir".into(),
+            message: format!(
+                "{} does not exist; smarthistory will create it on first use",
+                dir.display()
+            ),
+        });
+    } else {
+        // Probe for write access using a tempfile create+remove.
+        let probe = dir.join(".smarthistory-write-probe");
+        match std::fs::File::create(&probe) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(e) => issues.push(ConfigIssue {
+                level: ConfigIssueLevel::Error,
+                category: "tmuxpaneoutputdir".into(),
+                message: format!("cannot write to {}: {}", dir.display(), e),
+            }),
+        }
+    }
+
+    // --- capturelines checks ---
+    for (cmd, val) in cfg.capture_lines_per_command() {
+        if matches!(val, Some(0)) {
+            issues.push(ConfigIssue {
+                level: ConfigIssueLevel::Warning,
+                category: "capturelines".into(),
+                message: format!(
+                    "capturelines.{} = 0; use ALL instead to capture every line",
+                    cmd
+                ),
+            });
+        }
+    }
+
+    ConfigReport {
+        cfg,
+        issues,
+        file_missing,
+    }
+}
+
+/// Print every known configuration key with its resolved value.
+fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
+    let _ = writeln!(f, "  tmuxpaneoutputdir = {}", cfg.tmux_pane_output_dir.display());
+    let mut cmds: Vec<&String> = cfg.ignore_capture.iter().collect();
+    cmds.sort();
+    let _ = writeln!(
+        f,
+        "  ignorecapture = {}",
+        cmds.iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let default = match cfg.default_capture_lines {
+        Some(n) => n.to_string(),
+        None => "ALL".to_string(),
+    };
+    let _ = writeln!(f, "  capturelines = {}", default);
+    let mut per_cmd: Vec<(&String, &Option<usize>)> =
+        cfg.capture_lines_per_command().iter().collect();
+    per_cmd.sort_by(|a, b| a.0.cmp(b.0));
+    for (cmd, val) in per_cmd {
+        let v = match val {
+            Some(n) => n.to_string(),
+            None => "ALL".to_string(),
+        };
+        let _ = writeln!(f, "  capturelines.{} = {}", cmd, v);
+    }
+    let _ = writeln!(
+        f,
+        "  duplicatefilter = {}",
+        if cfg.duplicate_filter { "on" } else { "off" }
+    );
+    let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
+    use crate::tui::ALL_ACTIONS;
+    let bindings = cfg.key_bindings();
+    for a in ALL_ACTIONS {
+        if bindings.is_unbound(*a) {
+            let _ = writeln!(f, "  key.{} = none", a.config_key());
+        } else if let Some(spec) = bindings.get(*a) {
+            let _ = writeln!(
+                f,
+                "  key.{} = {}",
+                a.config_key(),
+                tui::format_key_spec(spec)
+            );
+        }
+    }
+}
+
 /// Resolved configuration. Constructed by `Config::load`.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -333,6 +676,11 @@ pub struct Config {
     /// TUI theme palette. Each field is a hex color string like
     /// `#ffaa00` or a named color (`red`, `green`, `cyan`, ...).
     theme: TuiTheme,
+    /// User-customizable TUI key bindings. Built from `key.<action>`
+    /// entries in the config file; defaults match the original
+    /// hard-coded Ctrl-* bindings.
+    #[allow(dead_code)]
+    key_bindings: tui::KeyBindings,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -406,6 +754,7 @@ impl Config {
             duplicate_filter: true,
             initial_mode: "SESS".to_string(),
             theme: TuiTheme::default(),
+            key_bindings: tui::KeyBindings::defaults(),
         }
     }
 
@@ -423,6 +772,12 @@ impl Config {
     /// Parse INI-style lines into the config. Unknown keys are
     /// ignored.
     fn parse(&mut self, contents: &str) {
+        // Side map for `key.<action>=<spec>` entries. They are
+        // collected on the fly here and applied to the binding
+        // table once the whole file has been read so a typo early
+        // in the file can't mask a later valid override.
+        let mut key_entries: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for raw_line in contents.lines() {
             let line = raw_line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -468,10 +823,19 @@ impl Config {
                                 .insert(cmd.to_string(), parse_capture_lines(value));
                         } else if let Some(field) = other.strip_prefix("tuicolor.") {
                             Self::assign_theme_field(&mut self.theme, field, value);
-                        }
+                        } else if let Some(action) = other.strip_prefix("key.")
+                            && !action.is_empty() {
+                                key_entries.insert(action.to_string(), value.to_string());
+                            }
                 }
             }
         }
+        // Apply the collected `key.*` entries on top of the
+        // defaults. `key_bindings_from_config` only overrides
+        // entries that match a known action and parses cleanly;
+        // invalid values produce a warning on stderr but don't
+        // stop the rest of the config from taking effect.
+        self.key_bindings = tui::key_bindings_from_config(&key_entries);
     }
 
     /// Look up the configured capture-line limit for a given command
@@ -483,6 +847,21 @@ impl Config {
             return val;
         }
         self.default_capture_lines
+    }
+
+    /// The per-command capture-line overrides keyed by the first
+    /// token of each command. The `Option<usize>` is `None` for
+    /// unlimited capture (the user wrote `ALL`).
+    #[allow(dead_code)]
+    pub fn capture_lines_per_command(&self) -> &std::collections::HashMap<String, Option<usize>> {
+        &self.capture_lines_per_command
+    }
+
+    /// The resolved `initialmode` value from the config file
+    /// (defaults to `SESS` when unset).
+    #[allow(dead_code)]
+    pub fn initial_mode(&self) -> &str {
+        &self.initial_mode
     }
 
     /// True if the given command is in the ignore-capture list.
@@ -577,6 +956,12 @@ impl Config {
     /// True if the user explicitly set `tuicolor.dim=`.
     pub fn has_dim_override(&self) -> bool {
         !self.theme.dim.is_empty()
+    }
+
+    /// Resolved key bindings for the TUI.
+    #[allow(dead_code)]
+    pub fn key_bindings(&self) -> &tui::KeyBindings {
+        &self.key_bindings
     }
 
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
@@ -1665,24 +2050,43 @@ fn main() -> anyhow::Result<()> {
             )?;
             store_output(&conn, history_id, &output)?;
         }
-        Commands::Config { key } => {
-            let cfg = Config::load();
-            match key.as_str() {
-                "tmuxpaneoutputdir" => println!("{}", cfg.tmux_pane_output_dir.display()),
-                "ignorecapture" => {
-                    let mut cmds: Vec<&String> = cfg.ignore_capture.iter().collect();
-                    cmds.sort();
-                    println!("{}", cmds.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
-                }
-                "capturelines" => {
-                    match cfg.default_capture_lines {
+        Commands::Config { action } => match action {
+            ConfigAction::Get { key } => {
+                let cfg = Config::load();
+                match key.as_str() {
+                    "tmuxpaneoutputdir" => println!("{}", cfg.tmux_pane_output_dir.display()),
+                    "ignorecapture" => {
+                        let mut cmds: Vec<&String> = cfg.ignore_capture.iter().collect();
+                        cmds.sort();
+                        println!(
+                            "{}",
+                            cmds.iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                    "capturelines" => match cfg.default_capture_lines {
                         Some(n) => println!("{}", n),
                         None => println!("ALL"),
-                    }
+                    },
+                    other => anyhow::bail!("unknown config key: {other}"),
                 }
-                other => anyhow::bail!("unknown config key: {other}"),
             }
-        }
+            ConfigAction::Check => {
+                let report = validate_config();
+                print!("{}", report);
+                if report.has_errors() {
+                    std::process::exit(1);
+                }
+            }
+            ConfigAction::List => {
+                let cfg = Config::load();
+                let mut out = String::new();
+                print_config_list(&mut out, &cfg);
+                print!("{}", out);
+            }
+        },
         Commands::Tui { mode, query } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:

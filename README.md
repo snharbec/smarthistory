@@ -79,6 +79,7 @@ Supported keys:
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
 | `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
+| `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -124,19 +125,43 @@ tuicolor.selection=#264f78
 # chips). Defaults to the global `bg` so the text always contrasts
 # with the bright badge background.
 tuicolor.badgefg=#0a0a0a
+
+# Remap keyboard shortcuts. The action names are documented in the
+# table above and in the in-app help overlay (Ctrl-H).
+key.open-help=M-h                # Alt+h instead of Ctrl-h
+key.cycle-theme-next=C-M-n       # Ctrl+Alt+n instead of Ctrl-n
+key.delete-selected=C-D          # uppercase variant also accepted
+key.run=Enter                    # named keys: Esc, Enter, Up, …
+key.edit-end=Right
+
+# Disable a default binding entirely by setting it to `none`
+# (also: `off`, `disable`, `-`). The action simply never fires;
+# the help overlay lists the action as `(unbound)`.
+key.delete-matching=none
 ```
 
 To inspect the resolved value of a single setting, use:
 
 ```bash
-smarthistory config tmuxpaneoutputdir
-smarthistory config ignorecapture
-smarthistory config capturelines
+smarthistory config get tmuxpaneoutputdir
+smarthistory config get ignorecapture
+smarthistory config get capturelines
 ```
 
-The zsh precmd hook calls `smarthistory config tmuxpaneoutputdir` to
-discover the tmux log directory, so changing `tmuxpaneoutputdir` in
-the config file requires no further action.
+To validate the entire config file (catch typos in `key.*` action
+names, missing directories, illegal values, key collisions), run:
+
+```bash
+smarthistory config check
+```
+
+This prints a report and exits non-zero if any errors are found.
+To print every key with its resolved value, use `smarthistory
+config list`.
+
+The zsh precmd hook calls `smarthistory config get
+tmuxpaneoutputdir` to discover the tmux log directory, so changing
+`tmuxpaneoutputdir` in the config file requires no further action.
 
 ## TMUX integration
 

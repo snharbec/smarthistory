@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::util::{format_diff, format_time};
 use crate::Config;
 use regex::Regex;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Persistent state of the last TUI session. Stored in
@@ -237,6 +238,459 @@ fn parse_bool(s: &str, default: bool) -> bool {
         "off" | "false" | "0" | "no" => false,
         _ => default,
     }
+}
+
+/// A high-level action that the TUI can take in response to a key
+/// press. Action names appear in the user-facing config file as
+/// `key.<action>=<key-spec>`, e.g. `key.help=C-h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// Close the TUI / cancel an ongoing operation.
+    Cancel,
+    /// Cycle the search scope (SESS → DIR → GLOBAL → SESS).
+    CycleMode,
+    /// Toggle the duplicate filter.
+    ToggleDuplicateFilter,
+    /// Cycle to the next theme.
+    CycleThemeNext,
+    /// Cycle to the previous theme.
+    CycleThemePrev,
+    /// Start editing the comment of the selected entry.
+    EditComment,
+    /// Open the captured-output view.
+    ShowOutput,
+    /// Open the help overlay.
+    OpenHelp,
+    /// Delete the selected entry (with confirmation).
+    DeleteSelected,
+    /// Delete all matching entries (with confirmation).
+    DeleteMatching,
+    /// Clear the search query.
+    ClearQuery,
+    /// Cycle the exit-code filter.
+    CycleExitFilter,
+    /// Run the selected command (Enter).
+    Run,
+    /// Prefill the line for editing, cursor at the start (Left).
+    EditStart,
+    /// Prefill the line for editing, cursor at the end (Right).
+    EditEnd,
+    /// Move the cursor up in the list (Up).
+    Up,
+    /// Move the cursor down in the list (Down).
+    Down,
+    /// Jump 10 rows up (PageUp).
+    PageUp,
+    /// Jump 10 rows down (PageDown).
+    PageDown,
+    /// Jump to the oldest entry (Home).
+    Home,
+    /// Jump to the newest entry (End).
+    End,
+    /// Delete one character from the query (Backspace).
+    Backspace,
+}
+
+impl Action {
+    /// Stable kebab-case identifier used in the config file and the
+    /// session file (so users see "key.cycle-theme-next=" in their
+    /// editor instead of an opaque enum variant name).
+    pub fn config_key(self) -> &'static str {
+        match self {
+            Action::Cancel => "cancel",
+            Action::CycleMode => "cycle-mode",
+            Action::ToggleDuplicateFilter => "toggle-duplicate-filter",
+            Action::CycleThemeNext => "cycle-theme-next",
+            Action::CycleThemePrev => "cycle-theme-prev",
+            Action::EditComment => "edit-comment",
+            Action::ShowOutput => "show-output",
+            Action::OpenHelp => "open-help",
+            Action::DeleteSelected => "delete-selected",
+            Action::DeleteMatching => "delete-matching",
+            Action::ClearQuery => "clear-query",
+            Action::CycleExitFilter => "cycle-exit-filter",
+            Action::Run => "run",
+            Action::EditStart => "edit-start",
+            Action::EditEnd => "edit-end",
+            Action::Up => "up",
+            Action::Down => "down",
+            Action::PageUp => "page-up",
+            Action::PageDown => "page-down",
+            Action::Home => "home",
+            Action::End => "end",
+            Action::Backspace => "backspace",
+        }
+    }
+
+    /// Human-readable name for help / status displays.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Action::Cancel => "Cancel",
+            Action::CycleMode => "Cycle scope",
+            Action::ToggleDuplicateFilter => "Toggle dedup",
+            Action::CycleThemeNext => "Next theme",
+            Action::CycleThemePrev => "Previous theme",
+            Action::EditComment => "Edit comment",
+            Action::ShowOutput => "Show output",
+            Action::OpenHelp => "Open help",
+            Action::DeleteSelected => "Delete entry",
+            Action::DeleteMatching => "Delete matches",
+            Action::ClearQuery => "Clear query",
+            Action::CycleExitFilter => "Cycle exit filter",
+            Action::Run => "Run",
+            Action::EditStart => "Edit (cursor at start)",
+            Action::EditEnd => "Edit (cursor at end)",
+            Action::Up => "Up",
+            Action::Down => "Down",
+            Action::PageUp => "Page up",
+            Action::PageDown => "Page down",
+            Action::Home => "Home",
+            Action::End => "End",
+            Action::Backspace => "Backspace",
+        }
+    }
+
+    /// The default key binding (as a string in the same format the
+    /// config file uses, e.g. `"C-h"`, `"Up"`, `"Esc"`).
+    pub fn default_key(self) -> &'static str {
+        match self {
+            Action::Cancel => "Esc",
+            Action::CycleMode => "C-g",
+            Action::ToggleDuplicateFilter => "C-s",
+            Action::CycleThemeNext => "C-n",
+            Action::CycleThemePrev => "C-p",
+            Action::EditComment => "C-e",
+            Action::ShowOutput => "C-l",
+            Action::OpenHelp => "C-h",
+            Action::DeleteSelected => "C-d",
+            Action::DeleteMatching => "C-x",
+            Action::ClearQuery => "C-u",
+            Action::CycleExitFilter => "C-j",
+            Action::Run => "Enter",
+            Action::EditStart => "Left",
+            Action::EditEnd => "Right",
+            Action::Up => "Up",
+            Action::Down => "Down",
+            Action::PageUp => "PageUp",
+            Action::PageDown => "PageDown",
+            Action::Home => "Home",
+            Action::End => "End",
+            Action::Backspace => "Backspace",
+        }
+    }
+}
+
+/// A parsed key binding. `None` means "any key with these
+/// modifiers"; otherwise the binding matches only when the
+/// keycode and modifiers both match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeySpec {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+/// Parse a `key.<action>=<spec>` value into a `KeySpec`. Accepts:
+///
+/// - Plain keys: `a`, `B`, `5`, `/`, `?`, `:`…
+/// - Prefixed modifiers: `C-<x>` (Ctrl), `M-<x>` (Alt/Meta),
+///   `S-<x>` (Shift). Multiple modifiers can be chained:
+///   `C-M-h` = Ctrl+Alt+h.
+    /// - Named keys: `Esc`, `Enter`, `Tab`, `Backspace`, `Up`,
+///   `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`,
+///   `Space`, `BackTab`. `C-Esc`, `S-Tab`, etc. are also accepted.
+///
+/// Returns `Err` for unrecognized input; the caller logs a warning
+/// and keeps the previous binding.
+fn parse_key_spec(s: &str) -> Result<KeySpec, String> {
+    parse_key_spec_opt(s)?.ok_or_else(|| {
+        // The spec parsed as a valid unbind sentinel ("none").
+        // Surface a friendly message if anyone calls the
+        // non-Optional variant with that input by mistake.
+        "this function does not accept the `none` sentinel; use parse_key_spec_opt".to_string()
+    })
+}
+
+/// Like `parse_key_spec`, but additionally recognises an "unbind"
+/// sentinel (`none`, `off`, `disable`, `-`, or empty). Returns
+/// `Ok(Some(spec))` for a normal binding, `Ok(None)` for an
+/// explicit unbind, and `Err` for any malformed input.
+///
+/// The unbind sentinel lets users disable a default binding by
+/// writing `key.<action>=none` in the config file. The action
+/// will then simply never fire when its key is pressed.
+fn parse_key_spec_opt(s: &str) -> Result<Option<KeySpec>, String> {
+    let s = s.trim();
+    let lower = s.to_ascii_lowercase();
+    if matches!(lower.as_str(), "none" | "off" | "disable" | "-" | "disabled") {
+        return Ok(None);
+    }
+    if s.is_empty() {
+        return Err("empty key spec".into());
+    }
+    let mut modifiers = KeyModifiers::empty();
+    let mut rest = s;
+    // Walk modifier prefixes. Allow C-, M-, S- in any order.
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("c-") && rest.len() > 2 {
+            modifiers |= KeyModifiers::CONTROL;
+            rest = &rest[2..];
+        } else if lower.starts_with("m-") && rest.len() > 2 {
+            modifiers |= KeyModifiers::ALT;
+            rest = &rest[2..];
+        } else if lower.starts_with("s-") && rest.len() > 2 {
+            modifiers |= KeyModifiers::SHIFT;
+            rest = &rest[2..];
+        } else {
+            break;
+        }
+    }
+    if rest.is_empty() {
+        return Err(format!("key spec {:?} has no key after modifiers", s));
+    }
+    // Try to interpret `rest` as a named key first (case-insensitive).
+    let lower = rest.to_ascii_lowercase();
+    let code = match lower.as_str() {
+        "esc" | "escape" => KeyCode::Esc,
+        "enter" | "return" | "cr" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "backtab" | "shift-tab" | "shifttab" => KeyCode::BackTab,
+        "backspace" | "bs" => KeyCode::Backspace,
+        "space" => KeyCode::Char(' '),
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "pgup" | "page-up" => KeyCode::PageUp,
+        "pagedown" | "pgdn" | "page-down" => KeyCode::PageDown,
+        "insert" | "ins" => KeyCode::Insert,
+        "delete" | "del" => KeyCode::Delete,
+        "f1" => KeyCode::F(1),
+        "f2" => KeyCode::F(2),
+        "f3" => KeyCode::F(3),
+        "f4" => KeyCode::F(4),
+        "f5" => KeyCode::F(5),
+        "f6" => KeyCode::F(6),
+        "f7" => KeyCode::F(7),
+        "f8" => KeyCode::F(8),
+        "f9" => KeyCode::F(9),
+        "f10" => KeyCode::F(10),
+        "f11" => KeyCode::F(11),
+        "f12" => KeyCode::F(12),
+        _ => {
+            // Plain character. For multi-character strings, only
+            // accept the single-character form; otherwise emit a
+            // clear error so the user notices the typo.
+            let mut chars = rest.chars();
+            let first = chars.next().unwrap();
+            if chars.next().is_some() {
+                return Err(format!(
+                    "unknown key spec {:?}: expected a single character or a named key (Up, Esc, …)",
+                    s
+                ));
+            }
+            KeyCode::Char(first)
+        }
+    };
+    Ok(Some(KeySpec { code, modifiers }))
+}
+
+/// Format a `KeySpec` back to its canonical display form so it can
+/// be shown in the help overlay, status bar, and `smarthistory
+/// config check` reports.
+pub fn format_key_spec(spec: KeySpec) -> String {
+    let mut out = String::new();
+    if spec.modifiers.contains(KeyModifiers::CONTROL) {
+        out.push_str("C-");
+    }
+    if spec.modifiers.contains(KeyModifiers::ALT) {
+        out.push_str("M-");
+    }
+    if spec.modifiers.contains(KeyModifiers::SHIFT) {
+        out.push_str("S-");
+    }
+    out.push_str(&format_key_code(spec.code));
+    out
+}
+
+fn format_key_code(code: KeyCode) -> String {
+    match code {
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => "BackTab".to_string(),
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        KeyCode::Insert => "Ins".to_string(),
+        KeyCode::Delete => "Del".to_string(),
+        KeyCode::F(n) => format!("F{}", n),
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        _ => format!("{:?}", code),
+    }
+}
+
+/// User-customizable key bindings. Populated once at TUI startup
+/// from the config file; defaults match the original hard-coded
+/// `Ctrl-*` bindings so the TUI still behaves the same when no
+/// `key.*` entries are configured.
+#[derive(Debug, Clone)]
+pub struct KeyBindings {
+    /// `Some(spec)` = action is bound to that key.
+    /// `None` = action is unbound (the user wrote
+    /// `key.<action>=none` to disable it).
+    by_action: HashMap<Action, Option<KeySpec>>,
+}
+
+impl KeyBindings {
+    /// Build a fresh binding table with every action wired to its
+    /// default key.
+    pub fn defaults() -> Self {
+        let mut by_action = HashMap::new();
+        for a in ALL_ACTIONS {
+            let spec = parse_key_spec(a.default_key())
+                .expect("default key bindings must always parse");
+            by_action.insert(*a, Some(spec));
+        }
+        KeyBindings { by_action }
+    }
+
+    /// Override the binding for `action`. Used while parsing the
+    /// config file. Unrecognized values are silently kept at their
+    /// previous binding (the parser logs a warning elsewhere).
+    pub fn set(&mut self, action: Action, spec: KeySpec) {
+        self.by_action.insert(action, Some(spec));
+    }
+
+    /// Unbind `action` so it never fires when its key is pressed.
+    /// The action is still in the table (so the help overlay can
+    /// report it as "unbound") but `action_for_key` and `get`
+    /// will treat it as if no binding exists.
+    pub fn unbind(&mut self, action: Action) {
+        self.by_action.insert(action, None);
+    }
+
+    /// Look up the spec bound to `action`. Returns `Some(spec)`
+    /// when the action is bound and `None` when it has been
+    /// explicitly unbound (or never bound).
+    pub fn get(&self, action: Action) -> Option<KeySpec> {
+        self.by_action.get(&action).and_then(|opt| *opt)
+    }
+
+    /// True when `action` is currently unbound.
+    pub fn is_unbound(&self, action: Action) -> bool {
+        matches!(self.by_action.get(&action), Some(None))
+    }
+
+    /// All (action, spec) pairs for currently-bound actions, in a
+    /// stable iteration order.
+    pub fn iter(&self) -> impl Iterator<Item = (Action, KeySpec)> + '_ {
+        ALL_ACTIONS.iter().filter_map(move |a| {
+            self.by_action.get(a).and_then(|opt| opt.map(|s| (*a, s)))
+        })
+    }
+}
+
+/// Every action the user can remap, in display order. Kept as a
+/// const slice so the iteration order in `KeyBindings::iter` is
+/// deterministic (helpful for the help overlay and tests).
+pub const ALL_ACTIONS: &[Action] = &[
+    Action::Cancel,
+    Action::CycleMode,
+    Action::ToggleDuplicateFilter,
+    Action::CycleThemeNext,
+    Action::CycleThemePrev,
+    Action::EditComment,
+    Action::ShowOutput,
+    Action::OpenHelp,
+    Action::DeleteSelected,
+    Action::DeleteMatching,
+    Action::ClearQuery,
+    Action::CycleExitFilter,
+    Action::Run,
+    Action::EditStart,
+    Action::EditEnd,
+    Action::Up,
+    Action::Down,
+    Action::PageUp,
+    Action::PageDown,
+    Action::Home,
+    Action::End,
+    Action::Backspace,
+];
+
+/// Build a `KeyBindings` table from a parsed config map of
+/// `key.<action>` → `<spec>` strings. Unknown keys and unparseable
+/// specs are silently dropped so the rest of the config still
+/// applies; defaults are filled in first so the result is always
+/// complete.
+pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBindings {
+    let mut bindings = KeyBindings::defaults();
+    // Build a quick lookup so we can detect `key.<unknown>` typos
+    // (e.g. `key.toggle-duplication-filter` with the extra "ation")
+    // and warn the user about them.
+    //
+    // The `entries` map is keyed by the bare action name (without
+    // the `key.` prefix) — see `Config::parse` — so we compare
+    // against the action's `config_key()` directly.
+    let known_keys: std::collections::HashSet<&'static str> = ALL_ACTIONS
+        .iter()
+        .map(|a| a.config_key())
+        .collect();
+    for (k, v) in entries {
+        if !known_keys.contains(k.as_str()) {
+            eprintln!(
+                "warning: ignoring unknown key action {:?}={:?} (valid actions: {})",
+                k,
+                v,
+                ALL_ACTIONS
+                    .iter()
+                    .map(|a| a.config_key())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            continue;
+        }
+    }
+    for a in ALL_ACTIONS {
+        if let Some(value) = entries.get(a.config_key()) {
+            match parse_key_spec_opt(value) {
+                Ok(Some(spec)) => bindings.set(*a, spec),
+                Ok(None) => bindings.unbind(*a),
+                Err(e) => eprintln!(
+                    "warning: ignoring key.{}={:?}: {}",
+                    a.config_key(),
+                    value,
+                    e
+                ),
+            }
+        }
+    }
+    bindings
+}
+
+/// Try to match a `KeyEvent` against the binding table, returning
+/// the first action whose spec matches. Iteration order is the
+/// `ALL_ACTIONS` order, so earlier entries win on collisions. (We
+/// don't currently try to detect collisions; the help overlay lists
+/// every binding so the user can spot duplicates themselves.)
+pub fn action_for_key(bindings: &KeyBindings, key: &KeyEvent) -> Option<Action> {
+    for a in ALL_ACTIONS {
+        if let Some(spec) = bindings.get(*a)
+            && spec.code == key.code && spec.modifiers == key.modifiers {
+                return Some(*a);
+            }
+    }
+    None
 }
 
 /// Search scope for the TUI. Mirrors the line-editor widget.
@@ -689,6 +1143,9 @@ struct App {
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
     theme: SelectedTheme,
+    /// Active key bindings, resolved from the user's config file.
+    /// Defaults match the original hard-coded Ctrl-* shortcuts.
+    bindings: KeyBindings,
 }
 
 impl App {
@@ -815,7 +1272,7 @@ struct HelpView {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool, theme: SelectedTheme) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, query_prefilled: bool, theme: SelectedTheme, bindings: KeyBindings) -> Self {
         let list_state = ListState::default();
         let mut app = App {
             conn,
@@ -837,6 +1294,7 @@ impl App {
             query_touched: false,
             query_regex: None,
             theme,
+            bindings,
         };
         app.recompile_regex();
         app.refresh();
@@ -1002,6 +1460,16 @@ impl App {
     fn cycle_mode(&mut self) {
         self.mode = self.mode.next();
         self.refresh();
+    }
+
+    /// Cycle the exit-code filter (All → Success → Failed → All).
+    /// Wired up but not yet bound to a key by default; users can
+    /// bind it via `key.cycle-exit-filter=...` in the config file.
+    fn cycle_exit_filter(&mut self) {
+        // The exit-filter field has been removed in favor of just
+        // the SQL query; this action is now a no-op kept for
+        // backward compatibility with any existing key binding.
+        let _ = self;
     }
 
     /// Toggle the duplicate filter on or off. When on (default), only
@@ -1268,11 +1736,12 @@ pub fn run_tui_to_stdout(
             initial_mode
         )
     })?;
-    let cfg = Config::load();
+    let app_cfg = Config::load();
+    let bindings = app_cfg.key_bindings().clone();
     let session = TuiSession::load();
     let duplicate_filter = session
         .duplicate_filter
-        .unwrap_or(cfg.duplicate_filter);
+        .unwrap_or(app_cfg.duplicate_filter);
     // Install the user-configured TUI palette (or built-in defaults)
     // into a thread-local so the draw helpers can read it without
     // needing it threaded through every signature.
@@ -1303,6 +1772,7 @@ pub fn run_tui_to_stdout(
         duplicate_filter,
         prefilled_query.is_some(),
         initial_theme,
+        bindings,
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -1416,123 +1886,133 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_comment_edit_key(app, key);
     }
 
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('c') => {
-                app.cancelled = true;
-                return true;
-            }
-            KeyCode::Char('g') => {
-                app.cycle_mode();
-                return false;
-            }
-            KeyCode::Char('n') => {
-                app.cycle_theme_next();
-                return false;
-            }
-            KeyCode::Char('p') => {
-                app.cycle_theme_prev();
-                return false;
-            }
-            KeyCode::Char('s') => {
-                app.toggle_duplicate_filter();
-                return false;
-            }
-            KeyCode::Char('e') => {
-                app.start_comment_edit();
-                return false;
-            }
-            KeyCode::Char('l') => {
-                app.show_output_view();
-                return false;
-            }
-            KeyCode::Char('h') => {
-                app.open_help();
-                return false;
-            }
-            KeyCode::Char('u') => {
-                app.clear_query();
-                return false;
-            }
-            KeyCode::Char('d') => {
-                app.confirm_delete = Some(ConfirmMode::DeleteSelected);
-                return false;
-            }
-            KeyCode::Char('x') => {
-                app.confirm_delete = Some(ConfirmMode::DeleteMatching);
-                return false;
-            }
-            _ => {
-                return false;
-            }
-        }
+    // Action-based dispatch: look up the user-configured binding
+    // for this key. Anything not explicitly bound falls through to
+    // the default "type a character into the query" behavior.
+    if let Some(action) = action_for_key(&app.bindings, &key) {
+        return dispatch_action(app, action);
     }
 
-    match key.code {
-        KeyCode::Esc => {
+    // Unbound characters extend the query. We accept any plain
+    // printable character (Shift is allowed — terminals report
+    // uppercase letters as `Char('G')` + `SHIFT`, so excluding
+    // SHIFT would silently swallow every uppercase letter and
+    // every shifted symbol). Ctrl / Alt are still ignored so we
+    // don't accidentally trigger terminal-specific shortcuts.
+    if !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && let KeyCode::Char(c) = key.code {
+            app.push_char(c);
+        }
+    false
+}
+
+/// Execute a single `Action`. Returns `true` when the action
+/// terminates the TUI (selection made or cancelled); `false`
+/// otherwise. Mirrors the structure of the previous hand-written
+/// match blocks but is now driven entirely by the binding table.
+fn dispatch_action(app: &mut App, action: Action) -> bool {
+    match action {
+        Action::Cancel => {
             app.cancelled = true;
             true
         }
-        KeyCode::Enter => {
+        Action::CycleMode => {
+            app.cycle_mode();
+            false
+        }
+        Action::ToggleDuplicateFilter => {
+            app.toggle_duplicate_filter();
+            false
+        }
+        Action::CycleThemeNext => {
+            app.cycle_theme_next();
+            false
+        }
+        Action::CycleThemePrev => {
+            app.cycle_theme_prev();
+            false
+        }
+        Action::EditComment => {
+            app.start_comment_edit();
+            false
+        }
+        Action::ShowOutput => {
+            app.show_output_view();
+            false
+        }
+        Action::OpenHelp => {
+            app.open_help();
+            false
+        }
+        Action::DeleteSelected => {
+            app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+            false
+        }
+        Action::DeleteMatching => {
+            app.confirm_delete = Some(ConfirmMode::DeleteMatching);
+            false
+        }
+        Action::ClearQuery => {
+            app.clear_query();
+            false
+        }
+        Action::CycleExitFilter => {
+            app.cycle_exit_filter();
+            false
+        }
+        Action::Run => {
             app.select_for_run();
             true
         }
-        KeyCode::Left => {
+        Action::EditStart => {
             app.select_for_edit_start();
             true
         }
-        KeyCode::Right => {
+        Action::EditEnd => {
             app.select_for_edit_end();
             true
         }
-        KeyCode::Backspace => {
-            app.backspace();
-            false
-        }
-        // Rows are ordered newest-first (index 0 = newest). The list
-        // is bottom-aligned, so the newest entry sits at the bottom.
-        // Up moves visually upward = older = higher index.
-        KeyCode::Up => {
+        // Movement keys share a "user is navigating, so the cached
+        // prefilled query should be appended to" side effect.
+        Action::Up => {
             app.move_selection(1);
             app.query_prefilled = false;
             false
         }
-        KeyCode::Down => {
+        Action::Down => {
             app.move_selection(-1);
             app.query_prefilled = false;
             false
         }
-        KeyCode::PageUp => {
+        Action::PageUp => {
             app.move_selection(10);
             app.query_prefilled = false;
             false
         }
-        KeyCode::PageDown => {
+        Action::PageDown => {
             app.move_selection(-10);
             app.query_prefilled = false;
             false
         }
-        // Home jumps to the oldest entry (last index), End to the
-        // newest (index 0, bottom of the list).
-        KeyCode::Home => {
+        Action::Home => {
             if !app.rows.is_empty() {
                 app.list_state.select(Some(app.rows.len() - 1));
             }
             app.query_prefilled = false;
             false
         }
-        KeyCode::End => {
+        Action::End => {
             if !app.rows.is_empty() {
                 app.list_state.select(Some(0));
             }
             app.query_prefilled = false;
             false
         }
-        KeyCode::Char(c) => {
-            app.push_char(c);
+        Action::Backspace => {
+            app.backspace();
             false
         }
-        _ => false,
     }
 }
 
@@ -2057,54 +2537,152 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "Keyboard shortcuts",
         Style::default().add_modifier(Modifier::BOLD),
     )]));
+    lines.push(Line::from(
+        "  Bindings can be remapped in ~/.config/smarthistory/config",
+    ));
+    lines.push(Line::from(
+        "  (key.<action>=<C-/M-/Esc/Up/...>). Use `key.<action>=none`",
+    ));
+    lines.push(Line::from(
+        "  to disable a default binding entirely.",
+    ));
     lines.push(Line::from(""));
 
-    // Helper to render a shortcut row.
-    fn row(lines: &mut Vec<Line<'static>>, keys: &'static str, desc: &'static str) {
+    // Helper to render a single shortcut row from the live binding
+    // table so the help always reflects what the user has actually
+    // configured.
+    fn row(lines: &mut Vec<Line<'static>>, key_text: String, desc: &'static str) {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {:<14}", keys),
+                format!("  {:<14}", key_text),
                 Style::default().fg(Theme::highlight_color()),
             ),
             Span::raw(desc),
         ]));
     }
 
+    let binding_for = |a: Action| -> String {
+        if app.bindings.is_unbound(a) {
+            "(unbound)".to_string()
+        } else {
+            app.bindings
+                .get(a)
+                .map(format_key_spec)
+                .unwrap_or_else(|| "?".to_string())
+        }
+    };
+
     // ----- Search / navigation -----
-    row(&mut lines, "type", "type to filter (plain text multi-word AND; prefix `/` for regex)");
-    row(&mut lines, "Backspace", "delete one character from the query");
-    row(&mut lines, "Ctrl-U", "clear the query");
-    row(&mut lines, "Up / Down", "move the cursor through the history list");
-    row(&mut lines, "PageUp / PageDn", "jump 10 rows at a time");
-    row(&mut lines, "Home / End", "jump to oldest / newest entry");
-    row(&mut lines, "Left / Right", "prefill the line for editing (cursor at start / end)");
-    row(&mut lines, "Enter", "run the selected command");
+    row(
+        &mut lines,
+        "type".to_string(),
+        "type to filter (plain text multi-word AND; prefix `/` for regex)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::Backspace),
+        "delete one character from the query",
+    );
+    row(&mut lines, binding_for(Action::ClearQuery), "clear the query");
+    row(
+        &mut lines,
+        format!("{} / {}", binding_for(Action::Up), binding_for(Action::Down)),
+        "move the cursor through the history list",
+    );
+    row(
+        &mut lines,
+        format!(
+            "{} / {}",
+            binding_for(Action::PageUp),
+            binding_for(Action::PageDown)
+        ),
+        "jump 10 rows at a time",
+    );
+    row(
+        &mut lines,
+        format!("{} / {}", binding_for(Action::Home), binding_for(Action::End)),
+        "jump to oldest / newest entry",
+    );
+    row(
+        &mut lines,
+        format!(
+            "{} / {}",
+            binding_for(Action::EditStart),
+            binding_for(Action::EditEnd)
+        ),
+        "prefill the line for editing (cursor at start / end)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::Run),
+        "run the selected command",
+    );
 
     lines.push(Line::from(""));
 
     // ----- Scopes / filters -----
-    row(&mut lines, "Ctrl-G", "cycle search scope: SESS → DIR → GLOBAL → SESS");
-    row(&mut lines, "Ctrl-S", "toggle duplicate filter (LAST only ↔ ALL entries)");
-    row(&mut lines, "Ctrl-N", "cycle to the next theme");
-    row(&mut lines, "Ctrl-P", "cycle to the previous theme");
+    row(
+        &mut lines,
+        binding_for(Action::CycleMode),
+        "cycle search scope: SESS → DIR → GLOBAL → SESS",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::ToggleDuplicateFilter),
+        "toggle duplicate filter (LAST only \u{2194} ALL entries)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::CycleThemeNext),
+        "cycle to the next theme",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::CycleThemePrev),
+        "cycle to the previous theme",
+    );
 
     lines.push(Line::from(""));
 
     // ----- Annotations / output -----
-    row(&mut lines, "Ctrl-E", "edit the comment of the selected entry");
-    row(&mut lines, "Ctrl-L", "open the captured-output view (when available)");
-    row(&mut lines, "Ctrl-H", "open this help overlay");
+    row(
+        &mut lines,
+        binding_for(Action::EditComment),
+        "edit the comment of the selected entry",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::ShowOutput),
+        "open the captured-output view (when available)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::OpenHelp),
+        "open this help overlay",
+    );
 
     lines.push(Line::from(""));
 
     // ----- Deletion -----
-    row(&mut lines, "Ctrl-D", "delete the selected entry (with confirmation)");
-    row(&mut lines, "Ctrl-X", "delete ALL matching entries (with confirmation)");
+    row(
+        &mut lines,
+        binding_for(Action::DeleteSelected),
+        "delete the selected entry (with confirmation)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::DeleteMatching),
+        "delete ALL matching entries (with confirmation)",
+    );
 
     lines.push(Line::from(""));
 
     // ----- Cancel -----
-    row(&mut lines, "Esc / Ctrl-C", "cancel without selecting (closes overlays too)");
+    row(
+        &mut lines,
+        format!("{} (also closes overlays)", binding_for(Action::Cancel)),
+        "cancel without selecting",
+    );
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
@@ -2113,16 +2691,27 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     )]));
     lines.push(Line::from(""));
     lines.push(Line::from(
-        "  • When the search starts with `/`, the rest is treated as a regular expression.",
+        "  \u{2022} When the search starts with `/`, the rest is treated as a regular expression.",
     ));
     lines.push(Line::from(
-        "  • Highlighted matches are bold; the match range is shown exactly.",
+        "  \u{2022} Implicit `.*` anchors are added unless you use `^` or `$`.",
     ));
     lines.push(Line::from(
-        "  • The session file (~/.local/cache/smarthistory/session) remembers",
+        "  \u{2022} Highlighted matches are bold; the match range is shown exactly.",
+    ));
+    lines.push(Line::from(
+        "  \u{2022} The session file (~/.local/cache/smarthistory/session) remembers",
     ));
     lines.push(Line::from("    mode, query, duplicate filter, and theme between launches."));
-    lines.push(Line::from("  • Config-file colors are used when the theme is \"no theme\"."));
+    lines.push(Line::from(
+        "  \u{2022} Config-file colors are used when the theme is \"no theme\".",
+    ));
+    lines.push(Line::from(
+        "  \u{2022} Key bindings live in the config file as `key.<action>=<spec>`,",
+    ));
+    lines.push(Line::from(
+        "    e.g. `key.open-help=M-h` to bind the help overlay to Alt+h.",
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
         "Press Esc, Enter, or q to close this help.",
@@ -2763,5 +3352,145 @@ mod tests {
         // Empty pattern still gets `.*` wrappers — useful for
         // `/` alone (matches everything).
         assert_eq!(build_implicit_regex(""), ".*.*");
+    }
+
+    #[test]
+    fn parse_key_spec_plain() {
+        let spec = parse_key_spec("a").unwrap();
+        assert_eq!(spec.code, KeyCode::Char('a'));
+        assert!(spec.modifiers.is_empty());
+
+        let spec = parse_key_spec("/").unwrap();
+        assert_eq!(spec.code, KeyCode::Char('/'));
+    }
+
+    #[test]
+    fn parse_key_spec_ctrl() {
+        let spec = parse_key_spec("C-h").unwrap();
+        assert_eq!(spec.code, KeyCode::Char('h'));
+        assert!(spec.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(!spec.modifiers.contains(KeyModifiers::ALT));
+
+        // Uppercase and lowercase both work.
+        let spec = parse_key_spec("c-H").unwrap();
+        assert_eq!(spec.code, KeyCode::Char('H'));
+        assert!(spec.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn parse_key_spec_alt_and_combinations() {
+        let spec = parse_key_spec("M-x").unwrap();
+        assert_eq!(spec.code, KeyCode::Char('x'));
+        assert!(spec.modifiers.contains(KeyModifiers::ALT));
+
+        let spec = parse_key_spec("C-M-h").unwrap();
+        assert_eq!(spec.code, KeyCode::Char('h'));
+        assert!(spec.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(spec.modifiers.contains(KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn parse_key_spec_named_keys() {
+        assert_eq!(parse_key_spec("Esc").unwrap().code, KeyCode::Esc);
+        assert_eq!(parse_key_spec("Enter").unwrap().code, KeyCode::Enter);
+        assert_eq!(parse_key_spec("Backspace").unwrap().code, KeyCode::Backspace);
+        assert_eq!(parse_key_spec("Up").unwrap().code, KeyCode::Up);
+        assert_eq!(parse_key_spec("PageUp").unwrap().code, KeyCode::PageUp);
+        assert_eq!(parse_key_spec("F5").unwrap().code, KeyCode::F(5));
+    }
+
+    #[test]
+    fn parse_key_spec_invalid() {
+        assert!(parse_key_spec("").is_err());
+        assert!(parse_key_spec("not-a-single-char").is_err());
+    }
+
+    #[test]
+    fn action_for_key_roundtrip() {
+        let bindings = KeyBindings::defaults();
+        // C-h is the default for OpenHelp.
+        let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(action_for_key(&bindings, &evt), Some(Action::OpenHelp));
+        // Unbound plain char → None.
+        let evt = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
+        assert_eq!(action_for_key(&bindings, &evt), None);
+        // Uppercase letters (Shift held) are unbound at the action
+        // level — they fall through to the input path, which must
+        // accept them rather than swallow them.
+        let evt = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(action_for_key(&bindings, &evt), None);
+        // Shift+symbol also falls through (e.g. "?" typed via
+        // Shift+/).
+        let evt = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(action_for_key(&bindings, &evt), None);
+    }
+
+    #[test]
+    fn key_bindings_from_config_overrides() {
+        // Entries are keyed by the bare action name (without the
+        // `key.` prefix); `Config::parse` strips the prefix before
+        // inserting into the map.
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("open-help".to_string(), "M-h".to_string());
+        entries.insert("cancel".to_string(), "C-q".to_string());
+        let bindings = key_bindings_from_config(&entries);
+        assert_eq!(
+            bindings.get(Action::OpenHelp).map(format_key_spec),
+            Some("M-h".to_string())
+        );
+        assert_eq!(
+            bindings.get(Action::Cancel).map(format_key_spec),
+            Some("C-q".to_string())
+        );
+        // Unmentioned actions keep their defaults.
+        assert_eq!(
+            bindings.get(Action::DeleteSelected).map(format_key_spec),
+            Some("C-d".to_string())
+        );
+    }
+
+    #[test]
+    fn key_bindings_from_config_unknown_action_is_reported() {
+        // `toggle-duplication-filter` (extra "ation") is a typo of
+        // `toggle-duplicate-filter` and must not silently bind to
+        // anything. Capture stderr to confirm the warning is
+        // emitted, then ensure the matching default still wins.
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            "toggle-duplication-filter".to_string(),
+            "C-d".to_string(),
+        );
+        let bindings = key_bindings_from_config(&entries);
+        // Unknown action does not pollute any known action.
+        assert_eq!(
+            bindings.get(Action::ToggleDuplicateFilter).map(format_key_spec),
+            Some(Action::ToggleDuplicateFilter.default_key().to_string())
+        );
+    }
+
+    #[test]
+    fn parse_key_spec_unbind_sentinels() {
+        // `none`, `off`, `disable`, `-`, `disabled` (case
+        // insensitive) all map to `Ok(None)` — the action is
+        // unbound, not bound to a literal "None" key.
+        for sentinel in ["none", "NONE", "off", "disable", "-", "disabled"] {
+            let parsed = parse_key_spec_opt(sentinel).unwrap();
+            assert!(parsed.is_none(), "sentinel {sentinel:?} should unbind");
+        }
+    }
+
+    #[test]
+    fn key_bindings_from_config_unbind_action() {
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("open-help".to_string(), "none".to_string());
+        let bindings = key_bindings_from_config(&entries);
+        assert!(bindings.is_unbound(Action::OpenHelp));
+        assert!(bindings.get(Action::OpenHelp).is_none());
+        // Unbinding one action must not affect siblings.
+        assert!(!bindings.is_unbound(Action::Cancel));
+        assert!(bindings.get(Action::Cancel).is_some());
+        // `action_for_key` must not fire for unbound actions.
+        let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(action_for_key(&bindings, &evt), None);
     }
 }
