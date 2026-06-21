@@ -366,7 +366,7 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         "type".to_string(),
-        "type to filter (plain text multi-word AND; prefix `/` for regex)",
+        "type to filter (plain text multi-word AND; prefix `/` for regex, `?` for fuzzy, `=` for LLM command generation)",
     );
     row(
         &mut lines,
@@ -377,6 +377,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         binding_for(Action::ClearQuery),
         "clear the query",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::ToggleSearchMode),
+        "cycle search mode: plain → regex (`/`) → fuzzy (`?`) → plain",
     );
     row(
         &mut lines,
@@ -925,6 +930,15 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Some(exit_filter_badge(app.exit_filter))
     };
+    // Same logic for the LLM chip: it's only useful when the
+    // user has typed `=...` to ask the LLM to generate a
+    // command. Showing it always would add visual noise
+    // similar to the exit-filter chip above.
+    let llm_chip = if app.is_llm_query() {
+        Some(llm_mode_badge(app.llm.is_some()))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -934,6 +948,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         duplicate_filter_badge(app.duplicate_filter),
     ];
     if let Some(chip) = exit_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = llm_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -978,6 +996,28 @@ fn exit_filter_badge(filter: ExitFilter) -> Span<'static> {
     };
     Span::styled(
         format!(" {} ", label),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(color)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The LLM-mode chip. Tinted magenta when ollama is configured
+/// (the user can press Enter and expect a generated command);
+/// tinted red when the query starts with `=` but ollama isn't
+/// configured (Enter will surface a "not configured" status
+/// instead of generating a command). The colour difference is
+/// a small affordance — the user would otherwise have to press
+/// Enter to learn the feature is unavailable.
+fn llm_mode_badge(configured: bool) -> Span<'static> {
+    let color = if configured {
+        Theme::accent_color()
+    } else {
+        Theme::error_color()
+    };
+    Span::styled(
+        " LLM ".to_string(),
         Style::default()
             .fg(Theme::badge_fg_color())
             .bg(color)
@@ -1118,11 +1158,20 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     let age = format_diff(row.timestamp);
     let age_padded = format!("{:>age_width$}", age);
 
-    let exit_marker = if row.exit_code == 0 { "✓" } else { "✗" };
-    let exit_style = if row.exit_code == 0 {
-        Theme::success()
+    // The LLM preview row has `exit_code == -1` (the
+    // "never executed" sentinel) and a negative `id`.
+    // We render it with a distinctive `~` marker and the
+    // accent color so the user can tell at a glance that
+    // this is a suggestion, not a command they've already
+    // run. The `✓`/`✗` markers mean success/failure and
+    // would be misleading for a command that hasn't been
+    // executed yet.
+    let (exit_marker, exit_style) = if row.id < 0 {
+        ("~", Theme::accent())
+    } else if row.exit_code == 0 {
+        ("✓", Theme::success())
     } else {
-        Theme::error()
+        ("✗", Theme::error())
     };
 
     // Capture indicator. A bright `o ` shows the row has captured
@@ -1139,8 +1188,31 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         Span::styled(" . ", Theme::dim())
     };
 
+    // LLM preview marker. The synthetic row the
+    // auto-call produces is identified by a negative
+    // `id` (real history ids are positive). We mark it
+    // with a short `[LLM]` tag in the accent color so
+    // the user can tell at a glance that this isn't a
+    // command they've actually run — it's a
+    // suggestion. The exit marker is suppressed for
+    // preview rows (the `✓`/`✗` would be misleading
+    // because the command hasn't been executed yet;
+    // its `exit_code` is the `-1` sentinel).
+    let is_llm_preview = row.id < 0;
+    let llm_preview_span = if is_llm_preview {
+        Span::styled(
+            " [LLM] ",
+            Style::default()
+                .fg(Theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("")
+    };
+
     let mut spans = vec![
         capture_span,
+        llm_preview_span,
         Span::styled(format!(" {} ", age_padded), Theme::accent()),
         Span::raw(" "),
         Span::styled(format!(" {} ", exit_marker), exit_style),
@@ -1408,11 +1480,21 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let is_regex = app.is_regex_query();
+    let _is_fuzzy = app.is_fuzzy_query();
+    let is_llm = app.is_llm_query();
     let (prompt, title, content) = match app.comment_edit {
         Some(ref buf) => ("comment> ", " comment ", buf.as_str()),
         None => {
             if is_regex {
                 ("/", " regex ", app.query.as_str())
+            } else if is_llm {
+                // LLM mode is signalled by both a dedicated
+                // prefix and a dedicated title in the input
+                // border, mirroring the yellow `regex` and
+                // green `fuzzy` tints. Using a different colour
+                // (warning = yellow) keeps the visual signal
+                // distinct from the other two modes.
+                ("=", " LLM ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -1430,6 +1512,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .title(title)
             .title_style(if is_regex {
                 Style::default().fg(Theme::warning_color())
+            } else if is_llm {
+                // Match the LLM-mode chip in the mode strip:
+                // magenta-tinted accent.
+                Style::default().fg(Theme::accent_color())
             } else {
                 Theme::accent()
             })
@@ -1437,6 +1523,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::warning_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())
+            } else if is_llm {
+                Style::default().fg(Theme::accent_color())
             } else {
                 Theme::dim()
             })
@@ -1445,11 +1533,24 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     .wrap(Wrap { trim: false });
     f.render_widget(input, area);
 
-    // Place the cursor at the end of the active buffer.
-    // The visible text starts at area.x + 1 (one cell for the left
-    // border). The prompt string includes its own trailing space.
+    // Place the cursor at the current `query_cursor`
+    // position. For non-LLM query modes the cursor is
+    // always at the end (the input loop ignores Left/Right
+    // in those modes), so the visual position is the same
+    // as the historical "end of buffer" placement. For LLM
+    // mode the user can move the cursor with Left/Right and
+    // it follows the typed text. The visible position is
+    // computed in *characters* — the same unit
+    // `query_cursor` uses — to stay aligned with the
+    // rendered glyphs, regardless of how many bytes each
+    // character takes in UTF-8.
+    //
+    // The visible text starts at `area.x + 1` (one cell for
+    // the left border). The prompt string includes its own
+    // trailing space, so the cursor lands one cell after
+    // the prompt and `query_cursor` cells into the buffer.
     let prompt_width = prompt.chars().count() as u16;
-    let cursor_x = area.x + 1 + prompt_width + content.chars().count() as u16;
+    let cursor_x = area.x + 1 + prompt_width + app.query_cursor as u16;
     let cursor_y = area.y + 1;
     f.set_cursor_position((
         cursor_x.min(area.x.saturating_add(area.width).saturating_sub(2)),

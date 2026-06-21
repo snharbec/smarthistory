@@ -211,6 +211,26 @@ fn truncate_for_status(s: &str, max: usize) -> String {
     out
 }
 
+/// Convert a character index to the corresponding byte index in
+/// `s`. Used by the query-field cursor logic, which tracks
+/// positions in *characters* (so multi-byte UTF-8 input like
+/// `é` or `→` is counted as one cursor step, not two) but
+/// `String::insert` / `String::remove` operate on bytes.
+///
+/// The `char_idx` is clamped to the actual number of chars in
+/// `s` so callers that compute a stale cursor position (e.g.
+/// the user pressed Left from the very beginning) get a
+/// well-defined "insert at end" or "delete at end" instead
+/// of a panic. We always return a valid `String::char_indices`
+/// offset, which the standard library accepts as a `usize`
+/// byte index.
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or_else(|| s.len())
+}
+
 /// Tokenize a command line into shell-quote-aware tokens.
 ///
 /// Returns one entry per whitespace-separated word, with
@@ -451,6 +471,26 @@ struct App {
     /// deleted, or cleared). After this point, additional input
     /// appends normally — even if the buffer is later emptied.
     query_touched: bool,
+    /// Byte offset in `self.query` where the next character is
+    /// inserted and the previous character is deleted. The
+    /// input field draws the terminal cursor at this position
+    /// (see `draw_input` in `render.rs`).
+    ///
+    /// For non-LLM query modes (plain, regex, fuzzy) the cursor
+    /// sits at the end of the buffer — the user can only append
+    /// or backspace, never move within the field. This matches
+    /// the long-standing behaviour of those modes and avoids
+    /// the visual noise of a cursor when the user isn't editing.
+    ///
+    /// For LLM queries (`=...`) the cursor is editable: pressing
+    /// `Left` / `Right` (the keys normally bound to
+    /// `EditStart` / `EditEnd`) move it within the buffer so
+    /// the user can reword the description before pressing
+    /// `Enter` to regenerate. The cursor is initialized to
+    /// `self.query.len()` whenever the query enters LLM mode
+    /// (or whenever a new LLM query is pre-filled) so typing
+    /// appends naturally; Left/Right can then move it.
+    query_cursor: usize,
     /// Compiled regex when the query starts with `/`. `None` when
     /// the query is plain text, the query is empty, or the regex
     /// failed to compile (in which case we silently fall back to
@@ -468,7 +508,64 @@ struct App {
     /// message is fresh; cleared after a short delay by
     /// `tick_status_message()`.
     status_message: Option<(String, std::time::Instant)>,
+    /// LLM client for the `=...` query mode. `None` means the
+    /// feature is not configured; the TUI surfaces a clear
+    /// status message instead of attempting the call. We hold
+    /// the client as a trait object so tests can inject a
+    /// canned-response implementation without spinning up a
+    /// real ollama server.
+    llm: Option<Box<dyn crate::llm::LlmClient>>,
+    /// Timestamp of the most recent keystroke that touched
+    /// the query in LLM mode. `None` when the debounce is
+    /// satisfied (i.e. an auto-call has been issued and the
+    /// user hasn't typed since) or when we're not in LLM
+    /// mode. The run-loop tick uses
+    /// `llm_debounce_started.elapsed()` to decide when to
+    /// fire the next preview call.
+    ///
+    /// See [`App::llm_maybe_autocall`] for the full lifecycle.
+    llm_debounce_started: Option<std::time::Instant>,
+    /// Last LLM response staged as a virtual preview row in
+    /// the history list. `Some` while the debounce has fired
+    /// and the user hasn't typed since; the row is appended
+    /// to the merged view (see [`App::llm_preview_row`]) so
+    /// the user can see the proposed command without
+    /// committing to running it.
+    ///
+    /// The preview row uses a synthetic `id` of `-1` (real
+    /// history ids are positive) and an `exit_code` of `-1`
+    /// (the same sentinel used by [`App::run_llm_query`]
+    /// when it first inserts a generated command).
+    llm_preview: Option<HistoryRow>,
+    /// `true` while a background LLM call is in flight. The
+    /// debounce timer is paused while a call is in flight;
+    /// when the call returns, the debounce is reset to
+    /// "satisfied" so the user can keep typing without
+    /// re-firing the call on every keystroke. We do NOT
+    /// re-fire on the result of a stale description (e.g.
+    /// the user kept typing while the call was in flight)
+    /// — only the next pause-and-restart cycle does that.
+    llm_in_flight: bool,
+    /// The description string the most-recent preview
+    /// corresponds to. Compared to the live
+    /// `self.query[1..]` to decide whether the preview is
+    /// still relevant. When the user keeps typing while a
+    /// call is in flight, the returned preview's
+    /// `description` no longer matches the live description
+    /// and we discard the stale preview rather than showing
+    /// the user a suggestion for a query they no longer
+    /// have.
+    llm_preview_description: Option<String>,
 }
+
+/// How long the LLM auto-call waits after the last keystroke
+/// before firing. Tuned to the "user is composing a thought"
+/// rhythm: long enough that the model isn't re-queried on
+/// every character of a long description, short enough that
+/// the user sees the suggestion before they have to look up
+/// to the status bar. 1 second is the value the user asked
+/// for in the spec.
+const LLM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl App {
     /// True if the current query is a regex (prefixed with `/`).
@@ -479,6 +576,17 @@ impl App {
     /// True if the current query is a fuzzy search (prefixed with `?`).
     fn is_fuzzy_query(&self) -> bool {
         self.query.starts_with('?')
+    }
+
+    /// True if the current query is an LLM command-generation
+    /// request (prefixed with `=`). When this returns true, the
+    /// normal "select a row to run" path is short-circuited;
+    /// the natural-language description after the `=` is sent to
+    /// the configured ollama instance, and the response is
+    /// inserted into the history as a new row and staged for
+    /// execution.
+    fn is_llm_query(&self) -> bool {
+        self.query.starts_with('=')
     }
 
     /// The regex pattern, i.e. everything after the leading `/`.
@@ -584,6 +692,210 @@ impl App {
             s
         };
         self.recompile_regex();
+        // The query text changed (the prefix was replaced or
+        // stripped). Reset the cursor to the new end so the
+        // next character appends naturally; the user can
+        // re-position it with Left/Right if they're now in
+        // LLM mode.
+        self.query_cursor = self.query.chars().count();
+        self.refresh();
+        // A mode-prefix change is also a user edit of the
+        // query — the debounce and the previously-suggested
+        // preview are now stale. Re-arm or clear so the
+        // auto-call cycle restarts cleanly.
+        self.llm_touch();
+    }
+
+    /// Re-arm the LLM auto-call debounce and discard any
+    /// in-flight preview that no longer matches the live
+    /// description. Called from every user-edit path
+    /// (`push_char`, `backspace`, `clear_query`,
+    /// `set_search_mode_prefix`).
+    ///
+    /// Lifecycle:
+    /// - When the query is an LLM query, we set
+    ///   `llm_debounce_started = Some(Instant::now())` so
+    ///   the run-loop tick can count down to a fresh
+    ///   `LLM_DEBOUNCE` window. We also clear any existing
+    ///   preview so the user doesn't see a stale suggestion
+    ///   for a description they no longer have.
+    /// - When the query is NOT an LLM query, we clear
+    ///   everything: the debounce, the preview, the
+    ///   in-flight flag, and the description we last
+    ///   fired on. The user has left LLM mode entirely;
+    ///   there's nothing for the auto-call path to do
+    ///   until they return.
+    ///
+    /// The function is infallible and never blocks — the
+    /// actual HTTP call is deferred to
+    /// [`App::llm_maybe_autocall`], which runs on the
+    /// run-loop tick.
+    fn llm_touch(&mut self) {
+        if self.is_llm_query() {
+            self.llm_debounce_started = Some(std::time::Instant::now());
+            // The user has just edited the description.
+            // Any previously-shown preview is now stale:
+            // the next auto-call will overwrite it. We
+            // also discard the in-flight flag so the
+            // returned preview (if any arrives after
+            // this point) is checked against the new
+            // description.
+            if self.llm_preview.is_some() {
+                self.llm_preview = None;
+                self.llm_preview_description = None;
+                // Re-render with the preview removed.
+                self.refresh();
+            }
+        } else {
+            // The user has left LLM mode (e.g. backspaced
+            // the `=` or replaced the query entirely). Reset
+            // all debounce state so the next LLM session
+            // starts from a clean slate.
+            self.llm_debounce_started = None;
+            self.llm_in_flight = false;
+            self.llm_preview = None;
+            self.llm_preview_description = None;
+        }
+    }
+
+    /// Construct the virtual preview row used to display the
+    /// most-recent auto-call result. Returns `None` when no
+    /// preview is active. Called from
+    /// [`App::build_merged_rows`] so the preview appears at
+    /// the top of the merged list (newest-first) while the
+    /// user is composing the LLM query.
+    ///
+    /// The synthetic row uses:
+    /// - `id = -1` (real history ids are positive — the
+    ///   negative value lets render code mark the row as a
+    ///   preview without a separate boolean field).
+    /// - `command = <LLM response>`.
+    /// - `comment = <user's original description>` so the
+    ///   preview is self-documenting: the user sees both
+    ///   the proposed command AND the description that
+    ///   generated it.
+    /// - `exit_code = -1` (the same sentinel used for
+    ///   newly-inserted LLM-generated rows; signals
+    ///   "never executed" to render code).
+    /// - `timestamp = now` so the preview sorts at the very
+    ///   top of the merged list.
+    fn llm_preview_row(&self) -> Option<HistoryRow> {
+        self.llm_preview.clone()
+    }
+
+    /// Drive the LLM auto-call debounce. Called from the
+    /// run-loop tick (every ~100ms when no input is
+    /// available). Fires a single LLM call when all of the
+    /// following are true:
+    ///
+    /// 1. The query is an LLM query (`=` prefix).
+    /// 2. The description is non-empty (no point calling
+    ///    the model for "=").
+    /// 3. A debounce timer is armed and at least
+    ///    [`LLM_DEBOUNCE`] has elapsed since the last
+    ///    `llm_touch`.
+    /// 4. No LLM call is currently in flight.
+    /// 5. The LLM client is configured.
+    /// 6. The live description differs from the
+    ///    description the last preview was generated for
+    ///    (avoids re-firing the same call repeatedly when
+    ///    the user pauses but the suggestion is already on
+    ///    screen).
+    ///
+    /// Returns immediately when the conditions aren't met.
+    /// The actual HTTP call is synchronous (matches the
+    /// existing `run_llm_query` semantics) but bounded by
+    /// the same 30s timeout the explicit-call path uses.
+    fn llm_maybe_autocall(&mut self) {
+        if !self.is_llm_query() {
+            return;
+        }
+        let description = self.query[1..].trim().to_string();
+        if description.is_empty() {
+            return;
+        }
+        // No client configured. The user is composing an
+        // LLM query without having set `ollama.url` /
+        // `ollama.model` — we silently do nothing on the
+        // auto-call path. The status-message they get when
+        // they press Enter (via `run_llm_query`) is
+        // sufficient feedback.
+        if self.llm.is_none() {
+            return;
+        }
+        // Already firing; let the current call complete.
+        if self.llm_in_flight {
+            return;
+        }
+        // Debounce window hasn't elapsed yet.
+        let Some(started) = self.llm_debounce_started else {
+            return;
+        };
+        if started.elapsed() < LLM_DEBOUNCE {
+            return;
+        }
+        // Already have a fresh preview for this exact
+        // description — don't fire a second call until
+        // the user actually changes something.
+        if self.llm_preview_description.as_deref() == Some(&description) {
+            return;
+        }
+        // All conditions met: arm the in-flight flag,
+        // capture the description for the response-check
+        // path, and fire the call. The debounce is left
+        // armed (not cleared) so a failed call doesn't
+        // immediately re-fire; the next keystroke will
+        // reset it.
+        self.llm_in_flight = true;
+        self.llm_debounce_started = Some(std::time::Instant::now());
+        let fired_description = description.clone();
+        let Some(llm) = self.llm.as_deref() else {
+            self.llm_in_flight = false;
+            return;
+        };
+        let raw = match llm.generate(&fired_description) {
+            Ok(s) => s,
+            Err(_) => {
+                // Errors during auto-call are silent: the
+                // explicit Run path will show a status
+                // message if the user presses Enter. The
+                // auto-call is best-effort and shouldn't
+                // crowd the status bar on every typo.
+                self.llm_in_flight = false;
+                return;
+            }
+        };
+        let Some(command) = crate::llm::sanitize_command(&raw) else {
+            // LLM didn't produce a usable command. Same
+            // silent-on-auto-call policy as a transport
+            // error: the user will see feedback when they
+            // press Enter.
+            self.llm_in_flight = false;
+            return;
+        };
+        // Build the synthetic preview row. The id is a
+        // negative sentinel so render code can mark it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let preview = HistoryRow {
+            id: -1,
+            command,
+            directory: std::env::var("PWD").unwrap_or_default(),
+            session_id: std::env::var("SMART_HISTORY_SESSION").unwrap_or_default(),
+            exit_code: -1,
+            timestamp: now,
+            comment: fired_description.clone(),
+            output: String::new(),
+        };
+        self.llm_preview = Some(preview);
+        self.llm_preview_description = Some(fired_description);
+        self.llm_in_flight = false;
+        // Re-render so the preview appears in the list
+        // immediately. The next tick will see the
+        // preview-description matches the live description
+        // and skip the re-fire path.
         self.refresh();
     }
 
@@ -744,7 +1056,13 @@ impl CommandMenu {
 }
 
 impl App {
-    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, exit_filter: ExitFilter, query_prefilled: bool, theme: SelectedTheme, bindings: KeyBindings) -> Self {
+    fn new(conn: Connection, initial_mode: Mode, initial_query: String, duplicate_filter: bool, exit_filter: ExitFilter, query_prefilled: bool, theme: SelectedTheme, bindings: KeyBindings, llm: Option<Box<dyn crate::llm::LlmClient>>) -> Self {
+        // Capture the character-aligned initial cursor
+        // position BEFORE moving `initial_query` into the
+        // struct. We use the character count (not the byte
+        // length) so the index is stable for multi-byte UTF-8
+        // input.
+        let initial_cursor = initial_query.chars().count();
         let list_state = ListState::default();
         let mut app = App {
             conn,
@@ -771,10 +1089,26 @@ impl App {
             merged_rows: Vec::new(),
             query_prefilled,
             query_touched: false,
+            // Start the cursor at the end of the query so the
+            // initial character appends naturally. The user can
+            // re-position it with Left/Right once the query is
+            // in LLM mode; for non-LLM modes the cursor is
+            // ignored by the input loop and stays at the end.
+            query_cursor: initial_cursor,
             query_regex: None,
             theme,
             bindings,
             status_message: None,
+            llm,
+            // LLM debounce state. The user hasn't typed
+            // anything yet (we're at construction time), so
+            // the debounce is satisfied and no preview is
+            // active. The run-loop tick will arm the
+            // debounce on the first keystroke in LLM mode.
+            llm_debounce_started: None,
+            llm_preview: None,
+            llm_in_flight: false,
+            llm_preview_description: None,
         };
         app.recompile_regex();
         app.refresh();
@@ -878,6 +1212,29 @@ impl App {
                 }
                 merged.push(row.clone());
             }
+        }
+        // The LLM preview row, when active, is inserted at
+        // the FRONT of the merged list (newest first). We
+        // only show it in LLM mode — the user's typing a
+        // description and the suggestion is the most
+        // relevant thing to look at. The synthetic `id = -1`
+        // is excluded from the dedup pass below so the
+        // duplicate filter doesn't accidentally keep only
+        // the preview (or worse, drop it) when a real row
+        // shares the command.
+        //
+        // We push the preview at the end and let the
+        // timestamp-DESC sort (below) bring it to the top;
+        // its `timestamp` is set to `now` in
+        // `llm_maybe_autocall`, so it always sorts first.
+        // In Stats mode the sort is suppressed, but stats
+        // mode never sees the LLM preview (the user
+        // wouldn't be composing a description there), and
+        // we already gate this on `is_llm_query()`.
+        if self.is_llm_query()
+            && let Some(preview) = self.llm_preview_row()
+        {
+            merged.push(preview);
         }
         // Only re-sort when the primary list is in timestamp-DESC
         // order. Stats mode uses a frequency-aware ordering from
@@ -1060,7 +1417,13 @@ impl App {
         // `refresh()` via `query_matches_text`. Otherwise we issue
         // one `LIKE` clause per whitespace-separated word so the
         // search is AND-by-word.
-        if !self.query.is_empty() && !self.is_regex_query() && !self.is_fuzzy_query() {
+        // LLM queries (`=...`) are also a "the user wants a
+        // generated command, not a filtered list" signal: we
+        // short-circuit before the row is even inserted, and
+        // when refresh() runs after the LLM wrote the row we
+        // don't want to filter it out by the original `=Find
+        // all files modified yesterday` substring.
+        if !self.query.is_empty() && !self.is_regex_query() && !self.is_fuzzy_query() && !self.is_llm_query() {
             for word in self.query.split_whitespace() {
                 let escaped = crate::util::escape_like(word);
                 clause.push_str(
@@ -1163,11 +1526,175 @@ fn move_selection(&mut self, delta: isize) {
 }
 
     fn select_for_run(&mut self) {
+        // `=...` queries are an LLM command-generation request,
+        // not a row selection. Short-circuit before any row
+        // lookup: there *is* no meaningful selected row when
+        // the user is composing a natural-language description.
+        if self.is_llm_query() {
+            self.run_llm_query();
+            return;
+        }
         if let Some(row) = self.selected_row() {
             self.selection = Some(row.command.clone());
             self.pick_mode = Some(PickMode::Run);
         }
     }
+
+    /// Handle a `=...` query by sending the natural-language
+    /// description to the configured ollama instance, sanitizing
+    /// the response, and staging the resulting command for
+    /// execution. The new command is also written to the
+    /// `history` table so it shows up in subsequent searches;
+    /// the user's original description is stored as the
+    /// row's comment so the row is self-documenting.
+    ///
+    /// This blocks the TUI's main loop for the duration of the
+    /// HTTP call (typically 1-5 seconds for a local 7B model,
+    /// bounded by a 30-second timeout in `OllamaClient`). The
+    /// user explicitly asked for this mode and accepted the
+    /// freeze; a future async refactor could keep the TUI
+    /// responsive while the call is in flight.
+    fn run_llm_query(&mut self) {
+        // Step 1: extract the description (everything after the
+        // leading `=`). The leading char may be a multi-byte
+        // UTF-8 sequence in theory; `=` is ASCII so this is
+        // safe.
+        let description = self.query[1..].trim();
+        if description.is_empty() {
+            self.set_status_message("LLM: provide a description after `=`".to_string());
+            return;
+        }
+        // Step 2: bail out cleanly if the LLM isn't configured.
+        // We surface a specific, actionable error so the user
+        // knows to edit their config file.
+        let Some(llm) = &self.llm else {
+            self.set_status_message(crate::llm::LlmError::NotConfigured.to_string());
+            return;
+        };
+        // Step 2.5: fast-path. The auto-call debounce may
+        // have already generated a preview for this exact
+        // description (`llm_maybe_autocall`). Reuse the
+        // preview's command directly — no second HTTP
+        // round-trip needed, no second 1–5s freeze of the
+        // TUI. This is the whole point of the
+        // "pause-and-show" UX the user asked for: by the
+        // time they press Enter, the suggestion is already
+        // on screen, and Enter just commits it.
+        //
+        // We require the preview to match the *trimmed*
+        // description (matching what we send to the LLM)
+        // and to be younger than the most recent keystroke
+        // (`llm_debounce_started`). The second check is a
+        // belt-and-suspenders guard: if the user typed
+        // after the preview was generated, the description
+        // is no longer equal, so the first check catches
+        // it. The timestamp guard documents the
+        // intent and protects against future refactors
+        // that might short-circuit the equality check.
+        if let (Some(preview), Some(preview_desc), Some(started)) = (
+            self.llm_preview.as_ref(),
+            self.llm_preview_description.as_ref(),
+            self.llm_debounce_started,
+        ) && preview_desc.as_str() == description
+        && started.elapsed() < LLM_DEBOUNCE * 5
+        {
+            // The preview was generated within the last
+            // 5 debounce windows, so it's recent enough
+            // to trust. Skip the HTTP call and stage the
+            // previewed command directly. `stage_llm_command`
+            // still inserts the row into history so the
+            // command is available for future searches;
+            // the preview row is virtual and was never
+            // persisted.
+            self.stage_llm_command(preview.command.clone(), description.to_string());
+            return;
+        }
+        // Step 3: call the LLM. The HTTP call freezes the TUI;
+        // there's no progress indicator because the underlying
+        // ollama API is request/response (no streaming). 30s
+        // timeout in `OllamaClient` bounds the worst case.
+        let raw = match llm.generate(description) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status_message(e.to_string());
+                return;
+            }
+        };
+        // Step 4: extract a clean command from the LLM's likely
+        // messy response (markdown fences, preambles, etc.).
+        let command = match crate::llm::sanitize_command(&raw) {
+            Some(c) => c,
+            None => {
+                self.set_status_message(crate::llm::LlmError::NoCommand.to_string());
+                return;
+            }
+        };
+        // Step 5: insert the new command into history with the
+        // description as the comment, and stage it for the
+        // parent shell to run. Extracted to a shared helper
+        // (`stage_llm_command`) so the fast-path that reuses
+        // an existing preview can call the same code without
+        // duplicating the SQL.
+        self.stage_llm_command(command, description.to_string());
+    }
+
+    /// Persist `command` to the history table (with
+    /// `description` as the comment) and stage it as the
+    /// next "selection" the parent shell will run. Shared
+    /// between the slow path (explicit LLM call from
+    /// `run_llm_query`) and the fast path (preview reuse
+    /// from the same method).
+    ///
+    /// On any DB error we surface a status message and
+    /// leave the selection unset so the TUI doesn't exit
+    /// with a half-staged command.
+    fn stage_llm_command(&mut self, command: String, description: String) {
+        // Step 5: insert the new command into history with the
+        // description as the comment. We mirror the zsh hook's
+        // upsert semantics (refresh timestamp on conflict) so
+        // repeated generations don't accumulate duplicate rows.
+        // The exit code is set to a sentinel `-1` (never run)
+        // because the LLM-generated command hasn't been
+        // executed yet — there's no real exit code to record.
+        // Using `NULL` would also work in the schema, but the
+        // existing `fetch()` helper reads `exit_code` with
+        // `row.get(4)?` which fails on NULL. Keeping the
+        // column NOT-NULL simplifies the rest of the code.
+        let directory = std::env::var("PWD").unwrap_or_default();
+        let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
+        let insert_result: anyhow::Result<()> = (|| {
+            self.conn.execute(
+                "INSERT INTO history (command, directory, session_id, exit_code) \
+                 VALUES (?1, ?2, ?3, -1) \
+                 ON CONFLICT (command, directory, session_id) DO UPDATE \
+                 SET timestamp = (strftime('%s', 'now'))",
+                params![command, directory, session_id],
+            )?;
+            self.conn.execute(
+                "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                 ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                params![command, description],
+            )?;
+            Ok(())
+        })();
+        if let Err(e) = insert_result {
+            self.set_status_message(format!("LLM: history insert failed: {}", e));
+            return;
+        }
+        // Step 6: stage the command for the parent shell to
+        // run, mirroring what `select_for_run` does for a
+        // normal row. The dispatcher's
+        // `app.selection.is_some()` check returns `true`,
+        // the TUI exits, and the shell runs the LLM's
+        // command. The status message is set for the user's
+        // confirmation before the TUI tears down; it may
+        // not be visible for long, but it goes into the
+        // scrollback if anything stays on screen.
+        self.selection = Some(command.clone());
+        self.pick_mode = Some(PickMode::Run);
+        self.set_status_message(format!("LLM: {}", command));
+    }
+
 
     /// Stage an external editor invocation as the next "selection".
     /// The TUI prints the command on stdout and exits with the Run
@@ -1182,6 +1709,27 @@ fn move_selection(&mut self, delta: isize) {
     }
 
     fn select_for_edit_start(&mut self) {
+        // When the query is an LLM command-generation
+        // request (`=...`), the Left/Right keys (which the
+        // user normally binds to `EditStart`/`EditEnd`) are
+        // repurposed to position the cursor inside the
+        // description rather than to stage a row. The LLM
+        // path doesn't have a meaningful "selected row" —
+        // the user is composing a prompt, not picking from
+        // history.
+        //
+        // Character-by-character navigation: pressing Left
+        // moves the cursor one character toward the start of
+        // the description (saturating at 0 so pressing Left
+        // at the very beginning of the buffer is a no-op
+        // rather than an underflow panic). Pressing Right
+        // (see `select_for_edit_end`) moves one character
+        // toward the end, saturating at the current buffer
+        // length.
+        if self.is_llm_query() {
+            self.query_cursor = self.query_cursor.saturating_sub(1);
+            return;
+        }
         if let Some(i) = self.list_state.selected()
             && let Some(row) = self.rows.get(i)
         {
@@ -1191,6 +1739,13 @@ fn move_selection(&mut self, delta: isize) {
     }
 
     fn select_for_edit_end(&mut self) {
+        // See `select_for_edit_start` for the LLM-mode
+        // branch rationale.
+        if self.is_llm_query() {
+            let len = self.query.chars().count();
+            self.query_cursor = self.query_cursor.saturating_add(1).min(len);
+            return;
+        }
         if let Some(i) = self.list_state.selected()
             && let Some(row) = self.rows.get(i)
         {
@@ -1209,11 +1764,28 @@ fn move_selection(&mut self, delta: isize) {
             // doesn't accidentally end up as a prefix).
             if self.query_prefilled && !self.query_touched {
                 self.query.clear();
+                // Reset the cursor to the (now-empty) end so
+                // the new character lands at position 0.
+                self.query_cursor = 0;
             }
             self.query_touched = true;
-            self.query.push(c);
+            // Insert the new character at the current cursor
+            // position rather than unconditionally appending.
+            // For non-LLM query modes the cursor is always at
+            // the end of the buffer, so this behaves exactly
+            // like `self.query.push(c)`. For LLM modes the
+            // user can move the cursor with Left/Right and
+            // insert mid-buffer.
+            let byte_idx = char_to_byte_index(&self.query, self.query_cursor);
+            self.query.insert(byte_idx, c);
+            self.query_cursor += 1;
             self.recompile_regex();
             self.refresh();
+            // Re-arm the LLM auto-call debounce (or clear
+            // the preview if we just left LLM mode by
+            // backspacing the `=`). The user's last
+            // edit time is the new debounce anchor.
+            self.llm_touch();
         }
     }
 
@@ -1225,11 +1797,24 @@ fn move_selection(&mut self, delta: isize) {
             // removed at least one character (so a stray backspace on
             // an empty, prefilled query still leaves the prefilled
             // value alone until the user starts typing).
-            if !self.query.is_empty() {
+            if self.query_cursor > 0 {
                 self.query_touched = true;
-                self.query.pop();
+                // Delete the character to the LEFT of the
+                // cursor. The cursor is always >= 1 here (the
+                // guard above) so there's always a character
+                // to delete. This respects the user's mid-buffer
+                // position for LLM mode and matches the
+                // historical "delete at end" behaviour when the
+                // cursor is at the end.
+                let byte_idx = char_to_byte_index(&self.query, self.query_cursor - 1);
+                self.query.remove(byte_idx);
+                self.query_cursor -= 1;
                 self.recompile_regex();
                 self.refresh();
+                // Mirror of `push_char`: re-arm the LLM
+                // debounce (or clear preview state if we
+                // just backspaced out of LLM mode).
+                self.llm_touch();
             }
         }
     }
@@ -1241,7 +1826,19 @@ fn move_selection(&mut self, delta: isize) {
             self.query.clear();
             self.query_touched = true;
             self.query_regex = None;
+            // Cursor at the new (empty) end. Any cursor
+            // position from before the clear is now
+            // meaningless.
+            self.query_cursor = 0;
             self.refresh();
+            // Clear-input is a user edit too. If we were
+            // in LLM mode, restart the debounce so the
+            // user can type a fresh description and have
+            // the auto-call fire on the new one. If we
+            // just cleared the leading `=`, `llm_touch`
+            // will see we're no longer in LLM mode and
+            // clear the preview.
+            self.llm_touch();
         }
     }
 
@@ -1536,6 +2133,7 @@ pub fn run_tui_to_stdout(
     initial_mode: String,
     initial_query: String,
     conn: Connection,
+    llm: Option<Box<dyn crate::llm::LlmClient>>,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -1589,6 +2187,7 @@ pub fn run_tui_to_stdout(
         prefilled_query.is_some(),
         initial_theme,
         bindings,
+        llm,
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -1668,6 +2267,17 @@ fn run_loop(
         }
 
         if !crossterm::event::poll(Duration::from_millis(100))? {
+            // No input ready. Still a chance to drive the
+            // LLM auto-call debounce: if the user is in LLM
+            // mode and has paused typing for at least
+            // `LLM_DEBOUNCE`, this is when the suggestion
+            // gets generated. We deliberately do this on the
+            // "no event" path (rather than only after a
+            // keypress) so the debounce works even if the
+            // user just stares at the screen after typing
+            // their last character — the worst case is that
+            // we wait one extra 100ms tick before firing.
+            app.llm_maybe_autocall();
             continue;
         }
         let Event::Key(key) = event::read()? else {
@@ -1829,15 +2439,15 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::Run => {
             app.select_for_run();
-            true
+            app.selection.is_some()
         }
         Action::EditStart => {
             app.select_for_edit_start();
-            true
+            app.selection.is_some()
         }
         Action::EditEnd => {
             app.select_for_edit_end();
-            true
+            app.selection.is_some()
         }
         // Movement keys share a "user is navigating, so the cached
         // prefilled query should be appended to" side effect.
@@ -2824,6 +3434,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                 );
                 app.refresh();
                 app
@@ -3004,7 +3615,7 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -3051,6 +3662,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -3479,14 +4091,21 @@ mod tests {
         fn cycle_search_mode_preserves_query_body() {
                 let mut app = stats_test_app(&[("git status", 1)]);
                 app.query = "git status".to_string();
+                // Set the cursor to a mid-buffer position to
+                // verify that the cycle resets it to the new
+                // end (the body is preserved but the cursor
+                // would otherwise be left at a stale index
+                // past the new end of the query).
+                app.query_cursor = 4;
                 app.cycle_search_mode();
-                // The body `git status` is preserved, only the
-                // prefix changes.
                 assert_eq!(app.query, "/git status");
+                assert_eq!(app.query_cursor, "/git status".chars().count());
                 app.cycle_search_mode();
                 assert_eq!(app.query, "?git status");
+                assert_eq!(app.query_cursor, "?git status".chars().count());
                 app.cycle_search_mode();
                 assert_eq!(app.query, "git status");
+                assert_eq!(app.query_cursor, "git status".chars().count());
         }
 
         // --- App::edit_referenced_file end-to-end ------------------------------
@@ -3599,6 +4218,13 @@ mod tests {
         // actually looking at.
         #[test]
         fn selected_row_finds_labeled_only_rows() {
+                // The env-var manipulation in this test races
+                // with `select_for_run_on_labeled_only_row_stages_command`
+                // and the LLM tests when they all run in
+                // parallel. Hold the env lock for the entire
+                // test so the read/modify/restore is atomic
+                // relative to other env-touching tests.
+                let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
                 // Build a DB with two rows that both match
                 // the search query "git": one in the current
                 // session (recent) and one in a *different*
@@ -3618,7 +4244,7 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -3668,6 +4294,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -3713,6 +4340,10 @@ mod tests {
         /// report described ("the command line stays empty").
         #[test]
         fn select_for_run_on_labeled_only_row_stages_command() {
+                // Hold the env lock for the whole test; see
+                // `selected_row_finds_labeled_only_rows` for the
+                // rationale.
+                let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
                 use rusqlite::Connection;
                 let conn = Connection::open_in_memory().expect("open in-memory db");
                 conn.execute_batch(
@@ -3722,7 +4353,7 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -3767,6 +4398,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                 );
                 app.refresh();
                 unsafe {
@@ -3787,5 +4419,878 @@ mod tests {
                         .expect("Run on a labeled-only row must stage its command");
                 assert_eq!(staged, "git pull");
                 assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        // --- LLM query mode -------------------------------------------------
+        //
+        // The LLM client is hidden behind a trait so these tests
+        // can inject canned responses without a live ollama
+        // server. The trait lives in `crate::llm`; the test
+        // defines a minimal in-memory implementation.
+
+        struct FakeLlm {
+                /// Raw response to return from `generate`, exactly
+                /// as the LLM would have produced it (before
+                /// sanitization). Tests use this to exercise the
+                /// full sanitize-then-stage path.
+                response: String,
+                /// Optional injection of an error.
+                error: Option<crate::llm::LlmError>,
+        }
+
+        impl crate::llm::LlmClient for FakeLlm {
+                fn generate(&self, _description: &str) -> Result<String, crate::llm::LlmError> {
+                        match &self.error {
+                                Some(e) => Err(match e {
+                                        // Reconstruct the error
+                                        // without owning its
+                                        // detail (the variants we
+                                        // test carry no heap
+                                        // data so this is a
+                                        // simple clone).
+                                        crate::llm::LlmError::NotConfigured => {
+                                                crate::llm::LlmError::NotConfigured
+                                        }
+                                        other => match other {
+                                                crate::llm::LlmError::Transport(s) => {
+                                                        crate::llm::LlmError::Transport(s.clone())
+                                                }
+                                                _ => crate::llm::LlmError::NoCommand,
+                                        },
+                                }),
+                                None => Ok(self.response.clone()),
+                        }
+                }
+        }
+
+        fn make_llm_app(query: &str, fake: FakeLlm) -> App {
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );
+                        -- The dedup index that backs the `ON
+                        -- CONFLICT (command, directory, session_id)`
+                        -- clause used by `run_llm_query`. In the
+                        -- production schema this is created by
+                        -- `init_db` in main.rs; tests have to
+                        -- declare it themselves since they build
+                        -- a fresh in-memory database.
+                        CREATE UNIQUE INDEX idx_history_dedup
+                            ON history (command, directory, session_id);",
+                )
+                .expect("create tables");
+                App::new(
+                        conn,
+                        Mode::Global,
+                        query.to_string(),
+                        false,
+                        ExitFilter::All,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        Some(Box::new(fake)),
+                )
+        }
+
+        /// Process-wide serialization for environment-variable
+        /// access in tests. The existing `selected_row_finds_labeled_only_rows`,
+        /// `select_for_run_on_labeled_only_row_stages_command`,
+        /// and LLM tests all call `unsafe { std::env::set_var }`
+        /// to set `PWD` / `SMART_HISTORY_SESSION`. When those
+        /// tests run in parallel, the env-var mutations race and
+        /// one test sees a half-restored state. Holding this
+        /// mutex's guard for the lifetime of each env-touching
+        /// test makes the read/modify/restore critical section
+        /// atomic across threads — the closest we can get to
+        /// per-test isolation in a parallel test runner without
+        /// pulling in a serial framework.
+        ///
+        /// Stored as a `std::sync::Mutex<()>` rather than a
+        /// `parking_lot::Mutex` so the project stays
+        /// dependency-free (this module already depends on
+        /// `std` for everything else).
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        #[test]
+        fn is_llm_query_recognises_equals_prefix() {
+                let mut app = make_llm_app(
+                        "=Find all files modified yesterday",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                assert!(app.is_llm_query());
+                app.query = "git status".to_string();
+                assert!(!app.is_llm_query());
+                app.query = "/regex".to_string();
+                assert!(!app.is_llm_query());
+                app.query = "?fuzzy".to_string();
+                assert!(!app.is_llm_query());
+                app.query = "".to_string();
+                assert!(!app.is_llm_query());
+        }
+
+        #[test]
+        fn run_llm_query_stages_clean_command() {
+                let mut app = make_llm_app(
+                        "=Find all files modified yesterday",
+                        FakeLlm {
+                                response: "find . -mtime -1 -type f".to_string(),
+                                error: None,
+                        },
+                );
+                app.select_for_run();
+                // The LLM call should stage the generated
+                // command for the parent shell to run.
+                assert_eq!(
+                        app.selection.as_deref(),
+                        Some("find . -mtime -1 -type f")
+                );
+                assert_eq!(app.pick_mode, Some(PickMode::Run));
+                // The new command should also be in the
+                // history table with the description as its
+                // comment, so the next search finds it.
+                app.refresh();
+                let rows = app.merged_rows();
+                assert!(
+                        rows.iter().any(|r| r.command == "find . -mtime -1 -type f"
+                                && r.comment == "Find all files modified yesterday"),
+                        "the LLM-generated command should be inserted with the \
+                         original description as its comment, got rows: {:?}",
+                        rows.iter().map(|r| (&*r.command, &*r.comment)).collect::<Vec<_>>()
+                );
+        }
+
+        #[test]
+        fn run_llm_query_sanitises_markdown_fences() {
+                // The LLM echoed the command inside a fenced
+                // block; the sanitizer should strip the fences
+                // before staging.
+                let mut app = make_llm_app(
+                        "=List Cargo.toml files",
+                        FakeLlm {
+                                response: "```bash\nfind . -name Cargo.toml\n```".to_string(),
+                                error: None,
+                        },
+                );
+                app.select_for_run();
+                let msg = app.status_message.as_ref().map(|(m, _)| m.clone());
+                assert_eq!(
+                        app.selection.as_deref(),
+                        Some("find . -name Cargo.toml"),
+                        "selection: {:?}, status: {:?}",
+                        app.selection,
+                        msg
+                );
+        }
+
+        #[test]
+        fn run_llm_query_rejects_empty_description() {
+                // `=` with no description should surface a
+                // clear status message and not call the LLM.
+                let mut app = make_llm_app(
+                        "=",
+                        FakeLlm {
+                                // The fake will fail the test if
+                                // it gets called.
+                                response: "should not be called".to_string(),
+                                error: None,
+                        },
+                );
+                app.select_for_run();
+                assert!(app.selection.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("empty description must surface a status");
+                assert!(msg.contains("description"), "got: {:?}", msg);
+        }
+
+        #[test]
+        fn run_llm_query_surfaces_not_configured_when_client_is_none() {
+                // Build an app *without* a configured LLM
+                // client and try to run an LLM query. The TUI
+                // should report "not configured" without
+                // panicking.
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );
+                        CREATE UNIQUE INDEX idx_history_dedup
+                            ON history (command, directory, session_id);",
+                )
+                .expect("create tables");
+                let mut app = App::new(
+                        conn,
+                        Mode::Global,
+                        "=anything".to_string(),
+                        false,
+                        ExitFilter::All,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None, // <-- the missing LLM config
+                );
+                app.select_for_run();
+                assert!(app.selection.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("not-configured must surface a status");
+                assert!(
+                        msg.contains("not configured"),
+                        "got: {:?}",
+                        msg
+                );
+        }
+
+        #[test]
+        fn run_llm_query_surfaces_no_command_when_sanitizer_rejects() {
+                // The LLM responded with nothing usable after
+                // sanitization (only commentary, no actual
+                // command). The TUI should surface a
+                // "no usable command" status.
+                let mut app = make_llm_app(
+                        "=Do something",
+                        FakeLlm {
+                                response: "# I cannot help with that.".to_string(),
+                                error: None,
+                        },
+                );
+                app.select_for_run();
+                assert!(app.selection.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("empty sanitizer output must surface a status");
+                assert!(
+                        msg.contains("no usable command"),
+                        "got: {:?}",
+                        msg
+                );
+        }
+
+        // --- Query cursor (LLM mode edit support) ---------------------
+
+        /// The cursor is initialised to the end of the query
+        /// so the first character the user types lands in the
+        /// expected place. For non-LLM queries this is a
+        /// no-op (the input loop ignores the cursor in those
+        /// modes); for LLM queries it's the starting point
+        /// from which Left/Right can move.
+        #[test]
+        fn query_cursor_initialised_to_end() {
+                let app = make_llm_app(
+                        "=describe something",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                assert_eq!(app.query, "=describe something");
+                assert_eq!(
+                        app.query_cursor,
+                        "=describe something".chars().count()
+                );
+        }
+
+        /// `push_char` inserts at the cursor, not just at the
+        /// end. This lets the user edit a multi-byte
+        /// description mid-buffer with the cursor in any
+        /// position.
+        #[test]
+        fn push_char_inserts_at_cursor_position() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                // Move to the middle of "files" (after "find ").
+                app.query_cursor = "=find ".chars().count();
+                app.push_char('x');
+                assert_eq!(app.query, "=find xfiles");
+                assert_eq!(app.query_cursor, "=find x".chars().count());
+                // Inserting again advances the cursor.
+                app.push_char('y');
+                assert_eq!(app.query, "=find xyfiles");
+                assert_eq!(app.query_cursor, "=find xy".chars().count());
+        }
+
+        /// `backspace` deletes the character to the LEFT of
+        /// the cursor. With the cursor at the end this is
+        /// the historical "pop the last char" behaviour; with
+        /// the cursor in the middle it deletes mid-buffer.
+        #[test]
+        fn backspace_deletes_before_cursor() {
+                let mut app = make_llm_app(
+                        "=find xfile",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                // Cursor at end (default). One backspace
+                // removes the trailing `e` (the historical
+                // behaviour).
+                app.backspace();
+                assert_eq!(app.query, "=find xfil");
+                assert_eq!(app.query_cursor, "=find xfil".chars().count());
+                // Now move the cursor to a mid-buffer
+                // position. Place it between the space and
+                // the `x` (position 6 in `=find xfil`).
+                // The leading `=` counts as one char, so
+                // `=find ` is positions 0-5 and `x` starts
+                // at position 6.
+                app.query_cursor = "=find ".chars().count();
+                app.backspace();
+                // Backspace at the cursor removes the
+                // character to the LEFT — that's the space
+                // at position 5 — collapsing the gap.
+                assert_eq!(app.query, "=findxfil");
+                assert_eq!(app.query_cursor, "=find".chars().count());
+        }
+
+        /// `backspace` at position 0 is a no-op. The user's
+        /// backspace press at the start of the buffer should
+        /// not panic and should not turn the cursor negative.
+        #[test]
+        fn backspace_at_position_zero_is_noop() {
+                let mut app = make_llm_app(
+                        "=x",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                app.query_cursor = 0;
+                app.backspace();
+                assert_eq!(app.query, "=x");
+                assert_eq!(app.query_cursor, 0);
+        }
+
+        /// `EditStart` (the Left key) in LLM mode moves the
+        /// cursor one character toward the start of the
+        /// description, NOT to a row in the history list.
+        /// This is the character-by-character navigation
+        /// the user asked for: "When the query is an LLM
+        /// query then cursor right and left should just
+        /// position the cursor in the query line."
+        #[test]
+        fn edit_start_in_llm_mode_moves_cursor_one_char_left() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                // Cursor starts at the end. The test helper
+                // initialises it there.
+                assert!(app.query_cursor > 0);
+                let end = app.query_cursor;
+                app.select_for_edit_start();
+                // One character toward the start, not all
+                // the way back to 0.
+                assert_eq!(app.query_cursor, end - 1);
+                // A second press moves one more character.
+                app.select_for_edit_start();
+                assert_eq!(app.query_cursor, end - 2);
+                // Crucially, no row is staged — the Left
+                // key in LLM mode is purely a cursor move.
+                assert!(app.selection.is_none());
+                assert!(app.pick_mode.is_none());
+        }
+
+        /// `EditEnd` (the Right key) in LLM mode moves the
+        /// cursor one character toward the end of the
+        /// description, NOT to a row in the history list.
+        /// Mirror of the previous test.
+        #[test]
+        fn edit_end_in_llm_mode_moves_cursor_one_char_right() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                // Start the cursor in the middle so we can
+                // step toward the end.
+                let mid = "=find ".chars().count();
+                app.query_cursor = mid;
+                app.select_for_edit_end();
+                assert_eq!(app.query_cursor, mid + 1);
+                app.select_for_edit_end();
+                assert_eq!(app.query_cursor, mid + 2);
+                assert!(app.selection.is_none());
+                assert!(app.pick_mode.is_none());
+        }
+
+        /// Pressing Left at the very start of the buffer
+        /// (cursor == 0) is a no-op, not an underflow. The
+        /// cursor is tracked in characters; without the
+        /// `saturating_sub` guard the dispatch could panic
+        /// or wrap to `usize::MAX`. Behaviour: stays at 0.
+        #[test]
+        fn edit_start_at_position_zero_stays_at_zero() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                app.query_cursor = 0;
+                app.select_for_edit_start();
+                assert_eq!(app.query_cursor, 0);
+                assert!(app.selection.is_none());
+        }
+
+        /// Pressing Right at the very end of the buffer
+        /// (cursor == len) is a no-op, not a panic. The
+        /// `.min(len)` clamp ensures the cursor stays at
+        /// the end even after repeated presses. Behaviour:
+        /// stays at the character-count length.
+        #[test]
+        fn edit_end_at_end_stays_at_end() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                let len = app.query.chars().count();
+                app.query_cursor = len;
+                app.select_for_edit_end();
+                assert_eq!(app.query_cursor, len);
+                // Pressing again (still at the end) is
+                // still a no-op.
+                app.select_for_edit_end();
+                assert_eq!(app.query_cursor, len);
+                assert!(app.selection.is_none());
+        }
+
+        /// Character-by-character navigation works for
+        /// multi-byte UTF-8. The user types an accented
+        /// character into a French-language description,
+        /// steps the cursor with Left, inserts another
+        /// accented character at that position, and the
+        /// buffer is still valid UTF-8 with the expected
+        /// character count.
+        #[test]
+        fn edit_left_right_handles_multibyte() {
+                let mut app = make_llm_app(
+                        "=chercher fichiers",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                let end = app.query.chars().count();
+                // One step left, then one step right,
+                // should round-trip back to the end.
+                app.select_for_edit_start();
+                assert_eq!(app.query_cursor, end - 1);
+                app.select_for_edit_end();
+                assert_eq!(app.query_cursor, end);
+                // Multi-step walk back to position 1 (one
+                // past the `=`).
+                for _ in 0..(end - 1) {
+                        app.select_for_edit_start();
+                }
+                assert_eq!(app.query_cursor, 1);
+                // Insert a multi-byte character at the
+                // cursor. `é` is 2 bytes in UTF-8 but 1
+                // char in our cursor accounting, so the
+                // cursor advances by exactly 1 char.
+                app.push_char('é');
+                assert_eq!(app.query_cursor, 2);
+                // The new buffer is the original with
+                // `é` inserted right after the `=`.
+                assert!(app.query.starts_with("=é"));
+                assert!(app.query.ends_with("chercher fichiers"));
+        }
+
+        /// `EditStart` / `EditEnd` keep their historical
+        /// "stage a row" semantics for non-LLM queries. The
+        /// LLM-mode override is specific to LLM.
+        #[test]
+        fn edit_start_end_in_non_llm_mode_stages_a_row() {
+                // Three rows so the list isn't empty. The
+                // timestamps are `now - offset`, so the
+                // newest (smallest offset) comes first in
+                // the default timestamp-DESC ordering. We use
+                // the query field empty so the SQL `WHERE`
+                // clause doesn't filter.
+                let mut app = stats_test_app(&[("cd", 1), ("git status", 2), ("ls", 3)]);
+                // Cursor at index 0 is the default.
+                app.select_for_edit_start();
+                // The first (newest) row is staged with
+                // EditStart pick_mode.
+                assert_eq!(app.selection.as_deref(), Some("cd"));
+                assert_eq!(app.pick_mode, Some(PickMode::EditStart));
+                // The query cursor is not modified by the
+                // row-staging path — it's a no-op for
+                // non-LLM queries.
+                assert_eq!(app.query_cursor, 0);
+        }
+
+        // --- LLM auto-call debounce --------------------------------
+
+        /// `llm_touch` arms the debounce when the query
+        /// is an LLM query. Used by `push_char` /
+        /// `backspace` / `clear_query` to reset the
+        /// 1-second countdown each time the user edits.
+        #[test]
+        fn llm_touch_arms_debounce_in_llm_mode() {
+                let mut app = make_llm_app(
+                        "=describe something",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                assert!(app.llm_debounce_started.is_none());
+                app.llm_touch();
+                assert!(app.llm_debounce_started.is_some());
+        }
+
+        /// `llm_touch` clears all debounce state when the
+        /// query is NOT an LLM query. We leave LLM mode
+        /// (e.g. backspaced the `=`) and there's nothing
+        /// for the auto-call to do.
+        #[test]
+        fn llm_touch_clears_state_outside_llm_mode() {
+                let mut app = make_llm_app(
+                        "=describe something",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                // First arm the debounce.
+                app.llm_touch();
+                assert!(app.llm_debounce_started.is_some());
+                // Leave LLM mode.
+                app.query = "git status".to_string();
+                app.llm_touch();
+                assert!(app.llm_debounce_started.is_none());
+                assert!(app.llm_preview.is_none());
+                assert!(!app.llm_in_flight);
+        }
+
+        /// `llm_touch` discards a stale preview when the
+        /// user edits the description in LLM mode. The
+        /// preview is no longer relevant; clearing it
+        /// makes the next auto-call produce a fresh one.
+        #[test]
+        fn llm_touch_discards_stale_preview() {
+                let mut app = make_llm_app(
+                        "=describe something",
+                        FakeLlm { response: String::new(), error: None },
+                );
+                // Manually install a preview as if the
+                // debounce had just fired.
+                app.llm_preview = Some(HistoryRow {
+                        id: -1,
+                        command: "old suggestion".to_string(),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: -1,
+                        timestamp: 0,
+                        comment: "describe something".to_string(),
+                        output: String::new(),
+                });
+                app.llm_preview_description =
+                        Some("describe something".to_string());
+                // The user edits the description by
+                // appending a character.
+                app.push_char('!');
+                assert!(
+                        app.llm_preview.is_none(),
+                        "stale preview must be cleared on edit"
+                );
+                assert!(app.llm_preview_description.is_none());
+        }
+
+        /// `llm_maybe_autocall` is a no-op when the
+        /// query is empty (just `=` with no
+        /// description). The model has nothing to work
+        /// with; firing the call would waste a
+        /// round-trip.
+        #[test]
+        fn llm_maybe_autocall_skips_empty_description() {
+                let mut app = make_llm_app(
+                        "=",
+                        FakeLlm { response: "should not be called".to_string(), error: None },
+                );
+                // Arm the debounce in the past so the
+                // time check passes if the call were to
+                // fire.
+                app.llm_debounce_started = Some(
+                        std::time::Instant::now()
+                                - std::time::Duration::from_secs(2),
+                );
+                app.llm_maybe_autocall();
+                assert!(app.llm_preview.is_none());
+        }
+
+        /// `llm_maybe_autocall` is a no-op when the
+        /// debounce window hasn't elapsed. The model
+        /// shouldn't be queried on every tick; only
+        /// after the user has paused for the full
+        /// debounce period.
+        #[test]
+        fn llm_maybe_autocall_respects_debounce_window() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: "should not be called yet".to_string(), error: None },
+                );
+                // Just-armed debounce: `Instant::now()` is
+                // well within the 1-second window.
+                app.llm_debounce_started = Some(std::time::Instant::now());
+                app.llm_maybe_autocall();
+                assert!(
+                        app.llm_preview.is_none(),
+                        "auto-call must not fire inside the debounce window"
+                );
+        }
+
+        /// `llm_maybe_autocall` is a no-op when the
+        /// live description already has a fresh
+        /// preview. We don't want to re-fire the same
+        /// call repeatedly when the user is just
+        /// looking at the suggestion.
+        #[test]
+        fn llm_maybe_autocall_skips_when_preview_already_fresh() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm { response: "find . -name '*.txt'".to_string(), error: None },
+                );
+                // Install a fresh preview that already
+                // matches the current description.
+                app.llm_preview = Some(HistoryRow {
+                        id: -1,
+                        command: "find . -name '*.txt'".to_string(),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: -1,
+                        timestamp: 0,
+                        comment: "find files".to_string(),
+                        output: String::new(),
+                });
+                app.llm_preview_description =
+                        Some("find files".to_string());
+                // Debounce expired in the past.
+                app.llm_debounce_started = Some(
+                        std::time::Instant::now()
+                                - std::time::Duration::from_secs(2),
+                );
+                // The FakeLlm's response would be
+                // "should not be called" if the call
+                // fired, but we set the FakeLlm to a
+                // specific response. If `generate` were
+                // called the preview would be replaced.
+                // Assert it WASN'T replaced.
+                let original = app.llm_preview.clone();
+                app.llm_maybe_autocall();
+                assert_eq!(app.llm_preview, original);
+        }
+
+        /// Happy path: debounce elapsed, description
+        /// has changed, LLM call fires, preview is
+        /// populated.
+        #[test]
+        fn llm_maybe_autocall_fires_and_populates_preview() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm {
+                                response: "find . -name '*.txt'".to_string(),
+                                error: None,
+                        },
+                );
+                // Debounce expired in the past.
+                app.llm_debounce_started = Some(
+                        std::time::Instant::now()
+                                - std::time::Duration::from_secs(2),
+                );
+                app.llm_maybe_autocall();
+                let preview = app
+                        .llm_preview
+                        .as_ref()
+                        .expect("preview must be populated");
+                assert_eq!(preview.command, "find . -name '*.txt'");
+                assert_eq!(preview.id, -1);
+                assert_eq!(preview.exit_code, -1);
+                assert_eq!(preview.comment, "find files");
+                assert_eq!(
+                        app.llm_preview_description.as_deref(),
+                        Some("find files")
+                );
+                assert!(!app.llm_in_flight);
+        }
+
+        /// Sanitizer rejection during auto-call is
+        /// silent — the user gets feedback when they
+        /// press Enter (via `run_llm_query`), not on
+        /// every auto-call. This is the same UX as a
+        /// transport error: don't crowd the status
+        /// bar on every typo.
+        #[test]
+        fn llm_maybe_autocall_silent_on_sanitizer_rejection() {
+                let mut app = make_llm_app(
+                        "=do something",
+                        FakeLlm {
+                                // All commentary, no command.
+                                response: "# I cannot help with that.".to_string(),
+                                error: None,
+                        },
+                );
+                app.llm_debounce_started = Some(
+                        std::time::Instant::now()
+                                - std::time::Duration::from_secs(2),
+                );
+                app.llm_maybe_autocall();
+                assert!(app.llm_preview.is_none());
+                assert!(!app.llm_in_flight);
+        }
+
+        /// The preview row appears at the top of the
+        /// merged list in LLM mode. Sort key is the
+        /// `timestamp = now` we set in the autocall,
+        /// so it sorts newest-first.
+        #[test]
+        fn llm_preview_appears_in_merged_rows() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm {
+                                response: "find . -name '*.txt'".to_string(),
+                                error: None,
+                        },
+                );
+                app.llm_debounce_started = Some(
+                        std::time::Instant::now()
+                                - std::time::Duration::from_secs(2),
+                );
+                app.llm_maybe_autocall();
+                let merged = app.merged_rows();
+                assert!(!merged.is_empty());
+                assert_eq!(merged[0].id, -1);
+                assert_eq!(merged[0].command, "find . -name '*.txt'");
+        }
+
+        /// When the query leaves LLM mode, the preview
+        /// is removed from the merged list. The user
+        /// has stopped composing a description; the
+        /// suggestion no longer applies.
+        #[test]
+        fn llm_preview_disappears_when_leaving_llm_mode() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm {
+                                response: "find . -name '*.txt'".to_string(),
+                                error: None,
+                        },
+                );
+                app.llm_debounce_started = Some(
+                        std::time::Instant::now()
+                                - std::time::Duration::from_secs(2),
+                );
+                app.llm_maybe_autocall();
+                assert!(!app.merged_rows().is_empty());
+                // User backspaces out of LLM mode.
+                app.query = "git status".to_string();
+                app.refresh();
+                // Preview must be gone from the merged
+                // list (it was only added in LLM mode).
+                let merged = app.merged_rows();
+                for r in merged {
+                        assert!(r.id >= 0, "preview leaked into non-LLM mode: {:?}", r);
+                }
+        }
+
+        /// Fast-path: when a fresh preview exists for
+        /// the live description, `run_llm_query`
+        /// reuses it without making a second HTTP
+        /// call. The FakeLlm's response is "should not
+        /// be called" — if `run_llm_query` made a
+        /// call, the staged command would be the
+        /// FakeLlm's response, not the preview's.
+        #[test]
+        fn run_llm_query_reuses_fresh_preview() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm {
+                                response: "should not be called".to_string(),
+                                error: None,
+                        },
+                );
+                // Install a fresh preview whose command
+                // differs from the FakeLlm response.
+                app.llm_preview = Some(HistoryRow {
+                        id: -1,
+                        command: "find . -name '*.txt'".to_string(),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: -1,
+                        timestamp: 0,
+                        comment: "find files".to_string(),
+                        output: String::new(),
+                });
+                app.llm_preview_description =
+                        Some("find files".to_string());
+                // Arm the debounce recently (well
+                // within the 5x multiplier).
+                app.llm_debounce_started = Some(std::time::Instant::now());
+                app.select_for_run();
+                // The preview's command was staged,
+                // not the FakeLlm's response.
+                assert_eq!(
+                        app.selection.as_deref(),
+                        Some("find . -name '*.txt'")
+                );
+                assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// Slow-path: when the preview is stale (the
+        /// description has changed since the preview
+        /// was generated), `run_llm_query` falls
+        /// through to the explicit LLM call.
+        #[test]
+        fn run_llm_query_does_not_reuse_stale_preview() {
+                let mut app = make_llm_app(
+                        "=find files",
+                        FakeLlm {
+                                response: "find . -mtime -1".to_string(),
+                                error: None,
+                        },
+                );
+                // Install a preview whose description
+                // does NOT match the live query.
+                app.llm_preview = Some(HistoryRow {
+                        id: -1,
+                        command: "stale".to_string(),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: -1,
+                        timestamp: 0,
+                        comment: "old description".to_string(),
+                        output: String::new(),
+                });
+                app.llm_preview_description =
+                        Some("old description".to_string());
+                app.llm_debounce_started = Some(std::time::Instant::now());
+                app.select_for_run();
+                // The live FakeLlm was called, NOT
+                // the stale preview.
+                assert_eq!(
+                        app.selection.as_deref(),
+                        Some("find . -mtime -1")
+                );
         }
 }

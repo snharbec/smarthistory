@@ -43,6 +43,18 @@ match standard workflow expectations. This project aims to provide:
   in the row in order, case-insensitive, so `?gsc` finds `git status
   --short && cargo build`. Toggle between modes with `F3` (or the
   command palette).
+- **LLM command generation on `=...`:** when you prefix a query with
+  `=` and press `Enter`, a local ollama instance translates the
+  natural-language description (e.g. `=Find all files modified
+  yesterday`) into an executable command. The command is inserted
+  into the history table with the original description as its
+  comment, then staged for execution by the parent shell. While
+  you compose the description, the TUI auto-calls the model after
+  one second of inactivity and shows the suggestion as a preview
+  row at the top of the list (marked with `[LLM]`); pressing
+  `Enter` reuses that preview without a second round-trip.
+  Opt-in via `ollama.url` and `ollama.model` in the config file;
+  see the TUI search syntax section for details.
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker
   replacing `fzf`. Supports live filtering, mode cycle (`Ctrl+G`), enter
   to run, left/right to prefill for editing.
@@ -100,6 +112,8 @@ Supported keys:
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
 | `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
 | `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
+| `ollama.url=http://host:port` | URL of a local ollama instance used by the LLM command-generation mode (the `=...` query prefix in the TUI). Must be paired with `ollama.model`. | (feature disabled) |
+| `ollama.model=<name>` | ollama model name to use, e.g. `llama3.2`, `qwen2.5-coder`, `codellama`. Must be paired with `ollama.url`. The model must already be pulled (`ollama pull <name>`). | (feature disabled) |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -171,6 +185,13 @@ key.toggle-search-mode=C-Space
 # Rebind the clipboard yank (default is `Ctrl-Y`). Multi-key
 # bindings are supported — this also fires on `F2`.
 key.yank-selection=C-y,F2
+
+# LLM command generation (the `=...` query mode in the TUI)
+# requires a local ollama instance. Both keys are mandatory;
+# missing either one disables the feature (the TUI surfaces
+# "not configured" on `=...`).
+ollama.url=http://localhost:11434
+ollama.model=llama3.2
 ```
 
 To inspect the resolved value of a single setting, use:
@@ -572,6 +593,87 @@ preserves the body of your query and only changes the leading
 prefix character, so `git status` -> `/git status` ->
 `?git status` -> `git status` keeps the same text the whole
 time.
+
+In LLM mode the `Left` and `Right` arrow keys (which would
+normally bind to `EditStart` / `EditEnd` and stage a row)
+instead move the input cursor within the description buffer.
+This lets you edit the LLM prompt mid-string before pressing
+`Enter`: pressing `Left` moves the cursor one character
+toward the start, `Right` one character toward the end, and
+typing inserts at the cursor rather than appending. The
+cursor sits at the end of the buffer for newly-typed
+characters; pressing `Left`/`Right` moves it one step at a
+time, saturating at the start/end. The query field's
+prompt changes to `=` and the input border is tinted
+magenta to signal LLM mode; the status bar shows an `LLM`
+chip (red when ollama is not configured, magenta when it
+is). `Backspace` deletes the character to the left of the
+cursor. The cursor stays at the end of the buffer in
+plain, regex, and fuzzy modes — the `Left`/`Right` keys
+retain their historical row-staging semantics there.
+
+While you compose the description the TUI auto-calls the
+configured ollama instance after **one second** of typing
+inactivity. The suggestion is staged as a virtual preview
+row at the top of the history list, marked with a
+distinctive `[LLM]` chip and a `~` exit-code marker (the
+command hasn't been executed yet). Re-typing within the
+debounce window cancels the pending call and clears any
+existing preview; the next pause restarts the timer. When
+you press `Enter`, the TUI reuses the live preview without
+making a second round-trip — the suggested command is
+inserted into the history table, staged for the parent
+shell, and the TUI exits.
+
+LLM command generation (mode `=`) skips the row lookup
+entirely. Prefix a query with `=` followed by a natural-language
+description and pressing `Enter` asks a local ollama instance
+to translate the description into an executable command. The
+generated command is inserted into the history table with the
+original description as its comment, then staged for execution
+by the parent shell:
+
+```
+> =Find all files modified yesterday
+# status bar shows: "Generating command via ollama…"
+# (the TUI blocks for the duration of the call; typically
+# 1-5 seconds for a local 7B model, bounded by a 30-second
+# timeout)
+# Generated command is inserted with the original description
+# as its comment, then staged. The TUI exits; the parent shell
+# runs the command.
+```
+
+Configuration is opt-in and lives in
+`~/.config/smarthistory/config`:
+
+```ini
+ollama.url=http://localhost:11434
+ollama.model=llama3.2
+```
+
+Both keys are required; if either is missing or empty, the LLM
+mode is disabled and pressing Enter on a `=...` query surfaces
+a "not configured" status message (with the `LLM` mode chip
+tinted red so the user notices the unavailability before they
+press Enter). The LLM prompt is intentionally strict:
+
+> You are a strict Bash command generator. Respond ONLY with the
+> executable command. Do not include markdown formatting,
+> backticks, explanations, or introductory text.
+
+The TUI sanitizer additionally strips markdown code fences
+(`` ``` ```` and ```` ```bash ````), common preambles
+("Sure, here's the command:"), wrapping backticks
+(`` `find . -mtime -1` ``), and trailing prose after a `;`,
+so a non-perfectly-obedient model still produces a usable
+command most of the time. If sanitization leaves nothing
+(only commentary), the TUI surfaces "LLM returned no usable
+command" instead of staging empty text.
+
+When the leading `=` is present the `LLM` chip appears in the
+mode strip (magenta when configured, red when not), and a
+green input border signals the LLM mode is active.
 
 ### Example session
 

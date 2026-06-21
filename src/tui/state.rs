@@ -42,7 +42,7 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HistoryRow {
     pub id: i64,
     pub command: String,

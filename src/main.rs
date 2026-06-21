@@ -1,3 +1,4 @@
+mod llm;
 mod tui;
 mod util;
 
@@ -684,6 +685,11 @@ pub struct Config {
     /// hard-coded Ctrl-* bindings.
     #[allow(dead_code)]
     key_bindings: tui::bindings::KeyBindings,
+    /// Optional LLM (ollama) configuration for the `=...` TUI
+    /// query mode. `None` means the feature is disabled — the
+    /// `llm` module returns `LlmError::NotConfigured` and the
+    /// TUI surfaces a clear status message.
+    llm: Option<llm::LlmConfig>,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -758,6 +764,12 @@ impl Config {
             initial_mode: "SESS".to_string(),
             theme: TuiTheme::default(),
             key_bindings: tui::bindings::KeyBindings::defaults(),
+            // LLM is opt-in: empty config means "feature
+            // disabled". Users enable it by setting both
+            // `ollama.url` and `ollama.model` in their config
+            // file; we only store a config when both fields
+            // are present (see `parse`).
+            llm: None,
         }
     }
 
@@ -781,6 +793,12 @@ impl Config {
         // in the file can't mask a later valid override.
         let mut key_entries: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Accumulator for `ollama.url` / `ollama.model`. The
+        // finished `LlmConfig` is built from these after the
+        // loop so that a later line in the config file
+        // overrides an earlier one.
+        let mut ollama_url = String::new();
+        let mut ollama_model = String::new();
         for raw_line in contents.lines() {
             let line = raw_line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -819,6 +837,12 @@ impl Config {
                         self.initial_mode = upper;
                     }
                 }
+                "ollama.url" => {
+                    ollama_url = value.to_string();
+                }
+                "ollama.model" => {
+                    ollama_model = value.to_string();
+                }
                 other => {
                     if let Some(cmd) = other.strip_prefix("capturelines.")
                         && !cmd.is_empty() {
@@ -831,6 +855,30 @@ impl Config {
                                 key_entries.insert(action.to_string(), value.to_string());
                             }
                 }
+            }
+        }
+        // The LLM block above collected zero or more ollama.*
+        // entries. We finalize the LlmConfig here, after the
+        // loop, so that a later `ollama.model=` line in the file
+        // overrides an earlier one (and a half-configured pair
+        // — only one of url/model — leaves the feature
+        // disabled, with a warning on stderr). Doing the
+        // resolution in the match arms above would lose the
+        // "later wins" guarantee and split the validation
+        // across two passes.
+        if !ollama_url.is_empty() || !ollama_model.is_empty() {
+            if ollama_url.is_empty() || ollama_model.is_empty() {
+                eprintln!(
+                    "warning: ollama.{} is set but the other half is missing; \
+                     LLM mode is disabled. Set both ollama.url and ollama.model \
+                     in ~/.config/smarthistory/config.",
+                    if ollama_url.is_empty() { "url" } else { "model" }
+                );
+            } else {
+                self.llm = Some(llm::LlmConfig {
+                    url: ollama_url,
+                    model: ollama_model,
+                });
             }
         }
         // Apply the collected `key.*` entries on top of the
@@ -2156,7 +2204,22 @@ fn main() -> anyhow::Result<()> {
                     cfg.initial_mode
                 });
             let initial_query = query.unwrap_or_else(|| "".to_string());
-            match tui::run_tui_to_stdout(initial_mode, initial_query, conn)? {
+            // Build the LLM client up front so the TUI entry
+            // point doesn't need to know about config parsing.
+            // The TUI itself only sees `Option<Box<dyn LlmClient>>`
+            // and surfaces a "not configured" status when None.
+            let tui_cfg = Config::load();
+            let llm_client: Option<Box<dyn llm::LlmClient>> = tui_cfg
+                .llm
+                .as_ref()
+                .map(llm::OllamaClient::new)
+                .map(|c| Box::new(c) as Box<dyn llm::LlmClient>);
+            match tui::run_tui_to_stdout(
+                initial_mode,
+                initial_query,
+                conn,
+                llm_client,
+            )? {
                 Some((command, pick_mode)) => {
                     // Print the chosen command. The pick_mode tells
                     // the parent what to do with it.
