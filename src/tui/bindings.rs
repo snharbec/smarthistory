@@ -88,6 +88,8 @@ pub enum Action {
     /// (manual + built-in) where navigating the list applies the
     /// theme live, Enter commits, Esc reverts to the original.
     ThemePicker,
+    /// Toggle between plain, regex, and fuzzy search modes.
+    ToggleSearchMode,
 }
 
 impl Action {
@@ -122,6 +124,7 @@ impl Action {
             Action::Backspace => "backspace",
             Action::CommandAction => "command-action",
             Action::ThemePicker => "theme-picker",
+            Action::ToggleSearchMode => "toggle-search-mode",
         }
     }
 
@@ -154,6 +157,7 @@ impl Action {
             Action::Backspace => "Backspace",
             Action::CommandAction => "Command palette",
             Action::ThemePicker => "Theme picker",
+            Action::ToggleSearchMode => "Toggle search mode",
         }
     }
 
@@ -176,7 +180,8 @@ impl Action {
             Action::CycleMode
             | Action::ToggleDuplicateFilter
             | Action::CycleExitFilter
-            | Action::ClearQuery => "search",
+            | Action::ClearQuery
+            | Action::ToggleSearchMode => "search",
             Action::CycleThemeNext | Action::CycleThemePrev => "theme",
             Action::EditComment
             | Action::ShowOutput
@@ -219,6 +224,7 @@ impl Action {
             Action::Backspace => "Backspace",
             Action::CommandAction => ":",
             Action::ThemePicker => "T",
+            Action::ToggleSearchMode => "F3",
         }
     }
 }
@@ -484,6 +490,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::Backspace,
     Action::CommandAction,
     Action::ThemePicker,
+    Action::ToggleSearchMode,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of

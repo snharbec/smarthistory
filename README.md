@@ -37,6 +37,12 @@ match standard workflow expectations. This project aims to provide:
   immediately. The query field still narrows the ranking.
 - **Substring search with derived columns:** `time` (formatted timestamp),
   `diff` (age like `5m`, `2h`, `3d`, `2M`), `base` (leaf directory).
+- **Three search modes, one key away:** plain substring (default),
+  regex (`/...` prefix), and fuzzy subsequence (`?...` prefix). The
+  fuzzy mode is fzf-style — every character of the query must appear
+  in the row in order, case-insensitive, so `?gsc` finds `git status
+  --short && cargo build`. Toggle between modes with `F3` (or the
+  command palette).
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker
   replacing `fzf`. Supports live filtering, mode cycle (`Ctrl+G`), enter
   to run, left/right to prefill for editing.
@@ -159,6 +165,9 @@ key.command-action=C-p
 # Rebind the theme picker (default is `T`) to F4.
 key.theme-picker=F4
 
+# Rebind the search-mode toggle (default is `F3`) to Ctrl-space.
+key.toggle-search-mode=C-Space
+
 # Rebind the clipboard yank (default is `Ctrl-Y`). Multi-key
 # bindings are supported — this also fires on `F2`.
 key.yank-selection=C-y,F2
@@ -263,6 +272,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Up`      | Widget  | Walk back through matches for the current line.                 |
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
 | `Ctrl+G`  | Widget  | Cycle search scope: SESS → DIR → GLOBAL → STATS → SESS.            |
+| `F3`      | TUI     | Cycle the TUI search mode: plain → `/`regex → `?`fuzzy → plain. The body of the query is preserved; only the leading prefix character changes. Rebindable via `key.toggle-search-mode=...` (also reachable through the command palette). |
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
@@ -527,6 +537,41 @@ When the leading `/` is present:
   place while you finish typing, so the list doesn't flicker empty
   for a transient typo like an unbalanced bracket.
 - The search is applied to both the command and the comment text.
+
+Fuzzy mode works the same way but uses a leading `?` instead of
+`/`. It implements the same subsequence match as `fzf`,
+`sk`, `peco`, and similar fuzzy finders: every character of
+the query must appear in the row, in order, case-insensitive.
+The match is AND-by-word, so `?git st` matches any row whose
+command and/or comment contain `git` followed by `st` in order:
+
+```
+> ?gsc               # "git status --short && cargo build"
+                      # "git stash create"
+                      # NOT "git log" (no `s` then `c`)
+> ?git st            # "git status", "git stash", "git switch trunk"...
+                      # NOT "cargo test" (no `git` subsequence)
+> ?kubectl dl        # "kubectl delete" (whitespace splits the
+                      #  pattern; each term is fuzzy-matched)
+```
+
+The fuzzy match runs against both the command text and the
+comment text (the same dual-target behaviour as plain and
+regex search). When the leading `?` is present the input
+border is tinted green so you can see you're in fuzzy mode;
+yellow is reserved for regex and the default is plain.
+
+Like regex, fuzzy is a post-filter: the SQL fetch returns a
+broad set of candidate rows and the TUI narrows them in Rust
+on every keystroke. This is fast enough to feel instant on
+a few-thousand-row history.
+
+Cycle between plain, regex, and fuzzy by pressing `F3`
+(rebindable via `key.toggle-search-mode=...`). The cycle
+preserves the body of your query and only changes the leading
+prefix character, so `git status` -> `/git status` ->
+`?git status` -> `git status` keeps the same text the whole
+time.
 
 ### Example session
 

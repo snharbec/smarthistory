@@ -143,6 +143,35 @@ fn parse_bool(s: &str, default: bool) -> bool {
     }
 }
 
+/// True if every character of `pattern` appears in `text` in
+/// order (a "subsequence" match), case-insensitive. This is the
+/// same shape as `fzf` and similar fuzzy finders: the user types
+/// a few letters and the result list narrows to rows whose
+/// command or comment contains those letters in sequence.
+///
+/// We don't implement the full fzf scoring (camelCase bonuses,
+/// consecutive-run bonuses, etc.) because shell history lines
+/// are short and the simple subsequence test is fast and good
+/// enough to feel responsive on lists of a few thousand rows.
+fn fuzzy_match(pattern: &str, text: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    let pattern_lower = pattern.to_ascii_lowercase();
+    let text_lower = text.to_ascii_lowercase();
+    let mut pat_chars = pattern_lower.chars();
+    let mut current = pat_chars.next();
+    for c in text_lower.chars() {
+        if Some(c) == current {
+            current = pat_chars.next();
+            if current.is_none() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Decide what text `yank_to_clipboard` should copy.
 ///
 /// Priority:
@@ -447,10 +476,24 @@ impl App {
         self.query.starts_with('/')
     }
 
+    /// True if the current query is a fuzzy search (prefixed with `?`).
+    fn is_fuzzy_query(&self) -> bool {
+        self.query.starts_with('?')
+    }
+
     /// The regex pattern, i.e. everything after the leading `/`.
     /// Empty when the query is just `/`.
     fn regex_pattern(&self) -> &str {
         if self.is_regex_query() {
+            &self.query[1..]
+        } else {
+            ""
+        }
+    }
+
+    /// The fuzzy pattern, i.e. everything after the leading `?`.
+    fn fuzzy_pattern(&self) -> &str {
+        if self.is_fuzzy_query() {
             &self.query[1..]
         } else {
             ""
@@ -485,6 +528,65 @@ impl App {
         }
     }
 
+    /// Cycle the search mode prefix: plain -> `/` (regex) -> `?`
+    /// (fuzzy) -> plain. When the query is empty, the mode is
+    /// just "plain"; otherwise the first character is replaced
+    /// with the new mode prefix. The first word of the query
+    /// (everything after the prefix) is preserved.
+    fn cycle_search_mode(&mut self) {
+        self.set_search_mode_prefix(self.next_search_mode_prefix(self.query_prefix()));
+    }
+
+    /// The first character of the query if it is a mode prefix
+    /// (`/` or `?`), otherwise a sentinel (`\0`) meaning "plain".
+    fn query_prefix(&self) -> char {
+        if self.query.is_empty() {
+            '\0'
+        } else {
+            let c = self.query.chars().next().unwrap();
+            if c == '/' || c == '?' { c } else { '\0' }
+        }
+    }
+
+    /// The next mode prefix in the cycle plain -> regex -> fuzzy.
+    fn next_search_mode_prefix(&self, current: char) -> char {
+        match current {
+            '/' => '?',  // regex -> fuzzy
+            '?' => '\0', // fuzzy -> plain
+            _ => '/',    // plain -> regex
+        }
+    }
+
+    /// Apply a new mode prefix to the query, preserving the rest
+    /// of the text. `\0` means "no prefix" (plain mode).
+    fn set_search_mode_prefix(&mut self, new_prefix: char) {
+        // Use `chars()` to be robust against multi-byte UTF-8
+        // prefixes (`?` is 2 bytes). We drop the first char
+        // only if it's a mode prefix, otherwise the body is the
+        // whole query.
+        let body: String = self
+            .query
+            .chars()
+            .next()
+            .map(|c| if c == '/' || c == '?' {
+                self.query[c.len_utf8()..].to_string()
+            } else {
+                self.query.clone()
+            })
+            .unwrap_or_default();
+
+        self.query = if new_prefix == '\0' {
+            body
+        } else {
+            let mut s = String::with_capacity(body.len() + new_prefix.len_utf8());
+            s.push(new_prefix);
+            s.push_str(&body);
+            s
+        };
+        self.recompile_regex();
+        self.refresh();
+    }
+
     /// Cycle to the next theme. `Ctrl-N` calls this; `Ctrl-P` calls
     /// `cycle_theme_prev`. Updates the global palette immediately so
     /// the change is visible on the next frame, and triggers a full
@@ -502,7 +604,9 @@ impl App {
 
     /// Return true if the given text matches the current query:
     /// either the plain-text substring search (multi-word, AND),
-    /// or the compiled regex when the query starts with `/`.
+    /// the compiled regex when the query starts with `/`, or a
+    /// fuzzy subsequence match (multi-word, AND) when the query
+    /// starts with `?`.
     fn query_matches_text(&self, text: &str) -> bool {
         if self.query.is_empty() {
             return true;
@@ -515,6 +619,17 @@ impl App {
             // the entire post-slash text as a literal pattern so
             // the user sees at least the matches that contain it.
             return text.to_lowercase().contains(&self.query[1..].to_lowercase());
+        }
+        if self.is_fuzzy_query() {
+            // Fuzzy search: every whitespace-separated word in the
+            // query must be a fuzzy subsequence of the text.
+            let fuzzy_pattern = self.fuzzy_pattern();
+            if fuzzy_pattern.is_empty() {
+                return true;
+            }
+            return fuzzy_pattern
+                .split_whitespace()
+                .all(|term| fuzzy_match(term, text));
         }
         // Plain text: every whitespace-separated word must appear
         // (case-insensitive).
@@ -684,26 +799,47 @@ impl App {
     /// command or comment text.
     fn refresh(&mut self) {
         self.rows = self.fetch().unwrap_or_default();
-        if self.is_regex_query() {
+        if self.is_regex_query() || self.is_fuzzy_query() {
             // Two-phase borrow: copy the rows out, then post-filter.
             // Avoids the borrow checker complaining about
             // simultaneously borrowing `self.rows` and `self`.
             let query = self.query.clone();
             let regex = self.query_regex.clone();
+            let is_regex = self.is_regex_query();
+            let is_fuzzy = self.is_fuzzy_query();
             self.rows.retain(|r| {
-                if let Some(ref re) = regex {
-                    re.is_match(&r.command) || re.is_match(&r.comment)
-                } else {
-                    // No valid regex yet (in-progress typo) — fall
-                    // back to a literal substring match on the
-                    // post-slash text so the user sees *something*.
-                    r.command
-                        .to_lowercase()
-                        .contains(&query[1..].to_lowercase())
-                        || r
-                            .comment
+                if is_regex {
+                    if let Some(ref re) = regex {
+                        re.is_match(&r.command) || re.is_match(&r.comment)
+                    } else {
+                        // No valid regex yet (in-progress typo) — fall
+                        // back to a literal substring match on the
+                        // post-slash text so the user sees *something*.
+                        r.command
                             .to_lowercase()
                             .contains(&query[1..].to_lowercase())
+                            || r
+                                .comment
+                                .to_lowercase()
+                                .contains(&query[1..].to_lowercase())
+                    }
+                } else if is_fuzzy {
+                    // Fuzzy search is also a post-filter. We can't
+                    // call `self.query_matches_text` here because
+                    // `self` is borrowed mutably by `retain`. The
+                    // pattern is the whole post-`?` query, so we
+                    // inline the check.
+                    let fuzzy_pattern = &query[1..];
+                    if fuzzy_pattern.is_empty() {
+                        true
+                    } else {
+                        fuzzy_pattern
+                            .split_whitespace()
+                            .all(|term| fuzzy_match(term, &r.command)
+                                || fuzzy_match(term, &r.comment))
+                    }
+                } else {
+                    true
                 }
             });
         }
@@ -924,7 +1060,7 @@ impl App {
         // `refresh()` via `query_matches_text`. Otherwise we issue
         // one `LIKE` clause per whitespace-separated word so the
         // search is AND-by-word.
-        if !self.query.is_empty() && !self.is_regex_query() {
+        if !self.query.is_empty() && !self.is_regex_query() && !self.is_fuzzy_query() {
             for word in self.query.split_whitespace() {
                 let escaped = crate::util::escape_like(word);
                 clause.push_str(
@@ -1685,6 +1821,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CycleExitFilter => {
             app.cycle_exit_filter();
+            false
+        }
+        Action::ToggleSearchMode => {
+            app.cycle_search_mode();
             false
         }
         Action::Run => {
@@ -3239,6 +3379,114 @@ mod tests {
                         find_filename_in_command("cat \"my notes.txt\""),
                         Some("my notes.txt".to_string())
                 );
+        }
+
+        // --- Fuzzy search ---------------------------------------------------
+
+        #[test]
+        fn is_fuzzy_query_recognises_question_mark_prefix() {
+                let mut app = stats_test_app(&[]);
+                app.query = "".to_string();
+                assert!(!app.is_fuzzy_query());
+                app.query = "git".to_string();
+                assert!(!app.is_fuzzy_query());
+                app.query = "?git".to_string();
+                assert!(app.is_fuzzy_query());
+                app.query = "? git".to_string();
+                assert!(app.is_fuzzy_query());
+        }
+
+        #[test]
+        fn fuzzy_pattern_strips_question_mark() {
+                let mut app = stats_test_app(&[]);
+                app.query = "git".to_string();
+                assert_eq!(app.fuzzy_pattern(), "");
+                app.query = "?git".to_string();
+                assert_eq!(app.fuzzy_pattern(), "git");
+                app.query = "?git status".to_string();
+                assert_eq!(app.fuzzy_pattern(), "git status");
+        }
+
+        #[test]
+        fn query_matches_text_supports_fuzzy_subsequence() {
+                let mut app = stats_test_app(&[]);
+                app.query = "?gts".to_string();
+                assert!(app.query_matches_text("git status"));
+                assert!(app.query_matches_text("go test stuff"));
+                assert!(!app.query_matches_text("vim"));
+        }
+
+        #[test]
+        fn query_matches_text_fuzzy_is_case_insensitive() {
+                let mut app = stats_test_app(&[]);
+                app.query = "?GTS".to_string();
+                assert!(app.query_matches_text("git status"));
+        }
+
+        #[test]
+        fn query_matches_text_fuzzy_supports_and_by_word() {
+                let mut app = stats_test_app(&[]);
+                app.query = "?git st".to_string();
+                // `git` and `st` both appear as subsequences.
+                assert!(app.query_matches_text("git status"));
+                assert!(app.query_matches_text("git stash"));
+                // `st` is not a subsequence of "vim".
+                assert!(!app.query_matches_text("vim"));
+                // `git` is missing.
+                assert!(!app.query_matches_text("cargo test"));
+        }
+
+        #[test]
+        fn query_matches_text_fuzzy_empty_pattern_matches_all() {
+                let mut app = stats_test_app(&[]);
+                app.query = "?".to_string();
+                // An empty fuzzy pattern (just the prefix) matches
+                // everything, mirroring the empty plain query
+                // behavior.
+                assert!(app.query_matches_text("git status"));
+                assert!(app.query_matches_text("vim"));
+        }
+
+        #[test]
+        fn build_where_skips_like_clauses_for_fuzzy_query() {
+                let mut app = stats_test_app(&[("git status", 1)]);
+                app.query = "?gts".to_string();
+                let (clause, _) = app.build_where();
+                // Fuzzy search post-filters in Rust, so the SQL
+                // should not narrow with `LIKE` clauses.
+                assert!(
+                        !clause.contains("LIKE"),
+                        "Fuzzy query should not add LIKE clauses, got: {:?}",
+                        clause
+                );
+        }
+
+        #[test]
+        fn cycle_search_mode_advances_prefix() {
+                let mut app = stats_test_app(&[("git status", 1)]);
+                // Empty query -> cycle lands on regex ('/').
+                app.cycle_search_mode();
+                assert_eq!(app.query, "/");
+                // Cycle to fuzzy ('?').
+                app.cycle_search_mode();
+                assert_eq!(app.query, "?");
+                // Cycle to plain (no prefix).
+                app.cycle_search_mode();
+                assert_eq!(app.query, "");
+        }
+
+        #[test]
+        fn cycle_search_mode_preserves_query_body() {
+                let mut app = stats_test_app(&[("git status", 1)]);
+                app.query = "git status".to_string();
+                app.cycle_search_mode();
+                // The body `git status` is preserved, only the
+                // prefix changes.
+                assert_eq!(app.query, "/git status");
+                app.cycle_search_mode();
+                assert_eq!(app.query, "?git status");
+                app.cycle_search_mode();
+                assert_eq!(app.query, "git status");
         }
 
         // --- App::edit_referenced_file end-to-end ------------------------------
