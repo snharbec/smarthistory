@@ -373,6 +373,13 @@ pub struct Palette {
     #[allow(dead_code)]
     pub(crate) dimmer: Color,
     pub(crate) highlight: Color,
+    /// Foreground color used for the "output search" mode
+    /// tint (the `+...` query prefix). Distinct from
+    /// `accent` (LLM), `success` (fuzzy), and `warning`
+    /// (regex). Sourced from the theme's `info` slot in
+    /// built-in palettes and from `tuicolor.info=` in the
+    /// manual-config case.
+    pub(crate) info: Color,
     /// Background color for the currently-selected row in the list.
     pub(crate) selection: Color,
     /// Foreground color used for badge text. Defaults to `bg` so
@@ -401,6 +408,7 @@ impl Palette {
             dim: Color::Gray,
             dimmer: Color::DarkGray,
             highlight: Color::Yellow,
+            info: Color::Blue,
             selection: Color::DarkGray,
             badge_fg: Color::Black,
             list_bg: Color::Black,
@@ -425,6 +433,7 @@ impl Palette {
             dim: resolve_color(&theme.dim),
             dimmer: Color::DarkGray,
             highlight: resolve_color(&theme.highlight),
+            info: resolve_color(&theme.info),
             selection: resolve_color(&cfg.selection(&theme.bg)),
             badge_fg: resolve_color(&cfg.badge_fg(&theme.bg)),
             list_bg: resolve_color(&cfg.list_bg(&theme.bg)),
@@ -479,6 +488,21 @@ pub fn install_palette(theme: SelectedTheme) {
                 },
                 dimmer: Color::DarkGray,
                 highlight: resolve_color(&cfg_theme.highlight),
+                // `info` is sourced from the theme's own
+                // `info` slot when the theme is built-in.
+                // The user's `tuicolor.info=` override wins
+                // when set. (We don't gate on a "has info
+                // override" check the way bg/fg do, because
+                // `info` is a pure-foreground accent and the
+                // manual config sets it to "blue" by default
+                // — there's no meaningful fallback case
+                // where the user *should* inherit the
+                // theme's slot.)
+                info: if cfg_theme.info.is_empty() {
+                    p.info
+                } else {
+                    resolve_color(&cfg_theme.info)
+                },
                 selection: if cfg_theme.selection.is_empty() {
                     p.selection
                 } else {

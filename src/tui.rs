@@ -578,6 +578,22 @@ impl App {
         self.query.starts_with('?')
     }
 
+    /// True if the current query is an output-content search
+    /// (prefixed with `+`). The body of the query is treated as
+    /// a multi-word AND of substring matches against the
+    /// captured `history_output.output` column rather than
+    /// against the command or comment text. Rows without
+    /// captured output are excluded.
+    ///
+    /// This is the inverse of the other "search inside text"
+    /// modes: `=` is for asking the LLM to generate a
+    /// command; `+` is for finding an existing command by
+    /// something it *produced* (an error message, a
+    /// grep hit, a particular log line).
+    fn is_output_query(&self) -> bool {
+        self.query.starts_with('+')
+    }
+
     /// True if the current query is an LLM command-generation
     /// request (prefixed with `=`). When this returns true, the
     /// normal "select a row to run" path is short-circuited;
@@ -602,6 +618,18 @@ impl App {
     /// The fuzzy pattern, i.e. everything after the leading `?`.
     fn fuzzy_pattern(&self) -> &str {
         if self.is_fuzzy_query() {
+            &self.query[1..]
+        } else {
+            ""
+        }
+    }
+
+    /// The output-search body, i.e. everything after the
+    /// leading `+`. Returns the empty string for any other
+    /// mode. The body is a multi-word AND of substring
+    /// matches against the `history_output.output` column.
+    fn output_pattern(&self) -> &str {
+        if self.is_output_query() {
             &self.query[1..]
         } else {
             ""
@@ -637,30 +665,33 @@ impl App {
     }
 
     /// Cycle the search mode prefix: plain -> `/` (regex) -> `?`
-    /// (fuzzy) -> plain. When the query is empty, the mode is
-    /// just "plain"; otherwise the first character is replaced
-    /// with the new mode prefix. The first word of the query
-    /// (everything after the prefix) is preserved.
+    /// (fuzzy) -> `+` (output search) -> plain. When the query
+    /// is empty, the mode is just "plain"; otherwise the first
+    /// character is replaced with the new mode prefix. The body
+    /// of the query (everything after the prefix) is preserved.
     fn cycle_search_mode(&mut self) {
         self.set_search_mode_prefix(self.next_search_mode_prefix(self.query_prefix()));
     }
 
     /// The first character of the query if it is a mode prefix
-    /// (`/` or `?`), otherwise a sentinel (`\0`) meaning "plain".
+    /// (`/`, `?`, or `+`), otherwise a sentinel (`\0`) meaning
+    /// "plain".
     fn query_prefix(&self) -> char {
         if self.query.is_empty() {
             '\0'
         } else {
             let c = self.query.chars().next().unwrap();
-            if c == '/' || c == '?' { c } else { '\0' }
+            if c == '/' || c == '?' || c == '+' { c } else { '\0' }
         }
     }
 
-    /// The next mode prefix in the cycle plain -> regex -> fuzzy.
+    /// The next mode prefix in the cycle plain -> regex ->
+    /// fuzzy -> output -> plain.
     fn next_search_mode_prefix(&self, current: char) -> char {
         match current {
             '/' => '?',  // regex -> fuzzy
-            '?' => '\0', // fuzzy -> plain
+            '?' => '+',  // fuzzy -> output
+            '+' => '\0', // output -> plain
             _ => '/',    // plain -> regex
         }
     }
@@ -676,7 +707,7 @@ impl App {
             .query
             .chars()
             .next()
-            .map(|c| if c == '/' || c == '?' {
+            .map(|c| if c == '/' || c == '?' || c == '+' {
                 self.query[c.len_utf8()..].to_string()
             } else {
                 self.query.clone()
@@ -916,9 +947,10 @@ impl App {
 
     /// Return true if the given text matches the current query:
     /// either the plain-text substring search (multi-word, AND),
-    /// the compiled regex when the query starts with `/`, or a
+    /// the compiled regex when the query starts with `/`, a
     /// fuzzy subsequence match (multi-word, AND) when the query
-    /// starts with `?`.
+    /// starts with `?`, or a plain substring search against the
+    /// output body when the query starts with `+`.
     fn query_matches_text(&self, text: &str) -> bool {
         if self.query.is_empty() {
             return true;
@@ -943,10 +975,20 @@ impl App {
                 .split_whitespace()
                 .all(|term| fuzzy_match(term, text));
         }
-        // Plain text: every whitespace-separated word must appear
-        // (case-insensitive).
+        // For plain text and output modes: every
+        // whitespace-separated word must appear
+        // (case-insensitive). In output mode we use the
+        // body (everything after the leading `+`) rather
+        // than the full query, so `+segmentation fault`
+        // searches for both `segmentation` AND `fault`
+        // — not for the literal `+segmentation`.
+        let body = if self.is_output_query() {
+            self.output_pattern()
+        } else {
+            self.query.as_str()
+        };
         let lower = text.to_lowercase();
-        self.query
+        body
             .split_whitespace()
             .all(|w| lower.contains(&w.to_lowercase()))
     }
@@ -1206,7 +1248,23 @@ impl App {
                 if !self.query.is_empty() {
                     let in_command = self.query_matches_text(&row.command);
                     let in_comment = self.query_matches_text(&row.comment);
-                    if !in_command && !in_comment {
+                    // Output mode (`+...`) targets the
+                    // `history_output.output` column. The
+                    // labeled-row filter is the secondary
+                    // path (the primary list already
+                    // includes output matches via the
+                    // `LIKE` clause in `build_where`),
+                    // so we also check the labeled row's
+                    // output text here. This makes a
+                    // labeled entry that has no command/
+                    // comment match visible if its
+                    // captured output does match. Empty
+                    // output rows are correctly excluded
+                    // because `query_matches_text` won't
+                    // find anything in an empty string.
+                    let in_output = self.is_output_query()
+                        && self.query_matches_text(&row.output);
+                    if !in_command && !in_comment && !in_output {
                         continue;
                     }
                 }
@@ -1414,23 +1472,58 @@ impl App {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         // When the query is a regex (prefixed with `/`) we skip the
         // SQL `LIKE` clause entirely and post-filter the rows in
-        // `refresh()` via `query_matches_text`. Otherwise we issue
-        // one `LIKE` clause per whitespace-separated word so the
-        // search is AND-by-word.
-        // LLM queries (`=...`) are also a "the user wants a
-        // generated command, not a filtered list" signal: we
-        // short-circuit before the row is even inserted, and
-        // when refresh() runs after the LLM wrote the row we
-        // don't want to filter it out by the original `=Find
-        // all files modified yesterday` substring.
-        if !self.query.is_empty() && !self.is_regex_query() && !self.is_fuzzy_query() && !self.is_llm_query() {
-            for word in self.query.split_whitespace() {
-                let escaped = crate::util::escape_like(word);
-                clause.push_str(
-                    " AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
-                );
-                params.push(Box::new(format!("%{}%", escaped)));
-                params.push(Box::new(format!("%{}%", escaped)));
+        // `refresh()` via `query_matches_text`. Same for fuzzy
+        // (`?`) and LLM (`=`) — those are the modes that have a
+        // post-filter step or a special "the user wants a
+        // generated command" semantic that doesn't translate to a
+        // SQL `LIKE` clause.
+        if !self.query.is_empty()
+            && !self.is_regex_query()
+            && !self.is_fuzzy_query()
+            && !self.is_llm_query()
+        {
+            // Output mode (`+...`) searches the
+            // `history_output.output` column instead of
+            // `h.command` / `c.comment`. We restrict the
+            // `LIKE` to the output text and also require
+            // the row to have a `history_output` row at
+            // all (the `IS NOT NULL` guard is technically
+            // redundant with the `LIKE` against the
+            // LEFT-JOINed column, but it makes the SQL
+            // self-documenting and matches the user's
+            // intent: "find me the command that produced
+            // *this output*"). The rest of the conditions
+            // (session, directory, exit filter) still
+            // apply.
+            if self.is_output_query() {
+                // Always require a `history_output` row
+                // for output-mode queries. The `LIKE`
+                // clause below already implies this (a
+                // NULL value can't match a substring),
+                // but the empty-body case has no
+                // `LIKE` clauses to do that work for
+                // it, so we need the guard separately.
+                // Without it, a bare `+` would list
+                // every row, including the ones with no
+                // captured output — which is the
+                // opposite of what the user asked for
+                // (they want to find commands by what
+                // they produced).
+                clause.push_str(" AND o.output IS NOT NULL");
+                for word in self.output_pattern().split_whitespace() {
+                    let escaped = crate::util::escape_like(word);
+                    clause.push_str(" AND o.output LIKE ? ESCAPE '\\'");
+                    params.push(Box::new(format!("%{}%", escaped)));
+                }
+            } else {
+                for word in self.query.split_whitespace() {
+                    let escaped = crate::util::escape_like(word);
+                    clause.push_str(
+                        " AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
+                    );
+                    params.push(Box::new(format!("%{}%", escaped)));
+                    params.push(Box::new(format!("%{}%", escaped)));
+                }
             }
         }
         match self.mode {
@@ -4082,6 +4175,11 @@ mod tests {
                 // Cycle to fuzzy ('?').
                 app.cycle_search_mode();
                 assert_eq!(app.query, "?");
+                // Cycle to output ('+'). New step in the
+                // cycle since the `+...` search-inside-output
+                // mode was added.
+                app.cycle_search_mode();
+                assert_eq!(app.query, "+");
                 // Cycle to plain (no prefix).
                 app.cycle_search_mode();
                 assert_eq!(app.query, "");
@@ -4103,6 +4201,9 @@ mod tests {
                 app.cycle_search_mode();
                 assert_eq!(app.query, "?git status");
                 assert_eq!(app.query_cursor, "?git status".chars().count());
+                app.cycle_search_mode();
+                assert_eq!(app.query, "+git status");
+                assert_eq!(app.query_cursor, "+git status".chars().count());
                 app.cycle_search_mode();
                 assert_eq!(app.query, "git status");
                 assert_eq!(app.query_cursor, "git status".chars().count());
@@ -5292,5 +5393,331 @@ mod tests {
                         app.selection.as_deref(),
                         Some("find . -mtime -1")
                 );
+        }
+
+        // --- Output search (`+...` query mode) ---------------------
+
+        /// Build an app with a set of history rows, each of
+        /// which has a captured output string. The `output`
+        /// column is what the `+...` search mode targets;
+        /// the tests below rely on this helper to set up
+        /// the data they need.
+        ///
+        /// `rows` is a list of `(command, output)` pairs. The
+        /// command and output are stored as-is. The test
+        /// schema mirrors the production schema (including
+        /// the `idx_history_dedup` unique index that backs
+        /// `run_llm_query`'s upsert) so the output search
+        /// path runs against the same SQL the real TUI
+        /// issues.
+        fn output_test_app(rows: &[(&str, &str)]) -> App {
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );
+                        CREATE UNIQUE INDEX idx_history_dedup
+                            ON history (command, directory, session_id);",
+                )
+                .expect("schema");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                for (i, (cmd, output)) in rows.iter().enumerate() {
+                        let id = i as i64 + 1;
+                        conn.execute(
+                                "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                                 VALUES (?1, ?2, '/tmp', 'sess', 0, ?3)",
+                                rusqlite::params![id, *cmd, now - (rows.len() as i64 - i as i64)],
+                        )
+                        .expect("insert history");
+                        if !output.is_empty() {
+                                conn.execute(
+                                        "INSERT INTO history_output (history_id, output) VALUES (?1, ?2)",
+                                        rusqlite::params![id, *output],
+                                )
+                                .expect("insert output");
+                        }
+                }
+                App::new(
+                        conn,
+                        Mode::Global,
+                        String::new(),
+                        false,
+                        ExitFilter::All,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None,
+                )
+        }
+
+        /// The `+` prefix is recognised as a mode marker.
+        /// Without the prefix, `is_output_query` is false
+        /// (e.g. `git log +foo` is a plain query, not an
+        /// output search).
+        #[test]
+        fn is_output_query_recognises_plus_prefix() {
+                let mut app =
+                        output_test_app(&[("ls", "file1\nfile2\n")]);
+                assert!(!app.is_output_query());
+                app.query = "+segmentation".to_string();
+                assert!(app.is_output_query());
+                app.query = "git log +foo".to_string();
+                assert!(!app.is_output_query());
+                app.query = "+".to_string();
+                assert!(app.is_output_query());
+        }
+
+        /// `output_pattern` returns everything after the
+        /// leading `+`, with the leading `+` itself
+        /// stripped. Used by `build_where` and
+        /// `query_matches_text` to drive the actual
+        /// `LIKE` clause and the post-filter.
+        #[test]
+        fn output_pattern_strips_leading_plus() {
+                let mut app =
+                        output_test_app(&[("ls", "")]);
+                assert_eq!(app.output_pattern(), "");
+                app.query = "+segmentation".to_string();
+                assert_eq!(app.output_pattern(), "segmentation");
+                app.query = "+".to_string();
+                assert_eq!(app.output_pattern(), "");
+                app.query = "+git stash".to_string();
+                assert_eq!(app.output_pattern(), "git stash");
+        }
+
+        /// Single-word output search: the row whose
+        /// captured output contains the substring is
+        /// included; other rows are not.
+        #[test]
+        fn output_search_matches_substring_in_output() {
+                let mut app = output_test_app(&[
+                        ("make", "Compiling foo v0.1.0\nFinished release"),
+                        ("ls", "src\nCargo.toml\nREADME.md"),
+                        (
+                                "cargo test",
+                                "running 1 test\ntest ok\nsegmentation fault (core dumped)",
+                        ),
+                ]);
+                app.query = "+segmentation".to_string();
+                app.refresh();
+                let commands: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(commands, vec!["cargo test"]);
+        }
+
+        /// Multi-word output search: the query is
+        /// `+running test` and only the row whose
+        /// output contains BOTH substrings is
+        /// included. This is the same AND-by-word
+        /// behaviour as plain text mode. We use
+        /// `running` / `test` here (not `seg` /
+        /// `fault`) because the substring match is
+        /// exact-substring, not word-boundary: a row
+        /// containing `segfault` would match BOTH
+        /// `seg` and `fault` as substrings, defeating
+        /// the AND test.
+        #[test]
+        fn output_search_is_multi_word_and() {
+                let mut app = output_test_app(&[
+                        ("make", "Compiling foo\nFinished release"),
+                        (
+                                "binary_a",
+                                "running test_a\nok",
+                        ),
+                        (
+                                "binary_b",
+                                "compiling test_b\nsegfault",
+                        ),
+                ]);
+                app.query = "+running test".to_string();
+                app.refresh();
+                let commands: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                // Only `binary_a` contains both
+                // `running` AND `test`. `binary_b` has
+                // `test` (in `test_b`) but not
+                // `running`, and `make` has neither.
+                assert_eq!(commands, vec!["binary_a"]);
+        }
+
+        /// Output search is case-insensitive. The user
+        /// types lowercase but the LLM-generated log
+        /// lines often contain uppercase variants
+        /// (`SEGMENTATION FAULT`); both should match.
+        #[test]
+        fn output_search_is_case_insensitive() {
+                let mut app = output_test_app(&[
+                        ("a", "ALL GOOD"),
+                        ("b", "SEGMENTATION FAULT"),
+                        ("c", "no output at all"),
+                ]);
+                app.query = "+segmentation".to_string();
+                app.refresh();
+                let commands: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(commands, vec!["b"]);
+        }
+
+        /// Rows without captured output are excluded
+        /// from output search. The SQL `LIKE` clause
+        /// only matches against `o.output`, which is
+        /// NULL for rows without a `history_output`
+        /// row. This is the desired behaviour: the
+        /// user is asking "which command produced
+        /// *this output*?" and a command with no
+        /// captured output cannot be the answer.
+        #[test]
+        fn output_search_excludes_rows_without_output() {
+                let mut app = output_test_app(&[
+                        ("with_output", "ERROR: something broke"),
+                        // No output row for this one.
+                        ("without_output", ""),
+                ]);
+                app.query = "+something".to_string();
+                app.refresh();
+                let commands: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(commands, vec!["with_output"]);
+        }
+
+        /// An empty `+` (no body) lists all rows that
+        /// have captured output. This mirrors the
+        /// plain-mode behaviour of an empty query
+        /// (show everything) but restricted to rows
+        /// with output. Useful as a "show me what
+        /// I've actually captured" view.
+        #[test]
+        fn output_search_empty_body_lists_all_with_output() {
+                let mut app = output_test_app(&[
+                        ("a", "some output"),
+                        ("b", "other output"),
+                        // No output row.
+                        ("c", ""),
+                ]);
+                app.query = "+".to_string();
+                app.refresh();
+                let commands: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                // `c` has no output, so it must be
+                // excluded. Order is timestamp-DESC
+                // (`a` is oldest, `c` is newest in
+                // the helper, so `c` would normally
+                // be first, but `c` is excluded).
+                assert_eq!(commands.len(), 2);
+                assert!(commands.contains(&"a"));
+                assert!(commands.contains(&"b"));
+        }
+
+        /// Output search respects the `history_output`
+        /// join: even if the command text or comment
+        /// doesn't contain the substring, the row is
+        /// included when its captured output does.
+        /// This is the whole point of the `+` mode —
+        /// it searches a column the other modes
+        /// don't touch.
+        #[test]
+        fn output_search_uses_output_not_command() {
+                let mut app = output_test_app(&[
+                        // Command text is innocuous;
+                        // only the captured output
+                        // contains the search term.
+                        (
+                                "do_thing",
+                                "ERROR: kernel panic — not syncing",
+                        ),
+                ]);
+                // `+panic` must match this row even
+                // though the command (`do_thing`) and
+                // the comment (empty) don't contain
+                // the word.
+                app.query = "+panic".to_string();
+                app.refresh();
+                let commands: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(commands, vec!["do_thing"]);
+        }
+
+        /// `query_matches_text` uses the body of the
+        /// `+` query (not the leading `+`) when
+        /// post-filtering labeled rows. The post-
+        /// filter would otherwise look for the
+        /// literal substring `+segmentation` and
+        /// never match.
+        #[test]
+        fn query_matches_text_strips_plus_prefix() {
+                let mut app =
+                        output_test_app(&[("x", "")]);
+                app.query = "+segmentation".to_string();
+                // The text being checked doesn't
+                // contain the literal `+segmentation`
+                // but does contain `segmentation`.
+                assert!(app.query_matches_text("segmentation fault"));
+                // Sanity: a totally unrelated text
+                // doesn't match.
+                assert!(!app.query_matches_text("all good"));
+        }
+
+        /// Mode cycle includes the `+` step. The
+        /// `cycle_search_mode_advances_prefix` and
+        /// `cycle_search_mode_preserves_query_body`
+        /// tests cover the exact cycle, but we
+        /// double-check here that the `+...` body is
+        /// preserved across the cycle in both
+        /// directions.
+        #[test]
+        fn cycle_search_mode_round_trips_output_mode() {
+                let mut app =
+                        output_test_app(&[("x", "")]);
+                // Start in plain mode with a body.
+                app.query = "error".to_string();
+                // plain -> regex
+                app.cycle_search_mode();
+                assert_eq!(app.query, "/error");
+                // regex -> fuzzy
+                app.cycle_search_mode();
+                assert_eq!(app.query, "?error");
+                // fuzzy -> output
+                app.cycle_search_mode();
+                assert_eq!(app.query, "+error");
+                // output -> plain
+                app.cycle_search_mode();
+                assert_eq!(app.query, "error");
         }
 }

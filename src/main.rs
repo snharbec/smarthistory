@@ -705,6 +705,13 @@ pub struct TuiTheme {
     warning: String,
     dim: String,
     highlight: String,
+    /// Foreground color used for the "output search" mode
+    /// tint (the `+...` query prefix). Defaults to blue so
+    /// it's visually distinct from the other mode tints
+    /// (yellow = regex, green = fuzzy, magenta = LLM).
+    /// Override with `tuicolor.info=<color>` in the config
+    /// file.
+    info: String,
     /// Background color used for the currently-selected row in the
     /// history list. Falls back to `bg` when unset.
     selection: String,
@@ -738,6 +745,7 @@ impl Default for TuiTheme {
             warning: "yellow".to_string(),
             dim: "gray".to_string(),
             highlight: "yellow".to_string(),
+            info: "blue".to_string(),
             selection: "darkgray".to_string(),
             badge_fg: String::new(),
             list_bg: String::new(),
@@ -1032,6 +1040,7 @@ impl Config {
             "warning" => theme.warning = value,
             "dim" => theme.dim = value,
             "highlight" => theme.highlight = value,
+            "info" => theme.info = value,
             "selection" => theme.selection = value,
             "badgefg" | "badge_fg" => theme.badge_fg = value,
             "listbg" | "list_bg" => theme.list_bg = value,

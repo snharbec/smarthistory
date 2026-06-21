@@ -37,12 +37,17 @@ match standard workflow expectations. This project aims to provide:
   immediately. The query field still narrows the ranking.
 - **Substring search with derived columns:** `time` (formatted timestamp),
   `diff` (age like `5m`, `2h`, `3d`, `2M`), `base` (leaf directory).
-- **Three search modes, one key away:** plain substring (default),
-  regex (`/...` prefix), and fuzzy subsequence (`?...` prefix). The
-  fuzzy mode is fzf-style — every character of the query must appear
-  in the row in order, case-insensitive, so `?gsc` finds `git status
-  --short && cargo build`. Toggle between modes with `F3` (or the
-  command palette).
+- **Four search modes, one key away:** plain substring (default),
+  regex (`/...` prefix), fuzzy subsequence (`?...` prefix), and
+  **output search** (`+...` prefix — matches against the
+  captured output text, not the command or comment). The
+  output mode answers "which command produced *this
+  output?": `+segmentation fault` finds every command whose
+  captured log contains both `segmentation` and `fault`. The
+  fuzzy mode is fzf-style — every character of the query
+  must appear in the row in order, case-insensitive, so
+  `?gsc` finds `git status --short && cargo build`. Toggle
+  between modes with `F3` (or the command palette).
 - **LLM command generation on `=...`:** when you prefix a query with
   `=` and press `Enter`, a local ollama instance translates the
   natural-language description (e.g. `=Find all files modified
@@ -110,7 +115,7 @@ Supported keys:
 | `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
-| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
+| `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `info`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
 | `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
 | `ollama.url=http://host:port` | URL of a local ollama instance used by the LLM command-generation mode (the `=...` query prefix in the TUI). Must be paired with `ollama.model`. | (feature disabled) |
 | `ollama.model=<name>` | ollama model name to use, e.g. `llama3.2`, `qwen2.5-coder`, `codellama`. Must be paired with `ollama.url`. The model must already be pulled (`ollama pull <name>`). | (feature disabled) |
@@ -293,7 +298,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Up`      | Widget  | Walk back through matches for the current line.                 |
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
 | `Ctrl+G`  | Widget  | Cycle search scope: SESS → DIR → GLOBAL → STATS → SESS.            |
-| `F3`      | TUI     | Cycle the TUI search mode: plain → `/`regex → `?`fuzzy → plain. The body of the query is preserved; only the leading prefix character changes. Rebindable via `key.toggle-search-mode=...` (also reachable through the command palette). |
+| `F3`      | TUI     | Cycle the TUI search mode: plain → `/`regex → `?`fuzzy → `+`output → plain. The body of the query is preserved; only the leading prefix character changes. Rebindable via `key.toggle-search-mode=...` (also reachable through the command palette). |
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
@@ -587,12 +592,54 @@ broad set of candidate rows and the TUI narrows them in Rust
 on every keystroke. This is fast enough to feel instant on
 a few-thousand-row history.
 
-Cycle between plain, regex, and fuzzy by pressing `F3`
-(rebindable via `key.toggle-search-mode=...`). The cycle
-preserves the body of your query and only changes the leading
-prefix character, so `git status` -> `/git status` ->
-`?git status` -> `git status` keeps the same text the whole
-time.
+Cycle between plain, regex, fuzzy, and output search by
+pressing `F3` (rebindable via `key.toggle-search-mode=...`).
+The cycle preserves the body of your query and only changes
+the leading prefix character, so `git status` ->
+`/git status` -> `?git status` -> `+git status` ->
+`git status` keeps the same text the whole time.
+
+Output search uses a leading `+` and targets the
+`history_output.output` column rather than `h.command` or
+the comment text. The other modes answer "which command
+am I looking for?"; the output mode answers the inverse
+question: "which command *produced this*?". A row with
+no captured output is excluded from the result set
+(matching the user's intent — they want to find a
+command by what it generated, not a command that has
+nothing to say). Matching is AND-by-substring across
+whitespace-separated terms, case-insensitive:
+
+```
+> +segmentation fault
+  # every command whose captured stdout/stderr contains
+  # BOTH `segmentation` AND `fault` (case-insensitive)
+
+> +running test
+  # the literal substrings `running` and `test` must
+  # both appear in the output text
+
+> +
+  # all rows that have captured output (an "output
+  # inventory" view)
+```
+
+When the leading `+` is present the input border is
+tinted blue and the mode strip shows an `OUTPUT` chip
+in the same blue. The colour comes from the active
+theme's `info` slot (blue by default, override with
+`tuicolor.info=<color>` in the config). The tint
+distinguishes output search from the three existing
+modes (yellow = regex, green = fuzzy, magenta = LLM)
+so the user always knows which column their query is
+hitting.
+
+Output search is a SQL pre-filter: each term becomes
+its own `LIKE '%term%'` clause against `o.output`,
+combined with the existing session/directory/exit-code
+filters. There is no post-filter step (unlike regex
+and fuzzy), so the round-trip is one query and the
+results match the user's mental model exactly.
 
 In LLM mode the `Left` and `Right` arrow keys (which would
 normally bind to `EditStart` / `EditEnd` and stage a row)

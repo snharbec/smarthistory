@@ -381,7 +381,7 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         binding_for(Action::ToggleSearchMode),
-        "cycle search mode: plain → regex (`/`) → fuzzy (`?`) → plain",
+        "cycle search mode: plain → regex (`/`) → fuzzy (`?`) → output (`+`) → plain",
     );
     row(
         &mut lines,
@@ -939,6 +939,18 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Same gating logic for the output-mode chip. The
+    // chip is only useful when the user has typed `+...`
+    // to ask for "which command produced this output?";
+    // showing it always would be noise. There is no
+    // "not configured" state — output mode is always
+    // available, just useless for commands that have no
+    // captured output.
+    let output_chip = if app.is_output_query() {
+        Some(output_mode_badge())
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -952,6 +964,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = llm_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = output_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -1021,6 +1037,23 @@ fn llm_mode_badge(configured: bool) -> Span<'static> {
         Style::default()
             .fg(Theme::badge_fg_color())
             .bg(color)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The output-mode chip. Tinted with the `info` color
+/// (blue by default, override via `tuicolor.info=`) so
+/// the user can see at a glance that the query is being
+/// matched against captured output. There is no
+/// "configured" / "not configured" state — the feature
+/// is always available; the chip just reminds the user
+/// they're in output-search mode.
+fn output_mode_badge() -> Span<'static> {
+    Span::styled(
+        " OUTPUT ".to_string(),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(Theme::info_color())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -1482,6 +1515,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let is_regex = app.is_regex_query();
     let _is_fuzzy = app.is_fuzzy_query();
     let is_llm = app.is_llm_query();
+    let is_output = app.is_output_query();
     let (prompt, title, content) = match app.comment_edit {
         Some(ref buf) => ("comment> ", " comment ", buf.as_str()),
         None => {
@@ -1495,6 +1529,15 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 // (warning = yellow) keeps the visual signal
                 // distinct from the other two modes.
                 ("=", " LLM ", app.query.as_str())
+            } else if is_output {
+                // Output-search mode (`+...`) gets its own
+                // blue-tinted prefix and `OUTPUT` title so
+                // the user can tell at a glance that the
+                // query is being matched against captured
+                // output, not commands. The colour comes
+                // from the active theme's `info` slot (blue
+                // by default, override via `tuicolor.info=`).
+                ("+", " output ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -1516,6 +1559,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 // Match the LLM-mode chip in the mode strip:
                 // magenta-tinted accent.
                 Style::default().fg(Theme::accent_color())
+            } else if is_output {
+                // Output-mode tint: blue (info slot), so the
+                // user can see at a glance that the query
+                // is being matched against captured output.
+                Style::default().fg(Theme::info_color())
             } else {
                 Theme::accent()
             })
@@ -1525,6 +1573,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::warning_color())
             } else if is_llm {
                 Style::default().fg(Theme::accent_color())
+            } else if is_output {
+                Style::default().fg(Theme::info_color())
             } else {
                 Theme::dim()
             })

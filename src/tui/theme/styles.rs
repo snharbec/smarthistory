@@ -79,6 +79,14 @@ impl Theme {
     pub fn highlight_color() -> Color {
         PALETTE.with(|c| c.borrow().highlight)
     }
+    /// Foreground color for the "output search" mode tint
+    /// (the `+...` query prefix). Sourced from the active
+    /// theme's `info` slot — blue by default — so it
+    /// tracks the rest of the palette through theme
+    /// changes.
+    pub fn info_color() -> Color {
+        PALETTE.with(|c| c.borrow().info)
+    }
     #[allow(dead_code)]
     pub fn dim_color() -> Color {
         PALETTE.with(|c| c.borrow().dim)
