@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use super::bindings::{format_key_specs, Action};
-use super::state::{ExitFilter, HistoryRow, Mode};
+use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{format_diff, format_time, App, CommandMenu, ConfirmMode, HelpView, OutputView};
@@ -442,6 +442,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         binding_for(Action::CycleExitFilter),
         "cycle exit-code filter: ALL → OK → ERR → ALL",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::CycleSortOrder),
+        "cycle sort order: AGE (newest first) → FREQ (most-run first) → AGE",
     );
     row(
         &mut lines,
@@ -951,6 +956,17 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Sort-order chip is hidden when the order is at
+    // its default (`Age`, the historical timestamp-DESC
+    // behaviour). Showing it always would be visual
+    // noise — the user has to actively choose
+    // `Frequency` to see this chip, so its presence
+    // is itself the signal.
+    let sort_chip = if app.sort_order != SortOrder::default() {
+        Some(sort_order_badge(app.sort_order))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -968,6 +984,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = output_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = sort_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -1054,6 +1074,28 @@ fn output_mode_badge() -> Span<'static> {
         Style::default()
             .fg(Theme::badge_fg_color())
             .bg(Theme::info_color())
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The sort-order chip. Shown only when the sort
+/// differs from the default (`Age`); the user has to
+/// actively choose `Frequency` to see it, so the chip
+/// itself is the signal that the list is in a
+/// non-default order. Tinted with the warning color
+/// (yellow by default) so it stands out from the mode
+/// chips — the user should notice they've moved away
+/// from the historical age-DESC sort.
+fn sort_order_badge(order: SortOrder) -> Span<'static> {
+    let label = match order {
+        SortOrder::Age => "AGE",
+        SortOrder::Frequency => "FREQ",
+    };
+    Span::styled(
+        format!(" {} ", label),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(Theme::warning_color())
             .add_modifier(Modifier::BOLD),
     )
 }

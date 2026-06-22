@@ -152,3 +152,75 @@ impl ExitFilter {
         }
     }
 }
+
+/// The order rows are sorted in within the TUI history
+/// list. Cycled with `F4` (the `CycleSortOrder` action).
+///
+/// - `Age`      — sort by timestamp DESC (the historical
+///   default; newest commands at the bottom of the
+///   bottom-aligned list).
+/// - `Frequency` — sort by how many times each command
+///   appears in the currently-filtered set, DESC.
+///   Ties are broken by timestamp DESC (newest wins among
+///   commands with the same count). Commands that appear
+///   once still appear, just sorted alongside the more
+///   frequent ones.
+///
+/// The counts are computed *within the current filtered
+/// set* (the rows returned by the SQL `build_where` /
+/// `fetch_stats` query, plus any labeled rows that
+/// survived the filter). This means switching modes
+/// (SESS/DIR/GLOBAL) or filters changes what "most
+/// frequent" means — the count is always relative to
+/// what the user is looking at. This is the same model
+/// the user has when they say "show me my most-run
+/// commands" while looking at a particular session or
+/// directory: it's the most-run *here*, not globally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    /// Newest first (the historical default).
+    #[default]
+    Age,
+    /// Most-frequent first, with timestamp DESC as a
+    /// tie-breaker.
+    Frequency,
+}
+
+impl SortOrder {
+    /// Cycle to the next value. `Age` → `Frequency` → `Age`.
+    /// Two values is the smallest useful cycle; the user
+    /// can always press the key again to flip back.
+    pub fn next(self) -> Self {
+        match self {
+            SortOrder::Age => SortOrder::Frequency,
+            SortOrder::Frequency => SortOrder::Age,
+        }
+    }
+
+    /// Lowercase identifier for the session file: `age`
+    /// or `frequency`. Short and stable so it doesn't
+    /// churn on display-name tweaks.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SortOrder::Age => "age",
+            SortOrder::Frequency => "frequency",
+        }
+    }
+
+    /// Parse the persisted form. Accepts the canonical
+    /// `as_str()` value plus a few friendly aliases
+    /// (`freq`/`count`/`occurrences` for the same thing
+    /// as `frequency`, and upper-case / dash-separated
+    /// variants for hand-edited session files). Returns
+    /// `None` for anything else so the caller can fall
+    /// back to the default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "age" | "time" | "newest" => Some(SortOrder::Age),
+            "frequency" | "freq" | "count" | "occurrence" | "occurrences" => {
+                Some(SortOrder::Frequency)
+            }
+            _ => None,
+        }
+    }
+}

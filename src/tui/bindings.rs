@@ -60,6 +60,18 @@ pub enum Action {
     ClearQuery,
     /// Cycle the exit-code filter.
     CycleExitFilter,
+    /// Cycle the sort order of the history list. The
+    /// current order is also persisted in the session
+    /// file and restored on the next TUI invocation, so
+    /// the user always lands back on the sort they last
+    /// picked.
+    ///
+    /// Two values are supported: `Age` (newest first,
+    /// the historical default) and `Frequency` (most-
+    /// run commands first, with timestamp DESC as a
+    /// tie-breaker). See `SortOrder` for the full
+    /// contract.
+    CycleSortOrder,
     /// Run the selected command (Enter).
     Run,
     /// Prefill the line for editing, cursor at the start (Left).
@@ -112,6 +124,7 @@ impl Action {
             Action::DeleteMatching => "delete-matching",
             Action::ClearQuery => "clear-query",
             Action::CycleExitFilter => "cycle-exit-filter",
+            Action::CycleSortOrder => "cycle-sort-order",
             Action::Run => "run",
             Action::EditStart => "edit-start",
             Action::EditEnd => "edit-end",
@@ -145,6 +158,7 @@ impl Action {
             Action::DeleteMatching => "Delete matches",
             Action::ClearQuery => "Clear query",
             Action::CycleExitFilter => "Cycle exit filter",
+            Action::CycleSortOrder => "Cycle sort order",
             Action::Run => "Run",
             Action::EditStart => "Edit (cursor at start)",
             Action::EditEnd => "Edit (cursor at end)",
@@ -180,6 +194,7 @@ impl Action {
             Action::CycleMode
             | Action::ToggleDuplicateFilter
             | Action::CycleExitFilter
+            | Action::CycleSortOrder
             | Action::ClearQuery
             | Action::ToggleSearchMode => "search",
             Action::CycleThemeNext | Action::CycleThemePrev => "theme",
@@ -212,6 +227,7 @@ impl Action {
             Action::DeleteMatching => "C-x",
             Action::ClearQuery => "C-u",
             Action::CycleExitFilter => "C-j",
+            Action::CycleSortOrder => "F4",
             Action::Run => "Enter",
             Action::EditStart => "Left",
             Action::EditEnd => "Right",
@@ -478,6 +494,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::DeleteMatching,
     Action::ClearQuery,
     Action::CycleExitFilter,
+    Action::CycleSortOrder,
     Action::Run,
     Action::EditStart,
     Action::EditEnd,

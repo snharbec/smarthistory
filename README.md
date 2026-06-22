@@ -48,6 +48,17 @@ match standard workflow expectations. This project aims to provide:
   must appear in the row in order, case-insensitive, so
   `?gsc` finds `git status --short && cargo build`. Toggle
   between modes with `F3` (or the command palette).
+- **Two sort orders, persisted across invocations:** the
+  default sorts by age (newest first — the historical
+  behavior). Pressing `F4` switches to sort by command
+  frequency — most-run commands first, with the
+  most-recently-used command winning ties. The choice is
+  saved to the session file (`~/.cache/smarthistory/
+  session`) and restored on the next TUI call, so the
+  user always lands back on the sort they last picked.
+  Frequency sort counts occurrences within the
+  currently-filtered set, so a `DIR` or `SESS` mode user
+  sees "most-run *here*", not "most-run globally".
 - **LLM command generation on `=...`:** when you prefix a query with
   `=` and press `Enter`, a local ollama instance translates the
   natural-language description (e.g. `=Find all files modified
@@ -299,6 +310,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
 | `Ctrl+G`  | Widget  | Cycle search scope: SESS → DIR → GLOBAL → STATS → SESS.            |
 | `F3`      | TUI     | Cycle the TUI search mode: plain → `/`regex → `?`fuzzy → `+`output → plain. The body of the query is preserved; only the leading prefix character changes. Rebindable via `key.toggle-search-mode=...` (also reachable through the command palette). |
+| `F4`      | TUI     | Cycle the TUI sort order: AGE (newest first, the default) → FREQ (most-run commands first within the currently filtered set, with one row per command — duplicates are collapsed implicitly) → AGE. The chosen order is persisted in the session file (`~/.cache/smarthistory/session`) and restored on the next TUI call. A `FREQ` chip in the mode strip signals the non-default order. Rebindable via `key.cycle-sort-order=...`. |
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
@@ -640,6 +652,73 @@ combined with the existing session/directory/exit-code
 filters. There is no post-filter step (unlike regex
 and fuzzy), so the round-trip is one query and the
 results match the user's mental model exactly.
+
+### TUI sort order
+
+The merged history list is sorted in one of two ways,
+toggled with `F4` (rebindable via
+`key.cycle-sort-order=...`, also reachable through
+the command palette). The current order is shown in
+the mode strip: no chip means the default age sort;
+a `FREQ` chip in yellow means the user has switched
+to frequency sort.
+
+- **AGE (default)**: rows are ordered by
+  `timestamp DESC` — newest at the bottom of the
+  bottom-aligned list, oldest at the top. This is the
+  historical behavior and the one most users want for
+  "what did I just run?"-style searches.
+- **FREQ**: rows are ordered by how many times the
+  same `command` string appears in the currently
+  filtered set, DESC. Ties are broken by the
+  *newest timestamp of either command* (so a
+  command whose most recent run is newer ranks
+  above an equally-frequent one whose most recent
+  run is older), then by per-row timestamp DESC.
+  In frequency mode the duplicate filter is
+  *implicit* — each command appears exactly once
+  in the list, regardless of the
+  `key.toggle-duplicate-filter` setting — because
+  "show me my most-run commands" only makes sense
+  if every command gets a single row. The kept
+  instance per command is the most recent one
+  (the highest-timestamp row, identified by the
+  per-row tie-breaker before dedup). The list
+  reads as a "most-run commands, newest first"
+  leaderboard.
+
+The frequency counts are computed *within the
+currently filtered set* — the rows returned by the
+SQL query (with the active mode, query, and
+exit-code filter applied). This means switching
+modes (`SESS` / `DIR` / `GLOBAL`) or filters changes
+what "most frequent" means: the count is always
+relative to what the user is looking at. A user
+in `DIR` mode who toggles frequency sees their
+most-run commands *in this directory*, not their
+most-run commands globally. The natural-language
+mental model ("show me my most-used commands here")
+matches the implementation.
+
+Stats mode always uses the successor-frequency
+ranking from `fetch_stats` (predicting the next
+command) and is not affected by the sort toggle —
+the user has explicitly asked for prediction, and
+overriding it with age or in-set frequency would
+defeat the purpose.
+
+The chosen sort is persisted in the session file
+(`~/.cache/smarthistory/session`) as
+`sortorder=age` or `sortorder=frequency`. The
+session file round-trips through `SortOrder::parse`,
+which accepts the canonical `age`/`frequency`
+values plus a few friendly aliases (`time` /
+`newest` for age; `freq` / `count` / `occurrences`
+for frequency) so hand-edited session files
+can't wedge the TUI on startup. Deleting the
+session file (or letting it fall out of the
+default) restores the user to the age sort on the
+next TUI call.
 
 In LLM mode the `Left` and `Right` arrow keys (which would
 normally bind to `EditStart` / `EditEnd` and stage a row)
