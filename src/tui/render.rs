@@ -15,12 +15,19 @@ use super::bindings::{format_key_specs, Action};
 use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
-use super::{format_diff, format_time, App, CommandMenu, ConfirmMode, HelpView, OutputView};
+use super::{
+    format_diff, format_time, App, CommandMenu, ConfirmMode, DescribeView, HelpView, OutputView,
+};
 use regex::Regex;
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
     if let Some(ref view) = app.output_view {
         draw_output_view(f, view);
+        return;
+    }
+
+    if let Some(ref view) = app.describe_view {
+        draw_describe_view(f, view);
         return;
     }
 
@@ -183,6 +190,95 @@ fn draw_output_view(f: &mut Frame, view: &OutputView) {
 
     // Footer with scroll position (only if there is room inside the
     // border).
+    if area.height >= 3 {
+        let footer = format!(" {}/{} ", end, total);
+        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())));
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(para, footer_area);
+    }
+}
+
+/// Full-screen overlay that shows the LLM's
+/// description of the selected history row.
+///
+/// The shape mirrors the captured-output overlay
+/// (`draw_output_view`): a rounded border, a
+/// descriptive title, a scrollable body, and a
+/// scroll-position footer. The title is built
+/// from the row's command so the user can see
+/// exactly which row is being described (useful
+/// when navigating the list while the overlay is
+/// open — the LLM was asked about a specific
+/// command, not the current selection).
+///
+/// Long responses are handled by the scroll
+/// offset; short ones (the typical case — the
+/// prompt asks for at most four sentences) fit on
+/// a single screen and don't need scrolling.
+fn draw_describe_view(f: &mut Frame, view: &DescribeView) {
+    let area = f.area();
+    // Build a short title that shows the command
+    // being described. Long commands are truncated
+    // with an ellipsis so the title stays
+    // single-line and within the border.
+    let title = {
+        let max = (area.width as usize).saturating_sub(20).max(20);
+        if view.command.chars().count() > max {
+            let keep = max.saturating_sub(1);
+            let mut s: String = view.command.chars().take(keep).collect();
+            s.push('…');
+            format!(" Describe: {} (\u{2191}\u{2193} scroll, ^K close) ", s)
+        } else {
+            format!(
+                " Describe: {} (\u{2191}\u{2193} scroll, ^K close) ",
+                view.command
+            )
+        }
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .title_style(Theme::accent())
+        .border_style(Theme::dim());
+
+    let all_lines: Vec<&str> = view.text.lines().collect();
+    let total = all_lines.len();
+    // Inner height excludes the top and bottom borders.
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = view.scroll.min(max_scroll);
+
+    // Window of visible lines. Wrap is enabled so
+    // a single very long sentence (a URL pasted
+    // into a command, for example) flows across
+    // multiple terminal lines rather than getting
+    // truncated. The max-scroll computation uses
+    // `lines().count()` which is the un-wrapped
+    // line count, so we may end up with a few
+    // empty lines at the bottom of the body on
+    // very narrow terminals — that's harmless.
+    let end = (scroll + inner_h).min(total);
+    let start = scroll;
+    let visible: Vec<Line> = all_lines[start..end]
+        .iter()
+        .map(|l| Line::from(Span::raw(l.to_string())))
+        .collect();
+
+    let paragraph = Paragraph::new(visible)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    // Footer with scroll position (only if there
+    // is room inside the border). The "1/1" form
+    // is a single page; "3/7" means line 3 of 7
+    // is the bottom of the visible window.
     if area.height >= 3 {
         let footer = format!(" {}/{} ", end, total);
         let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())));
@@ -481,6 +577,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         binding_for(Action::EditFileReference),
         "open a filename referenced in the selected command in $EDITOR",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::Describe),
+        "ask the LLM what the selected command does (4-sentence summary)",
     );
     row(
         &mut lines,

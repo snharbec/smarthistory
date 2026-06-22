@@ -71,6 +71,18 @@ match standard workflow expectations. This project aims to provide:
   `Enter` reuses that preview without a second round-trip.
   Opt-in via `ollama.url` and `ollama.model` in the config file;
   see the TUI search syntax section for details.
+- **LLM "describe" on `Ctrl-K`:** when the cursor is on a history
+  row, pressing `Ctrl-K` asks the local ollama instance for a
+  short description of what the command does (at most four
+  sentences, plain prose, no markdown). The response opens in a
+  full-screen overlay with the command in the title; press
+  `Esc` / `Enter` / `q` / `Ctrl-K` again to close, `↑` / `↓` /
+  `PageUp` / `PageDown` / `Home` / `End` to scroll. The
+  description is *not* persisted to the history — it's a
+  one-shot annotation, not a comment. Use `Ctrl-E` to save a
+  description into the `command_comments` table. The same
+  `ollama.url` / `ollama.model` configuration as the
+  `=...` command-generation mode applies.
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker
   replacing `fzf`. Supports live filtering, mode cycle (`Ctrl+G`), enter
   to run, left/right to prefill for editing.
@@ -318,6 +330,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `:`       | TUI     | Open the command palette (run any action by name).        |
 | `T`       | TUI     | Open the theme picker (live preview, Enter commits, Esc reverts). |
 | `Ctrl+Y`  | TUI     | Yank the captured output (or the selected command) to the system clipboard via `arboard`. Shows a "Yanked N chars" message in the status bar; falls back to "Nothing to yank" when no row is selected. |
+| `Ctrl+K`  | TUI     | Ask the local ollama instance for a short description (at most 4 sentences) of what the selected command does. The response opens in a full-screen overlay; press `Esc` / `Enter` / `q` / `Ctrl-K` again to close, `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` to scroll. The description is *not* persisted — use `Ctrl-E` to save a comment. Falls back to a status message when no row is selected or ollama is not configured. Rebindable via `key.describe=...`. |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |

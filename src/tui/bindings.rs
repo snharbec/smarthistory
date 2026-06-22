@@ -72,6 +72,22 @@ pub enum Action {
     /// tie-breaker). See `SortOrder` for the full
     /// contract.
     CycleSortOrder,
+    /// Ask the local ollama instance for a short
+    /// description (at most four sentences) of what the
+    /// selected history line does, and show the
+    /// response in a full-screen overlay.
+    ///
+    /// The result is *not* inserted into the history
+    /// table — it's a one-shot annotation, not a
+    /// persisted comment. Use `EditComment` (`Ctrl-E`)
+    /// to save a description into the `command_comments`
+    /// table.
+    ///
+    /// The default key (`Ctrl-K`) is free of the other
+    /// default bindings and is not bound by readline /
+    /// zsh in any common configuration. Rebindable
+    /// via `key.describe=...`.
+    Describe,
     /// Run the selected command (Enter).
     Run,
     /// Prefill the line for editing, cursor at the start (Left).
@@ -125,6 +141,7 @@ impl Action {
             Action::ClearQuery => "clear-query",
             Action::CycleExitFilter => "cycle-exit-filter",
             Action::CycleSortOrder => "cycle-sort-order",
+            Action::Describe => "describe",
             Action::Run => "run",
             Action::EditStart => "edit-start",
             Action::EditEnd => "edit-end",
@@ -159,6 +176,7 @@ impl Action {
             Action::ClearQuery => "Clear query",
             Action::CycleExitFilter => "Cycle exit filter",
             Action::CycleSortOrder => "Cycle sort order",
+            Action::Describe => "Describe selected command",
             Action::Run => "Run",
             Action::EditStart => "Edit (cursor at start)",
             Action::EditEnd => "Edit (cursor at end)",
@@ -205,6 +223,12 @@ impl Action {
             | Action::ThemePicker
             | Action::YankSelection
             | Action::EditFileReference => "tools",
+            // LLM-backed actions. The `run_llm_query` and
+            // `start_describe` paths both call into the
+            // configured ollama instance; this category
+            // groups them so the command palette shows them
+            // together.
+            Action::Describe => "llm",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
         }
     }
@@ -228,6 +252,7 @@ impl Action {
             Action::ClearQuery => "C-u",
             Action::CycleExitFilter => "C-j",
             Action::CycleSortOrder => "F4",
+            Action::Describe => "C-k",
             Action::Run => "Enter",
             Action::EditStart => "Left",
             Action::EditEnd => "Right",
@@ -495,6 +520,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::ClearQuery,
     Action::CycleExitFilter,
     Action::CycleSortOrder,
+    Action::Describe,
     Action::Run,
     Action::EditStart,
     Action::EditEnd,

@@ -464,14 +464,6 @@ struct App {
     /// When `Some`, we are viewing the captured output of a history
     /// row in a full-screen overlay.
     output_view: Option<OutputView>,
-    /// When `Some`, the LLM-driven "describe"
-    /// overlay is open. The contained struct holds
-    /// the command that was described and the LLM's
-    /// response (a short prose description). The
-    /// overlay is full-screen with a single scroll
-    /// offset, similar to the captured-output
-    /// overlay but driven by a different source.
-    describe_view: Option<DescribeView>,
     /// When `Some`, the help overlay is open. The contained `scroll`
     /// tracks how far down the user has scrolled.
     help_view: Option<HelpView>,
@@ -1066,39 +1058,6 @@ struct OutputView {
     scroll: usize,
 }
 
-/// State for the LLM "describe what this command does"
-/// overlay. Mirrors the captured-output overlay in
-/// shape (a piece of text + a scroll offset) but is
-/// driven by an LLM call rather than by the captured
-/// stdout of a history row.
-///
-/// `command` is the row's command — kept here so the
-/// overlay title can show "Describe: <command>" even
-/// after the user has navigated away from the row in
-/// the history list (and so the LLM prompt that
-/// generated `text` is reconstructable from the
-/// overlay's own state).
-///
-/// `text` is the LLM's raw response. We don't run it
-/// through any sanitizer the way `run_llm_query` does
-/// (the `sanitize_command` step would be wrong here —
-/// the response is *prose*, not a command) — but we
-/// still trim leading/trailing whitespace so the
-/// rendered text doesn't have stray newlines around
-/// it.
-struct DescribeView {
-    /// The command that was described.
-    command: String,
-    /// The LLM's response (a short prose description).
-    text: String,
-    /// Scroll offset (lines past the top of the
-    /// rendered text). Most responses are at most
-    /// four sentences and fit on a single screen,
-    /// but the scroll handles longer outputs and
-    /// small terminal heights.
-    scroll: usize,
-}
-
 /// State for the help overlay. Just a scroll offset; the help text
 /// is computed from the live app state on each render so the
 /// "current settings" section is always accurate.
@@ -1204,7 +1163,6 @@ impl App {
             cancelled: false,
             comment_edit: None,
             output_view: None,
-            describe_view: None,
             help_view: None,
             command_menu: None,
             theme_picker: None,
@@ -2191,82 +2149,6 @@ fn move_selection(&mut self, delta: isize) {
         self.output_view = None;
     }
 
-    /// Ask the configured ollama instance for a short
-    /// description of what the selected history line
-    /// does, then open a full-screen overlay with the
-    /// response.
-    ///
-    /// Behaviour:
-    /// - **No row selected** → status message,
-    ///   no overlay.
-    /// - **LLM not configured** → status message,
-    ///   no overlay. We don't open the overlay at
-    ///   all; the user would just see a "loading"
-    ///   spinner and then an error.
-    /// - **LLM call fails** → status message,
-    ///   no overlay (we close it before opening so a
-    ///   fresh describe can be retried from a clean
-    ///   state).
-    /// - **Success** → overlay opens with the LLM's
-    ///   prose response. The response is trimmed
-    ///   of leading/trailing whitespace but otherwise
-    ///   rendered as-is.
-    ///
-    /// The HTTP call is synchronous (matches
-    /// `run_llm_query`'s design). Local 7B models
-    /// respond in 1-5 seconds; the 30-second
-    /// timeout in `OllamaClient` bounds the worst
-    /// case. The user explicitly asked for this mode
-    /// and accepted the freeze.
-    fn start_describe(&mut self) {
-        let Some(row) = self.selected_row() else {
-            self.set_status_message(
-                "Describe: no row selected".to_string(),
-            );
-            return;
-        };
-        // Clone the row's command out of the merged
-        // view so we can drop the borrow before
-        // mutating `self` again. The merged view is
-        // rebuilt by `refresh()` (called by the
-        // output-view close path, for example) and we
-        // want the describe path to be safe across
-        // such refreshes.
-        let command = row.command.clone();
-        // Close any existing overlay first so a
-        // re-describe doesn't stack views.
-        self.describe_view = None;
-        // Take a short-lived reference to the LLM
-        // client. We don't hold it across the HTTP
-        // call — `describe_view = ...` below
-        // re-borrows `self` mutably, which would
-        // conflict with a live `self.llm.as_ref()`
-        // borrow. The reference is dropped at the end
-        // of this statement.
-        let Some(llm) = self.llm.as_deref() else {
-            self.set_status_message(
-                crate::llm::LlmError::NotConfigured.to_string(),
-            );
-            return;
-        };
-        let raw = match llm.describe(&command) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status_message(e.to_string());
-                return;
-            }
-        };
-        self.describe_view = Some(DescribeView {
-            command,
-            text: raw.trim().to_string(),
-            scroll: 0,
-        });
-    }
-
-    fn close_describe(&mut self) {
-        self.describe_view = None;
-    }
-
     /// Copy something useful to the system clipboard. The pick
     /// order mirrors the user's mental model: if the captured-
     /// output overlay is open, copy its text; otherwise copy the
@@ -2395,10 +2277,6 @@ fn move_selection(&mut self, delta: isize) {
 
     fn is_output_viewing(&self) -> bool {
         self.output_view.is_some()
-    }
-
-    fn is_describe_viewing(&self) -> bool {
-        self.describe_view.is_some()
     }
 
     fn is_help_viewing(&self) -> bool {
@@ -2710,15 +2588,6 @@ fn run_loop(
             continue;
         }
 
-        if app.is_describe_viewing() {
-            handle_describe_view_key(app, key, page_size);
-            // The describe overlay never stages a
-            // selection — it just shows the LLM's
-            // response and lets the user scroll / close.
-            // We don't auto-exit on close.
-            continue;
-        }
-
         if handle_key(app, key) {
             return Ok(());
         }
@@ -2858,10 +2727,6 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CycleSortOrder => {
             app.cycle_sort_order();
-            false
-        }
-        Action::Describe => {
-            app.start_describe();
             false
         }
         Action::ToggleSearchMode => {
@@ -3285,99 +3150,6 @@ fn handle_output_view_key(
         }
         _ => OutputViewResult::Continue,
     }
-}
-
-/// Key handler for the LLM "describe" overlay.
-///
-/// The shape mirrors the captured-output handler
-/// (`handle_output_view_key`) but the action set is
-/// smaller: there's no "open in editor" or "open
-/// in pager" — the describe overlay is purely a
-/// read-only viewer for a short piece of prose.
-///
-/// Close keys: `Esc`, `Enter`, `q`, `Ctrl-C`,
-/// `Ctrl-K` (re-pressing the action that opened the
-/// overlay is a natural way to dismiss it). Scroll
-/// keys: `Up` / `Down` for one line, `PageUp` /
-/// `PageDown` for a page, `Home` / `End` for the
-/// extremes.
-///
-/// Returns `true` only when the user aborts the
-/// whole TUI with `Ctrl-C` (matching the convention
-/// used by the other overlay handlers). The overlay
-/// itself is closed by mutating `app.describe_view`
-/// directly here; the run loop's overlay check
-/// (`app.is_describe_viewing()`) takes care of the
-/// dispatch fall-through.
-fn handle_describe_view_key(
-    app: &mut App,
-    key: KeyEvent,
-    page_size: usize,
-) -> bool {
-    // Compute the max valid scroll offset for the
-    // current description text. Most responses are
-    // short and fit on a single screen, in which
-    // case `max_scroll` returns 0 and Up/PageUp
-    // are no-ops.
-    let max_scroll = |text: &str| -> usize {
-        let total = text.lines().count();
-        total.saturating_sub(page_size.max(1))
-    };
-    let is_close = matches!(
-        key.code,
-        KeyCode::Esc
-            | KeyCode::Enter
-            | KeyCode::Char('q')
-            | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL)
-    );
-    if is_close {
-        app.close_describe();
-        return false;
-    }
-    if key.code == KeyCode::Char('c')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-    {
-        app.cancelled = true;
-        app.close_describe();
-        return true;
-    }
-    match key.code {
-        KeyCode::Up => {
-            if let Some(ref mut view) = app.describe_view {
-                view.scroll = view.scroll.saturating_sub(1);
-            }
-        }
-        KeyCode::Down => {
-            if let Some(ref mut view) = app.describe_view {
-                let max = view.text.lines().count().saturating_sub(page_size.max(1));
-                view.scroll = (view.scroll + 1).min(max);
-            }
-        }
-        KeyCode::PageUp => {
-            if let Some(ref mut view) = app.describe_view {
-                view.scroll =
-                    view.scroll.saturating_sub(page_size.max(1));
-            }
-        }
-        KeyCode::PageDown => {
-            if let Some(ref mut view) = app.describe_view {
-                let max = view.text.lines().count().saturating_sub(page_size.max(1));
-                view.scroll = (view.scroll + page_size.max(1)).min(max);
-            }
-        }
-        KeyCode::Home => {
-            if let Some(ref mut view) = app.describe_view {
-                view.scroll = 0;
-            }
-        }
-        KeyCode::End => {
-            if let Some(ref mut view) = app.describe_view {
-                view.scroll = max_scroll(&view.text);
-            }
-        }
-        _ => {}
-    }
-    false
 }
 
 /// A short random ID used in temp file names.
@@ -5091,40 +4863,6 @@ mod tests {
                                 None => Ok(self.describe_response.clone()),
                         }
                 }
-
-                fn prompt(&self, _prompt: &str) -> Result<String, crate::llm::LlmError> {
-                        // The trait's default `generate`
-                        // and `describe` impls call
-                        // `prompt(&build_prompt(...))` and
-                        // `prompt(&build_describe_prompt(...))`
-                        // respectively. The tests that
-                        // exercise this fake override
-                        // `generate` and `describe`
-                        // directly, so this method is
-                        // never called in practice. We
-                        // still have to implement it
-                        // (the trait has no default body
-                        // for it) so we return the canned
-                        // `response` — a sane fallback
-                        // that makes any test that
-                        // accidentally calls it get a
-                        // deterministic value rather than
-                        // a panic.
-                        match &self.error {
-                                Some(e) => Err(match e {
-                                        crate::llm::LlmError::NotConfigured => {
-                                                crate::llm::LlmError::NotConfigured
-                                        }
-                                        other => match other {
-                                                crate::llm::LlmError::Transport(s) => {
-                                                        crate::llm::LlmError::Transport(s.clone())
-                                                }
-                                                _ => crate::llm::LlmError::NoCommand,
-                                        },
-                                }),
-                                None => Ok(self.response.clone()),
-                        }
-                }
         }
 
         fn make_llm_app(query: &str, fake: FakeLlm) -> App {
@@ -5197,7 +4935,7 @@ mod tests {
         fn is_llm_query_recognises_equals_prefix() {
                 let mut app = make_llm_app(
                         "=Find all files modified yesterday",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 assert!(app.is_llm_query());
                 app.query = "git status".to_string();
@@ -5217,7 +4955,6 @@ mod tests {
                         FakeLlm {
                                 response: "find . -mtime -1 -type f".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5252,7 +4989,6 @@ mod tests {
                         FakeLlm {
                                 response: "```bash\nfind . -name Cargo.toml\n```".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5277,7 +5013,6 @@ mod tests {
                                 // it gets called.
                                 response: "should not be called".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5358,7 +5093,6 @@ mod tests {
                         FakeLlm {
                                 response: "# I cannot help with that.".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5387,7 +5121,7 @@ mod tests {
         fn query_cursor_initialised_to_end() {
                 let app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 assert_eq!(app.query, "=describe something");
                 assert_eq!(
@@ -5404,7 +5138,7 @@ mod tests {
         fn push_char_inserts_at_cursor_position() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 // Move to the middle of "files" (after "find ").
                 app.query_cursor = "=find ".chars().count();
@@ -5425,7 +5159,7 @@ mod tests {
         fn backspace_deletes_before_cursor() {
                 let mut app = make_llm_app(
                         "=find xfile",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 // Cursor at end (default). One backspace
                 // removes the trailing `e` (the historical
@@ -5455,7 +5189,7 @@ mod tests {
         fn backspace_at_position_zero_is_noop() {
                 let mut app = make_llm_app(
                         "=x",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 app.query_cursor = 0;
                 app.backspace();
@@ -5474,7 +5208,7 @@ mod tests {
         fn edit_start_in_llm_mode_moves_cursor_one_char_left() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 // Cursor starts at the end. The test helper
                 // initialises it there.
@@ -5501,7 +5235,7 @@ mod tests {
         fn edit_end_in_llm_mode_moves_cursor_one_char_right() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 // Start the cursor in the middle so we can
                 // step toward the end.
@@ -5524,7 +5258,7 @@ mod tests {
         fn edit_start_at_position_zero_stays_at_zero() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 app.query_cursor = 0;
                 app.select_for_edit_start();
@@ -5541,7 +5275,7 @@ mod tests {
         fn edit_end_at_end_stays_at_end() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 let len = app.query.chars().count();
                 app.query_cursor = len;
@@ -5565,7 +5299,7 @@ mod tests {
         fn edit_left_right_handles_multibyte() {
                 let mut app = make_llm_app(
                         "=chercher fichiers",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 let end = app.query.chars().count();
                 // One step left, then one step right,
@@ -5626,7 +5360,7 @@ mod tests {
         fn llm_touch_arms_debounce_in_llm_mode() {
                 let mut app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 assert!(app.llm_debounce_started.is_none());
                 app.llm_touch();
@@ -5641,7 +5375,7 @@ mod tests {
         fn llm_touch_clears_state_outside_llm_mode() {
                 let mut app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 // First arm the debounce.
                 app.llm_touch();
@@ -5662,7 +5396,7 @@ mod tests {
         fn llm_touch_discards_stale_preview() {
                 let mut app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None },
                 );
                 // Manually install a preview as if the
                 // debounce had just fired.
@@ -5697,7 +5431,7 @@ mod tests {
         fn llm_maybe_autocall_skips_empty_description() {
                 let mut app = make_llm_app(
                         "=",
-                        FakeLlm { response: "should not be called".to_string(), error: None, describe_response: String::new() },
+                        FakeLlm { response: "should not be called".to_string(), error: None },
                 );
                 // Arm the debounce in the past so the
                 // time check passes if the call were to
@@ -5719,7 +5453,7 @@ mod tests {
         fn llm_maybe_autocall_respects_debounce_window() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: "should not be called yet".to_string(), error: None, describe_response: String::new() },
+                        FakeLlm { response: "should not be called yet".to_string(), error: None },
                 );
                 // Just-armed debounce: `Instant::now()` is
                 // well within the 1-second window.
@@ -5740,7 +5474,7 @@ mod tests {
         fn llm_maybe_autocall_skips_when_preview_already_fresh() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: "find . -name '*.txt'".to_string(), error: None, describe_response: String::new() },
+                        FakeLlm { response: "find . -name '*.txt'".to_string(), error: None },
                 );
                 // Install a fresh preview that already
                 // matches the current description.
@@ -5782,7 +5516,6 @@ mod tests {
                         FakeLlm {
                                 response: "find . -name '*.txt'".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 // Debounce expired in the past.
@@ -5820,7 +5553,6 @@ mod tests {
                                 // All commentary, no command.
                                 response: "# I cannot help with that.".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.llm_debounce_started = Some(
@@ -5843,7 +5575,6 @@ mod tests {
                         FakeLlm {
                                 response: "find . -name '*.txt'".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.llm_debounce_started = Some(
@@ -5868,7 +5599,6 @@ mod tests {
                         FakeLlm {
                                 response: "find . -name '*.txt'".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 app.llm_debounce_started = Some(
@@ -5902,7 +5632,6 @@ mod tests {
                         FakeLlm {
                                 response: "should not be called".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 // Install a fresh preview whose command
@@ -5943,7 +5672,6 @@ mod tests {
                         FakeLlm {
                                 response: "find . -mtime -1".to_string(),
                                 error: None,
-                                describe_response: String::new(),
                         },
                 );
                 // Install a preview whose description
@@ -6697,218 +6425,5 @@ mod tests {
                         "renamed the field: {:?}",
                         rendered
                 );
-        }
-
-        // --- Describe (`Action::Describe`, default `C-k`) -----
-
-        /// `Action::Describe` is bound to `Ctrl-K` by
-        /// default. The test helper `FakeLlm` is wired
-        /// up the same way as the LLM tests above, so
-        /// we can drive `start_describe` end-to-end
-        /// without a live ollama server.
-        #[test]
-        fn describe_default_key_routes() {
-                let bindings = KeyBindings::defaults();
-                let key = KeyEvent::new(
-                        KeyCode::Char('k'),
-                        KeyModifiers::CONTROL,
-                );
-                let action = action_for_key(&bindings, &key)
-                        .expect("Ctrl-K is bound by default");
-                assert_eq!(action, Action::Describe);
-        }
-
-        /// `start_describe` opens the overlay with
-        /// the LLM's response, scoped to the
-        /// currently-selected row. The command
-        /// string is captured in the view so the
-        /// title can render it.
-        #[test]
-        fn start_describe_opens_overlay_with_response() {
-                let mut app = global_test_app(&[("git status", 1)]);
-                // Wire up the FakeLlm. We replace the
-                // existing `None` LLM (set by
-                // `global_test_app`) with one that
-                // returns a canned description.
-                app.llm = Some(Box::new(FakeLlm {
-                        response: String::new(),
-                        error: None,
-                        describe_response: "Lists the working \
-                                            tree status in git."
-                                .to_string(),
-                }));
-                // Select the row.
-                app.refresh();
-                app.start_describe();
-                let view = app
-                        .describe_view
-                        .as_ref()
-                        .expect("describe overlay must open on success");
-                assert_eq!(view.command, "git status");
-                assert!(view.text.contains("Lists"));
-                assert!(!app.cancelled);
-        }
-
-        /// `start_describe` with no LLM configured
-        /// surfaces the "not configured" status
-        /// message and does NOT open the overlay
-        /// (so the user doesn't see an empty
-        /// overlay that would have to be closed
-        /// again). This is the same UX as the
-        /// `run_llm_query` path.
-        #[test]
-        fn start_describe_surfaces_not_configured_when_client_is_none() {
-                let mut app = global_test_app(&[("a", 1)]);
-                // `global_test_app` already sets
-                // `app.llm = None`.
-                assert!(app.llm.is_none());
-                app.refresh();
-                app.start_describe();
-                assert!(app.describe_view.is_none());
-                let msg = app
-                        .status_message
-                        .as_ref()
-                        .map(|(m, _)| m.as_str())
-                        .expect("missing-LLM must surface a status");
-                assert!(msg.contains("not configured"), "got: {:?}", msg);
-        }
-
-        /// `start_describe` with no row selected
-        /// surfaces a status message and doesn't
-        /// open the overlay. (We force "no row
-        /// selected" by emptying the rows before
-        /// the call.)
-        #[test]
-        fn start_describe_with_no_row_surfaces_status() {
-                // Empty DB: no rows, so
-                // `selected_row()` returns None.
-                let mut app = global_test_app(&[]);
-                app.llm = Some(Box::new(FakeLlm {
-                        response: String::new(),
-                        error: None,
-                        describe_response: "should not be used".to_string(),
-                }));
-                app.refresh();
-                app.start_describe();
-                assert!(app.describe_view.is_none());
-                let msg = app
-                        .status_message
-                        .as_ref()
-                        .map(|(m, _)| m.as_str())
-                        .expect("empty list must surface a status");
-                assert!(msg.contains("no row"), "got: {:?}", msg);
-        }
-
-        /// When the LLM call fails, the overlay is
-        /// not opened and the error is surfaced in
-        /// the status bar. Same UX as the
-        /// "not configured" path: the user gets a
-        /// message and the TUI stays in the normal
-        /// list view.
-        #[test]
-        fn start_describe_surfaces_error_on_transport_failure() {
-                let mut app = global_test_app(&[("a", 1)]);
-                app.llm = Some(Box::new(FakeLlm {
-                        response: String::new(),
-                        error: Some(crate::llm::LlmError::Transport(
-                                "connection refused".to_string(),
-                        )),
-                        describe_response: String::new(),
-                }));
-                app.refresh();
-                app.start_describe();
-                assert!(app.describe_view.is_none());
-                let msg = app
-                        .status_message
-                        .as_ref()
-                        .map(|(m, _)| m.as_str())
-                        .expect("transport error must surface a status");
-                assert!(msg.contains("transport"), "got: {:?}", msg);
-        }
-
-        /// `start_describe` is reentrant-safe: if
-        /// the overlay is already open, a second
-        /// call replaces the previous view (rather
-        /// than stacking two views on top of each
-        /// other). The previous response is
-        /// dropped; the new one wins.
-        #[test]
-        fn start_describe_replaces_existing_view() {
-                let mut app = global_test_app(&[("a", 1)]);
-                let llm = FakeLlm {
-                        response: String::new(),
-                        error: None,
-                        describe_response: "first response".to_string(),
-                };
-                app.llm = Some(Box::new(llm));
-                app.refresh();
-                app.start_describe();
-                assert_eq!(
-                        app.describe_view.as_ref().unwrap().text,
-                        "first response"
-                );
-                // Now re-describe with a different
-                // canned response. We can't easily
-                // swap `app.llm` mid-test, so we
-                // just verify the overlay is
-                // re-entered cleanly: the overlay is
-                // open, and re-running start_describe
-                // should leave it open (not panic,
-                // not stack).
-                app.start_describe();
-                assert!(app.describe_view.is_some());
-        }
-
-        /// The overlay's `command` field reflects
-        /// the row that was selected at the time of
-        /// the describe call. Navigating to a
-        /// different row afterwards doesn't change
-        /// the overlay's captured command — the
-        /// title stays anchored to the original
-        /// row, which is the right UX (the LLM was
-        /// asked about that specific command).
-        #[test]
-        fn describe_view_anchors_to_original_command() {
-                let mut app = global_test_app(&[
-                        ("git status", 1),
-                        ("ls -la", 2),
-                ]);
-                app.llm = Some(Box::new(FakeLlm {
-                        response: String::new(),
-                        error: None,
-                        describe_response: "description".to_string(),
-                }));
-                app.refresh();
-                // Select the first row (newest
-                // timestamp wins, so this is "git
-                // status").
-                app.start_describe();
-                let view = app.describe_view.as_ref().unwrap();
-                assert_eq!(view.command, "git status");
-                // Move to the second row.
-                app.move_selection(1);
-                // The overlay's command is still
-                // "git status" — it doesn't follow
-                // the cursor.
-                let view = app.describe_view.as_ref().unwrap();
-                assert_eq!(view.command, "git status");
-        }
-
-        /// `is_describe_viewing` is the predicate
-        /// the run loop uses to decide whether to
-        /// route keys to the overlay. We just want
-        /// to know it tracks the field correctly.
-        #[test]
-        fn is_describe_viewing_tracks_field() {
-                let mut app = global_test_app(&[("a", 1)]);
-                assert!(!app.is_describe_viewing());
-                app.describe_view = Some(DescribeView {
-                        command: "a".to_string(),
-                        text: "a description".to_string(),
-                        scroll: 0,
-                });
-                assert!(app.is_describe_viewing());
-                app.close_describe();
-                assert!(!app.is_describe_viewing());
         }
 }
