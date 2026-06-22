@@ -83,6 +83,21 @@ match standard workflow expectations. This project aims to provide:
   description into the `command_comments` table. The same
   `ollama.url` / `ollama.model` configuration as the
   `=...` command-generation mode applies.
+- **LLM "correct" on `Ctrl-T`:** when the cursor is on a
+  history row whose command is broken (typo, missing
+  argument, etc.), pressing `Ctrl-T` asks the local
+  ollama instance to fix it. A modal overlay opens
+  showing the original command and the LLM's corrected
+  version side-by-side; pressing `Enter` stages the
+  corrected command (inserts it into the history
+  table with the original as the comment for
+  traceability) and exits the TUI, while `Esc`
+  cancels. The `correct` prompt asks the LLM to fix
+  only what was wrong, not to rewrite the command's
+  meaning — if the command is already correct, the
+  LLM returns it unchanged so `Enter` is always safe
+  to press. Same `ollama.url` / `ollama.model`
+  configuration as the other LLM features.
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker
   replacing `fzf`. Supports live filtering, mode cycle (`Ctrl+G`), enter
   to run, left/right to prefill for editing.
@@ -331,6 +346,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `T`       | TUI     | Open the theme picker (live preview, Enter commits, Esc reverts). |
 | `Ctrl+Y`  | TUI     | Yank the captured output (or the selected command) to the system clipboard via `arboard`. Shows a "Yanked N chars" message in the status bar; falls back to "Nothing to yank" when no row is selected. |
 | `Ctrl+K`  | TUI     | Ask the local ollama instance for a short description (at most 4 sentences) of what the selected command does. The response opens in a full-screen overlay; press `Esc` / `Enter` / `q` / `Ctrl-K` again to close, `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` to scroll. The description is *not* persisted — use `Ctrl-E` to save a comment. Falls back to a status message when no row is selected or ollama is not configured. Rebindable via `key.describe=...`. |
+| `Ctrl+T`  | TUI     | Ask the local ollama instance to fix the selected command (typos, missing arguments, obvious errors — without changing the command's meaning). A modal overlay opens with the original and corrected commands side-by-side; `Enter` accepts and stages the corrected command (exits the TUI so the parent shell runs it), `Esc` cancels. If the command is already correct, the LLM returns it unchanged so `Enter` is always safe to press. The corrected row is inserted into history with the original as the comment for traceability. Falls back to a status message when no row is selected or ollama is not configured. Rebindable via `key.correct=...`. |
 | `Ctrl+C`  | Widget  | Abort the current line and reset widget state.                 |
 | `Enter`   | TUI     | Run the selected command.                                       |
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |

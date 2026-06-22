@@ -143,6 +143,27 @@ pub trait LlmClient: Send + Sync {
     fn describe(&self, command: &str) -> Result<String, LlmError> {
         self.prompt(&build_describe_prompt(command))
     }
+
+    /// Correct a shell command: take a possibly
+    /// malformed command and return a fixed version
+    /// that is syntactically valid and preserves the
+    /// user's intent. Used by the TUI's "correct"
+    /// action (default key `Ctrl-T`).
+    ///
+    /// Default implementation calls
+    /// [`build_correct_prompt`] and forwards to
+    /// [`prompt`]. Tests can override this to return a
+    /// canned corrected command without having to
+    /// also stub the prompt construction.
+    ///
+    /// The response is the *raw* ollama output;
+    /// callers should run it through
+    /// [`sanitize_command`] to extract a clean
+    /// command, the same way `run_llm_query` does
+    /// for the `=...` flow.
+    fn correct(&self, command: &str) -> Result<String, LlmError> {
+        self.prompt(&build_correct_prompt(command))
+    }
 }
 
 /// Real ollama backend. Uses ureq (sync HTTP) with a 30-second
@@ -257,6 +278,39 @@ pub fn build_describe_prompt(command: &str) -> String {
 no code blocks, no preamble), describe what this shell command does. Start with the verb \
 the command performs, then explain the user-visible effect and any side effects (files \
 created, network connections, side effects on the system).\n\n```\n{}\n```",
+        command
+    )
+}
+
+/// The prompt template for the "correct this command"
+/// action. The hard constraints are:
+///
+/// - **Output only the corrected command** — no
+///   explanations, no markdown, no backticks, no
+///   preamble, no apology.
+/// - **Preserve the user's intent** — fix typos,
+///   missing arguments, obvious errors; don't
+///   rewrite the command into something different.
+///   Adding a missing argument is fine; changing
+///   the meaning is not.
+/// - **If the command is already correct, return it
+///   unchanged** — so the TUI's "press Enter to run
+///   the corrected command" path is safe even for
+///   commands that didn't need fixing.
+///
+/// The shape of the response is identical to
+/// `build_prompt` (the `=...` flow's prompt), so the
+/// caller can use the same `sanitize_command` to
+/// extract the corrected command from the LLM's
+/// response.
+pub fn build_correct_prompt(command: &str) -> String {
+    format!(
+        "You are a strict Bash command corrector. Given a command the user tried to run, \
+output a single corrected version that is syntactically valid and will actually run. \
+Preserve the user's intent (don't add unrelated flags, don't change the meaning). \
+If the command is already correct, return it unchanged. Respond ONLY with the \
+executable command. Do not include markdown formatting, backticks, explanations, or \
+introductory text.\n\n{}",
         command
     )
 }
@@ -468,6 +522,41 @@ mod tests {
         // scan well when the user has many of
         // them stacked up.
         assert!(p.contains("verb"));
+    }
+
+    /// `build_correct_prompt` includes the command
+    /// being corrected and the strict-output
+    /// constraints (no markdown, no preamble, no
+    /// explanations). It also includes the
+    /// intent-preservation rule ("don't change the
+    /// meaning") and the no-op contract ("if the
+    /// command is already correct, return it
+    /// unchanged"). These two constraints are what
+    /// make the corrected command safe to
+    /// auto-stage on `Enter` — the user can trust
+    /// that the LLM only fixed what was wrong, not
+    /// that it rewrote the command into something
+    /// different.
+    #[test]
+    fn build_correct_prompt_includes_command_and_constraints() {
+        let p = build_correct_prompt("gti status");
+        assert!(p.contains("gti status"));
+        // The output-format constraints match the
+        // `=...` flow's `build_prompt` — both
+        // produce a single-line command-form
+        // response, so the caller can use the
+        // same `sanitize_command` to extract it.
+        assert!(p.contains("markdown"), "missing markdown prohibition");
+        assert!(p.contains("backticks"), "missing no-backticks rule");
+        assert!(p.contains("explanations"), "missing no-explanation rule");
+        // The intent-preservation rule is what
+        // distinguishes the correct prompt from
+        // the describe prompt.
+        assert!(p.contains("intent"), "missing intent-preservation rule");
+        // The "no-op when already correct"
+        // contract is what makes the corrected
+        // command safe to auto-stage.
+        assert!(p.contains("already correct"), "missing no-op contract");
     }
 
     /// `OllamaClient::prompt` is the low-level HTTP

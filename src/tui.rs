@@ -472,6 +472,13 @@ struct App {
     /// offset, similar to the captured-output
     /// overlay but driven by a different source.
     describe_view: Option<DescribeView>,
+    /// When `Some`, the LLM-driven "correct this
+    /// command" modal overlay is open. The user is
+    /// reviewing a candidate corrected command;
+    /// pressing `Enter` stages it (and writes it
+    /// to the history table with the original as
+    /// the comment), pressing `Esc` cancels.
+    correct_view: Option<CorrectView>,
     /// When `Some`, the help overlay is open. The contained `scroll`
     /// tracks how far down the user has scrolled.
     help_view: Option<HelpView>,
@@ -1099,6 +1106,38 @@ struct DescribeView {
     scroll: usize,
 }
 
+/// State for the LLM "correct this command" modal
+/// overlay. Shown after the LLM has returned a
+/// candidate corrected command; the user reviews
+/// and either accepts (Enter) or cancels (Esc).
+///
+/// The shape is similar to `DescribeView` but the
+/// two fields (`original_command` and
+/// `corrected_command`) have different roles:
+/// `original` is read-only (it's the row the user
+/// had selected), and `corrected` is what the LLM
+/// produced. Pressing Enter stages `corrected` as
+/// the next selection (and writes it to the
+/// history table with `original` as the comment
+/// for traceability), pressing Esc just closes the
+/// overlay.
+///
+/// We don't store a "loading" flag here the way we
+/// could: the LLM call happens synchronously
+/// inside `start_correct`, and the overlay only
+/// exists once the response is in hand. This
+/// matches the `start_describe` design.
+struct CorrectView {
+    /// The original (possibly malformed) command
+    /// the user had selected. Shown for context so
+    /// the user can see what was being fixed.
+    original_command: String,
+    /// The LLM's corrected version of the command.
+    /// The user reviews this and presses Enter to
+    /// stage it for execution, or Esc to cancel.
+    corrected_command: String,
+}
+
 /// State for the help overlay. Just a scroll offset; the help text
 /// is computed from the live app state on each render so the
 /// "current settings" section is always accurate.
@@ -1205,6 +1244,7 @@ impl App {
             comment_edit: None,
             output_view: None,
             describe_view: None,
+            correct_view: None,
             help_view: None,
             command_menu: None,
             theme_picker: None,
@@ -2267,6 +2307,139 @@ fn move_selection(&mut self, delta: isize) {
         self.describe_view = None;
     }
 
+    /// Ask the configured ollama instance to correct
+    /// the selected history row. On success, opens a
+    /// modal overlay showing the original and the
+    /// corrected command; the user then presses
+    /// `Enter` to stage the corrected command and
+    /// exit the TUI, or `Esc` to cancel.
+    ///
+    /// Behaviour:
+    /// - **No row selected** → status message, no
+    ///   overlay.
+    /// - **LLM not configured** → status message,
+    ///   no overlay.
+    /// - **LLM call fails** → status message, no
+    ///   overlay.
+    /// - **LLM response sanitizes to `None`** → status
+    ///   message, no overlay. The LLM's response was
+    ///   empty or pure commentary; we can't extract
+    ///   a command from it.
+    /// - **Success** → overlay opens with the
+    ///   corrected command (sanitized from the LLM's
+    ///   raw response, the same way `run_llm_query`
+    ///   does). The user reviews and decides.
+    ///
+    /// Like `start_describe`, the HTTP call is
+    /// synchronous. Local 7B models respond in 1-5
+    /// seconds; the 30-second timeout in
+    /// `OllamaClient` bounds the worst case.
+    fn start_correct(&mut self) {
+        let Some(row) = self.selected_row() else {
+            self.set_status_message(
+                "Correct: no row selected".to_string(),
+            );
+            return;
+        };
+        // Clone the command out of the merged view
+        // so the borrow is dropped before we mutate
+        // `self` again. (See `start_describe` for
+        // the same pattern; both LLM-backed actions
+        // need this dance.)
+        let original_command = row.command.clone();
+        // Close any existing overlay first so a
+        // re-correct doesn't stack views.
+        self.correct_view = None;
+        // Take a short-lived reference to the LLM
+        // client. We don't hold it across the
+        // subsequent `correct_view = ...`
+        // assignment, which mutably re-borrows
+        // `self`.
+        let Some(llm) = self.llm.as_deref() else {
+            self.set_status_message(
+                crate::llm::LlmError::NotConfigured.to_string(),
+            );
+            return;
+        };
+        let raw = match llm.correct(&original_command) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status_message(e.to_string());
+                return;
+            }
+        };
+        let corrected_command = match crate::llm::sanitize_command(&raw) {
+            Some(c) => c,
+            None => {
+                self.set_status_message(
+                    crate::llm::LlmError::NoCommand.to_string(),
+                );
+                return;
+            }
+        };
+        self.correct_view = Some(CorrectView {
+            original_command,
+            corrected_command,
+        });
+    }
+
+    fn close_correct(&mut self) {
+        self.correct_view = None;
+    }
+
+    /// Accept the corrected command from the
+    /// `CorrectView` overlay: insert the row into
+    /// the history table (with the original command
+    /// as the comment for traceability) and stage the
+    /// corrected command as the next "selection"
+    /// for the parent shell. Called when the user
+    /// presses `Enter` in the correct overlay.
+    ///
+    /// Mirrors `stage_llm_command` (used by
+    /// `run_llm_query`) so the on-disk and
+    /// in-memory representations stay consistent.
+    /// On any DB error we surface a status message
+    /// and leave `selection` unset so the TUI
+    /// doesn't exit with a half-staged command.
+    fn accept_corrected_command(&mut self) {
+        let Some(view) = self.correct_view.take() else {
+            return;
+        };
+        let directory = std::env::var("PWD").unwrap_or_default();
+        let session_id =
+            std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
+        let insert_result: anyhow::Result<()> = (|| {
+            self.conn.execute(
+                "INSERT INTO history (command, directory, session_id, exit_code) \
+                 VALUES (?1, ?2, ?3, -1) \
+                 ON CONFLICT (command, directory, session_id) DO UPDATE \
+                 SET timestamp = (strftime('%s', 'now'))",
+                params![view.corrected_command, directory, session_id],
+            )?;
+            // The original command is the comment,
+            // so the corrected row is self-
+            // documenting: the user can later
+            // search for the original (typo-laden)
+            // text and find the corrected version.
+            self.conn.execute(
+                "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                 ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                params![view.corrected_command, view.original_command],
+            )?;
+            Ok(())
+        })();
+        if let Err(e) = insert_result {
+            self.set_status_message(format!(
+                "Correct: history insert failed: {}",
+                e
+            ));
+            return;
+        }
+        self.selection = Some(view.corrected_command.clone());
+        self.pick_mode = Some(PickMode::Run);
+        self.set_status_message(format!("Correct: {}", view.corrected_command));
+    }
+
     /// Copy something useful to the system clipboard. The pick
     /// order mirrors the user's mental model: if the captured-
     /// output overlay is open, copy its text; otherwise copy the
@@ -2399,6 +2572,10 @@ fn move_selection(&mut self, delta: isize) {
 
     fn is_describe_viewing(&self) -> bool {
         self.describe_view.is_some()
+    }
+
+    fn is_correct_viewing(&self) -> bool {
+        self.correct_view.is_some()
     }
 
     fn is_help_viewing(&self) -> bool {
@@ -2719,6 +2896,22 @@ fn run_loop(
             continue;
         }
 
+        if app.is_correct_viewing() {
+            // The correct overlay is modal:
+            // `Enter` accepts (stages the
+            // corrected command and exits the
+            // TUI), `Esc` cancels (closes the
+            // overlay, returns to the list
+            // without staging anything). The
+            // dispatcher's `true` return on
+            // accept is what actually triggers
+            // the TUI exit.
+            if handle_correct_view_key(app, key) {
+                return Ok(());
+            }
+            continue;
+        }
+
         if handle_key(app, key) {
             return Ok(());
         }
@@ -2862,6 +3055,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::Describe => {
             app.start_describe();
+            false
+        }
+        Action::Correct => {
+            app.start_correct();
             false
         }
         Action::ToggleSearchMode => {
@@ -3378,6 +3575,60 @@ fn handle_describe_view_key(
         _ => {}
     }
     false
+}
+
+/// Key handler for the LLM "correct" modal overlay.
+///
+/// The action set is smaller than the describe
+/// overlay: there are no scroll keys (the corrected
+/// command is a single line of text, so scrolling
+/// doesn't apply) and the only meaningful inputs
+/// are:
+///
+/// - `Enter` — accept. Stages the corrected
+///   command (inserts it into history with the
+///   original as the comment) and returns `true`
+///   so the run loop exits. The parent shell
+///   then runs the corrected command.
+/// - `Esc` / `q` — cancel. Closes the overlay,
+///   returns `false` so the TUI stays open with
+///   the user's original list state intact.
+/// - `Ctrl-C` — abort the entire TUI (mirrors the
+///   other overlay handlers' convention). Sets
+///   `cancelled = true` and returns `true` so the
+///   run loop exits.
+fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => {
+            // Accept: stage the corrected command
+            // and let the run loop exit. The status
+            // message set inside `accept_corrected_command`
+            // is the last thing the user sees
+            // before the TUI tears down.
+            app.accept_corrected_command();
+            true
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.close_correct();
+            false
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            app.close_correct();
+            true
+        }
+        // All other keys are no-ops. The user can
+        // only accept or cancel; we don't expose
+        // the corrected command for editing in
+        // this overlay (the LLM's output is the
+        // proposal, the user either takes it or
+        // leaves it). If the user wants to edit
+        // the corrected command, they can press
+        // `Esc` to cancel, then `Left`/`Right` on
+        // the original row to prefill the line
+        // editor, and edit there.
+        _ => false,
+    }
 }
 
 /// A short random ID used in temp file names.
@@ -3998,6 +4249,67 @@ mod tests {
                             captured_at INTEGER DEFAULT (strftime('%s', 'now')),
                             FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
                         );",
+                )
+                .expect("schema");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                for (i, (cmd, offset)) in rows.iter().enumerate() {
+                        conn.execute(
+                                "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                                 VALUES (?1, ?2, '/tmp', 'sess', 0, ?3)",
+                                rusqlite::params![i as i64 + 1, *cmd, now - *offset],
+                        )
+                        .expect("insert");
+                }
+                App::new(
+                        conn,
+                        Mode::Global,
+                        String::new(),
+                        false,
+                        ExitFilter::All,
+                        SortOrder::default(),
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None,
+                )
+        }
+
+        /// Like `global_test_app` but with the unique
+        /// index that backs the production
+        /// `ON CONFLICT (command, directory, session_id)`
+        /// upsert. Tests that exercise the
+        /// history-insert path (e.g. the
+        /// `correct` action) need this index,
+        /// otherwise the insert fails with
+        /// "ON CONFLICT clause does not match
+        /// any PRIMARY KEY or UNIQUE constraint".
+        fn global_test_app_with_dedup_index(rows: &[(&str, i64)]) -> App {
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );
+                        CREATE UNIQUE INDEX idx_history_dedup
+                            ON history (command, directory, session_id);",
                 )
                 .expect("schema");
                 let now = std::time::SystemTime::now()
@@ -5040,6 +5352,21 @@ mod tests {
                 /// empty string when the test doesn't care
                 /// about the describe path.
                 describe_response: String,
+                /// Raw response to return from `correct`,
+                /// exactly as the LLM would have
+                /// produced it (before
+                /// sanitization). The production path
+                /// runs this through
+                /// `sanitize_command` to extract a
+                /// clean command, so a test that
+                /// exercises the full pipeline should
+                /// set this to a command-form string
+                /// (or to a string with markdown
+                /// fences to verify the sanitizer).
+                /// Defaults to the empty string when
+                /// the test doesn't care about the
+                /// correct path.
+                correct_response: String,
         }
 
         impl crate::llm::LlmClient for FakeLlm {
@@ -5089,6 +5416,34 @@ mod tests {
                                         },
                                 }),
                                 None => Ok(self.describe_response.clone()),
+                        }
+                }
+
+                fn correct(&self, _command: &str) -> Result<String, crate::llm::LlmError> {
+                        // Same `error` injection as the
+                        // other methods so a test
+                        // fixture like
+                        // `LlmError::NotConfigured`
+                        // covers all three LLM-backed
+                        // actions (generate, describe,
+                        // correct). The canned response
+                        // is in a separate field so
+                        // tests can supply a corrected
+                        // command distinct from a
+                        // description.
+                        match &self.error {
+                                Some(e) => Err(match e {
+                                        crate::llm::LlmError::NotConfigured => {
+                                                crate::llm::LlmError::NotConfigured
+                                        }
+                                        other => match other {
+                                                crate::llm::LlmError::Transport(s) => {
+                                                        crate::llm::LlmError::Transport(s.clone())
+                                                }
+                                                _ => crate::llm::LlmError::NoCommand,
+                                        },
+                                }),
+                                None => Ok(self.correct_response.clone()),
                         }
                 }
 
@@ -5197,7 +5552,7 @@ mod tests {
         fn is_llm_query_recognises_equals_prefix() {
                 let mut app = make_llm_app(
                         "=Find all files modified yesterday",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 assert!(app.is_llm_query());
                 app.query = "git status".to_string();
@@ -5218,6 +5573,7 @@ mod tests {
                                 response: "find . -mtime -1 -type f".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5253,6 +5609,7 @@ mod tests {
                                 response: "```bash\nfind . -name Cargo.toml\n```".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5278,6 +5635,7 @@ mod tests {
                                 response: "should not be called".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5359,6 +5717,7 @@ mod tests {
                                 response: "# I cannot help with that.".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.select_for_run();
@@ -5387,7 +5746,7 @@ mod tests {
         fn query_cursor_initialised_to_end() {
                 let app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 assert_eq!(app.query, "=describe something");
                 assert_eq!(
@@ -5404,7 +5763,7 @@ mod tests {
         fn push_char_inserts_at_cursor_position() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Move to the middle of "files" (after "find ").
                 app.query_cursor = "=find ".chars().count();
@@ -5425,7 +5784,7 @@ mod tests {
         fn backspace_deletes_before_cursor() {
                 let mut app = make_llm_app(
                         "=find xfile",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Cursor at end (default). One backspace
                 // removes the trailing `e` (the historical
@@ -5455,7 +5814,7 @@ mod tests {
         fn backspace_at_position_zero_is_noop() {
                 let mut app = make_llm_app(
                         "=x",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 app.query_cursor = 0;
                 app.backspace();
@@ -5474,7 +5833,7 @@ mod tests {
         fn edit_start_in_llm_mode_moves_cursor_one_char_left() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Cursor starts at the end. The test helper
                 // initialises it there.
@@ -5501,7 +5860,7 @@ mod tests {
         fn edit_end_in_llm_mode_moves_cursor_one_char_right() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Start the cursor in the middle so we can
                 // step toward the end.
@@ -5524,7 +5883,7 @@ mod tests {
         fn edit_start_at_position_zero_stays_at_zero() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 app.query_cursor = 0;
                 app.select_for_edit_start();
@@ -5541,7 +5900,7 @@ mod tests {
         fn edit_end_at_end_stays_at_end() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 let len = app.query.chars().count();
                 app.query_cursor = len;
@@ -5565,7 +5924,7 @@ mod tests {
         fn edit_left_right_handles_multibyte() {
                 let mut app = make_llm_app(
                         "=chercher fichiers",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 let end = app.query.chars().count();
                 // One step left, then one step right,
@@ -5626,7 +5985,7 @@ mod tests {
         fn llm_touch_arms_debounce_in_llm_mode() {
                 let mut app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 assert!(app.llm_debounce_started.is_none());
                 app.llm_touch();
@@ -5641,7 +6000,7 @@ mod tests {
         fn llm_touch_clears_state_outside_llm_mode() {
                 let mut app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // First arm the debounce.
                 app.llm_touch();
@@ -5662,7 +6021,7 @@ mod tests {
         fn llm_touch_discards_stale_preview() {
                 let mut app = make_llm_app(
                         "=describe something",
-                        FakeLlm { response: String::new(), error: None, describe_response: String::new() },
+                        FakeLlm { response: String::new(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Manually install a preview as if the
                 // debounce had just fired.
@@ -5697,7 +6056,7 @@ mod tests {
         fn llm_maybe_autocall_skips_empty_description() {
                 let mut app = make_llm_app(
                         "=",
-                        FakeLlm { response: "should not be called".to_string(), error: None, describe_response: String::new() },
+                        FakeLlm { response: "should not be called".to_string(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Arm the debounce in the past so the
                 // time check passes if the call were to
@@ -5719,7 +6078,7 @@ mod tests {
         fn llm_maybe_autocall_respects_debounce_window() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: "should not be called yet".to_string(), error: None, describe_response: String::new() },
+                        FakeLlm { response: "should not be called yet".to_string(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Just-armed debounce: `Instant::now()` is
                 // well within the 1-second window.
@@ -5740,7 +6099,7 @@ mod tests {
         fn llm_maybe_autocall_skips_when_preview_already_fresh() {
                 let mut app = make_llm_app(
                         "=find files",
-                        FakeLlm { response: "find . -name '*.txt'".to_string(), error: None, describe_response: String::new() },
+                        FakeLlm { response: "find . -name '*.txt'".to_string(), error: None, describe_response: String::new(), correct_response: String::new() },
                 );
                 // Install a fresh preview that already
                 // matches the current description.
@@ -5783,6 +6142,7 @@ mod tests {
                                 response: "find . -name '*.txt'".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 // Debounce expired in the past.
@@ -5821,6 +6181,7 @@ mod tests {
                                 response: "# I cannot help with that.".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.llm_debounce_started = Some(
@@ -5844,6 +6205,7 @@ mod tests {
                                 response: "find . -name '*.txt'".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.llm_debounce_started = Some(
@@ -5869,6 +6231,7 @@ mod tests {
                                 response: "find . -name '*.txt'".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 app.llm_debounce_started = Some(
@@ -5903,6 +6266,7 @@ mod tests {
                                 response: "should not be called".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 // Install a fresh preview whose command
@@ -5944,6 +6308,7 @@ mod tests {
                                 response: "find . -mtime -1".to_string(),
                                 error: None,
                                 describe_response: String::new(),
+                                correct_response: String::new(),
                         },
                 );
                 // Install a preview whose description
@@ -6736,6 +7101,7 @@ mod tests {
                         describe_response: "Lists the working \
                                             tree status in git."
                                 .to_string(),
+                        correct_response: String::new(),
                 }));
                 // Select the row.
                 app.refresh();
@@ -6787,6 +7153,7 @@ mod tests {
                         response: String::new(),
                         error: None,
                         describe_response: "should not be used".to_string(),
+                        correct_response: String::new(),
                 }));
                 app.refresh();
                 app.start_describe();
@@ -6814,6 +7181,7 @@ mod tests {
                                 "connection refused".to_string(),
                         )),
                         describe_response: String::new(),
+                        correct_response: String::new(),
                 }));
                 app.refresh();
                 app.start_describe();
@@ -6839,6 +7207,7 @@ mod tests {
                         response: String::new(),
                         error: None,
                         describe_response: "first response".to_string(),
+                        correct_response: String::new(),
                 };
                 app.llm = Some(Box::new(llm));
                 app.refresh();
@@ -6877,6 +7246,7 @@ mod tests {
                         response: String::new(),
                         error: None,
                         describe_response: "description".to_string(),
+                        correct_response: String::new(),
                 }));
                 app.refresh();
                 // Select the first row (newest
@@ -6910,5 +7280,229 @@ mod tests {
                 assert!(app.is_describe_viewing());
                 app.close_describe();
                 assert!(!app.is_describe_viewing());
+        }
+
+        // --- Correct (`Action::Correct`, default `C-t`) -----
+
+        /// `Action::Correct` is bound to `Ctrl-T` by
+        /// default. The default key is free of the
+        /// other defaults and not used by readline /
+        /// zsh in any common configuration, so the
+        /// binding is a safe starting point.
+        #[test]
+        fn correct_default_key_routes() {
+                let bindings = KeyBindings::defaults();
+                let key = KeyEvent::new(
+                        KeyCode::Char('t'),
+                        KeyModifiers::CONTROL,
+                );
+                let action = action_for_key(&bindings, &key)
+                        .expect("Ctrl-T is bound by default");
+                assert_eq!(action, Action::Correct);
+        }
+
+        /// `start_correct` opens the overlay with
+        /// the LLM's corrected command, scoped to
+        /// the currently-selected row. The original
+        /// command is captured in the view so the
+        /// user can see what was being fixed.
+        ///
+        /// The FakeLlm returns a clean command
+        /// (no markdown), so the sanitized result
+        /// is exactly the canned string. The
+        /// `sanitize_command` path is exercised
+        /// separately by the LLM tests.
+        #[test]
+        fn start_correct_opens_overlay_with_response() {
+                let mut app = global_test_app(&[("gti status", 1)]);
+                app.llm = Some(Box::new(FakeLlm {
+                        response: String::new(),
+                        error: None,
+                        describe_response: String::new(),
+                        correct_response: "git status".to_string(),
+                }));
+                app.refresh();
+                app.start_correct();
+                let view = app
+                        .correct_view
+                        .as_ref()
+                        .expect("correct overlay must open on success");
+                assert_eq!(view.original_command, "gti status");
+                assert_eq!(view.corrected_command, "git status");
+                assert!(!app.cancelled);
+        }
+
+        /// `start_correct` with no LLM configured
+        /// surfaces the "not configured" status
+        /// message and does NOT open the overlay
+        /// (so the user doesn't see an empty
+        /// overlay that would have to be closed
+        /// again). Same UX as `start_describe`.
+        #[test]
+        fn start_correct_surfaces_not_configured_when_client_is_none() {
+                let mut app = global_test_app(&[("a", 1)]);
+                assert!(app.llm.is_none());
+                app.refresh();
+                app.start_correct();
+                assert!(app.correct_view.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("missing-LLM must surface a status");
+                assert!(msg.contains("not configured"), "got: {:?}", msg);
+        }
+
+        /// `start_correct` with no row selected
+        /// surfaces a status message and doesn't
+        /// open the overlay. (Empty DB.)
+        #[test]
+        fn start_correct_with_no_row_surfaces_status() {
+                let mut app = global_test_app(&[]);
+                app.llm = Some(Box::new(FakeLlm {
+                        response: String::new(),
+                        error: None,
+                        describe_response: String::new(),
+                        correct_response: "should not be used".to_string(),
+                }));
+                app.refresh();
+                app.start_correct();
+                assert!(app.correct_view.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("empty list must surface a status");
+                assert!(msg.contains("no row"), "got: {:?}", msg);
+        }
+
+        /// When the LLM call fails, the overlay
+        /// is not opened and the error is surfaced
+        /// in the status bar.
+        #[test]
+        fn start_correct_surfaces_error_on_transport_failure() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.llm = Some(Box::new(FakeLlm {
+                        response: String::new(),
+                        error: Some(crate::llm::LlmError::Transport(
+                                "connection refused".to_string(),
+                        )),
+                        describe_response: String::new(),
+                        correct_response: String::new(),
+                }));
+                app.refresh();
+                app.start_correct();
+                assert!(app.correct_view.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("transport error must surface a status");
+                assert!(msg.contains("transport"), "got: {:?}", msg);
+        }
+
+        /// When the LLM response sanitizes to
+        /// `None` (e.g. all commentary, no command
+        /// survived `sanitize_command`), the
+        /// overlay is not opened and a status
+        /// message is surfaced.
+        #[test]
+        fn start_correct_surfaces_no_command_when_sanitizer_rejects() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.llm = Some(Box::new(FakeLlm {
+                        response: String::new(),
+                        error: None,
+                        describe_response: String::new(),
+                        // All commentary, no
+                        // command-form line survives
+                        // `sanitize_command`.
+                        correct_response: "# I cannot help with that."
+                                .to_string(),
+                }));
+                app.refresh();
+                app.start_correct();
+                assert!(app.correct_view.is_none());
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("empty sanitizer output must surface a status");
+                assert!(msg.contains("no usable command"), "got: {:?}", msg);
+        }
+
+        /// `is_correct_viewing` is the predicate
+        /// the run loop uses to decide whether to
+        /// route keys to the overlay. We just
+        /// want to know it tracks the field
+        /// correctly.
+        #[test]
+        fn is_correct_viewing_tracks_field() {
+                let mut app = global_test_app(&[("a", 1)]);
+                assert!(!app.is_correct_viewing());
+                app.correct_view = Some(CorrectView {
+                        original_command: "a".to_string(),
+                        corrected_command: "b".to_string(),
+                });
+                assert!(app.is_correct_viewing());
+                app.close_correct();
+                assert!(!app.is_correct_viewing());
+        }
+
+        /// `accept_corrected_command` stages the
+        /// corrected command and writes a new
+        /// history row with the original as the
+        /// comment (for traceability). This is the
+        /// "Enter pressed in the correct overlay"
+        /// path.
+        #[test]
+        fn accept_corrected_command_stages_and_inserts() {
+                let mut app = global_test_app_with_dedup_index(&[("gti status", 1)]);
+                app.correct_view = Some(CorrectView {
+                        original_command: "gti status".to_string(),
+                        corrected_command: "git status".to_string(),
+                });
+                app.accept_corrected_command();
+                // Selection is set with the
+                // corrected command.
+                assert_eq!(app.selection.as_deref(), Some("git status"));
+                assert_eq!(app.pick_mode, Some(PickMode::Run));
+                // The corrected overlay is consumed
+                // (taken).
+                assert!(app.correct_view.is_none());
+                // A new row was inserted into
+                // history with the original as
+                // the comment.
+                let count: i64 = app
+                        .conn
+                        .query_row(
+                                "SELECT COUNT(*) FROM history WHERE command = ?1",
+                                rusqlite::params!["git status"],
+                                |row| row.get(0),
+                        )
+                        .expect("count");
+                assert_eq!(count, 1, "corrected command must be inserted");
+                let comment: String = app
+                        .conn
+                        .query_row(
+                                "SELECT comment FROM command_comments WHERE command = ?1",
+                                rusqlite::params!["git status"],
+                                |row| row.get(0),
+                        )
+                        .expect("comment");
+                assert_eq!(comment, "gti status");
+        }
+
+        /// `accept_corrected_command` is a no-op
+        /// when the overlay is closed (e.g. the
+        /// user pressed `Esc` and then somehow
+        /// triggered the action). We don't want
+        /// to crash, and we don't want to write a
+        /// row with a stale `view`.
+        #[test]
+        fn accept_corrected_command_no_op_when_overlay_closed() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.correct_view = None;
+                app.accept_corrected_command();
+                assert!(app.selection.is_none());
         }
 }

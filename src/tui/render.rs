@@ -16,7 +16,8 @@ use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
-    format_diff, format_time, App, CommandMenu, ConfirmMode, DescribeView, HelpView, OutputView,
+    format_diff, format_time, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView,
+    OutputView,
 };
 use regex::Regex;
 
@@ -28,6 +29,11 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(ref view) = app.describe_view {
         draw_describe_view(f, view);
+        return;
+    }
+
+    if let Some(ref view) = app.correct_view {
+        draw_correct_view(f, view);
         return;
     }
 
@@ -290,6 +296,139 @@ fn draw_describe_view(f: &mut Frame, view: &DescribeView) {
         };
         f.render_widget(para, footer_area);
     }
+}
+
+/// Full-screen modal overlay for the LLM "correct"
+/// action.
+///
+/// The layout is two stacked panes:
+///
+/// 1. **Original command** (top) — a small,
+///    read-only label showing what the user had
+///    selected. Includes the directory and exit
+///    code as a sanity check (so the user can see
+///    "ah, the LLM was correcting THIS row, not
+///    some other one").
+/// 2. **Corrected command** (middle) — the LLM's
+///    proposal, drawn in the accent color so it
+///    stands out as the actionable item.
+/// 3. **Footer** (bottom) — a one-line prompt
+///    reminding the user that `Enter` accepts and
+///    `Esc` cancels.
+///
+/// The corrected command is shown as plain text
+/// (no syntax highlighting, no markdown) because
+/// the LLM is the source of truth for the string
+/// and we don't want a render-time mistake to
+/// make a working command look broken (or vice
+/// versa). Long commands wrap across lines via
+/// ratatui's `Wrap` widget; very long commands
+/// are handled by the height of the available
+/// space and the user can resize the terminal if
+/// they need more room.
+fn draw_correct_view(f: &mut Frame, view: &CorrectView) {
+    use ratatui::text::Span;
+    let area = f.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Correct (Enter to run corrected, Esc to cancel) ")
+        .title_style(Theme::accent())
+        .border_style(Theme::dim());
+
+    // The body is two paragraphs stacked
+    // vertically. We split the inner area (minus
+    // the border) at 50/50 by default, but let the
+    // original-command pane shrink to a single
+    // line when the command is short and the
+    // corrected-command pane take the rest.
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    // Reserve the bottom row for the footer
+    // prompt, then split the rest into two panes.
+    let (body_area, footer_area) = if inner.height >= 4 {
+        let footer_h: u16 = 1;
+        let body = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: inner.height.saturating_sub(footer_h),
+        };
+        let footer = Rect {
+            x: inner.x,
+            y: inner.y + body.height,
+            width: inner.width,
+            height: footer_h,
+        };
+        (Some(body), Some(footer))
+    } else {
+        // Tiny terminal: skip the footer entirely
+        // and let the body fill the inner area.
+        (Some(inner), None)
+    };
+
+    if let Some(body) = body_area {
+        // Split the body in two: original (top),
+        // corrected (bottom). The original is a
+        // small label, so give it one line; the
+        // corrected takes the rest.
+        let original_h: u16 = if body.height >= 2 { 2 } else { 1 };
+        let original_area = Rect {
+            x: body.x,
+            y: body.y,
+            width: body.width,
+            height: original_h,
+        };
+        let corrected_area = Rect {
+            x: body.x,
+            y: body.y + original_h,
+            width: body.width,
+            height: body.height.saturating_sub(original_h),
+        };
+
+        // Original command: a dimmed label
+        // showing what was being corrected.
+        // Long commands wrap; the user can
+        // see the full string by looking at
+        // the corrected pane alongside it.
+        let original_para = Paragraph::new(Line::from(Span::styled(
+            format!("Original:  {}", view.original_command),
+            Theme::dim(),
+        )))
+        .wrap(Wrap { trim: false });
+        f.render_widget(original_para, original_area);
+
+        // Corrected command: the accent
+        // color makes it the focal point of
+        // the overlay. A `>` prefix echoes
+        // shell-prompt conventions and
+        // signals "this is the proposed
+        // command".
+        let corrected_para = Paragraph::new(Line::from(Span::styled(
+            format!("Corrected: {}", view.corrected_command),
+            Theme::accent(),
+        )))
+        .wrap(Wrap { trim: false });
+        f.render_widget(corrected_para, corrected_area);
+    }
+
+    if let Some(footer) = footer_area {
+        let footer_para = Paragraph::new(Line::from(Span::styled(
+            " \u{21B5} Enter: run corrected  \u{00B7}  Esc: cancel  \u{00B7}  ^C: abort TUI ",
+            Theme::dim(),
+        )));
+        f.render_widget(footer_para, footer);
+    }
+
+    // The block is the visual frame; we draw it
+    // last so the border sits cleanly on top of
+    // any sub-pixel rounding from the inner
+    // widgets.
+    f.render_widget(block, area);
 }
 
 fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
@@ -582,6 +721,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         binding_for(Action::Describe),
         "ask the LLM what the selected command does (4-sentence summary)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::Correct),
+        "ask the LLM to fix the selected command (Enter to run the corrected version)",
     );
     row(
         &mut lines,

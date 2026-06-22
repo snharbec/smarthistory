@@ -88,6 +88,27 @@ pub enum Action {
     /// zsh in any common configuration. Rebindable
     /// via `key.describe=...`.
     Describe,
+    /// Ask the local ollama instance to correct a
+    /// malformed selected history line, returning a
+    /// syntactically valid command that preserves the
+    /// user's intent. The result opens in a modal
+    /// overlay showing the original and the corrected
+    /// command side-by-side; pressing `Enter` stages
+    /// the corrected command (inserts it into
+    /// history with the original as the comment)
+    /// and exits the TUI, while `Esc` cancels.
+    ///
+    /// The `correct` prompt asks the LLM to fix
+    /// typos, missing arguments, and obvious errors
+    /// without changing the command's meaning. If
+    /// the command is already correct, the LLM
+    /// returns it unchanged — the user can press
+    /// `Enter` to run it as-is.
+    ///
+    /// The default key (`Ctrl-T`) is free of the
+    /// other default bindings; rebindable via
+    /// `key.correct=...`.
+    Correct,
     /// Run the selected command (Enter).
     Run,
     /// Prefill the line for editing, cursor at the start (Left).
@@ -142,6 +163,7 @@ impl Action {
             Action::CycleExitFilter => "cycle-exit-filter",
             Action::CycleSortOrder => "cycle-sort-order",
             Action::Describe => "describe",
+            Action::Correct => "correct",
             Action::Run => "run",
             Action::EditStart => "edit-start",
             Action::EditEnd => "edit-end",
@@ -177,6 +199,7 @@ impl Action {
             Action::CycleExitFilter => "Cycle exit filter",
             Action::CycleSortOrder => "Cycle sort order",
             Action::Describe => "Describe selected command",
+            Action::Correct => "Correct selected command",
             Action::Run => "Run",
             Action::EditStart => "Edit (cursor at start)",
             Action::EditEnd => "Edit (cursor at end)",
@@ -229,6 +252,7 @@ impl Action {
             // groups them so the command palette shows them
             // together.
             Action::Describe => "llm",
+            Action::Correct => "llm",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
         }
     }
@@ -253,6 +277,7 @@ impl Action {
             Action::CycleExitFilter => "C-j",
             Action::CycleSortOrder => "F4",
             Action::Describe => "C-k",
+            Action::Correct => "C-t",
             Action::Run => "Enter",
             Action::EditStart => "Left",
             Action::EditEnd => "Right",
@@ -521,6 +546,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CycleExitFilter,
     Action::CycleSortOrder,
     Action::Describe,
+    Action::Correct,
     Action::Run,
     Action::EditStart,
     Action::EditEnd,
