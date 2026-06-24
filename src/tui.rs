@@ -648,8 +648,13 @@ impl App {
     /// the configured ollama instance, and the response is
     /// inserted into the history as a new row and staged for
     /// execution.
+    /// 
+    /// Only returns true if there's actual description text after
+    /// the `=` (not just `=` alone or `=` with only whitespace).
+    /// This allows users to type just `=` to search for old LLM
+    /// queries without triggering a new generation.
     fn is_llm_query(&self) -> bool {
-        self.query.starts_with('=')
+        self.query.starts_with('=') && self.query[1..].trim().len() > 0
     }
 
     /// The regex pattern, i.e. everything after the leading `/`.
@@ -677,6 +682,17 @@ impl App {
     /// matches against the `history_output.output` column.
     fn output_pattern(&self) -> &str {
         if self.is_output_query() {
+            &self.query[1..]
+        } else {
+            ""
+        }
+    }
+
+    /// The LLM query body, i.e. everything after the
+    /// leading `=`. Returns the empty string for any other
+    /// mode.
+    fn llm_pattern(&self) -> &str {
+        if self.is_llm_query() {
             &self.query[1..]
         } else {
             ""
@@ -847,11 +863,10 @@ impl App {
     /// - `id = -1` (real history ids are positive — the
     ///   negative value lets render code mark the row as a
     ///   preview without a separate boolean field).
-    /// - `command = <LLM response>`.
-    /// - `comment = <user's original description>` so the
-    ///   preview is self-documenting: the user sees both
-    ///   the proposed command AND the description that
-    ///   generated it.
+    /// - `command = "=" + <user's description>` (the query text).
+    /// - `output = <LLM response>` (the generated command).
+    /// - `comment = <LLM response>` so the preview is
+    ///   self-documenting.
     /// - `exit_code = -1` (the same sentinel used for
     ///   newly-inserted LLM-generated rows; signals
     ///   "never executed" to render code).
@@ -953,19 +968,21 @@ impl App {
         };
         // Build the synthetic preview row. The id is a
         // negative sentinel so render code can mark it.
+        // The command is the user's description (with = prefix),
+        // and the output is the LLM-generated command.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let preview = HistoryRow {
             id: -1,
-            command,
+            command: format!("={}", fired_description),
             directory: std::env::var("PWD").unwrap_or_default(),
             session_id: std::env::var("SMART_HISTORY_SESSION").unwrap_or_default(),
             exit_code: -1,
             timestamp: now,
-            comment: fired_description.clone(),
-            output: String::new(),
+            comment: command.clone(),
+            output: command,
         };
         self.llm_preview = Some(preview);
         self.llm_preview_description = Some(fired_description);
@@ -1713,29 +1730,44 @@ impl App {
         // When the query is a regex (prefixed with `/`) we skip the
         // SQL `LIKE` clause entirely and post-filter the rows in
         // `refresh()` via `query_matches_text`. Same for fuzzy
-        // (`?`) and LLM (`=`) — those are the modes that have a
-        // post-filter step or a special "the user wants a
-        // generated command" semantic that doesn't translate to a
-        // SQL `LIKE` clause.
+        // (`?`) — those are modes that have a post-filter step.
+        // LLM (`=`) is special: we filter to commands starting with
+        // `=` and search the command/output text.
         if !self.query.is_empty()
             && !self.is_regex_query()
             && !self.is_fuzzy_query()
-            && !self.is_llm_query()
         {
-            // Output mode (`+...`) searches the
-            // `history_output.output` column instead of
-            // `h.command` / `c.comment`. We restrict the
-            // `LIKE` to the output text and also require
-            // the row to have a `history_output` row at
-            // all (the `IS NOT NULL` guard is technically
-            // redundant with the `LIKE` against the
-            // LEFT-JOINed column, but it makes the SQL
-            // self-documenting and matches the user's
-            // intent: "find me the command that produced
-            // *this output*"). The rest of the conditions
-            // (session, directory, exit filter) still
-            // apply.
-            if self.is_output_query() {
+            if self.is_llm_query() {
+                // LLM mode: only show commands that start with `=`
+                // (previous LLM queries). Also allow filtering by
+                // the body of the query.
+                clause.push_str(" AND h.command LIKE '?%'");
+                params.push(Box::new("=%".to_string()));
+                // Search the body in command and output
+                for word in self.llm_pattern().split_whitespace() {
+                    if !word.is_empty() {
+                        let escaped = crate::util::escape_like(word);
+                        clause.push_str(
+                            " AND (h.command LIKE ? ESCAPE '\\' OR o.output LIKE ? ESCAPE '\\')",
+                        );
+                        params.push(Box::new(format!("%{}%", escaped)));
+                        params.push(Box::new(format!("%{}%", escaped)));
+                    }
+                }
+            } else if self.is_output_query() {
+                // Output mode (`+...`) searches the
+                // `history_output.output` column instead of
+                // `h.command` / `c.comment`. We restrict the
+                // `LIKE` to the output text and also require
+                // the row to have a `history_output` row at
+                // all (the `IS NOT NULL` guard is technically
+                // redundant with the `LIKE` against the
+                // LEFT-JOINed column, but it makes the SQL
+                // self-documenting and matches the user's
+                // intent: "find me the command that produced
+                // *this output*"). The rest of the conditions
+                // (session, directory, exit filter) still
+                // apply.
                 // Always require a `history_output` row
                 // for output-mode queries. The `LIKE`
                 // clause below already implies this (a
@@ -1885,7 +1917,14 @@ fn move_selection(&mut self, delta: isize) {
             return;
         }
         if let Some(row) = self.selected_row() {
-            self.selection = Some(row.command.clone());
+            // If the row's command starts with `=`, it's an old
+            // LLM query. Execute the output (the generated command)
+            // instead of the description.
+            if row.command.starts_with('=') && !row.output.is_empty() {
+                self.selection = Some(row.output.clone());
+            } else {
+                self.selection = Some(row.command.clone());
+            }
             self.pick_mode = Some(PickMode::Run);
         }
     }
@@ -1956,7 +1995,9 @@ fn move_selection(&mut self, delta: isize) {
             // command is available for future searches;
             // the preview row is virtual and was never
             // persisted.
-            self.stage_llm_command(preview.command.clone(), description.to_string());
+            // Note: preview.command is the description (="...),
+            // preview.output is the generated command.
+            self.stage_llm_command(preview.output.clone(), description.to_string());
             return;
         }
         // Step 3: call the LLM. The HTTP call freezes the TUI;
@@ -1998,51 +2039,64 @@ fn move_selection(&mut self, delta: isize) {
     /// On any DB error we surface a status message and
     /// leave the selection unset so the TUI doesn't exit
     /// with a half-staged command.
-    fn stage_llm_command(&mut self, command: String, description: String) {
-        // Step 5: insert the new command into history with the
-        // description as the comment. We mirror the zsh hook's
-        // upsert semantics (refresh timestamp on conflict) so
-        // repeated generations don't accumulate duplicate rows.
-        // The exit code is set to a sentinel `-1` (never run)
-        // because the LLM-generated command hasn't been
-        // executed yet — there's no real exit code to record.
-        // Using `NULL` would also work in the schema, but the
-        // existing `fetch()` helper reads `exit_code` with
-        // `row.get(4)?` which fails on NULL. Keeping the
-        // column NOT-NULL simplifies the rest of the code.
+    /// Persist the LLM query to the history table with
+    /// `description` (prefixed with `=`) as the command and
+    /// `generated_command` stored as the output. This allows
+    /// users to search for old LLM queries with `=` and
+    /// re-execute the generated command.
+    fn stage_llm_command(&mut self, generated_command: String, description: String) {
+        // Store the description with = prefix as the command,
+        // and the generated command in the output column.
+        // This way users can search for old LLM queries and
+        // the generated command is replayed when selected.
         let directory = std::env::var("PWD").unwrap_or_default();
         let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
-        let insert_result: anyhow::Result<()> = (|| {
+        let query_command = format!("={}", description);
+        let insert_result: anyhow::Result<i64> = (|| {
             self.conn.execute(
                 "INSERT INTO history (command, directory, session_id, exit_code) \
                  VALUES (?1, ?2, ?3, -1) \
                  ON CONFLICT (command, directory, session_id) DO UPDATE \
                  SET timestamp = (strftime('%s', 'now'))",
-                params![command, directory, session_id],
+                params![&query_command, directory, session_id],
             )?;
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+                params![&query_command, std::env::var("PWD").unwrap_or_default(), session_id],
+                |row| row.get(0),
+            )?;
+            // Store the generated command as a comment for visibility
             self.conn.execute(
                 "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
                  ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
-                params![command, description],
+                params![&query_command, &generated_command],
+            )?;
+            Ok(id)
+        })();
+        let history_id = match insert_result {
+            Ok(id) => id,
+            Err(e) => {
+                self.set_status_message(format!("LLM: history insert failed: {}", e));
+                return;
+            }
+        };
+        // Also store the generated command as output
+        let output_result: anyhow::Result<()> = (|| {
+            self.conn.execute(
+                "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
+                 ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, captured_at = (strftime('%s', 'now'))",
+                params![history_id, &generated_command],
             )?;
             Ok(())
         })();
-        if let Err(e) = insert_result {
-            self.set_status_message(format!("LLM: history insert failed: {}", e));
-            return;
+        if let Err(e) = output_result {
+            self.set_status_message(format!("LLM: output store failed: {}", e));
+            // Continue anyway - we can still stage the command
         }
-        // Step 6: stage the command for the parent shell to
-        // run, mirroring what `select_for_run` does for a
-        // normal row. The dispatcher's
-        // `app.selection.is_some()` check returns `true`,
-        // the TUI exits, and the shell runs the LLM's
-        // command. The status message is set for the user's
-        // confirmation before the TUI tears down; it may
-        // not be visible for long, but it goes into the
-        // scrollback if anything stays on screen.
-        self.selection = Some(command.clone());
+        // Stage the generated command for the parent shell to run
+        self.selection = Some(generated_command.clone());
         self.pick_mode = Some(PickMode::Run);
-        self.set_status_message(format!("LLM: {}", command));
+        self.set_status_message(format!("LLM: {}", generated_command));
     }
 
 
@@ -5585,16 +5639,17 @@ mod tests {
                 );
                 assert_eq!(app.pick_mode, Some(PickMode::Run));
                 // The new command should also be in the
-                // history table with the description as its
-                // comment, so the next search finds it.
+                // history table with the description as the command (with = prefix)
+                // and the generated command as output/comment.
                 app.refresh();
                 let rows = app.merged_rows();
                 assert!(
-                        rows.iter().any(|r| r.command == "find . -mtime -1 -type f"
-                                && r.comment == "Find all files modified yesterday"),
-                        "the LLM-generated command should be inserted with the \
-                         original description as its comment, got rows: {:?}",
-                        rows.iter().map(|r| (&*r.command, &*r.comment)).collect::<Vec<_>>()
+                        rows.iter().any(|r| r.command == "=Find all files modified yesterday"
+                                && r.output == "find . -mtime -1 -type f"),
+                        "the LLM query should be inserted with the description as command, \
+                         got rows: {:?}",
+                        rows.iter().map(|r| (&*r.command, &*r.output, &*r.comment)
+                        ).collect::<Vec<_>>()
                 );
         }
 
@@ -5625,8 +5680,9 @@ mod tests {
 
         #[test]
         fn run_llm_query_rejects_empty_description() {
-                // `=` with no description should surface a
-                // clear status message and not call the LLM.
+                // `=` with no description is now treated as a search
+                // for old LLM queries, not a generation request. The
+                // user can select existing LLM query rows.
                 let mut app = make_llm_app(
                         "=",
                         FakeLlm {
@@ -5638,14 +5694,29 @@ mod tests {
                                 correct_response: String::new(),
                         },
                 );
+                // Insert an old LLM query into history so there's
+                // something to select
+                app.conn.execute(
+                        "INSERT INTO history (command, directory, session_id, exit_code) VALUES (?1, ?2, ?3, ?4)",
+                        params!["=old test query", "/test", "test-session", -1],
+                ).unwrap();
+                let history_id: i64 = app.conn.query_row(
+                        "SELECT id FROM history WHERE command = ?1",
+                        params!["=old test query"],
+                        |row| row.get(0),
+                ).unwrap();
+                app.conn.execute(
+                        "INSERT INTO history_output (history_id, output) VALUES (?1, ?2)",
+                        params![history_id, "ls -la"],
+                ).unwrap();
+                app.refresh();
+                
+                // With just "=", is_llm_query returns false (no description),
+                // so select_for_run should select the row, not call run_llm_query
                 app.select_for_run();
-                assert!(app.selection.is_none());
-                let msg = app
-                        .status_message
-                        .as_ref()
-                        .map(|(m, _)| m.as_str())
-                        .expect("empty description must surface a status");
-                assert!(msg.contains("description"), "got: {:?}", msg);
+                // The selected row's output should be staged (since it's an old LLM query)
+                assert_eq!(app.selection.as_deref(), Some("ls -la"));
+                assert_eq!(app.pick_mode, Some(PickMode::Run));
         }
 
         #[test]
@@ -6155,10 +6226,13 @@ mod tests {
                         .llm_preview
                         .as_ref()
                         .expect("preview must be populated");
-                assert_eq!(preview.command, "find . -name '*.txt'");
+                // With the new design: command is the query (with = prefix),
+                // output/comment is the generated command.
+                assert_eq!(preview.command, "=find files");
+                assert_eq!(preview.output, "find . -name '*.txt'");
+                assert_eq!(preview.comment, "find . -name '*.txt'");
                 assert_eq!(preview.id, -1);
                 assert_eq!(preview.exit_code, -1);
-                assert_eq!(preview.comment, "find files");
                 assert_eq!(
                         app.llm_preview_description.as_deref(),
                         Some("find files")
@@ -6216,7 +6290,9 @@ mod tests {
                 let merged = app.merged_rows();
                 assert!(!merged.is_empty());
                 assert_eq!(merged[0].id, -1);
-                assert_eq!(merged[0].command, "find . -name '*.txt'");
+                // Command is the description (with = prefix), output is the generated command
+                assert_eq!(merged[0].command, "=find files");
+                assert_eq!(merged[0].output, "find . -name '*.txt'");
         }
 
         /// When the query leaves LLM mode, the preview
@@ -6269,17 +6345,17 @@ mod tests {
                                 correct_response: String::new(),
                         },
                 );
-                // Install a fresh preview whose command
-                // differs from the FakeLlm response.
+                // Install a fresh preview with the new structure:
+                // command is the query (with = prefix), output/comment is the generated command.
                 app.llm_preview = Some(HistoryRow {
                         id: -1,
-                        command: "find . -name '*.txt'".to_string(),
+                        command: "=find files".to_string(),
                         directory: String::new(),
                         session_id: String::new(),
                         exit_code: -1,
                         timestamp: 0,
-                        comment: "find files".to_string(),
-                        output: String::new(),
+                        comment: "find . -name '*.txt'".to_string(),
+                        output: "find . -name '*.txt'".to_string(),
                 });
                 app.llm_preview_description =
                         Some("find files".to_string());
@@ -6287,7 +6363,7 @@ mod tests {
                 // within the 5x multiplier).
                 app.llm_debounce_started = Some(std::time::Instant::now());
                 app.select_for_run();
-                // The preview's command was staged,
+                // The preview's output (generated command) was staged,
                 // not the FakeLlm's response.
                 assert_eq!(
                         app.selection.as_deref(),
