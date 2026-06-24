@@ -37,10 +37,14 @@ match standard workflow expectations. This project aims to provide:
   immediately. The query field still narrows the ranking.
 - **Substring search with derived columns:** `time` (formatted timestamp),
   `diff` (age like `5m`, `2h`, `3d`, `2M`), `base` (leaf directory).
-- **Four search modes, one key away:** plain substring (default),
-  regex (`/...` prefix), fuzzy subsequence (`?...` prefix), and
+- **Multiple search and LLM modes:** plain substring (default),
+  regex (`/...` prefix), fuzzy subsequence (`?...` prefix),
   **output search** (`+...` prefix — matches against the
-  captured output text, not the command or comment). The
+  captured output text, not the command or comment),
+  **LLM command generation** (`=...` prefix — translates a
+  natural-language description into an executable command),
+  and **general question** (`%...` prefix — asks a local
+  ollama instance for a short answer). The
   output mode answers "which command produced *this
   output?": `+segmentation fault` finds every command whose
   captured log contains both `segmentation` and `fault`. The
@@ -71,6 +75,16 @@ match standard workflow expectations. This project aims to provide:
   `Enter` reuses that preview without a second round-trip.
   Opt-in via `ollama.url` and `ollama.model` in the config file;
   see the TUI search syntax section for details.
+- **General question mode on `%...`:** when you prefix a query with
+  `%` and press `Enter`, a local ollama instance answers the
+  question (e.g. `%What is the capital of France?`) with a short
+  response (at most 4 sentences). The answer opens in a full-screen
+  overlay; press `Esc` / `Enter` / `q` to close, `↑` / `↓` /
+  `PageUp` / `PageDown` / `Home` / `End` to scroll. The question
+  is saved to history with the answer stored as output (not as a
+  comment), so typing `%` later shows all previous questions and
+  selecting one re-displays its answer. Same `ollama.url` /
+  `ollama.model` configuration as the `=...` mode.
 - **LLM "describe" on `Ctrl-K`:** when the cursor is on a history
   row, pressing `Ctrl-K` asks the local ollama instance for a
   short description of what the command does (at most four
@@ -829,6 +843,52 @@ command" instead of staging empty text.
 When the leading `=` is present the `LLM` chip appears in the
 mode strip (magenta when configured, red when not), and a
 green input border signals the LLM mode is active.
+
+### General question mode (`%...`)
+
+Prefix a query with `%` followed by a natural-language question
+and press `Enter` to ask a local ollama instance for a short
+answer (at most 4 sentences). The answer opens in a full-screen
+overlay; press `Esc` / `Enter` / `q` to close, `↑` / `↓` /
+`PageUp` / `PageDown` / `Home` / `End` to scroll.
+
+The question is saved to history with the answer stored as
+output (not as a comment). Typing just `%` (or `%` followed by
+search terms) filters the list to show only previous questions,
+matching against both the question text and the stored answer.
+Selecting an old question row re-displays its answer in the
+overlay without making a new LLM call.
+
+```
+> %What is the capital of France?
+# status bar shows: "Generating command via ollama…"
+# (the TUI blocks for the duration of the call; typically
+# 1-5 seconds for a local 7B model, bounded by a 30-second
+# timeout)
+# Answer opens in a full-screen overlay:
+# "Paris is the capital of France. It is located in the
+#  north-central part of the country, on the Seine river."
+# Press Esc/Enter/q to close the overlay.
+```
+
+Configuration is opt-in and lives in
+`~/.config/smarthistory/config`:
+
+```ini
+ollama.url=http://localhost:11434
+ollama.model=llama3.2
+```
+
+Both keys are required; if either is missing or empty, the
+question mode is disabled and pressing Enter on a `%...` query
+surfaces a "not configured" status message. The same
+`ollama.url` / `ollama.model` configuration as the `=...`
+command-generation mode applies.
+
+When the leading `%` is present the input border is tinted
+magenta (same as the LLM mode) and the status bar shows a
+`QUESTION` chip (red when ollama is not configured, magenta
+when it is).
 
 ### Example session
 

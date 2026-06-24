@@ -164,6 +164,19 @@ pub trait LlmClient: Send + Sync {
     fn correct(&self, command: &str) -> Result<String, LlmError> {
         self.prompt(&build_correct_prompt(command))
     }
+
+    /// Answer a general question in at most four sentences
+    /// of plain prose. Used by the TUI's question mode
+    /// (prefixed with `%`).
+    ///
+    /// Default implementation calls
+    /// [`build_question_prompt`] and forwards to
+    /// [`prompt`]. Tests can override this to return a
+    /// canned answer without having to also stub
+    /// the prompt construction.
+    fn question(&self, question: &str) -> Result<String, LlmError> {
+        self.prompt(&build_question_prompt(question))
+    }
 }
 
 /// Real ollama backend. Uses ureq (sync HTTP) with a 30-second
@@ -312,6 +325,20 @@ If the command is already correct, return it unchanged. Respond ONLY with the \
 executable command. Do not include markdown formatting, backticks, explanations, or \
 introductory text.\n\n{}",
         command
+    )
+}
+
+/// The prompt template for the "general question"
+/// action (prefixed with `%`). The hard constraint is
+/// "maximum 4 sentences" so the response fits comfortably
+/// in a small overlay; the soft constraint is "plain prose,
+/// no markdown, no lists, no code blocks" so the user gets a
+/// readable answer instead of a wall of formatted text.
+pub fn build_question_prompt(question: &str) -> String {
+    format!(
+        "Give me a short answer with maximum 4 sentences of the following question. \
+Respond with plain prose only — no markdown, no lists, no code blocks, no preamble.\n\n{}",
+        question
     )
 }
 

@@ -10,9 +10,13 @@ pub mod theme;
 pub mod render;
 
 use crate::util::{format_diff, format_time};
+use crate::llm::LlmClient;
 use crate::Config;
 use regex::Regex;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
 pub use state::{ExitFilter, Mode, HistoryRow, PickMode, SortOrder, exit_code};
@@ -479,6 +483,10 @@ struct App {
     /// to the history table with the original as
     /// the comment), pressing `Esc` cancels.
     correct_view: Option<CorrectView>,
+    /// When `Some`, the general question overlay is open.
+    /// The user asked a question (prefixed with `%`) and
+    /// the LLM's answer is displayed here.
+    question_view: Option<QuestionView>,
     /// When `Some`, the help overlay is open. The contained `scroll`
     /// tracks how far down the user has scrolled.
     help_view: Option<HelpView>,
@@ -562,6 +570,10 @@ struct App {
     /// canned-response implementation without spinning up a
     /// real ollama server.
     llm: Option<Box<dyn crate::llm::LlmClient>>,
+    /// The LLM configuration, stored separately so background
+    /// threads can create their own `OllamaClient` instances
+    /// for async requests.
+    llm_config: Option<crate::llm::LlmConfig>,
     /// Timestamp of the most recent keystroke that touched
     /// the query in LLM mode. `None` when the debounce is
     /// satisfied (i.e. an auto-call has been issued and the
@@ -593,6 +605,13 @@ struct App {
     /// the user kept typing while the call was in flight)
     /// — only the next pause-and-restart cycle does that.
     llm_in_flight: bool,
+    /// When `Some`, an LLM request is in flight (spawned in a
+    /// background thread). The run loop polls the receiver and
+    /// processes the result when it arrives. The cancelled flag
+    /// is set when the user presses Ctrl+C (or the Cancel action)
+    /// while a request is in flight, causing the result to be
+    /// discarded.
+    llm_request: Option<LlmRequest>,
     /// The description string the most-recent preview
     /// corresponds to. Compared to the live
     /// `self.query[1..]` to decide whether the preview is
@@ -693,6 +712,30 @@ impl App {
     /// mode.
     fn llm_pattern(&self) -> &str {
         if self.is_llm_query() {
+            &self.query[1..]
+        } else {
+            ""
+        }
+    }
+
+    /// True if the current query is a general question
+    /// request (prefixed with `%`). When this returns true,
+    /// the question text is sent to the LLM and the answer
+    /// is displayed in an overlay.
+    /// 
+    /// Only returns true if there's actual question text after
+    /// the `%` (not just `%` alone or `%` with only whitespace).
+    /// This allows users to type just `%` to search for old
+    /// questions without triggering a new question.
+    fn is_question_query(&self) -> bool {
+        self.query.starts_with('%') && self.query[1..].trim().len() > 0
+    }
+
+    /// The question body, i.e. everything after the
+    /// leading `%`. Returns the empty string for any other
+    /// mode.
+    fn question_pattern(&self) -> &str {
+        if self.is_question_query() {
             &self.query[1..]
         } else {
             ""
@@ -874,6 +917,69 @@ impl App {
     ///   top of the merged list.
     fn llm_preview_row(&self) -> Option<HistoryRow> {
         self.llm_preview.clone()
+    }
+
+    /// Spawn a background thread to make an LLM request.
+    /// Returns immediately; the result is processed by the
+    /// run loop when it arrives. Sets `llm_in_flight` and
+    /// stores the `LlmRequest` so the run loop can poll it
+    /// and the user can cancel it.
+    fn spawn_llm_request(
+        &mut self,
+        request_type: LlmRequestType,
+        prompt: String,
+    ) {
+        // If we have an LLM client but no config (e.g. in tests with FakeLlm),
+        // process the request synchronously using the appropriate method.
+        if self.llm_config.is_none() {
+            if let Some(ref llm) = self.llm {
+                let result = match &request_type {
+                    LlmRequestType::Generate { .. } => llm.generate(&prompt),
+                    LlmRequestType::Describe { command } => llm.describe(command),
+                    LlmRequestType::Correct { original_command } => llm.correct(original_command),
+                    LlmRequestType::Question { question } => llm.question(question),
+                };
+                let request = LlmRequest {
+                    request_type,
+                    receiver: mpsc::channel().1,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                };
+                self.process_llm_result(request, result);
+            } else {
+                self.set_status_message(
+                    crate::llm::LlmError::NotConfigured.to_string(),
+                );
+            }
+            return;
+        }
+        
+        let Some(ref cfg) = self.llm_config else {
+            self.set_status_message(
+                crate::llm::LlmError::NotConfigured.to_string(),
+            );
+            return;
+        };
+        let cfg = cfg.clone();
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        
+        std::thread::spawn(move || {
+            let client = crate::llm::OllamaClient::new(&cfg);
+            let result = client.prompt(&prompt);
+            // Check if cancelled before sending the result
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+            }
+        });
+        
+        self.llm_in_flight = true;
+        self.llm_request = Some(LlmRequest {
+            request_type,
+            receiver: rx,
+            cancelled,
+        });
+        self.set_status_message("LLM request in progress…".to_string());
     }
 
     /// Drive the LLM auto-call debounce. Called from the
@@ -1155,6 +1261,58 @@ struct CorrectView {
     corrected_command: String,
 }
 
+/// State for the general question overlay (prefixed with `%`).
+/// Mirrors the describe overlay in shape (a piece of text +
+/// a scroll offset) but is driven by the user's question.
+///
+/// `question` is the user's original question — kept here so the
+/// overlay title can show "Question: <question>".
+///
+/// `text` is the LLM's answer (at most 4 sentences). We don't
+/// run it through any sanitizer — the response is *prose*,
+/// not a command — but we still trim leading/trailing whitespace.
+struct QuestionView {
+    /// The question that was asked (prefixed with `%`).
+    question: String,
+    /// The LLM's answer (at most 4 sentences of plain prose).
+    text: String,
+    /// Scroll offset (lines past the top of the rendered text).
+    scroll: usize,
+}
+
+/// The type of LLM request that is currently in flight.
+/// Each variant carries the data needed to process the
+/// response once it arrives.
+enum LlmRequestType {
+    /// A `=...` command generation request.
+    Generate {
+        description: String,
+    },
+    /// A `Ctrl-K` describe request.
+    Describe {
+        command: String,
+    },
+    /// A `Ctrl-T` correct request.
+    Correct {
+        original_command: String,
+    },
+    /// A `%...` general question request.
+    Question {
+        question: String,
+    },
+}
+
+/// An in-flight LLM request. The receiver is polled by the
+/// run loop; when a result arrives, it is processed according
+/// to `request_type`. The `cancelled` flag is set by the
+/// run loop when the user presses Ctrl+C (or the Cancel action)
+/// while a request is in flight.
+struct LlmRequest {
+    request_type: LlmRequestType,
+    receiver: mpsc::Receiver<Result<String, crate::llm::LlmError>>,
+    cancelled: Arc<AtomicBool>,
+}
+
 /// State for the help overlay. Just a scroll offset; the help text
 /// is computed from the live app state on each render so the
 /// "current settings" section is always accurate.
@@ -1238,6 +1396,7 @@ impl App {
         theme: SelectedTheme,
         bindings: KeyBindings,
         llm: Option<Box<dyn crate::llm::LlmClient>>,
+        llm_config: Option<crate::llm::LlmConfig>,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -1262,6 +1421,7 @@ impl App {
             output_view: None,
             describe_view: None,
             correct_view: None,
+            question_view: None,
             help_view: None,
             command_menu: None,
             theme_picker: None,
@@ -1285,6 +1445,7 @@ impl App {
             bindings,
             status_message: None,
             llm,
+            llm_config,
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -1293,6 +1454,7 @@ impl App {
             llm_debounce_started: None,
             llm_preview: None,
             llm_in_flight: false,
+            llm_request: None,
             llm_preview_description: None,
         };
         app.recompile_regex();
@@ -1754,6 +1916,23 @@ impl App {
                         params.push(Box::new(format!("%{}%", escaped)));
                     }
                 }
+            } else if self.is_question_query() {
+                // Question mode: only show commands that start with `%`
+                // (previous questions). Also allow filtering by
+                // the body of the query.
+                clause.push_str(" AND h.command LIKE '?%'");
+                params.push(Box::new("%%".to_string()));
+                // Search the body in command and output
+                for word in self.question_pattern().split_whitespace() {
+                    if !word.is_empty() {
+                        let escaped = crate::util::escape_like(word);
+                        clause.push_str(
+                            " AND (h.command LIKE ? ESCAPE '\\' OR o.output LIKE ? ESCAPE '\\')",
+                        );
+                        params.push(Box::new(format!("%{}%", escaped)));
+                        params.push(Box::new(format!("%{}%", escaped)));
+                    }
+                }
             } else if self.is_output_query() {
                 // Output mode (`+...`) searches the
                 // `history_output.output` column instead of
@@ -1916,16 +2095,31 @@ fn move_selection(&mut self, delta: isize) {
             self.run_llm_query();
             return;
         }
+        // `%...` queries are general question requests.
+        // Open an overlay with the answer instead of running
+        // a command.
+        if self.is_question_query() {
+            self.run_question_query();
+            return;
+        }
         if let Some(row) = self.selected_row() {
             // If the row's command starts with `=`, it's an old
             // LLM query. Execute the output (the generated command)
             // instead of the description.
             if row.command.starts_with('=') && !row.output.is_empty() {
                 self.selection = Some(row.output.clone());
+                self.pick_mode = Some(PickMode::Run);
+            } else if row.command.starts_with('%') && !row.output.is_empty() {
+                // For old question rows, show the answer in the overlay.
+                self.question_view = Some(QuestionView {
+                    question: row.command.clone(),
+                    text: row.output.clone(),
+                    scroll: 0,
+                });
             } else {
                 self.selection = Some(row.command.clone());
+                self.pick_mode = Some(PickMode::Run);
             }
-            self.pick_mode = Some(PickMode::Run);
         }
     }
 
@@ -1943,6 +2137,83 @@ fn move_selection(&mut self, delta: isize) {
     /// user explicitly asked for this mode and accepted the
     /// freeze; a future async refactor could keep the TUI
     /// responsive while the call is in flight.
+    
+    /// Process the result of an in-flight LLM request.
+    /// Called from the run loop when a result arrives on
+    /// the channel. Handles each request type differently.
+    fn process_llm_result(&mut self, request: LlmRequest, result: Result<String, crate::llm::LlmError>) {
+        self.llm_in_flight = false;
+        self.llm_request = None;
+        
+        // If the request was cancelled, discard the result.
+        if request.cancelled.load(Ordering::Relaxed) {
+            self.set_status_message("LLM request cancelled".to_string());
+            return;
+        }
+        
+        let raw = match result {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status_message(e.to_string());
+                return;
+            }
+        };
+        
+        match request.request_type {
+            LlmRequestType::Generate { description } => {
+                let command = match crate::llm::sanitize_command(&raw) {
+                    Some(c) => c,
+                    None => {
+                        self.set_status_message(crate::llm::LlmError::NoCommand.to_string());
+                        return;
+                    }
+                };
+                self.stage_llm_command(command, description);
+            }
+            LlmRequestType::Describe { command } => {
+                self.describe_view = Some(DescribeView {
+                    command,
+                    text: raw.trim().to_string(),
+                    scroll: 0,
+                });
+            }
+            LlmRequestType::Correct { original_command } => {
+                let corrected_command = match crate::llm::sanitize_command(&raw) {
+                    Some(c) => c,
+                    None => {
+                        self.set_status_message(crate::llm::LlmError::NoCommand.to_string());
+                        return;
+                    }
+                };
+                self.correct_view = Some(CorrectView {
+                    original_command,
+                    corrected_command,
+                });
+            }
+            LlmRequestType::Question { question } => {
+                let answer = raw.trim().to_string();
+                self.stage_question(question.clone(), answer.clone());
+                self.question_view = Some(QuestionView {
+                    question: format!("%{}", question),
+                    text: answer,
+                    scroll: 0,
+                });
+            }
+        }
+    }
+
+    /// Process any pending LLM request synchronously.
+    /// Used by tests that expect the result to be available
+    /// immediately after calling an LLM action method.
+    #[cfg(test)]
+    fn process_pending_llm_request(&mut self) {
+        if let Some(request) = self.llm_request.take() {
+            if let Ok(result) = request.receiver.recv() {
+                self.process_llm_result(request, result);
+            }
+        }
+    }
+
     fn run_llm_query(&mut self) {
         // Step 1: extract the description (everything after the
         // leading `=`). The leading char may be a multi-byte
@@ -1954,32 +2225,16 @@ fn move_selection(&mut self, delta: isize) {
             return;
         }
         // Step 2: bail out cleanly if the LLM isn't configured.
-        // We surface a specific, actionable error so the user
-        // knows to edit their config file.
-        let Some(llm) = &self.llm else {
+        if self.llm.is_none() {
             self.set_status_message(crate::llm::LlmError::NotConfigured.to_string());
             return;
-        };
+        }
         // Step 2.5: fast-path. The auto-call debounce may
         // have already generated a preview for this exact
         // description (`llm_maybe_autocall`). Reuse the
         // preview's command directly — no second HTTP
         // round-trip needed, no second 1–5s freeze of the
-        // TUI. This is the whole point of the
-        // "pause-and-show" UX the user asked for: by the
-        // time they press Enter, the suggestion is already
-        // on screen, and Enter just commits it.
-        //
-        // We require the preview to match the *trimmed*
-        // description (matching what we send to the LLM)
-        // and to be younger than the most recent keystroke
-        // (`llm_debounce_started`). The second check is a
-        // belt-and-suspenders guard: if the user typed
-        // after the preview was generated, the description
-        // is no longer equal, so the first check catches
-        // it. The timestamp guard documents the
-        // intent and protects against future refactors
-        // that might short-circuit the equality check.
+        // TUI.
         if let (Some(preview), Some(preview_desc), Some(started)) = (
             self.llm_preview.as_ref(),
             self.llm_preview_description.as_ref(),
@@ -1987,46 +2242,16 @@ fn move_selection(&mut self, delta: isize) {
         ) && preview_desc.as_str() == description
         && started.elapsed() < LLM_DEBOUNCE * 5
         {
-            // The preview was generated within the last
-            // 5 debounce windows, so it's recent enough
-            // to trust. Skip the HTTP call and stage the
-            // previewed command directly. `stage_llm_command`
-            // still inserts the row into history so the
-            // command is available for future searches;
-            // the preview row is virtual and was never
-            // persisted.
-            // Note: preview.command is the description (="...),
-            // preview.output is the generated command.
             self.stage_llm_command(preview.output.clone(), description.to_string());
             return;
         }
-        // Step 3: call the LLM. The HTTP call freezes the TUI;
-        // there's no progress indicator because the underlying
-        // ollama API is request/response (no streaming). 30s
-        // timeout in `OllamaClient` bounds the worst case.
-        let raw = match llm.generate(description) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status_message(e.to_string());
-                return;
-            }
-        };
-        // Step 4: extract a clean command from the LLM's likely
-        // messy response (markdown fences, preambles, etc.).
-        let command = match crate::llm::sanitize_command(&raw) {
-            Some(c) => c,
-            None => {
-                self.set_status_message(crate::llm::LlmError::NoCommand.to_string());
-                return;
-            }
-        };
-        // Step 5: insert the new command into history with the
-        // description as the comment, and stage it for the
-        // parent shell to run. Extracted to a shared helper
-        // (`stage_llm_command`) so the fast-path that reuses
-        // an existing preview can call the same code without
-        // duplicating the SQL.
-        self.stage_llm_command(command, description.to_string());
+        // Step 3: spawn a background thread for the LLM call.
+        // The run loop will process the result when it arrives.
+        let prompt = crate::llm::build_prompt(description);
+        self.spawn_llm_request(
+            LlmRequestType::Generate { description: description.to_string() },
+            prompt,
+        );
     }
 
     /// Persist `command` to the history table (with
@@ -2319,42 +2544,21 @@ fn move_selection(&mut self, delta: isize) {
             );
             return;
         };
-        // Clone the row's command out of the merged
-        // view so we can drop the borrow before
-        // mutating `self` again. The merged view is
-        // rebuilt by `refresh()` (called by the
-        // output-view close path, for example) and we
-        // want the describe path to be safe across
-        // such refreshes.
         let command = row.command.clone();
-        // Close any existing overlay first so a
-        // re-describe doesn't stack views.
         self.describe_view = None;
-        // Take a short-lived reference to the LLM
-        // client. We don't hold it across the HTTP
-        // call — `describe_view = ...` below
-        // re-borrows `self` mutably, which would
-        // conflict with a live `self.llm.as_ref()`
-        // borrow. The reference is dropped at the end
-        // of this statement.
-        let Some(llm) = self.llm.as_deref() else {
+        
+        if self.llm.is_none() {
             self.set_status_message(
                 crate::llm::LlmError::NotConfigured.to_string(),
             );
             return;
-        };
-        let raw = match llm.describe(&command) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status_message(e.to_string());
-                return;
-            }
-        };
-        self.describe_view = Some(DescribeView {
-            command,
-            text: raw.trim().to_string(),
-            scroll: 0,
-        });
+        }
+        
+        let prompt = crate::llm::build_describe_prompt(&command);
+        self.spawn_llm_request(
+            LlmRequestType::Describe { command },
+            prompt,
+        );
     }
 
     fn close_describe(&mut self) {
@@ -2404,37 +2608,19 @@ fn move_selection(&mut self, delta: isize) {
         // Close any existing overlay first so a
         // re-correct doesn't stack views.
         self.correct_view = None;
-        // Take a short-lived reference to the LLM
-        // client. We don't hold it across the
-        // subsequent `correct_view = ...`
-        // assignment, which mutably re-borrows
-        // `self`.
-        let Some(llm) = self.llm.as_deref() else {
+        
+        if self.llm.is_none() {
             self.set_status_message(
                 crate::llm::LlmError::NotConfigured.to_string(),
             );
             return;
-        };
-        let raw = match llm.correct(&original_command) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status_message(e.to_string());
-                return;
-            }
-        };
-        let corrected_command = match crate::llm::sanitize_command(&raw) {
-            Some(c) => c,
-            None => {
-                self.set_status_message(
-                    crate::llm::LlmError::NoCommand.to_string(),
-                );
-                return;
-            }
-        };
-        self.correct_view = Some(CorrectView {
-            original_command,
-            corrected_command,
-        });
+        }
+        
+        let prompt = crate::llm::build_correct_prompt(&original_command);
+        self.spawn_llm_request(
+            LlmRequestType::Correct { original_command },
+            prompt,
+        );
     }
 
     fn close_correct(&mut self) {
@@ -2492,6 +2678,88 @@ fn move_selection(&mut self, delta: isize) {
         self.selection = Some(view.corrected_command.clone());
         self.pick_mode = Some(PickMode::Run);
         self.set_status_message(format!("Correct: {}", view.corrected_command));
+    }
+
+    /// Handle a `%...` query by sending the natural-language
+    /// question to the configured ollama instance and displaying
+    /// the answer in an overlay. The question is also saved to
+    /// history with the answer stored as output (but not as a
+    /// comment).
+    fn run_question_query(&mut self) {
+        // Extract the question (everything after the leading `%`).
+        let question = self.query[1..].trim();
+        if question.is_empty() {
+            self.set_status_message("Question: provide a question after `%`".to_string());
+            return;
+        }
+        // Bail out cleanly if the LLM isn't configured.
+        if self.llm.is_none() {
+            self.set_status_message(crate::llm::LlmError::NotConfigured.to_string());
+            return;
+        }
+        
+        let question_owned = question.to_string();
+        let prompt = crate::llm::build_question_prompt(&question_owned);
+        self.spawn_llm_request(
+            LlmRequestType::Question { question: question_owned },
+            prompt,
+        );
+    }
+
+    /// Persist a general question to the history table with
+    /// `question` (prefixed with `%`) as the command and
+    /// `answer` stored as the output (but not as a comment).
+    fn stage_question(&mut self, question: String, answer: String) {
+        let directory = std::env::var("PWD").unwrap_or_default();
+        let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
+        let query_command = format!("%{}", question);
+        
+        let insert_result: anyhow::Result<i64> = (|| {
+            self.conn.execute(
+                "INSERT INTO history (command, directory, session_id, exit_code) \
+                 VALUES (?1, ?2, ?3, -1) \
+                 ON CONFLICT (command, directory, session_id) DO UPDATE \
+                 SET timestamp = (strftime('%s', 'now'))",
+                params![&query_command, &directory, &session_id],
+            )?;
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+                params![&query_command, &directory, &session_id],
+                |row| row.get(0),
+            )?;
+            Ok(id)
+        })();
+        
+        let history_id = match insert_result {
+            Ok(id) => id,
+            Err(e) => {
+                self.set_status_message(format!("Question: history insert failed: {}", e));
+                return;
+            }
+        };
+        
+        // Store the answer as output (not as comment).
+        let output_result: anyhow::Result<()> = (|| {
+            self.conn.execute(
+                "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
+                 ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, captured_at = (strftime('%s', 'now'))",
+                params![history_id, &answer],
+            )?;
+            Ok(())
+        })();
+        
+        if let Err(e) = output_result {
+            self.set_status_message(format!("Question: output store failed: {}", e));
+            return;
+        }
+    }
+
+    fn close_question(&mut self) {
+        self.question_view = None;
+    }
+
+    fn is_question_viewing(&self) -> bool {
+        self.question_view.is_some()
     }
 
     /// Copy something useful to the system clipboard. The pick
@@ -2755,6 +3023,7 @@ pub fn run_tui_to_stdout(
     initial_query: String,
     conn: Connection,
     llm: Option<Box<dyn crate::llm::LlmClient>>,
+    llm_config: Option<crate::llm::LlmConfig>,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -2822,6 +3091,7 @@ pub fn run_tui_to_stdout(
         initial_theme,
         bindings,
         llm,
+        llm_config,
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -2911,6 +3181,16 @@ fn run_loop(
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
 
+        // Check for LLM result from background thread.
+        if let Some(request) = app.llm_request.as_ref() {
+            if let Ok(result) = request.receiver.try_recv() {
+                // Take ownership of the request before processing.
+                if let Some(request) = app.llm_request.take() {
+                    app.process_llm_result(request, result);
+                }
+            }
+        }
+
         if !crossterm::event::poll(Duration::from_millis(100))? {
             // No input ready. Still a chance to drive the
             // LLM auto-call debounce: if the user is in LLM
@@ -2928,6 +3208,22 @@ fn run_loop(
         let Event::Key(key) = event::read()? else {
             continue;
         };
+
+        // If an LLM request is in flight, check if this is a
+        // cancel key. If so, cancel the request without leaving
+        // the TUI.
+        if app.llm_request.is_some() {
+            if let Some(action) = action_for_key(&app.bindings, &key) {
+                if matches!(action, Action::Cancel) {
+                    if let Some(request) = app.llm_request.take() {
+                        request.cancelled.store(true, Ordering::Relaxed);
+                    }
+                    app.llm_in_flight = false;
+                    app.set_status_message("LLM request cancelled".to_string());
+                    continue;
+                }
+            }
+        }
 
         if app.is_output_viewing() {
             handle_output_view_key(app, key, page_size);
@@ -2947,6 +3243,15 @@ fn run_loop(
             // selection — it just shows the LLM's
             // response and lets the user scroll / close.
             // We don't auto-exit on close.
+            continue;
+        }
+
+        if app.is_question_viewing() {
+            // The question overlay shows the LLM's
+            // answer to a general question. It never
+            // stages a selection — the user just reads
+            // the answer and closes the overlay.
+            handle_question_view_key(app, key, page_size);
             continue;
         }
 
@@ -3042,6 +3347,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 fn dispatch_action(app: &mut App, action: Action) -> bool {
     match action {
         Action::Cancel => {
+            // If an LLM request is in flight, cancel it without
+            // leaving the TUI.
+            if let Some(request) = app.llm_request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+                app.llm_in_flight = false;
+                app.set_status_message("LLM request cancelled".to_string());
+                return false;
+            }
             app.cancelled = true;
             true
         }
@@ -3623,6 +3936,82 @@ fn handle_describe_view_key(
         }
         KeyCode::End => {
             if let Some(ref mut view) = app.describe_view {
+                view.scroll = max_scroll(&view.text);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Key handler for the general question overlay (prefixed with `%`).
+///
+/// Mirrors the describe overlay in shape (a piece of text + a scroll
+/// offset) but is driven by the user's question rather than by the
+/// captured stdout of a history row.
+///
+/// Close keys: `Esc`, `Enter`, `q`, `Ctrl-C`. Scroll keys: `Up` /
+/// `Down` for one line, `PageUp` / `PageDown` for a page, `Home` /
+/// `End` for the extremes.
+///
+/// Returns `true` only when the user aborts the whole TUI with `Ctrl-C`.
+fn handle_question_view_key(
+    app: &mut App,
+    key: KeyEvent,
+    page_size: usize,
+) -> bool {
+    let max_scroll = |text: &str| -> usize {
+        let total = text.lines().count();
+        total.saturating_sub(page_size.max(1))
+    };
+    let is_close = matches!(
+        key.code,
+        KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Char('q')
+    );
+    if is_close {
+        app.close_question();
+        return false;
+    }
+    if key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.cancelled = true;
+        app.close_question();
+        return true;
+    }
+    match key.code {
+        KeyCode::Up => {
+            if let Some(ref mut view) = app.question_view {
+                view.scroll = view.scroll.saturating_sub(1);
+            }
+        }
+        KeyCode::Down => {
+            if let Some(ref mut view) = app.question_view {
+                let max = view.text.lines().count().saturating_sub(page_size.max(1));
+                view.scroll = (view.scroll + 1).min(max);
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut view) = app.question_view {
+                view.scroll =
+                    view.scroll.saturating_sub(page_size.max(1));
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut view) = app.question_view {
+                let max = view.text.lines().count().saturating_sub(page_size.max(1));
+                view.scroll = (view.scroll + page_size.max(1)).min(max);
+            }
+        }
+        KeyCode::Home => {
+            if let Some(ref mut view) = app.question_view {
+                view.scroll = 0;
+            }
+        }
+        KeyCode::End => {
+            if let Some(ref mut view) = app.question_view {
                 view.scroll = max_scroll(&view.text);
             }
         }
@@ -4265,6 +4654,7 @@ mod tests {
                         SelectedTheme::None,
                         KeyBindings::defaults(),
                         None,
+                        None,
                 );
                 app.refresh();
                 app
@@ -4328,6 +4718,7 @@ mod tests {
                         SelectedTheme::None,
                         KeyBindings::defaults(),
                         None,
+                        None,
                 )
         }
 
@@ -4388,6 +4779,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                         None,
                 )
         }
@@ -4615,6 +5007,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                         None,
                 );
                 app.refresh();
@@ -5257,6 +5650,7 @@ mod tests {
                         SelectedTheme::None,
                         KeyBindings::defaults(),
                         None,
+                        None,
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -5361,6 +5755,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                         None,
                 );
                 app.refresh();
@@ -5580,6 +5975,7 @@ mod tests {
                         SelectedTheme::None,
                         KeyBindings::defaults(),
                         Some(Box::new(fake)),
+                        None,
                 )
         }
 
@@ -5631,6 +6027,7 @@ mod tests {
                         },
                 );
                 app.select_for_run();
+        app.process_pending_llm_request();
                 // The LLM call should stage the generated
                 // command for the parent shell to run.
                 assert_eq!(
@@ -5668,6 +6065,7 @@ mod tests {
                         },
                 );
                 app.select_for_run();
+        app.process_pending_llm_request();
                 let msg = app.status_message.as_ref().map(|(m, _)| m.clone());
                 assert_eq!(
                         app.selection.as_deref(),
@@ -5761,6 +6159,7 @@ mod tests {
                         SelectedTheme::None,
                         KeyBindings::defaults(),
                         None, // <-- the missing LLM config
+                        None,
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -5792,6 +6191,7 @@ mod tests {
                         },
                 );
                 app.select_for_run();
+        app.process_pending_llm_request();
                 assert!(app.selection.is_none());
                 let msg = app
                         .status_message
@@ -6403,6 +6803,7 @@ mod tests {
                         Some("old description".to_string());
                 app.llm_debounce_started = Some(std::time::Instant::now());
                 app.select_for_run();
+        app.process_pending_llm_request();
                 // The live FakeLlm was called, NOT
                 // the stale preview.
                 assert_eq!(
@@ -6482,6 +6883,7 @@ mod tests {
                         false,
                         SelectedTheme::None,
                         KeyBindings::defaults(),
+                        None,
                         None,
                 )
         }
@@ -7182,6 +7584,7 @@ mod tests {
                 // Select the row.
                 app.refresh();
                 app.start_describe();
+        app.process_pending_llm_request();
                 let view = app
                         .describe_view
                         .as_ref()
@@ -7261,6 +7664,7 @@ mod tests {
                 }));
                 app.refresh();
                 app.start_describe();
+        app.process_pending_llm_request();
                 assert!(app.describe_view.is_none());
                 let msg = app
                         .status_message
@@ -7288,6 +7692,7 @@ mod tests {
                 app.llm = Some(Box::new(llm));
                 app.refresh();
                 app.start_describe();
+        app.process_pending_llm_request();
                 assert_eq!(
                         app.describe_view.as_ref().unwrap().text,
                         "first response"
@@ -7329,6 +7734,7 @@ mod tests {
                 // timestamp wins, so this is "git
                 // status").
                 app.start_describe();
+        app.process_pending_llm_request();
                 let view = app.describe_view.as_ref().unwrap();
                 assert_eq!(view.command, "git status");
                 // Move to the second row.
@@ -7399,6 +7805,7 @@ mod tests {
                 }));
                 app.refresh();
                 app.start_correct();
+        app.process_pending_llm_request();
                 let view = app
                         .correct_view
                         .as_ref()
@@ -7468,6 +7875,7 @@ mod tests {
                 }));
                 app.refresh();
                 app.start_correct();
+        app.process_pending_llm_request();
                 assert!(app.correct_view.is_none());
                 let msg = app
                         .status_message
@@ -7497,6 +7905,7 @@ mod tests {
                 }));
                 app.refresh();
                 app.start_correct();
+        app.process_pending_llm_request();
                 assert!(app.correct_view.is_none());
                 let msg = app
                         .status_message

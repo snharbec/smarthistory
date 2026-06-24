@@ -17,7 +17,7 @@ use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
     format_diff, format_time, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView,
-    OutputView,
+    OutputView, QuestionView,
 };
 use regex::Regex;
 
@@ -34,6 +34,11 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(ref view) = app.correct_view {
         draw_correct_view(f, view);
+        return;
+    }
+
+    if let Some(ref view) = app.question_view {
+        draw_question_view(f, view);
         return;
     }
 
@@ -429,6 +434,68 @@ fn draw_correct_view(f: &mut Frame, view: &CorrectView) {
     // any sub-pixel rounding from the inner
     // widgets.
     f.render_widget(block, area);
+}
+
+/// Full-screen overlay for the general question
+/// action (prefixed with `%`).
+///
+/// Mirrors the describe overlay in shape (a piece of
+/// text + a scroll offset) but is driven by the user's
+/// question rather than by a command description.
+fn draw_question_view(f: &mut Frame, view: &QuestionView) {
+    let area = f.area();
+    // Build a short title that shows the question.
+    let title = {
+        let max = (area.width as usize).saturating_sub(25).max(20);
+        if view.question.chars().count() > max {
+            let keep = max.saturating_sub(1);
+            let mut s: String = view.question.chars().take(keep).collect();
+            s.push('…');
+            format!(" Question: {} (\u{2191}\u{2193} scroll, q/Esc close) ", s)
+        } else {
+            format!(
+                " Question: {} (\u{2191}\u{2193} scroll, q/Esc close) ",
+                view.question
+            )
+        }
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .title_style(Theme::accent())
+        .border_style(Theme::dim());
+
+    let all_lines: Vec<&str> = view.text.lines().collect();
+    let total = all_lines.len();
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = view.scroll.min(max_scroll);
+
+    let end = (scroll + inner_h).min(total);
+    let start = scroll;
+    let visible: Vec<Line> = all_lines[start..end]
+        .iter()
+        .map(|l| Line::from(Span::raw(l.to_string())))
+        .collect();
+
+    let paragraph = Paragraph::new(visible)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    // Footer with scroll position.
+    if area.height >= 3 {
+        let footer = format!(" {}/{} ", end, total);
+        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())));
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(para, footer_area);
+    }
 }
 
 fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
@@ -1924,7 +1991,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let (middle_text, middle_style) = match status {
         Some(m) if m.starts_with("Yank failed") => (format!(" {} ", m), Theme::error()),
         Some(m) => (format!(" {} ", m), Theme::success()),
-        None => (help.to_string(), Theme::dim()),
+        None => {
+            if app.llm_in_flight {
+                // Show a loading indicator when an LLM request is in flight.
+                (" LLM request in progress… ".to_string(), Theme::warning())
+            } else {
+                (help.to_string(), Theme::dim())
+            }
+        }
     };
 
     let line = Line::from(vec![

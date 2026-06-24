@@ -2223,11 +2223,13 @@ fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(llm::OllamaClient::new)
                 .map(|c| Box::new(c) as Box<dyn llm::LlmClient>);
+            let llm_config = tui_cfg.llm.clone();
             match tui::run_tui_to_stdout(
                 initial_mode,
                 initial_query,
                 conn,
                 llm_client,
+                llm_config,
             )? {
                 Some((command, pick_mode)) => {
                     // Print the chosen command. The pick_mode tells
