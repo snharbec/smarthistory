@@ -576,6 +576,12 @@ struct App {
     llm_config: Option<crate::llm::LlmConfig>,
     /// User-customizable query prefix characters.
     query_prefixes: crate::QueryPrefixes,
+    /// Path to the note_search database, if configured.
+    notes_database: Option<std::path::PathBuf>,
+    /// Path to the notes directory, if configured.
+    notes_dir: Option<std::path::PathBuf>,
+    /// Set to true when the last notes query failed to parse.
+    notes_query_error: bool,
     /// Timestamp of the most recent keystroke that touched
     /// the query in LLM mode. `None` when the debounce is
     /// satisfied (i.e. an auto-call has been issued and the
@@ -724,6 +730,138 @@ impl App {
             &self.query[p.len_utf8()..]
         } else {
             ""
+        }
+    }
+
+    /// True if the current query is a note search request
+    /// (prefixed with the configured notes prefix, default `@`).
+    fn is_notes_query(&self) -> bool {
+        let p = self.query_prefixes.notes;
+        !self.query.is_empty() && self.query.chars().next() == Some(p)
+    }
+
+    /// The note search body, i.e. everything after the
+    /// leading notes prefix.
+    fn notes_pattern(&self) -> &str {
+        if self.is_notes_query() {
+            let p = self.query_prefixes.notes;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
+    /// Read the first N lines of a note file for the preview pane.
+    fn read_note_preview(&self, filename: &str) -> String {
+        let Some(ref notes_dir) = self.notes_dir else {
+            return String::new();
+        };
+        let path = notes_dir.join(filename);
+        if !path.exists() || !path.is_file() {
+            return String::new();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => String::new(),
+        }
+    }
+
+    /// Search the note_search database for notes matching the
+    /// current query. Returns HistoryRow entries with the note
+    /// filename as `command`, the title as `comment`, and the
+    /// full content as `output`.
+    fn fetch_notes(&mut self) -> Result<Vec<HistoryRow>> {
+        let Some(ref db_path) = self.notes_database else {
+            return Ok(Vec::new());
+        };
+        let pattern = self.notes_pattern().trim();
+        if pattern.is_empty() {
+            return self.fetch_recent_notes(db_path);
+        }
+        
+        let service = note_search::database_service::DatabaseService::new(
+            &db_path.to_string_lossy()
+        );
+        
+        match service.search_notes_by_query(pattern) {
+            Ok(results) => {
+                let mut debug_count = 0;
+                let mut rows: Vec<HistoryRow> = results.iter().map(|note| {
+                    let title = note.title.as_deref().unwrap_or("");
+                    let comment = if title.is_empty() {
+                        note.filename.clone()
+                    } else {
+                        format!("{} — {}", title, note.filename)
+                    };
+                    // Debug: print first few timestamps
+                    if debug_count < 3 {
+                        eprintln!(
+                            "DEBUG note: {} created={:?} updated={:?}",
+                            note.filename, note.created, note.updated
+                        );
+                        debug_count += 1;
+                    }
+                    let ts = note.updated.or(note.created).unwrap_or(0);
+                    HistoryRow {
+                        id: 0,
+                        command: note.filename.clone(),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: 0,
+                        timestamp: ts,
+                        comment,
+                        output: self.read_note_preview(&note.filename),
+                        mode: "note".to_string(),
+                    }
+                }).collect();
+                // Sort by timestamp descending (newest first)
+                rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                self.notes_query_error = false;
+                Ok(rows)
+            }
+            Err(_e) => {
+                self.notes_query_error = true;
+                Ok(Vec::new())
+            }
+        }
+    }
+    
+    /// Fetch recent notes (when no query is entered).
+    fn fetch_recent_notes(&self, db_path: &std::path::Path) -> Result<Vec<HistoryRow>> {
+        let service = note_search::database_service::DatabaseService::new(
+            &db_path.to_string_lossy()
+        );
+        // Use default SearchCriteria to get all notes (no query filter).
+        let criteria = note_search::SearchCriteria::default();
+        match service.search_notes(&criteria) {
+            Ok(results) => {
+                let mut rows: Vec<HistoryRow> = results.iter().map(|note| {
+                    let title = note.title.as_deref().unwrap_or("");
+                    let comment = if title.is_empty() {
+                        note.filename.clone()
+                    } else {
+                        format!("{} — {}", title, note.filename)
+                    };
+                    let ts = note.updated.or(note.created).unwrap_or(0);
+                    HistoryRow {
+                        id: 0,
+                        command: note.filename.clone(),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: 0,
+                        timestamp: ts,
+                        comment,
+                        output: self.read_note_preview(&note.filename),
+                        mode: "note".to_string(),
+                    }
+                }).collect();
+                // Sort by timestamp descending (newest first)
+                rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                Ok(rows)
+            }
+            Err(_e) => {
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -1391,6 +1529,8 @@ impl App {
         llm: Option<Box<dyn crate::llm::LlmClient>>,
         llm_config: Option<crate::llm::LlmConfig>,
         query_prefixes: crate::QueryPrefixes,
+        notes_database: Option<std::path::PathBuf>,
+        notes_dir: Option<std::path::PathBuf>,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -1441,6 +1581,9 @@ impl App {
             llm,
             llm_config,
             query_prefixes,
+            notes_database,
+            notes_dir,
+            notes_query_error: false,
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -1724,9 +1867,12 @@ impl App {
         merged
     }
 
-    fn fetch(&self) -> Result<Vec<HistoryRow>> {
+    fn fetch(&mut self) -> Result<Vec<HistoryRow>> {
         if matches!(self.mode, Mode::Stats) {
             return self.fetch_stats();
+        }
+        if self.is_notes_query() {
+            return self.fetch_notes();
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
@@ -2098,6 +2244,30 @@ fn move_selection(&mut self, delta: isize) {
         // a command.
         if self.is_question_query() {
             self.run_question_query();
+            return;
+        }
+        // `@...` queries are note search requests.
+        // Selecting a note opens it in the editor.
+        if self.is_notes_query() {
+            if let Some(row) = self.selected_row() {
+                let editor = std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vi".to_string());
+                // Build the full path to the note file
+                let filepath = match self.notes_dir.as_ref() {
+                    Some(dir) => dir.join(&row.command).to_string_lossy().to_string(),
+                    None => row.command.clone(),
+                };
+                // Quote the path if it contains spaces
+                let quoted = if filepath.contains(' ') {
+                    format!("\"{}\"", filepath)
+                } else {
+                    filepath
+                };
+                self.selection = Some(format!("{} {}", editor, quoted));
+                self.pick_mode = Some(PickMode::Run);
+            }
             return;
         }
         if let Some(row) = self.selected_row() {
@@ -3032,6 +3202,8 @@ pub fn run_tui_to_stdout(
     let app_cfg = Config::load();
     let bindings = app_cfg.key_bindings().clone();
     let query_prefixes = app_cfg.query_prefixes().clone();
+    let notes_database = app_cfg.notes_database().map(|p| p.to_path_buf());
+    let notes_dir = app_cfg.notes_dir().map(|p| p.to_path_buf());
     let session = TuiSession::load();
     let duplicate_filter = session
         .duplicate_filter
@@ -3092,6 +3264,8 @@ pub fn run_tui_to_stdout(
         llm,
         llm_config,
         query_prefixes,
+        notes_database,
+        notes_dir,
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -4657,6 +4831,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 );
                 app.refresh();
                 app
@@ -4723,6 +4899,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 )
         }
 
@@ -4787,6 +4965,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 )
         }
 
@@ -5017,6 +5197,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -5661,6 +5843,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -5769,6 +5953,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 );
                 app.refresh();
                 unsafe {
@@ -5990,6 +6176,8 @@ mod tests {
                         Some(Box::new(fake)),
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 )
         }
 
@@ -6176,6 +6364,8 @@ mod tests {
                         None, // <-- the missing LLM config
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -6907,6 +7097,8 @@ mod tests {
                         None,
                         None,
                         crate::QueryPrefixes::default(),
+                        None,
+                        None,
                 )
         }
 

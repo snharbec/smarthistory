@@ -1924,6 +1924,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             })
             .border_style(if app.comment_edit.is_some() {
                 Style::default().fg(Theme::warning_color())
+            } else if app.notes_query_error {
+                Style::default().fg(Theme::error_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())
             } else if is_llm {

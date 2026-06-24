@@ -4,6 +4,7 @@ mod util;
 
 use clap::Parser;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -230,6 +231,29 @@ enum Commands {
         #[arg(short, long)]
         exit_code: i32,
     },
+    /// Export history data to a JSON file. The file contains all
+    /// history entries, command comments, and captured output so
+    /// that a complete import is possible.
+    Export {
+        /// Path to the output JSON file.
+        filename: PathBuf,
+        /// Optional start timestamp (Unix epoch seconds). Only
+        /// entries with timestamp >= this value are exported.
+        #[arg(long)]
+        since: Option<i64>,
+        /// Optional end timestamp (Unix epoch seconds). Only
+        /// entries with timestamp <= this value are exported.
+        #[arg(long)]
+        until: Option<i64>,
+    },
+    /// Import history data from a JSON file previously created
+    /// with the `export` command. Existing entries with the same
+    /// (command, directory, session_id) are updated; new entries
+    /// are inserted.
+    Import {
+        /// Path to the input JSON file.
+        filename: PathBuf,
+    },
 }
 
 /// Sub-commands of `smarthistory config`. `Get` preserves the
@@ -252,6 +276,33 @@ enum ConfigAction {
     Check,
     /// Print every known configuration key with its resolved value.
     List,
+}
+
+/// A single history entry for JSON export/import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryExportRow {
+    id: Option<i64>,
+    command: String,
+    directory: String,
+    session_id: String,
+    exit_code: i32,
+    timestamp: i64,
+    mode: String,
+    /// Optional comment (from command_comments table).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comment: Option<String>,
+    /// Optional captured output (from history_output table).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+}
+
+/// The full export/import format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryExport {
+    /// Schema version for forward compatibility.
+    version: i32,
+    /// All history entries.
+    history: Vec<HistoryExportRow>,
 }
 
 fn get_db_path() -> PathBuf {
@@ -671,6 +722,8 @@ pub struct QueryPrefixes {
     pub llm: char,
     /// Prefix for general question mode (default `%`).
     pub question: char,
+    /// Prefix for note search mode (default `@`).
+    pub notes: char,
 }
 
 impl Default for QueryPrefixes {
@@ -681,6 +734,7 @@ impl Default for QueryPrefixes {
             output: '+',
             llm: '=',
             question: '%',
+            notes: '@',
         }
     }
 }
@@ -719,6 +773,14 @@ pub struct Config {
     /// `llm` module returns `LlmError::NotConfigured` and the
     /// TUI surfaces a clear status message.
     llm: Option<llm::LlmConfig>,
+    /// Path to the note_search SQLite database. When set, the `@`
+    /// prefix searches notes instead of shell history.
+    /// Can also be set via the NOTE_SEARCH_DATABASE env var.
+    notes_database: Option<std::path::PathBuf>,
+    /// Path to the directory containing note files. Used to read
+    /// note content for the preview pane.
+    /// Can also be set via the NOTE_SEARCH_DIR env var.
+    notes_dir: Option<std::path::PathBuf>,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
 }
@@ -809,6 +871,8 @@ impl Config {
             // file; we only store a config when both fields
             // are present (see `parse`).
             llm: None,
+            notes_database: None,
+            notes_dir: None,
             query_prefixes: QueryPrefixes::default(),
         }
     }
@@ -821,6 +885,19 @@ impl Config {
             && let Ok(contents) = std::fs::read_to_string(&path) {
                 cfg.parse(&contents);
             }
+        // Environment variables override config file values.
+        if let Ok(db) = env::var("NOTE_SEARCH_DATABASE") {
+            let path = std::path::PathBuf::from(&db);
+            if path.exists() && path.is_file() {
+                cfg.notes_database = Some(path);
+            }
+        }
+        if let Ok(dir) = env::var("NOTE_SEARCH_DIR") {
+            let path = std::path::PathBuf::from(&dir);
+            if path.exists() && path.is_dir() {
+                cfg.notes_dir = Some(path);
+            }
+        }
         cfg
     }
 
@@ -882,6 +959,28 @@ impl Config {
                 }
                 "ollama.model" => {
                     ollama_model = value.to_string();
+                }
+                "notes.database" => {
+                    let path = expand_tilde(value);
+                    if path.exists() && path.is_file() {
+                        self.notes_database = Some(path);
+                    } else {
+                        eprintln!(
+                            "warning: notes.database {} does not exist or is not a file",
+                            path.display()
+                        );
+                    }
+                }
+                "notes.dir" => {
+                    let path = expand_tilde(value);
+                    if path.exists() && path.is_dir() {
+                        self.notes_dir = Some(path);
+                    } else {
+                        eprintln!(
+                            "warning: notes.dir {} does not exist or is not a directory",
+                            path.display()
+                        );
+                    }
                 }
                 other => {
                     if let Some(cmd) = other.strip_prefix("capturelines.")
@@ -1062,6 +1161,16 @@ impl Config {
         &self.query_prefixes
     }
 
+    /// Path to the note_search database, if configured.
+    pub fn notes_database(&self) -> Option<&std::path::Path> {
+        self.notes_database.as_deref()
+    }
+
+    /// Path to the notes directory, if configured.
+    pub fn notes_dir(&self) -> Option<&std::path::Path> {
+        self.notes_dir.as_deref()
+    }
+
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
     /// fields are silently ignored so a typo doesn't break the rest
     /// of the config.
@@ -1105,6 +1214,7 @@ impl Config {
             "output" => prefixes.output = c,
             "llm" => prefixes.llm = c,
             "question" => prefixes.question = c,
+            "notes" => prefixes.notes = c,
             _ => {}
         }
     }
@@ -2180,7 +2290,7 @@ fn main() -> anyhow::Result<()> {
                 LIMIT ?2
             ";
             let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map(params![command, limit], |row| {
+            let rows = stmt.query_map(params![command, limit as i64], |row| {
                 let next: String = row.get(0)?;
                 let freq: i64 = row.get(1)?;
                 Ok((next, freq))
@@ -2318,6 +2428,149 @@ fn main() -> anyhow::Result<()> {
                 }
                 None => std::process::exit(tui::exit_code::CANCEL),
             }
+        }
+        Commands::Export {
+            filename,
+            since,
+            until,
+        } => {
+            // Build the time-range filter.
+            let mut time_clause = String::new();
+            let mut time_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(ts) = since {
+                time_clause.push_str(" AND h.timestamp >= ?");
+                time_params.push(Box::new(ts));
+            }
+            if let Some(ts) = until {
+                time_clause.push_str(" AND h.timestamp <= ?");
+                time_params.push(Box::new(ts));
+            }
+
+            // Fetch history rows with their comments and output.
+            let sql = format!(
+                "SELECT h.id, h.command, h.directory, h.session_id, \
+                        h.exit_code, h.timestamp, h.mode, \
+                        c.comment, o.output \
+                 FROM history h \
+                 LEFT JOIN command_comments c ON h.command = c.command \
+                 LEFT JOIN history_output o ON h.id = o.history_id \
+                 WHERE 1=1{} \
+                 ORDER BY h.timestamp ASC",
+                time_clause
+            );
+            let params_ref: Vec<&dyn rusqlite::ToSql> =
+                time_params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(&params_ref[..], |row| {
+                Ok(HistoryExportRow {
+                    id: Some(row.get::<_, i64>(0)?),
+                    command: row.get::<_, String>(1)?,
+                    directory: row.get::<_, String>(2)?,
+                    session_id: row.get::<_, String>(3)?,
+                    exit_code: row.get::<_, i32>(4)?,
+                    timestamp: row.get::<_, i64>(5)?,
+                    mode: row.get::<_, String>(6)?,
+                    comment: row.get::<_, Option<String>>(7)?,
+                    output: row.get::<_, Option<String>>(8)?,
+                })
+            })?;
+
+            let mut history = Vec::new();
+            for row in rows {
+                history.push(row?);
+            }
+
+            let export = HistoryExport {
+                version: 1,
+                history,
+            };
+
+            let json = serde_json::to_string_pretty(&export)?;
+            std::fs::write(&filename, json)?;
+            eprintln!(
+                "Exported {} history entries to {}",
+                export.history.len(),
+                filename.display()
+            );
+        }
+        Commands::Import { filename } => {
+            let json = std::fs::read_to_string(&filename)?;
+            let export: HistoryExport = serde_json::from_str(&json)?;
+
+            if export.version != 1 {
+                anyhow::bail!(
+                    "Unsupported export version {}; expected 1",
+                    export.version
+                );
+            }
+
+            let mut imported = 0usize;
+            let mut updated = 0usize;
+            for row in &export.history {
+                // Upsert the history row.
+                let result = conn.execute(
+                    "INSERT INTO history (command, directory, session_id, exit_code, timestamp, mode) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                     ON CONFLICT (command, directory, session_id) DO UPDATE \
+                     SET timestamp = excluded.timestamp, \
+                         exit_code = excluded.exit_code, \
+                         mode = excluded.mode",
+                    params![
+                        row.command,
+                        row.directory,
+                        row.session_id,
+                        row.exit_code,
+                        row.timestamp,
+                        row.mode,
+                    ],
+                )?;
+
+                if result == 0 {
+                    // ON CONFLICT DO UPDATE returns 0 when the
+                    // conflict triggered an update rather than an
+                    // insert. We detect this by checking if the
+                    // row existed before.
+                    updated += 1;
+                } else {
+                    imported += 1;
+                }
+
+                // Store the comment if present.
+                if let Some(ref comment) = row.comment {
+                    if !comment.is_empty() {
+                        conn.execute(
+                            "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                             ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                            params![row.command, comment],
+                        )?;
+                    }
+                }
+
+                // Store the output if present.
+                if let Some(ref output) = row.output {
+                    if !output.is_empty() {
+                        // Get the history id for this row.
+                        let history_id: i64 = conn.query_row(
+                            "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+                            params![row.command, row.directory, row.session_id],
+                            |r| r.get(0),
+                        )?;
+                        conn.execute(
+                            "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
+                             ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, \
+                             captured_at = (strftime('%s', 'now'))",
+                            params![history_id, output],
+                        )?;
+                    }
+                }
+            }
+
+            eprintln!(
+                "Imported {} new entries, updated {} existing entries from {}",
+                imported,
+                updated,
+                filename.display()
+            );
         }
     }
     Ok(())
