@@ -655,6 +655,33 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
         }
         bindings.set(*a, specs);
     }
+    
+    // Detect duplicate key bindings (same key bound to multiple actions).
+    // The first action in ALL_ACTIONS order wins; the others are silently
+    // shadowed. We warn about all shadowed bindings so the user can fix
+    // the conflict.
+    {
+        let mut seen: std::collections::HashMap<(KeyCode, KeyModifiers), &'static str> =
+            std::collections::HashMap::new();
+        for a in ALL_ACTIONS {
+            for spec in bindings.specs(*a) {
+                let key = (spec.code, spec.modifiers);
+                if let Some(prev) = seen.get(&key) {
+                    eprintln!(
+                        "warning: key.{}={} is bound to the same key ({}) as {}; \
+                         only the first binding wins",
+                        a.config_key(),
+                        format_key_spec(*spec),
+                        format_key_spec(*spec),
+                        prev,
+                    );
+                } else {
+                    seen.insert(key, a.config_key());
+                }
+            }
+        }
+    }
+    
     bindings
 }
 

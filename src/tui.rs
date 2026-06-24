@@ -574,6 +574,8 @@ struct App {
     /// threads can create their own `OllamaClient` instances
     /// for async requests.
     llm_config: Option<crate::llm::LlmConfig>,
+    /// User-customizable query prefix characters.
+    query_prefixes: crate::QueryPrefixes,
     /// Timestamp of the most recent keystroke that touched
     /// the query in LLM mode. `None` when the debounce is
     /// satisfied (i.e. an auto-call has been issued and the
@@ -634,109 +636,92 @@ struct App {
 const LLM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl App {
-    /// True if the current query is a regex (prefixed with `/`).
+    /// True if the current query is a regex (prefixed with configured regex prefix).
     fn is_regex_query(&self) -> bool {
-        self.query.starts_with('/')
+        let p = self.query_prefixes.regex;
+        !self.query.is_empty() && self.query.chars().next() == Some(p)
     }
 
-    /// True if the current query is a fuzzy search (prefixed with `?`).
+    /// True if the current query is a fuzzy search (prefixed with configured fuzzy prefix).
     fn is_fuzzy_query(&self) -> bool {
-        self.query.starts_with('?')
+        let p = self.query_prefixes.fuzzy;
+        !self.query.is_empty() && self.query.chars().next() == Some(p)
     }
 
     /// True if the current query is an output-content search
-    /// (prefixed with `+`). The body of the query is treated as
-    /// a multi-word AND of substring matches against the
-    /// captured `history_output.output` column rather than
-    /// against the command or comment text. Rows without
-    /// captured output are excluded.
-    ///
-    /// This is the inverse of the other "search inside text"
-    /// modes: `=` is for asking the LLM to generate a
-    /// command; `+` is for finding an existing command by
-    /// something it *produced* (an error message, a
-    /// grep hit, a particular log line).
+    /// (prefixed with configured output prefix).
     fn is_output_query(&self) -> bool {
-        self.query.starts_with('+')
+        let p = self.query_prefixes.output;
+        !self.query.is_empty() && self.query.chars().next() == Some(p)
     }
 
     /// True if the current query is an LLM command-generation
-    /// request (prefixed with `=`). When this returns true, the
-    /// normal "select a row to run" path is short-circuited;
-    /// the natural-language description after the `=` is sent to
-    /// the configured ollama instance, and the response is
-    /// inserted into the history as a new row and staged for
-    /// execution.
-    /// 
+    /// request (prefixed with configured LLM prefix).
     /// Only returns true if there's actual description text after
-    /// the `=` (not just `=` alone or `=` with only whitespace).
-    /// This allows users to type just `=` to search for old LLM
-    /// queries without triggering a new generation.
+    /// the prefix (not just the prefix alone or with only whitespace).
     fn is_llm_query(&self) -> bool {
-        self.query.starts_with('=') && self.query[1..].trim().len() > 0
+        let p = self.query_prefixes.llm;
+        self.query.starts_with(p) && self.query[p.len_utf8()..].trim().len() > 0
     }
 
-    /// The regex pattern, i.e. everything after the leading `/`.
-    /// Empty when the query is just `/`.
+    /// True if the current query is a general question
+    /// request (prefixed with configured question prefix).
+    /// Only returns true if there's actual question text after
+    /// the prefix (not just the prefix alone or with only whitespace).
+    fn is_question_query(&self) -> bool {
+        let p = self.query_prefixes.question;
+        self.query.starts_with(p) && self.query[p.len_utf8()..].trim().len() > 0
+    }
+
+    /// The regex pattern, i.e. everything after the leading regex prefix.
+    /// Empty when the query is not a regex.
     fn regex_pattern(&self) -> &str {
         if self.is_regex_query() {
-            &self.query[1..]
+            let p = self.query_prefixes.regex;
+            &self.query[p.len_utf8()..]
         } else {
             ""
         }
     }
 
-    /// The fuzzy pattern, i.e. everything after the leading `?`.
+    /// The fuzzy pattern, i.e. everything after the leading fuzzy prefix.
     fn fuzzy_pattern(&self) -> &str {
         if self.is_fuzzy_query() {
-            &self.query[1..]
+            let p = self.query_prefixes.fuzzy;
+            &self.query[p.len_utf8()..]
         } else {
             ""
         }
     }
 
     /// The output-search body, i.e. everything after the
-    /// leading `+`. Returns the empty string for any other
-    /// mode. The body is a multi-word AND of substring
-    /// matches against the `history_output.output` column.
+    /// leading output prefix.
     fn output_pattern(&self) -> &str {
         if self.is_output_query() {
-            &self.query[1..]
+            let p = self.query_prefixes.output;
+            &self.query[p.len_utf8()..]
         } else {
             ""
         }
     }
 
     /// The LLM query body, i.e. everything after the
-    /// leading `=`. Returns the empty string for any other
-    /// mode.
+    /// leading LLM prefix.
     fn llm_pattern(&self) -> &str {
         if self.is_llm_query() {
-            &self.query[1..]
+            let p = self.query_prefixes.llm;
+            &self.query[p.len_utf8()..]
         } else {
             ""
         }
     }
 
-    /// True if the current query is a general question
-    /// request (prefixed with `%`). When this returns true,
-    /// the question text is sent to the LLM and the answer
-    /// is displayed in an overlay.
-    /// 
-    /// Only returns true if there's actual question text after
-    /// the `%` (not just `%` alone or `%` with only whitespace).
-    /// This allows users to type just `%` to search for old
-    /// questions without triggering a new question.
-    fn is_question_query(&self) -> bool {
-        self.query.starts_with('%') && self.query[1..].trim().len() > 0
-    }
-
     /// The question body, i.e. everything after the
-    /// leading `%`. Returns the empty string for any other
-    /// mode.
+    /// leading question prefix.
     fn question_pattern(&self) -> &str {
         if self.is_question_query() {
-            &self.query[1..]
+            let p = self.query_prefixes.question;
+            &self.query[p.len_utf8()..]
         } else {
             ""
         }
@@ -780,40 +765,45 @@ impl App {
     }
 
     /// The first character of the query if it is a mode prefix
-    /// (`/`, `?`, or `+`), otherwise a sentinel (`\0`) meaning
+    /// (regex, fuzzy, or output), otherwise a sentinel (`\0`) meaning
     /// "plain".
     fn query_prefix(&self) -> char {
         if self.query.is_empty() {
             '\0'
         } else {
             let c = self.query.chars().next().unwrap();
-            if c == '/' || c == '?' || c == '+' { c } else { '\0' }
+            let p = &self.query_prefixes;
+            if c == p.regex || c == p.fuzzy || c == p.output { c } else { '\0' }
         }
     }
 
     /// The next mode prefix in the cycle plain -> regex ->
     /// fuzzy -> output -> plain.
     fn next_search_mode_prefix(&self, current: char) -> char {
-        match current {
-            '/' => '?',  // regex -> fuzzy
-            '?' => '+',  // fuzzy -> output
-            '+' => '\0', // output -> plain
-            _ => '/',    // plain -> regex
+        let p = &self.query_prefixes;
+        if current == p.regex {
+            p.fuzzy
+        } else if current == p.fuzzy {
+            p.output
+        } else if current == p.output {
+            '\0'
+        } else {
+            p.regex
         }
     }
 
     /// Apply a new mode prefix to the query, preserving the rest
     /// of the text. `\0` means "no prefix" (plain mode).
     fn set_search_mode_prefix(&mut self, new_prefix: char) {
+        let p = &self.query_prefixes;
         // Use `chars()` to be robust against multi-byte UTF-8
-        // prefixes (`?` is 2 bytes). We drop the first char
-        // only if it's a mode prefix, otherwise the body is the
-        // whole query.
+        // prefixes. We drop the first char only if it's a mode
+        // prefix, otherwise the body is the whole query.
         let body: String = self
             .query
             .chars()
             .next()
-            .map(|c| if c == '/' || c == '?' || c == '+' {
+            .map(|c| if c == p.regex || c == p.fuzzy || c == p.output {
                 self.query[c.len_utf8()..].to_string()
             } else {
                 self.query.clone()
@@ -1009,7 +999,8 @@ impl App {
         if !self.is_llm_query() {
             return;
         }
-        let description = self.query[1..].trim().to_string();
+        let prefix = self.query_prefixes.llm;
+        let description = self.query[prefix.len_utf8()..].trim().to_string();
         if description.is_empty() {
             return;
         }
@@ -1082,13 +1073,14 @@ impl App {
             .unwrap_or(0);
         let preview = HistoryRow {
             id: -1,
-            command: format!("={}", fired_description),
+            command: format!("{}{}", self.query_prefixes.llm, fired_description),
             directory: std::env::var("PWD").unwrap_or_default(),
             session_id: std::env::var("SMART_HISTORY_SESSION").unwrap_or_default(),
             exit_code: -1,
             timestamp: now,
             comment: command.clone(),
             output: command,
+            mode: "llm".to_string(),
         };
         self.llm_preview = Some(preview);
         self.llm_preview_description = Some(fired_description);
@@ -1132,7 +1124,8 @@ impl App {
             // Regex mode but no valid compiled regex yet — treat
             // the entire post-slash text as a literal pattern so
             // the user sees at least the matches that contain it.
-            return text.to_lowercase().contains(&self.query[1..].to_lowercase());
+            let p = self.query_prefixes.regex;
+            return text.to_lowercase().contains(&self.query[p.len_utf8()..].to_lowercase());
         }
         if self.is_fuzzy_query() {
             // Fuzzy search: every whitespace-separated word in the
@@ -1397,6 +1390,7 @@ impl App {
         bindings: KeyBindings,
         llm: Option<Box<dyn crate::llm::LlmClient>>,
         llm_config: Option<crate::llm::LlmConfig>,
+        query_prefixes: crate::QueryPrefixes,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -1446,6 +1440,7 @@ impl App {
             status_message: None,
             llm,
             llm_config,
+            query_prefixes,
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -1488,6 +1483,9 @@ impl App {
             let regex = self.query_regex.clone();
             let is_regex = self.is_regex_query();
             let is_fuzzy = self.is_fuzzy_query();
+            // Capture prefix lengths for the fallback paths
+            let regex_prefix_len = self.query_prefixes.regex.len_utf8();
+            let fuzzy_prefix_len = self.query_prefixes.fuzzy.len_utf8();
             self.rows.retain(|r| {
                 if is_regex {
                     if let Some(ref re) = regex {
@@ -1495,22 +1493,22 @@ impl App {
                     } else {
                         // No valid regex yet (in-progress typo) — fall
                         // back to a literal substring match on the
-                        // post-slash text so the user sees *something*.
+                        // post-prefix text so the user sees *something*.
                         r.command
                             .to_lowercase()
-                            .contains(&query[1..].to_lowercase())
+                            .contains(&query[regex_prefix_len..].to_lowercase())
                             || r
                                 .comment
                                 .to_lowercase()
-                                .contains(&query[1..].to_lowercase())
+                                .contains(&query[regex_prefix_len..].to_lowercase())
                     }
                 } else if is_fuzzy {
                     // Fuzzy search is also a post-filter. We can't
                     // call `self.query_matches_text` here because
                     // `self` is borrowed mutably by `retain`. The
-                    // pattern is the whole post-`?` query, so we
+                    // pattern is the whole post-prefix query, so we
                     // inline the check.
-                    let fuzzy_pattern = &query[1..];
+                    let fuzzy_pattern = &query[fuzzy_prefix_len..];
                     if fuzzy_pattern.is_empty() {
                         true
                     } else {
@@ -1732,7 +1730,7 @@ impl App {
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
-            "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output \
+            "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output, h.mode \
              FROM history h \
              LEFT JOIN command_comments c ON h.command = c.command \
              LEFT JOIN history_output o ON h.id = o.history_id{} \
@@ -1753,6 +1751,7 @@ impl App {
                     timestamp: row.get(5)?,
                     comment: row.get(6).unwrap_or_default(),
                     output: row.get(7).unwrap_or_default(),
+                    mode: row.get(8).unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1829,7 +1828,7 @@ impl App {
                  GROUP BY next_cmd \
              ) \
              SELECT h.id, h.command, h.directory, h.session_id, \
-                    h.exit_code, h.timestamp, c.comment, o.output, \
+                    h.exit_code, h.timestamp, c.comment, o.output, h.mode, \
                     COALESCE(f.freq, 0) AS freq \
              FROM history h \
              LEFT JOIN command_comments c ON h.command = c.command \
@@ -1854,6 +1853,7 @@ impl App {
                     timestamp: row.get(5)?,
                     comment: row.get(6).unwrap_or_default(),
                     output: row.get(7).unwrap_or_default(),
+                    mode: row.get(8).unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1900,11 +1900,10 @@ impl App {
             && !self.is_fuzzy_query()
         {
             if self.is_llm_query() {
-                // LLM mode: only show commands that start with `=`
-                // (previous LLM queries). Also allow filtering by
-                // the body of the query.
-                clause.push_str(" AND h.command LIKE '?%'");
-                params.push(Box::new("=%".to_string()));
+                // LLM mode: only show entries with mode='llm'.
+                // Also allow filtering by the body of the query
+                // against the command and output.
+                clause.push_str(" AND h.mode = 'llm'");
                 // Search the body in command and output
                 for word in self.llm_pattern().split_whitespace() {
                     if !word.is_empty() {
@@ -1917,11 +1916,10 @@ impl App {
                     }
                 }
             } else if self.is_question_query() {
-                // Question mode: only show commands that start with `%`
-                // (previous questions). Also allow filtering by
-                // the body of the query.
-                clause.push_str(" AND h.command LIKE '?%'");
-                params.push(Box::new("%%".to_string()));
+                // Question mode: only show entries with mode='question'.
+                // Also allow filtering by the body of the query
+                // against the command and output.
+                clause.push_str(" AND h.mode = 'question'");
                 // Search the body in command and output
                 for word in self.question_pattern().split_whitespace() {
                     if !word.is_empty() {
@@ -2103,14 +2101,13 @@ fn move_selection(&mut self, delta: isize) {
             return;
         }
         if let Some(row) = self.selected_row() {
-            // If the row's command starts with `=`, it's an old
-            // LLM query. Execute the output (the generated command)
-            // instead of the description.
-            if row.command.starts_with('=') && !row.output.is_empty() {
+            // Check the mode field to determine the type of entry.
+            if row.mode == "llm" && !row.output.is_empty() {
+                // Old LLM query: execute the output (the generated command).
                 self.selection = Some(row.output.clone());
                 self.pick_mode = Some(PickMode::Run);
-            } else if row.command.starts_with('%') && !row.output.is_empty() {
-                // For old question rows, show the answer in the overlay.
+            } else if row.mode == "question" && !row.output.is_empty() {
+                // Old question: show the answer in the overlay.
                 self.question_view = Some(QuestionView {
                     question: row.command.clone(),
                     text: row.output.clone(),
@@ -2194,7 +2191,7 @@ fn move_selection(&mut self, delta: isize) {
                 let answer = raw.trim().to_string();
                 self.stage_question(question.clone(), answer.clone());
                 self.question_view = Some(QuestionView {
-                    question: format!("%{}", question),
+                    question: format!("{}{}", self.query_prefixes.question, question),
                     text: answer,
                     scroll: 0,
                 });
@@ -2216,12 +2213,11 @@ fn move_selection(&mut self, delta: isize) {
 
     fn run_llm_query(&mut self) {
         // Step 1: extract the description (everything after the
-        // leading `=`). The leading char may be a multi-byte
-        // UTF-8 sequence in theory; `=` is ASCII so this is
-        // safe.
-        let description = self.query[1..].trim();
+        // leading LLM prefix).
+        let prefix = self.query_prefixes.llm;
+        let description = self.query[prefix.len_utf8()..].trim();
         if description.is_empty() {
-            self.set_status_message("LLM: provide a description after `=`".to_string());
+            self.set_status_message("LLM: provide a description after the LLM prefix".to_string());
             return;
         }
         // Step 2: bail out cleanly if the LLM isn't configured.
@@ -2270,19 +2266,19 @@ fn move_selection(&mut self, delta: isize) {
     /// users to search for old LLM queries with `=` and
     /// re-execute the generated command.
     fn stage_llm_command(&mut self, generated_command: String, description: String) {
-        // Store the description with = prefix as the command,
+        // Store the description with the configured LLM prefix as the command,
         // and the generated command in the output column.
         // This way users can search for old LLM queries and
         // the generated command is replayed when selected.
         let directory = std::env::var("PWD").unwrap_or_default();
         let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
-        let query_command = format!("={}", description);
+        let query_command = format!("{}{}", self.query_prefixes.llm, description);
         let insert_result: anyhow::Result<i64> = (|| {
             self.conn.execute(
-                "INSERT INTO history (command, directory, session_id, exit_code) \
-                 VALUES (?1, ?2, ?3, -1) \
+                "INSERT INTO history (command, directory, session_id, exit_code, mode) \
+                 VALUES (?1, ?2, ?3, -1, 'llm') \
                  ON CONFLICT (command, directory, session_id) DO UPDATE \
-                 SET timestamp = (strftime('%s', 'now'))",
+                 SET timestamp = (strftime('%s', 'now')), mode = 'llm'",
                 params![&query_command, directory, session_id],
             )?;
             let id: i64 = self.conn.query_row(
@@ -2650,10 +2646,10 @@ fn move_selection(&mut self, delta: isize) {
             std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
         let insert_result: anyhow::Result<()> = (|| {
             self.conn.execute(
-                "INSERT INTO history (command, directory, session_id, exit_code) \
-                 VALUES (?1, ?2, ?3, -1) \
+                "INSERT INTO history (command, directory, session_id, exit_code, mode) \
+                 VALUES (?1, ?2, ?3, -1, 'command') \
                  ON CONFLICT (command, directory, session_id) DO UPDATE \
-                 SET timestamp = (strftime('%s', 'now'))",
+                 SET timestamp = (strftime('%s', 'now')), mode = 'command'",
                 params![view.corrected_command, directory, session_id],
             )?;
             // The original command is the comment,
@@ -2686,10 +2682,11 @@ fn move_selection(&mut self, delta: isize) {
     /// history with the answer stored as output (but not as a
     /// comment).
     fn run_question_query(&mut self) {
-        // Extract the question (everything after the leading `%`).
-        let question = self.query[1..].trim();
+        // Extract the question (everything after the leading question prefix).
+        let prefix = self.query_prefixes.question;
+        let question = self.query[prefix.len_utf8()..].trim();
         if question.is_empty() {
-            self.set_status_message("Question: provide a question after `%`".to_string());
+            self.set_status_message("Question: provide a question after the question prefix".to_string());
             return;
         }
         // Bail out cleanly if the LLM isn't configured.
@@ -2712,14 +2709,14 @@ fn move_selection(&mut self, delta: isize) {
     fn stage_question(&mut self, question: String, answer: String) {
         let directory = std::env::var("PWD").unwrap_or_default();
         let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
-        let query_command = format!("%{}", question);
+        let query_command = format!("{}{}", self.query_prefixes.question, question);
         
         let insert_result: anyhow::Result<i64> = (|| {
             self.conn.execute(
-                "INSERT INTO history (command, directory, session_id, exit_code) \
-                 VALUES (?1, ?2, ?3, -1) \
+                "INSERT INTO history (command, directory, session_id, exit_code, mode) \
+                 VALUES (?1, ?2, ?3, -1, 'question') \
                  ON CONFLICT (command, directory, session_id) DO UPDATE \
-                 SET timestamp = (strftime('%s', 'now'))",
+                 SET timestamp = (strftime('%s', 'now')), mode = 'question'",
                 params![&query_command, &directory, &session_id],
             )?;
             let id: i64 = self.conn.query_row(
@@ -2967,7 +2964,7 @@ fn move_selection(&mut self, delta: isize) {
     }
 
     fn fetch_labeled(&self) -> Result<Vec<HistoryRow>> {
-        let sql = "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output \
+        let sql = "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output, h.mode \
                    FROM history h \
                    JOIN command_comments c ON h.command = c.command \
                    LEFT JOIN history_output o ON h.id = o.history_id \
@@ -2984,6 +2981,7 @@ fn move_selection(&mut self, delta: isize) {
                     timestamp: row.get(5)?,
                     comment: row.get(6).unwrap_or_default(),
                     output: row.get(7).unwrap_or_default(),
+                    mode: row.get(8).unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3033,6 +3031,7 @@ pub fn run_tui_to_stdout(
     })?;
     let app_cfg = Config::load();
     let bindings = app_cfg.key_bindings().clone();
+    let query_prefixes = app_cfg.query_prefixes().clone();
     let session = TuiSession::load();
     let duplicate_filter = session
         .duplicate_filter
@@ -3092,6 +3091,7 @@ pub fn run_tui_to_stdout(
         bindings,
         llm,
         llm_config,
+        query_prefixes,
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -4617,7 +4617,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -4655,6 +4656,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 );
                 app.refresh();
                 app
@@ -4681,7 +4683,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -4719,6 +4722,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 )
         }
 
@@ -4741,7 +4745,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -4781,6 +4786,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 )
         }
 
@@ -4959,7 +4965,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -5009,6 +5016,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -5598,7 +5606,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -5651,6 +5660,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -5709,7 +5719,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -5757,6 +5768,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 );
                 app.refresh();
                 unsafe {
@@ -5941,7 +5953,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -5976,6 +5989,7 @@ mod tests {
                         KeyBindings::defaults(),
                         Some(Box::new(fake)),
                         None,
+                        crate::QueryPrefixes::default(),
                 )
         }
 
@@ -6095,7 +6109,7 @@ mod tests {
                 // Insert an old LLM query into history so there's
                 // something to select
                 app.conn.execute(
-                        "INSERT INTO history (command, directory, session_id, exit_code) VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO history (command, directory, session_id, exit_code, mode) VALUES (?1, ?2, ?3, ?4, 'llm')",
                         params!["=old test query", "/test", "test-session", -1],
                 ).unwrap();
                 let history_id: i64 = app.conn.query_row(
@@ -6132,7 +6146,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -6160,6 +6175,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None, // <-- the missing LLM config
                         None,
+                        crate::QueryPrefixes::default(),
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -6505,6 +6521,7 @@ mod tests {
                         timestamp: 0,
                         comment: "describe something".to_string(),
                         output: String::new(),
+                        mode: String::new(),
                 });
                 app.llm_preview_description =
                         Some("describe something".to_string());
@@ -6583,6 +6600,7 @@ mod tests {
                         timestamp: 0,
                         comment: "find files".to_string(),
                         output: String::new(),
+                        mode: String::new(),
                 });
                 app.llm_preview_description =
                         Some("find files".to_string());
@@ -6756,6 +6774,7 @@ mod tests {
                         timestamp: 0,
                         comment: "find . -name '*.txt'".to_string(),
                         output: "find . -name '*.txt'".to_string(),
+                        mode: String::new(),
                 });
                 app.llm_preview_description =
                         Some("find files".to_string());
@@ -6798,6 +6817,7 @@ mod tests {
                         timestamp: 0,
                         comment: "old description".to_string(),
                         output: String::new(),
+                        mode: String::new(),
                 });
                 app.llm_preview_description =
                         Some("old description".to_string());
@@ -6837,7 +6857,8 @@ mod tests {
                             directory TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             exit_code INTEGER,
-                            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
                         );
                         CREATE TABLE command_comments (
                             command TEXT PRIMARY KEY,
@@ -6885,6 +6906,7 @@ mod tests {
                         KeyBindings::defaults(),
                         None,
                         None,
+                        crate::QueryPrefixes::default(),
                 )
         }
 

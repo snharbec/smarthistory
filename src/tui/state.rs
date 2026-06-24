@@ -52,6 +52,8 @@ pub struct HistoryRow {
     pub timestamp: i64,
     pub comment: String,
     pub output: String,
+    /// The mode/type of this history entry: "command", "llm", or "question".
+    pub mode: String,
 }
 
 /// How the parent shell should treat the chosen command.

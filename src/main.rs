@@ -656,6 +656,35 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     }
 }
 
+/// User-customizable query prefix characters. Each field is a
+/// single character used to trigger a specific search or LLM mode.
+/// Defaults match the original hard-coded values.
+#[derive(Debug, Clone)]
+pub struct QueryPrefixes {
+    /// Prefix for regex search (default `/`).
+    pub regex: char,
+    /// Prefix for fuzzy search (default `?`).
+    pub fuzzy: char,
+    /// Prefix for output search (default `+`).
+    pub output: char,
+    /// Prefix for LLM command generation (default `=`).
+    pub llm: char,
+    /// Prefix for general question mode (default `%`).
+    pub question: char,
+}
+
+impl Default for QueryPrefixes {
+    fn default() -> Self {
+        QueryPrefixes {
+            regex: '/',
+            fuzzy: '?',
+            output: '+',
+            llm: '=',
+            question: '%',
+        }
+    }
+}
+
 /// Resolved configuration. Constructed by `Config::load`.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -690,6 +719,8 @@ pub struct Config {
     /// `llm` module returns `LlmError::NotConfigured` and the
     /// TUI surfaces a clear status message.
     llm: Option<llm::LlmConfig>,
+    /// User-customizable query prefix characters.
+    query_prefixes: QueryPrefixes,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -778,6 +809,7 @@ impl Config {
             // file; we only store a config when both fields
             // are present (see `parse`).
             llm: None,
+            query_prefixes: QueryPrefixes::default(),
         }
     }
 
@@ -861,6 +893,8 @@ impl Config {
                         } else if let Some(action) = other.strip_prefix("key.")
                             && !action.is_empty() {
                                 key_entries.insert(action.to_string(), value.to_string());
+                            } else if let Some(prefix) = other.strip_prefix("prefix.") {
+                                Self::assign_prefix(&mut self.query_prefixes, prefix, value);
                             }
                 }
             }
@@ -1023,6 +1057,11 @@ impl Config {
         &self.key_bindings
     }
 
+    /// Resolved query prefix characters.
+    pub fn query_prefixes(&self) -> &QueryPrefixes {
+        &self.query_prefixes
+    }
+
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
     /// fields are silently ignored so a typo doesn't break the rest
     /// of the config.
@@ -1047,6 +1086,25 @@ impl Config {
             "detailsbg" | "details_bg" => theme.details_bg = value,
             "inputbg" | "input_bg" => theme.input_bg = value,
             "statusbg" | "status_bg" => theme.status_bg = value,
+            _ => {}
+        }
+    }
+
+    /// Apply a single `prefix.<name>=<char>` override. The value
+    /// must be a single character. Invalid values are silently
+    /// ignored.
+    fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed.chars().count() != 1 {
+            return;
+        }
+        let c = trimmed.chars().next().unwrap();
+        match name.to_ascii_lowercase().as_str() {
+            "regex" => prefixes.regex = c,
+            "fuzzy" => prefixes.fuzzy = c,
+            "output" => prefixes.output = c,
+            "llm" => prefixes.llm = c,
+            "question" => prefixes.question = c,
             _ => {}
         }
     }
@@ -1105,8 +1163,8 @@ fn upsert_history_row(
     exit_code: i32,
 ) -> anyhow::Result<i64> {
     conn.execute(
-        "INSERT INTO history (command, directory, session_id, exit_code)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO history (command, directory, session_id, exit_code, mode)
+         VALUES (?1, ?2, ?3, ?4, 'command')
          ON CONFLICT (command, directory, session_id) DO UPDATE
          SET timestamp = (strftime('%s', 'now')),
              exit_code = excluded.exit_code",
@@ -1703,7 +1761,8 @@ fn init_db() -> anyhow::Result<Connection> {
             directory TEXT NOT NULL,
             session_id TEXT NOT NULL,
             exit_code INTEGER,
-            timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+            mode TEXT NOT NULL DEFAULT 'command'
         )",
         [],
     )?;
@@ -1742,6 +1801,8 @@ fn init_db() -> anyhow::Result<Connection> {
     // a previous schema, migrate those comments into the global
     // command_comments table and then drop the column.
     migrate_history_comment_column(&conn)?;
+    // If an older database is missing the `mode` column, add it.
+    migrate_history_mode_column(&conn)?;
     Ok(conn)
 }
 
@@ -1782,6 +1843,24 @@ fn migrate_history_comment_column(conn: &Connection) -> anyhow::Result<()> {
         [],
     )?;
     conn.execute("DROP TABLE history_old", [])?;
+    Ok(())
+}
+
+/// If the `history` table is missing the `mode` column (from
+/// an earlier schema), add it with a default value of 'command'.
+fn migrate_history_mode_column(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(history)")?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let has_mode = names.filter_map(|n| n.ok()).any(|n| n == "mode");
+    if has_mode {
+        return Ok(());
+    }
+    // SQLite 3.35.0+ supports ADD COLUMN; rusqlite bundles a recent
+    // enough SQLite, so this should work.
+    conn.execute(
+        "ALTER TABLE history ADD COLUMN mode TEXT NOT NULL DEFAULT 'command'",
+        [],
+    )?;
     Ok(())
 }
 

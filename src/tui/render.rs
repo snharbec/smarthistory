@@ -974,6 +974,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     for (row_pos, &idx) in filtered.iter().enumerate().skip(start).take(end - start) {
         let action = menu.actions[idx];
         let label = action.display_name();
+        let config_key = action.config_key();
         let key = if app.bindings.is_unbound(action) {
             " (unbound)".to_string()
         } else {
@@ -990,7 +991,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         // 22 is enough for "Edit (cursor at start)" plus a space.
         let mut spans = vec![
             Span::styled(
-                format!("  {:<22}", label),
+                format!("  {:<22} ({})", label, config_key),
                 if is_selected {
                     highlight_style
                 } else {
@@ -1970,11 +1971,16 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         x => format!("{} matches", x),
     };
 
-    let help = match app.selected_row() {
-        Some(row) if !row.output.is_empty() => " ^H help · ^D del · ^X del all · ^U clear",
-        Some(_) => " ^H help · ^D del · ^X del all · ^U clear",
-        None => " ^H help · ^D del · ^X del all · ^U clear",
-    };
+    // Build the help hint from the actual configured key bindings
+    // so it always reflects what the user has configured.
+    let help_open = format_key_specs(app.bindings.specs(Action::OpenHelp));
+    let help_del = format_key_specs(app.bindings.specs(Action::DeleteSelected));
+    let help_del_all = format_key_specs(app.bindings.specs(Action::DeleteMatching));
+    let help_clear = format_key_specs(app.bindings.specs(Action::ClearQuery));
+    let help = format!(
+        " {} help · {} del · {} del all · {} clear",
+        help_open, help_del, help_del_all, help_clear
+    );
 
     // Active theme badge. Rendered at the right edge of the status
     // bar so the help text keeps its existing left-anchored layout.
