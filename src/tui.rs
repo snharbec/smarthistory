@@ -2903,11 +2903,33 @@ impl App {
                 }
             }
             Mode::Dir => {
+                // Canonicalize the same
+                // way the insert side
+                // does (see
+                // `canonicalize_directory`
+                // and the various
+                // `env::current_dir()`
+                // call sites in
+                // `main.rs` / `tui.rs`).
+                // Without this, the
+                // user's logical `$PWD`
+                // (e.g.
+                // `/Users/har/Sources/...`)
+                // would never match the
+                // canonical path the
+                // `preexec` hook stored
+                // (e.g.
+                // `/Volumes/HUGE/har/Sources/...`)
+                // on macOS where the
+                // user's home is on an
+                // external volume.
                 if let Ok(pwd) = std::env::var("PWD")
                     && !pwd.is_empty()
                 {
+                    let canonical =
+                        crate::util::canonicalize_directory(&pwd);
                     clause.push_str(" AND h.directory = ?");
-                    params.push(Box::new(pwd));
+                    params.push(Box::new(canonical));
                 }
             }
             Mode::Global => {}
@@ -3264,7 +3286,15 @@ fn move_selection(&mut self, delta: isize) {
         // and the generated command in the output column.
         // This way users can search for old LLM queries and
         // the generated command is replayed when selected.
-        let directory = std::env::var("PWD").unwrap_or_default();
+        // The directory is canonicalized
+        // (resolves symlinks / macOS
+        // volume mounts) so the row
+        // matches the same path the
+        // DIR-mode filter uses later.
+        let directory =
+            crate::util::canonicalize_directory(
+                &std::env::var("PWD").unwrap_or_default(),
+            );
         let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
         let query_command = format!("{}{}", self.query_prefixes.llm, description);
         let insert_result: anyhow::Result<i64> = (|| {
@@ -3277,7 +3307,7 @@ fn move_selection(&mut self, delta: isize) {
             )?;
             let id: i64 = self.conn.query_row(
                 "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
-                params![&query_command, std::env::var("PWD").unwrap_or_default(), session_id],
+                params![&query_command, directory, session_id],
                 |row| row.get(0),
             )?;
             // Store the generated command as a comment for visibility
@@ -3711,7 +3741,23 @@ fn move_selection(&mut self, delta: isize) {
         let Some(view) = self.correct_view.take() else {
             return;
         };
-        let directory = std::env::var("PWD").unwrap_or_default();
+        // Canonicalize the
+        // directory the same way
+        // `select_for_run` does, so
+        // the dedup index
+        // `(command, directory,
+        // session_id)` matches
+        // across insert and update
+        // sites. Without this, two
+        // forms of the same path
+        // (e.g. `/Users/har/...` and
+        // `/Volumes/HUGE/har/...`
+        // on macOS) would create
+        // separate rows.
+        let directory =
+            crate::util::canonicalize_directory(
+                &std::env::var("PWD").unwrap_or_default(),
+            );
         let session_id =
             std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
         let insert_result: anyhow::Result<()> = (|| {
@@ -3777,7 +3823,14 @@ fn move_selection(&mut self, delta: isize) {
     /// `question` (prefixed with `%`) as the command and
     /// `answer` stored as the output (but not as a comment).
     fn stage_question(&mut self, question: String, answer: String) {
-        let directory = std::env::var("PWD").unwrap_or_default();
+        // Same canonicalization as
+        // the LLM staging site —
+        // keeps the dedup index
+        // consistent.
+        let directory =
+            crate::util::canonicalize_directory(
+                &std::env::var("PWD").unwrap_or_default(),
+            );
         let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
         let query_command = format!("{}{}", self.query_prefixes.question, question);
         

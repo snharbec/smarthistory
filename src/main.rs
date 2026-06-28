@@ -2039,7 +2039,7 @@ fn main() -> anyhow::Result<()> {
             exit_code,
             comment,
         } => {
-            let pwd = env::current_dir()?.to_string_lossy().into_owned();
+            let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
 
@@ -2085,8 +2085,32 @@ fn main() -> anyhow::Result<()> {
             let mut sql = format!("SELECT {}", qualified_fields.join(", "));
 
             let query_ref = query.as_deref();
-            let (where_clause, params) =
-                build_search_where_clause(query_ref, directory, session, exit_code.as_deref());
+            // Canonicalize the
+            // directory so it
+            // matches the form the
+            // insert side stores
+            // (which uses the
+            // kernel's canonical
+            // path via
+            // `current_directory_for_storage`).
+            // Without this, a
+            // `--directory
+            // /Users/har/...`
+            // argument on macOS
+            // would not match rows
+            // whose `directory` is
+            // the canonical
+            // `/Volumes/HUGE/har/...`
+            // form.
+            let directory_canonical = directory
+                .as_deref()
+                .map(crate::util::canonicalize_directory);
+            let (where_clause, params) = build_search_where_clause(
+                query_ref,
+                directory_canonical,
+                session,
+                exit_code.as_deref(),
+            );
             sql.push_str(&where_clause);
 
             append_order_and_limit(&mut sql, limit.unwrap_or(100));
@@ -2129,8 +2153,21 @@ fn main() -> anyhow::Result<()> {
             let mut sql = format!("SELECT {}", qualified_fields.join(", "));
 
             let query_ref = query.as_deref();
-            let (where_clause, params) =
-                build_search_where_clause(query_ref, directory, session, exit_code.as_deref());
+            // Same canonicalization
+            // as the `Search`
+            // command — see the
+            // comment there for
+            // why this matters on
+            // macOS volumes.
+            let directory_canonical = directory
+                .as_deref()
+                .map(crate::util::canonicalize_directory);
+            let (where_clause, params) = build_search_where_clause(
+                query_ref,
+                directory_canonical,
+                session,
+                exit_code.as_deref(),
+            );
             sql.push_str(&where_clause);
 
             append_order_and_limit(&mut sql, limit.unwrap_or(1000));
@@ -2169,9 +2206,17 @@ fn main() -> anyhow::Result<()> {
             // issue a COUNT first and a DELETE second. The COUNT drives
             // the confirmation message; the DELETE uses the same params
             // so the matched set is identical.
+            // Canonicalize the
+            // directory for the same
+            // reason as in `Search`
+            // and `Select` (see the
+            // comment there).
+            let directory_canonical = directory
+                .as_deref()
+                .map(crate::util::canonicalize_directory);
             let (where_clause, params) = build_where_clause(
                 query.as_deref(),
-                directory,
+                directory_canonical,
                 session,
                 exit_code.as_deref(),
             );
@@ -2369,7 +2414,7 @@ fn main() -> anyhow::Result<()> {
                 println!();
             }
 
-            let pwd = env::current_dir()?.to_string_lossy().into_owned();
+            let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
             let history_id = upsert_history_row(&conn, &command_str, &pwd, &session_id, exit_code,
@@ -2397,7 +2442,7 @@ fn main() -> anyhow::Result<()> {
                 let max = cfg.capture_lines_for(&command);
                 extract_tmux_output(&command, &file, max).unwrap_or_default()
             };
-            let pwd = env::current_dir()?.to_string_lossy().into_owned();
+            let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
             let history_id = upsert_history_row(
