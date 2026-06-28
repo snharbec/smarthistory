@@ -32,6 +32,48 @@ pub enum Action {
     /// The default key (`Ctrl-Y`) is the canonical readline/vim
     /// "yank" shortcut, so the muscle memory transfers.
     YankSelection,
+    /// Mark the currently-selected todo
+    /// entry as done inside its note
+    /// file. Available only when the
+    /// active query is a todo search
+    /// (`!...`); outside of todo mode the
+    /// action is a no-op with a status
+    /// message so the user knows why
+    /// their key did nothing.
+    ///
+    /// The implementation reads the
+    /// selected row's `id` (which
+    /// encodes the 1-based line number
+    /// in the source file as `id =
+    /// -(line_number)`) and `comment`
+    /// (the filename), opens the file,
+    /// replaces the `[ ]` checkbox
+    /// marker on the matched line with
+    /// `[x]`, and writes it back. The
+    /// todo list is re-fetched so the
+    /// row disappears (the underlying
+    /// query is `open: true`, and a
+    /// closed todo is filtered out).
+    ///
+    /// The default key (`Ctrl-X`) is
+    /// intentionally the same letter
+    /// as the user's mental model:
+    /// "mark this X / done". The
+    /// previously-default `Ctrl-X`
+    /// binding for `DeleteMatching` is
+    /// moved to `Ctrl-M-D` so the two
+    /// actions don't share a key.
+    ///
+    /// If the file has been edited since
+    /// the indexer last looked at it
+    /// (e.g. the user toggled the
+    /// checkbox manually), the
+    /// targeted line may no longer
+    /// look like a todo — the action
+    /// surfaces a status message in
+    /// that case rather than silently
+    /// mis-editing the file.
+    MarkTodoDone,
     /// Find a filename referenced in the selected history row
     /// and stage `$EDITOR <filename>` as the next selection. The
     /// TUI exits so the parent shell runs the command, which
@@ -198,6 +240,7 @@ impl Action {
             Action::CommandAction => "command-action",
             Action::ThemePicker => "theme-picker",
             Action::ToggleSearchMode => "toggle-search-mode",
+            Action::MarkTodoDone => "mark-todo-done",
         }
     }
 
@@ -235,6 +278,7 @@ impl Action {
             Action::CommandAction => "Command palette",
             Action::ThemePicker => "Theme picker",
             Action::ToggleSearchMode => "Toggle search mode",
+            Action::MarkTodoDone => "Mark todo done",
         }
     }
 
@@ -261,6 +305,7 @@ impl Action {
             | Action::CycleSortOrder
             | Action::ClearQuery
             | Action::ToggleSearchMode => "search",
+            Action::MarkTodoDone => "todo",
             Action::CycleThemeNext | Action::CycleThemePrev => "theme",
             Action::EditComment
             | Action::ShowOutput
@@ -295,7 +340,7 @@ impl Action {
             Action::EditFileReference => "C-o",
             Action::OpenHelp => "C-h",
             Action::DeleteSelected => "C-d",
-            Action::DeleteMatching => "C-x",
+            Action::DeleteMatching => "C-M-d",
             Action::ClearQuery => "C-u",
             Action::CycleExitFilter => "C-j",
             Action::CycleSortOrder => "F4",
@@ -315,6 +360,7 @@ impl Action {
             Action::CommandAction => ":",
             Action::ThemePicker => "T",
             Action::ToggleSearchMode => "F3",
+            Action::MarkTodoDone => "C-x",
         }
     }
 }
@@ -585,6 +631,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CommandAction,
     Action::ThemePicker,
     Action::ToggleSearchMode,
+    Action::MarkTodoDone,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of

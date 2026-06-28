@@ -724,6 +724,16 @@ pub struct QueryPrefixes {
     pub question: char,
     /// Prefix for note search mode (default `@`).
     pub notes: char,
+    /// Prefix for the todo-search mode (default `!`).
+    /// Inside the TUI, typing `!` switches to a
+    /// view that scans every configured note for
+    /// todo lines (markdown task-list checkboxes
+    /// like `- [ ]` / `- [x]`) and lists each one
+    /// as its own row, with the surrounding
+    /// context in the details pane. Selecting
+    /// a row opens `$EDITOR <file> +<line>` so the
+    /// user lands directly on the todo line.
+    pub todo: char,
 }
 
 impl Default for QueryPrefixes {
@@ -735,6 +745,7 @@ impl Default for QueryPrefixes {
             llm: '=',
             question: '%',
             notes: '@',
+            todo: '!',
         }
     }
 }
@@ -781,6 +792,18 @@ pub struct Config {
     /// note content for the preview pane.
     /// Can also be set via the NOTE_SEARCH_DIR env var.
     notes_dir: Option<std::path::PathBuf>,
+    /// Template for the line-number option that
+    /// the todo-search mode (`!`) appends to the
+    /// editor command when the user selects a
+    /// todo line. The string `"$LINE"` is
+    /// substituted with the actual 1-based line
+    /// number. Default: `"+$LINE"` (works with
+    /// `vim`, `nano`, `emacs -nw`, and most
+    /// POSIX editors).
+    ///
+    /// Configurable via `todo.line_option=...`
+    /// in the config file.
+    todo_line_option: String,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
 }
@@ -873,6 +896,7 @@ impl Config {
             llm: None,
             notes_database: None,
             notes_dir: None,
+            todo_line_option: String::from("+$LINE"),
             query_prefixes: QueryPrefixes::default(),
         }
     }
@@ -979,6 +1003,27 @@ impl Config {
                         eprintln!(
                             "warning: notes.dir {} does not exist or is not a directory",
                             path.display()
+                        );
+                    }
+                }
+                "todo.line_option" => {
+                    // The template uses the literal
+                    // `"$LINE"` placeholder which is
+                    // substituted at selection time
+                    // (see `App::todo_editor_command`).
+                    // We accept any non-empty string;
+                    // malformed templates fall back
+                    // to the default at runtime so a
+                    // typo doesn't disable the feature.
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() && trimmed.contains("$LINE") {
+                        self.todo_line_option = trimmed.to_string();
+                    } else if !trimmed.is_empty() {
+                        eprintln!(
+                            "warning: todo.line_option {:?} must contain \"$LINE\"; \
+                             keeping default \"{}\"",
+                            value,
+                            self.todo_line_option
                         );
                     }
                 }
@@ -1171,6 +1216,15 @@ impl Config {
         self.notes_dir.as_deref()
     }
 
+    /// Template for the line-number option that
+    /// the todo-search mode appends to the
+    /// editor command. The string `"$LINE"` is
+    /// substituted with the actual 1-based line
+    /// number. Default: `"+$LINE"`.
+    pub fn todo_line_option(&self) -> &str {
+        &self.todo_line_option
+    }
+
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
     /// fields are silently ignored so a typo doesn't break the rest
     /// of the config.
@@ -1215,6 +1269,7 @@ impl Config {
             "llm" => prefixes.llm = c,
             "question" => prefixes.question = c,
             "notes" => prefixes.notes = c,
+            "todo" => prefixes.todo = c,
             _ => {}
         }
     }

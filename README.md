@@ -137,6 +137,30 @@ match standard workflow expectations. This project aims to provide:
   `notes.database` and `notes.dir` to be configured (or the
   `NOTE_SEARCH_DATABASE` / `NOTE_SEARCH_DIR` environment variables).
   The prefix character is configurable via `prefix.notes=...`.
+- **Todo search on `!...`:** when you prefix a query with
+  `!` (default; configurable via `prefix.todo=...`), the
+  TUI queries the same
+  [note_search](https://github.com/snharbec/note_search) SQLite
+  database that powers the `@` mode and lists every open
+  todo as its own row (one per line, not one per file).
+  Supports the Obsidian-style query syntax: plain words
+  AND-matched against the todo text, `#tag` matched
+  against both the todo's inline tags and the note's
+  frontmatter tags, `[[link]]` matched against the
+  todo's links and the note's outgoing links, and
+  `[attr:value]` matched against the note's header
+  fields. The same `@today` / `@week` / `@month` /
+  `@year` date-filter aliases used by `@...` apply
+  here too. Selecting a row opens
+  `$EDITOR <file> <line_option>` with the line
+  number substituted in (default template `+$LINE`).
+  Requires `notes.database` and `notes.dir` to be
+  configured (the same database used by the `@` mode);
+  the todo list comes straight from the
+  `todo_entries` table that the indexer maintains,
+  so the TUI and `note_search list` always agree.
+  The prefix character is configurable via
+  `prefix.todo=...`.
 - **Debug logging:** `SMARTHISTORY_DEBUG=1` enables per-press logging of
   cache decisions to `~/.local/cache/smarthistory/widget-debug.log`.
 - **Atuin import** for users migrating from atuin.
@@ -184,6 +208,8 @@ Supported keys:
 | `notes.database=~/path` | Path to a [note_search](https://github.com/snharbec/note_search) SQLite database. When set, the `@` prefix searches notes instead of shell history. Can also be set via the `NOTE_SEARCH_DATABASE` environment variable. | (feature disabled) |
 | `notes.dir=~/path` | Path to the directory containing note files. Used to read note content for the preview pane and to resolve filenames when opening a note in the editor. Can also be set via the `NOTE_SEARCH_DIR` environment variable. | (feature disabled) |
 | `prefix.notes=@` | Prefix character for note search mode. Change this if `@` conflicts with other key bindings. | `@` |
+| `prefix.todo=!` | Prefix character for the todo-search mode. Change this if `!` conflicts with other key bindings. | `!` |
+| `todo.line_option=+$LINE` | Template for the line-number option appended to the editor command when a todo line is selected. The literal `$LINE` is substituted with the 1-based line number. Default `+$LINE` works with `vim`, `nano`, `emacs -nw`, and most POSIX editors. Examples: `+LINE:$LINE`, `:$LINE`. | `+$LINE` |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -380,7 +406,8 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |
 | `Right`   | TUI     | Prefill the line with the selection, cursor at the end.        |
 | `Ctrl+D`  | TUI     | Delete the selected entry (with confirmation).                 |
-| `Ctrl+X`  | TUI     | Delete all matching entries (with confirmation).               |
+| `Ctrl+X`  | TUI     | **Todo mode only** — mark the selected todo as done. The action toggles the checkbox on its line in the source note file from `[ ]` to `[x]`, then calls the note_search library's `update_files_in_db` to re-index the file (the same path the external indexer uses), and finally re-fetches the todo list — the row disappears in the same frame because the underlying query filters `open: true`. Outside of todo mode (`!...`), the action is a no-op with a status message so the user knows why their key did nothing. Rebindable via `key.mark-todo-done=...`. |
+| `Ctrl+MD` | TUI     | Delete all matching entries (with confirmation). The previous default binding for this action was `Ctrl+X`; the binding moved to `Ctrl+M-D` so the todo-mode mark-done action could claim `Ctrl+X`. Configure with `key.delete-matching=...` if you want a different key. |
 | `Esc`     | TUI     | Cancel the picker (no command printed).                        |
 
 The current scope is shown in the RPROMPT. `Up` and `Down` always use
@@ -956,6 +983,185 @@ tokens — `@todayfile.md` is treated as a search term, not as the
 
 A `TODAY` / `WEEK` / `MONTH` / `YEAR` chip in the mode strip signals
 the active filter when one is in effect.
+
+### Todo search mode (`!...`)
+
+Prefix a query with `!` (default, configurable via
+`prefix.todo=...`) to list every open todo entry from the
+[note_search](https://github.com/snharbec/note_search) SQLite
+database as its own row in the TUI. Where `@...` lists notes
+(one per file), `!...` lists todos (one per line) — so a
+single note with three open checkboxes appears as three rows,
+and selecting one jumps straight to the right line.
+
+#### Data source
+
+The todo list is fetched straight from the `todo_entries`
+table the indexer maintains, via the library's
+`DatabaseService::search_todos` method. Closed todos
+(`[x]` / `[X]`) are filtered out by default — the user
+sees only uncompleted items. The result is sorted by file
+modified time (newest first), then by line number within
+each file, matching what `note_search list` produces; the
+TUI is a thin view over the same database, so the two
+surfaces always agree.
+
+The library's `TodoResult` rows don't carry a per-todo
+timestamp, so the TUI reads each file's `updated`
+timestamp from the `markdown_data` table in a single
+batched query and uses it as the row's `timestamp`. This
+makes the age column in the history list show real
+values (e.g. `2M`, `3d`) instead of the
+`9999M` placeholder.
+
+Configuration requires both `notes.database` and
+`notes.dir` (the same database and directory used by the
+`@` mode):
+
+```ini
+notes.database=~/notes/note.sqlite
+notes.dir=~/notes
+```
+
+When `notes.database` is missing, typing `!` surfaces a
+status message in the TUI and the list stays empty. The
+output pane for a selected todo shows the todo line
+itself (the library returns only the single-line text;
+surrounding context isn't available from the library's
+API yet).
+
+#### Query syntax
+
+The user-typed query (after the `!` prefix) is parsed
+through the library's Obsidian-like query parser. Each
+token type is matched against different parts of the
+note / todo:
+
+| Token | Matches against |
+| ----- | --------------- |
+| `word` | the todo line text and the note's header fields (`LIKE '%word%'`); multiple words are AND-matched |
+| `#tag` | the todo's inline `#tag` patterns and the note's frontmatter `tags` array |
+| `[[link]]` | the todo's links, the note's outgoing links, and the note's header fields |
+| `[attr:value]` | the note's frontmatter `header_fields` |
+| `@today`, `@week`, `@month`, `@year` | date-filter alias — restricts to notes whose `updated` falls inside the window |
+
+A leading `@` on a non-alias token is the user's
+convenient shorthand for "search the word" (e.g.
+`!@orchard` matches todos containing "orchard"). It is
+stripped before the parser sees the token, so the parser
+treats it as a plain text term rather than as a link
+reference.
+
+```
+> !@orchard
+# Lists every open todo whose text or note header contains "orchard"
+
+> !#urgent
+# Lists every open todo in notes tagged "urgent" (note-level tag)
+# and every open todo that has an inline "#urgent" on its line
+
+> !older #work
+# AND-matches: open todos that mention "older" AND live in a note tagged "work"
+
+> ![[project-alpha]]
+# Lists every open todo that references [[project-alpha]] somewhere
+```
+
+Invalid query syntax (e.g. unclosed brackets) surfaces a
+status message in the TUI instead of silently returning
+an empty list.
+
+#### Date-filter aliases
+
+The same four `@`-prefixed aliases from the notes mode
+also apply here:
+
+| Alias     | Window          |
+| --------- | --------------- |
+| `@today`  | last 24 hours   |
+| `@week`   | last 7 days     |
+| `@month`  | last 30 days    |
+| `@year`   | last 365 days   |
+
+Multiple aliases resolve to the last one (`!@today @week`
+ends up as `@week`). The aliases are case-insensitive
+(`@Today` and `@TODAY` work) and recognised only as
+whole-word tokens — `@todayfile.md` is treated as a
+search term, not as the `@today` alias.
+
+#### Marking a todo as done
+
+Press `Ctrl+X` while a todo row is selected to mark
+that todo as done. The action:
+
+1. **Toggles the checkbox** marker on the todo's
+   line in the source note file from `[ ]` to
+   `[x]`. Leading whitespace, the bullet
+   character, and trailing text are all preserved —
+   only the bracket marker changes.
+2. **Re-indexes the file** in the note_search
+   SQLite database via the library's
+   `update_files_in_db` function. The same
+   canonical re-index path the external
+   indexer uses is invoked here, so the
+   `markdown_data` row is upserted and the
+   `todo_entries` rows for the file are replaced
+   with their freshly-parsed state — including
+   `closed = 1` for the toggled todo.
+3. **Re-fetches the todo list**. The underlying
+   SQL filters `open: true`, so the toggled row
+   drops out of the list immediately. The user
+   sees the row disappear in the same frame as
+   the action.
+
+The action is **only available inside the todo
+search mode** (`!...`). Outside of todo mode,
+`Ctrl+X` is a no-op with a status message so the
+user understands why their key did nothing — the
+binding is otherwise discoverable from the help
+overlay regardless of mode. The previously-default
+`Ctrl+X` binding for "delete all matching entries"
+moved to `Ctrl+M-D` so the two actions don't share
+a key.
+
+If the file's content has changed since the indexer
+last looked at it (e.g. the user manually toggled
+the checkbox, or edited the line in some other way)
+and the targeted line no longer looks like an open
+todo, the action surfaces a status message and
+leaves the file untouched. The DB update is
+best-effort: if it fails (e.g. the database file
+is locked by another process), the status message
+explains the partial failure but the on-disk file
+is already correct — the user can re-run their
+external indexer to recover.
+
+#### Editor integration
+
+Selecting a todo and pressing `Enter` opens
+`$EDITOR <file> <line_option>` with the line number
+substituted in. The default template is `+$LINE` (which
+works with `vim`, `nano`, `emacs -nw`, and most POSIX
+editors); configure with `todo.line_option=...`. The
+substitution replaces the literal `$LINE` token with the
+1-based line number of the todo entry. Examples:
+
+| Config                    | Result for todo on line 42 |
+| ------------------------- | -------------------------- |
+| `todo.line_option=+$LINE` | `vi /path/to/note.md +42` |
+| `todo.line_option=+LINE:$LINE` | `vi /path/to/note.md +LINE:42` |
+| `todo.line_option=:$LINE` | `vi /path/to/note.md :42` |
+
+The line number is recovered from the synthetic negative
+row id (`id = -(line_number)`), so the editor jumps
+exactly to the todo line.
+
+#### Configuration
+
+The prefix character is configurable via
+`prefix.todo=...` in the config file. When
+`notes.database` is not configured, typing `!` surfaces
+a status message and the list stays empty.
 
 ### Example session
 

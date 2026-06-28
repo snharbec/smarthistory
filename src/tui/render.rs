@@ -1609,7 +1609,19 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // run. The `✓`/`✗` markers mean success/failure and
     // would be misleading for a command that hasn't been
     // executed yet.
-    let (exit_marker, exit_style) = if row.id < 0 {
+    // **Important**: the check is on
+    // `exit_code == -1`, NOT on
+    // `row.id < 0`. Negative ids
+    // are also used by todo rows
+    // (which encode the 1-based
+    // line number as
+    // `id = -(line_number)`), so
+    // `id < 0` would falsely
+    // classify every todo row as
+    // an LLM preview. The
+    // `exit_code` sentinel is the
+    // load-bearing distinction.
+    let (exit_marker, exit_style) = if row.is_llm_preview() {
         ("~", Theme::accent())
     } else if row.exit_code == 0 {
         ("✓", Theme::success())
@@ -1631,17 +1643,38 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         Span::styled(" . ", Theme::dim())
     };
 
-    // LLM preview marker. The synthetic row the
-    // auto-call produces is identified by a negative
-    // `id` (real history ids are positive). We mark it
-    // with a short `[LLM]` tag in the accent color so
-    // the user can tell at a glance that this isn't a
-    // command they've actually run — it's a
-    // suggestion. The exit marker is suppressed for
-    // preview rows (the `✓`/`✗` would be misleading
-    // because the command hasn't been executed yet;
-    // its `exit_code` is the `-1` sentinel).
-    let is_llm_preview = row.id < 0;
+    // LLM preview marker. The
+    // synthetic row the auto-call
+    // produces is identified by
+    // `exit_code == -1` (the
+    // "never executed" sentinel;
+    // real history rows always
+    // have `exit_code >= 0`).
+    // We mark it with a short
+    // `[LLM]` tag in the accent
+    // color so the user can tell
+    // at a glance that this isn't
+    // a command they've actually
+    // run — it's a suggestion.
+    // The exit marker is
+    // suppressed for preview
+    // rows (the `✓`/`✗` would
+    // be misleading because the
+    // command hasn't been
+    // executed yet).
+    // **Important**: the check is
+    // on `exit_code == -1`, NOT
+    // on `row.id < 0`. Negative
+    // ids are also used by todo
+    // rows (which encode the
+    // 1-based line number as
+    // `id = -(line_number)`), so
+    // `id < 0` would falsely
+    // classify every todo row as
+    // an LLM preview. The
+    // `exit_code` sentinel is the
+    // load-bearing distinction.
+    let is_llm_preview = row.is_llm_preview();
     let llm_preview_span = if is_llm_preview {
         Span::styled(
             " [LLM] ",
@@ -1803,6 +1836,48 @@ pub(super) fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>>
     spans
 }
 
+/// Truncate a multi-line command string
+/// to a single line that fits within
+/// the Details pane's Cmd row. The Cmd
+/// row uses a fixed-width label column
+/// (5 chars for the longest label
+/// `Stat `) and lives inside a bordered
+/// block (2 chars), so the available
+/// width for the cmd text is `pane_width
+/// - 7`.
+///
+/// Returns just the first line of the
+/// input, ellipsized (`…`) if it
+/// overflows the available width. Empty
+/// panes (width 0 or less than the
+/// label/border total) return an empty
+/// string.
+///
+/// `pane_width` is the outer width of
+/// the Details pane (the `Rect::width`
+/// passed to `draw_details`).
+fn truncate_cmd_for_details_pane(cmd: &str, pane_width: usize) -> String {
+    let label_width = 5usize;
+    let border_width = 2usize;
+    let max_cmd_width = pane_width.saturating_sub(label_width + border_width);
+    if max_cmd_width == 0 {
+        return String::new();
+    }
+    let first_line = cmd.lines().next().unwrap_or("");
+    if first_line.chars().count() > max_cmd_width {
+        // Keep at least 1 char of the
+        // original text + the ellipsis.
+        // If the available width is 1 we
+        // show just the ellipsis.
+        let take = max_cmd_width.saturating_sub(1).max(1);
+        let mut s: String = first_line.chars().take(take).collect();
+        s.push('…');
+        s
+    } else {
+        first_line.to_string()
+    }
+}
+
 fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1829,13 +1904,30 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         format!("exit {}", row.exit_code)
     };
 
+    // The `Cmd` line must stay on a single
+    // line: a todo's `command` text is a
+    // free-form markdown string and could
+    // be very long (a 200-char sentence,
+    // multiple lines, embedded code, etc.).
+    // Showing the full multi-line string
+    // here would push the rest of the
+    // Details rows (Dir / Sess / Time /
+    // Stat / Rem) off-screen and break the
+    // fixed 6-row layout. We take just the
+    // first line, and if that line itself
+    // exceeds the available column width
+    // we ellipsize it so the layout still
+    // holds. The full text remains
+    // available in the Output Preview pane
+    // below, where the user can scroll if
+    // they need the rest.
+    let cmd_first_line = row.command.lines().next().unwrap_or("").to_string();
+    let cmd_visible = truncate_cmd_for_details_pane(&cmd_first_line, area.width as usize);
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Cmd  ", Theme::dim()),
-            Span::styled(
-                row.command.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(cmd_visible, Style::default().add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled("Dir  ", Theme::dim()),
@@ -1922,32 +2014,81 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    // The input border's prompt character and title
+    // change based on the active query mode. We
+    // compute all the predicates up front so the
+    // match below is a single dispatch instead of
+    // a long if/else chain (the modes are mutually
+    // exclusive — only one prefix can be active
+    // at a time, since each one matches a different
+    // leading character).
+    //
+    // Each mode has a distinct visual identity:
+    // - plain: accent (cyan/default).
+    // - regex (`/`): warning (yellow).
+    // - fuzzy (`?`): success (green).
+    // - output (`+`): info (blue).
+    // - llm (`=`): accent (cyan — same as plain
+    //   but the prefix character itself is the
+    //   primary signal).
+    // - notes (`@`): success (green — search/
+    //   navigation colour).
+    // - question (`%`): info (blue — queries
+    //   return information).
+    // - todo (`!`): warning (yellow — calls
+    //   attention to action items).
+    //
+    // Where two modes share a colour, the prefix
+    // character is the differentiator. The colour
+    // is the secondary reinforcement.
     let is_regex = app.is_regex_query();
-    let _is_fuzzy = app.is_fuzzy_query();
-    let is_llm = app.is_llm_query();
+    let is_fuzzy = app.is_fuzzy_query();
     let is_output = app.is_output_query();
+    let is_llm = app.is_llm_query();
+    let is_notes = app.is_notes_query();
+    let is_question = app.is_question_query();
+    let is_todo = app.is_todo_query();
     let (prompt, title, content) = match app.comment_edit {
         Some(ref buf) => ("comment> ", " comment ", buf.as_str()),
         None => {
             if is_regex {
                 ("/", " regex ", app.query.as_str())
+            } else if is_fuzzy {
+                ("?", " fuzzy ", app.query.as_str())
+            } else if is_output {
+                ("+", " output ", app.query.as_str())
             } else if is_llm {
                 // LLM mode is signalled by both a dedicated
                 // prefix and a dedicated title in the input
                 // border, mirroring the yellow `regex` and
-                // green `fuzzy` tints. Using a different colour
-                // (warning = yellow) keeps the visual signal
-                // distinct from the other two modes.
+                // green `fuzzy` tints. The LLM tint uses
+                // the accent colour (magenta by default)
+                // to keep the visual signal distinct from
+                // the search-result modes.
                 ("=", " LLM ", app.query.as_str())
-            } else if is_output {
-                // Output-search mode (`+...`) gets its own
-                // blue-tinted prefix and `OUTPUT` title so
-                // the user can tell at a glance that the
-                // query is being matched against captured
-                // output, not commands. The colour comes
-                // from the active theme's `info` slot (blue
-                // by default, override via `tuicolor.info=`).
-                ("+", " output ", app.query.as_str())
+            } else if is_notes {
+                // Notes mode: searching an external
+                // note_search SQLite database. Accent
+                // (magenta) like the LLM mode — both
+                // modes go "outside" the local shell
+                // history (notes and LLM), so we share
+                // the colour family.
+                ("@", " notes ", app.query.as_str())
+            } else if is_question {
+                // Question mode: a short LLM answer is
+                // requested. Uses the info colour
+                // (blue by default) to signal
+                // "information, not a command".
+                ("%", " ? ", app.query.as_str())
+            } else if is_todo {
+                // Todo mode: scan every file in
+                // `notes.dir` for todo lines. The
+                // warning colour (yellow) calls
+                // attention — the user is now in a
+                // scan-everything mode that crosses
+                // the boundary between shell history
+                // and external note files.
+                ("!", " todo ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -1963,30 +2104,55 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
             .title(title)
+            // The title colour matches the
+            // active mode so the input border
+            // visually announces which mode
+            // you're in, even when the prefix
+            // character is off-screen (e.g.
+            // you've typed more than fits in the
+            // input box).
             .title_style(if is_regex {
                 Style::default().fg(Theme::warning_color())
-            } else if is_llm {
-                // Match the LLM-mode chip in the mode strip:
-                // magenta-tinted accent.
-                Style::default().fg(Theme::accent_color())
+            } else if is_fuzzy {
+                Style::default().fg(Theme::success_color())
             } else if is_output {
-                // Output-mode tint: blue (info slot), so the
-                // user can see at a glance that the query
-                // is being matched against captured output.
                 Style::default().fg(Theme::info_color())
+            } else if is_llm {
+                Style::default().fg(Theme::accent_color())
+            } else if is_notes {
+                Style::default().fg(Theme::accent_color())
+            } else if is_question {
+                Style::default().fg(Theme::info_color())
+            } else if is_todo {
+                Style::default().fg(Theme::warning_color())
             } else {
                 Theme::accent()
             })
+            // The border colour matches the title
+            // colour for the same reason. We
+            // additionally tint the border red
+            // when the last notes query failed
+            // to parse — that's an error state
+            // that's independent of the active
+            // mode.
             .border_style(if app.comment_edit.is_some() {
                 Style::default().fg(Theme::warning_color())
             } else if app.notes_query_error {
                 Style::default().fg(Theme::error_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())
-            } else if is_llm {
-                Style::default().fg(Theme::accent_color())
+            } else if is_fuzzy {
+                Style::default().fg(Theme::success_color())
             } else if is_output {
                 Style::default().fg(Theme::info_color())
+            } else if is_llm {
+                Style::default().fg(Theme::accent_color())
+            } else if is_notes {
+                Style::default().fg(Theme::accent_color())
+            } else if is_question {
+                Style::default().fg(Theme::info_color())
+            } else if is_todo {
+                Style::default().fg(Theme::warning_color())
             } else {
                 Theme::dim()
             })
@@ -2073,4 +2239,124 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(line).style(Style::default().bg(PALETTE.with(|p| p.borrow().status_bg))),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_cmd_for_details_pane;
+
+    /// A short single-line cmd fits
+    /// unchanged inside the pane.
+    #[test]
+    fn truncate_short_cmd_unchanged() {
+        assert_eq!(truncate_cmd_for_details_pane("ls -la", 80), "ls -la");
+    }
+
+    /// A multi-line cmd is reduced to its
+    /// first line — the rest of the
+    /// command stays in the Output
+    /// Preview pane.
+    #[test]
+    fn truncate_keeps_first_line_only() {
+        assert_eq!(
+            truncate_cmd_for_details_pane("first line\nsecond line\nthird line", 80),
+            "first line"
+        );
+    }
+
+    /// A single-line cmd that exceeds
+    /// the available width is
+    /// ellipsized. The total length
+    /// (visible chars + ellipsis) must
+    /// equal the available width, so
+    /// the row never overflows its
+    /// cell.
+    #[test]
+    fn truncate_long_cmd_is_ellipsized() {
+        // 80 - 5 (label) - 2 (border) = 73
+        // available chars; cmd is 100 chars
+        // long; result is 73 chars (72
+        // visible + 1 ellipsis).
+        let cmd = "a".repeat(100);
+        let truncated = truncate_cmd_for_details_pane(&cmd, 80);
+        assert_eq!(truncated.chars().count(), 73);
+        assert!(truncated.ends_with('…'));
+        // The visible portion is the
+        // first 72 `a`s, then the
+        // ellipsis.
+        assert_eq!(truncated, format!("{}…", "a".repeat(72)));
+    }
+
+    /// Multi-byte UTF-8 cmd text is
+    /// measured in characters, not
+    /// bytes. Without this, an emoji
+    /// would count as 4 bytes (and
+    /// overflow the cell by 3).
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        // 8 panes wide → 1 char available.
+        // The cmd is a single emoji, which
+        // is exactly 1 char, so it fits.
+        assert_eq!(truncate_cmd_for_details_pane("🚀", 8), "🚀");
+        // Same pane width, cmd is 2
+        // chars (two emoji); the
+        // ellipsize should keep 1 char +
+        // `…`.
+        let truncated = truncate_cmd_for_details_pane("🚀🚀", 8);
+        assert_eq!(truncated.chars().count(), 2);
+        assert!(truncated.starts_with('🚀'));
+        assert!(truncated.ends_with('…'));
+    }
+
+    /// A pane that's too narrow for the
+    /// label/border overhead (less
+    /// than 7 chars wide) returns an
+    /// empty string, so we don't try to
+    /// render a half-truncated cell
+    /// that would break the layout.
+    #[test]
+    fn truncate_returns_empty_for_very_narrow_pane() {
+        assert_eq!(truncate_cmd_for_details_pane("anything", 0), "");
+        assert_eq!(truncate_cmd_for_details_pane("anything", 6), "");
+        // Width 7 = exactly label + border
+        // → 0 chars available → empty.
+        assert_eq!(truncate_cmd_for_details_pane("anything", 7), "");
+        // Width 8 → 1 char available.
+        assert_eq!(truncate_cmd_for_details_pane("a", 8), "a");
+    }
+
+    /// The minimum-width result must
+    /// always contain at least one
+    /// visible character when the
+    /// input is non-empty and the pane
+    /// is at least one char wider than
+    /// label+border. Otherwise a
+    /// single-char cmd would render
+    /// as nothing at all, which is
+    /// confusing.
+    #[test]
+    fn truncate_minimum_one_visible_char() {
+        // Cmd is 10 chars, available is
+        // 1 → result is 1 char + ellipsis
+        // (still 2 chars total, but at
+        // least 1 is real text).
+        let truncated = truncate_cmd_for_details_pane("helloworld", 8);
+        assert_eq!(truncated.chars().count(), 2);
+        assert!(truncated.starts_with('h'));
+        assert!(truncated.ends_with('…'));
+    }
+
+    /// Empty input is preserved as
+    /// empty output. The caller
+    /// already handles the
+    /// `selected_row().is_none()`
+    /// case separately; this is just
+    /// for the defensive case where
+    /// the row's command is somehow
+    /// an empty string.
+    #[test]
+    fn truncate_empty_input() {
+        assert_eq!(truncate_cmd_for_details_pane("", 80), "");
+        assert_eq!(truncate_cmd_for_details_pane("", 0), "");
+    }
 }

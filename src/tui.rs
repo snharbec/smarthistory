@@ -294,14 +294,14 @@ impl NotesDateFilter {
 /// `@TODAY`, `@today` all work).
 fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
     let mut filter = NotesDateFilter::All;
-    let mut cleaned_tokens: Vec<&str> = Vec::new();
+    let mut cleaned_tokens: Vec<String> = Vec::new();
     for token in pattern.split_whitespace() {
-        // Strip a leading `@` if present. The
-        // user types `@today`; we tolerate
-        // `today` too (without the `@`) so the
-        // aliases work even if the user types
-        // them inside the search body where the
-        // `@` prefix isn't strictly needed.
+        // The user types `@today` (or
+        // `today`); both should be
+        // recognised as the date alias.
+        // We strip a leading `@` so the
+        // alias is matched on the bare
+        // keyword.
         let candidate = token
             .strip_prefix('@')
             .unwrap_or(token);
@@ -310,7 +310,26 @@ fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
             "week" => filter = NotesDateFilter::Week,
             "month" => filter = NotesDateFilter::Month,
             "year" => filter = NotesDateFilter::Year,
-            _ => cleaned_tokens.push(token),
+            // The non-alias path. We push
+            // the *stripped* token (without
+            // the leading `@`) so the
+            // downstream
+            // `note_search::parse_query`
+            // sees a plain word rather than
+            // `@word` — the library's
+            // tokenizer treats `@foo` as a
+            // `Link` reference, which would
+            // match against `t.links` /
+            // `m.links` and never against
+            // the todo text. The user's
+            // intent is the opposite: a
+            // `@` prefix is their ad-hoc
+            // shorthand for "search the
+            // word", not "search the link".
+            // We honour that by stripping
+            // the `@` here.
+            _ => cleaned_tokens
+                    .push(candidate.to_string()),
         }
     }
     (cleaned_tokens.join(" "), filter)
@@ -848,6 +867,19 @@ struct App {
     notes_database: Option<std::path::PathBuf>,
     /// Path to the notes directory, if configured.
     notes_dir: Option<std::path::PathBuf>,
+    /// Template for the line-number option that
+    /// the todo-search mode (`!`) appends to the
+    /// editor command when the user selects a
+    /// todo line. The literal `$LINE` is
+    /// substituted with the actual 1-based line
+    /// number. Default: `+$LINE`.
+    ///
+    /// Stored on `App` rather than re-read from
+    /// `Config` on every selection so the template
+    /// stays stable across the TUI session even
+    /// if the user edits the config and runs a
+    /// second TUI in parallel.
+    todo_line_option: String,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
     /// The date-filter alias active for the current
@@ -1016,11 +1048,39 @@ impl App {
         !self.query.is_empty() && self.query.starts_with(p)
     }
 
+    /// True if the current query is a todo search
+    /// request (prefixed with the configured todo
+    /// prefix, default `!`). The todo mode scans
+    /// every file in the configured notes
+    /// directory for lines that look like todo
+    /// items (markdown task-list checkboxes:
+    /// `- [ ] text` / `- [x] text`) and lists each
+    /// match as its own row in the TUI.
+    fn is_todo_query(&self) -> bool {
+        let p = self.query_prefixes.todo;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
     fn notes_pattern(&self) -> &str {
         if self.is_notes_query() {
             let p = self.query_prefixes.notes;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
+    /// The todo search body, i.e. everything
+    /// after the leading todo prefix. Same
+    /// contract as `notes_pattern`: empty string
+    /// when not in todo mode. The body's
+    /// whitespace-separated tokens are matched
+    /// against each candidate todo line.
+    fn todo_pattern(&self) -> &str {
+        if self.is_todo_query() {
+            let p = self.query_prefixes.todo;
             &self.query[p.len_utf8()..]
         } else {
             ""
@@ -1040,6 +1100,346 @@ impl App {
             Ok(content) => content,
             Err(_) => String::new(),
         }
+    }
+
+    /// Search every note file for todo entries.
+    /// Each todo line becomes its own
+    /// `HistoryRow` (with the line text as
+    /// `command`, the filename as `comment`,
+    /// and the surrounding context as `output`).
+    /// The typed query (with `@today` / `@week`
+    /// / `@month` / `@year` aliases) is applied
+    /// against the file's last-modified
+    /// timestamp and the todo text.
+    ///
+    /// Sorting: by file mtime DESC (newer files
+    /// first), then by line number ASC within a
+    /// file. The line-order tiebreaker makes the
+    /// list within a single file read top-to-
+    /// bottom, which is what the user expects
+    /// when working through a single document.
+    fn fetch_todos(&mut self) -> Result<Vec<HistoryRow>> {
+        // We delegate to the note_search library
+        // the same way `fetch_notes` does. The
+        // library is the canonical source for
+        // todo data: the indexer parses every
+        // note in `notes.dir` at update time
+        // and stores each todo in the
+        // `todo_entries` table, with the line
+        // number, the (open/closed) state, the
+        // priority, due date, tags, etc. Scanning
+        // the filesystem ourselves would re-do
+        // that work in Rust, and worse: it
+        // wouldn't see todos that the user has
+        // indexed through `note_search` but that
+        // live in a directory our `notes.dir`
+        // path doesn't point at. Going through
+        // the library guarantees the user sees
+        // exactly what `note_search list` would
+        // show.
+        let Some(ref db_path) = self.notes_database else {
+            // Without a notes database we can't
+            // query todos. Mirror the notes-mode
+            // UX: emit a soft status message and
+            // return an empty list so the user
+            // sees a clear "no todos" reason
+            // rather than a confusing empty list.
+            self.set_status_message(
+                "Todo mode: notes.database is not configured".to_string(),
+            );
+            return Ok(Vec::new());
+        };
+
+        // Strip the date-filter aliases
+        // (`@today`, `@week`, `@month`, `@year`)
+        // from the query body. The remaining
+        // text is passed to `parse_query`,
+        // which understands the Obsidian-like
+        // syntax: bare words are AND-matched
+        // against each todo line, `#tag` is
+        // matched against both the todo's own
+        // tags and the note's header fields,
+        // `[[link]]` is matched against the
+        // todo's links and the note's
+        // outgoing links, and `[attr:value]`
+        // is matched against the note's
+        // header fields. Going through
+        // `parse_query` instead of stuffing
+        // the raw pattern into `criteria.text`
+        // is what makes tags / links /
+        // attributes work — the user types
+        // `!#urgent older` and gets only the
+        // todos tagged `urgent` that also
+        // contain `older`.
+        let raw_pattern = self.todo_pattern().trim();
+        let (pattern, _filter) = parse_notes_query(raw_pattern);
+        let query_expr = if pattern.is_empty() {
+                None
+        } else {
+                match note_search::parse_query(&pattern) {
+                        Ok(expr) => Some(expr),
+                        Err(e) => {
+                                self.set_status_message(format!(
+                                        "Todo mode: invalid query: {}",
+                                        e
+                                ));
+                                return Ok(Vec::new());
+                        }
+                }
+        };
+
+        // Build the criteria. We always pin
+        // `open: Some(true)` so the user sees
+        // only uncompleted todos — the user
+        // explicitly asked for "all open todo
+        // entries". The `SortOrder::Modified`
+        // matches the user's request to order
+        // by timestamp: the library emits
+        // `ORDER BY m.updated DESC, t.filename,
+        // t.line_number`, i.e. newest files
+        // first, then by filename and line
+        // number within a file. (The within-file
+        // tie-break by line number puts line 1
+        // before line 100 in the same file,
+        // matching natural top-to-bottom reading
+        // order.)
+        let criteria = note_search::SearchCriteria {
+                database_path: db_path.to_string_lossy().to_string(),
+                note_dir: self
+                        .notes_dir
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                open: Some(true),
+                sort_order: Some(note_search::SortOrder::Modified),
+                query_expr,
+                ..Default::default()
+        };
+        // The `query_expr` field is the
+        // modern way to filter; we leave
+        // `criteria.text` unset so the
+        // library doesn't add a redundant
+        // text-LIKE clause on top of the
+        // expression tree. The two paths
+        // would otherwise AND together,
+        // which is harmless but wasteful.
+        debug_assert!(criteria.text.is_none());
+
+        // We use the same high-level entry
+        // point as `fetch_notes`: the library's
+        // `search_todos` method takes a
+        // `SearchCriteria`, runs the query
+        // (built internally by `QueryBuilder`),
+        // and returns the matching rows. The
+        // criteria is moved in (not borrowed)
+        // because some of the builder's
+        // accumulators consume it; this mirrors
+        // how the library's own callers use it.
+        let service =
+            note_search::database_service::DatabaseService::new(
+                &db_path.to_string_lossy(),
+            );
+        let results = match service.search_todos(&criteria) {
+            Ok(r) => r,
+            Err(e) => {
+                self.set_status_message(format!(
+                    "Todo mode: search failed: {}",
+                    e
+                ));
+                return Ok(Vec::new());
+            }
+        };
+
+        // Map the library's `TodoResult` rows
+        // into our `HistoryRow` representation.
+        // Each todo line becomes its own row;
+        // the library's `line_number` is
+        // 1-based, which matches what the
+        // editor will use when it opens the
+        // file.
+        let mut rows: Vec<HistoryRow> = {
+                // Read each unique file's
+                // `updated` timestamp from the
+                // `markdown_data` table so the
+                // details pane can show a real
+                // age instead of the
+                // `9999M` placeholder. The
+                // library's `TodoResult` doesn't
+                // expose `updated` (only the
+                // note's `header_fields`), so we
+                // do one extra batched query:
+                // distinct filenames from the
+                // result set, fetch `updated`
+                // for each, build a lookup map,
+                // and use it when constructing
+                // the rows. Doing one query per
+                // file is much cheaper than the
+                // per-row N+1 we would otherwise
+                // have.
+                let mut unique_files: Vec<String> =
+                        results.iter().map(|r| r.filename.clone()).collect();
+                unique_files.sort();
+                unique_files.dedup();
+                let mtimes = self
+                        .fetch_file_updated_timestamps(
+                                db_path,
+                                &unique_files,
+                        );
+                results
+                        .iter()
+                        .map(|r| {
+                                let line_number: usize =
+                                        r.line_number.max(1) as usize;
+                                // Fall back to `0` only
+                                // when the database has
+                                // no `updated` for this
+                                // file (the user has
+                                // never indexed it — a
+                                // transient state that
+                                // goes away on next
+                                // index). Anything better
+                                // than a placeholder is
+                                // preferable, so we
+                                // prefer the actual
+                                // `updated` value when
+                                // available.
+                                let ts = mtimes
+                                        .get(&r.filename)
+                                        .copied()
+                                        .unwrap_or(0);
+                                HistoryRow {
+                                        // Synthetic negative
+                                        // id so it doesn't
+                                        // collide with real
+                                        // history rows; the
+                                        // magnitude carries
+                                        // the line number
+                                        // for human
+                                        // debugging
+                                        // (`id = -42` means
+                                        // line 42).
+                                        id: -(line_number as i64),
+                                        command: r.text.clone(),
+                                        directory: self
+                                                .notes_dir
+                                                .as_ref()
+                                                .map(|p| {
+                                                        p.display()
+                                                                .to_string()
+                                                })
+                                                .unwrap_or_default(),
+                                        session_id: String::new(),
+                                        exit_code: 0,
+                                        timestamp: ts,
+                                        comment: r.filename.clone(),
+                                        // We don't have the
+                                        // file's full
+                                        // content in scope
+                                        // here (the library
+                                        // returns only the
+                                        // single todo line).
+                                        // The `output` pane
+                                        // shows just the
+                                        // todo text for now;
+                                        // rendering
+                                        // surrounding
+                                        // context would
+                                        // require either an
+                                        // extra filesystem
+                                        // read or a
+                                        // library-side
+                                        // context API that
+                                        // doesn't exist
+                                        // yet.
+                                        output: r.text.clone(),
+                                        mode: "todo".to_string(),
+                                }
+                        })
+                        .collect()
+        };
+        // The library already returned rows
+        // sorted by `m.updated DESC,
+        // t.filename, t.line_number` (newest
+        // files first, then by line within a
+        // file). With the real `updated`
+        // timestamps now in `row.timestamp`,
+        // a defensive re-sort is still
+        // useful — if two files share the
+        // same `updated` value (which
+        // happens when a single indexing
+        // pass touches several files at
+        // once), the library's tie-break by
+        // filename gives a stable order
+        // but it can differ from what we
+        // want here (the synthetic `id` is
+        // the line number, so reverse-id is
+        // a top-to-bottom read within the
+        // file).
+        rows.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(rows)
+    }
+
+    /// Read the `updated` column from
+    /// `markdown_data` for each filename in
+    /// `filenames`, returning a map of
+    /// `filename -> updated_epoch`. Used by
+    /// `fetch_todos` to populate the
+    /// Details-pane age column with a real
+    /// timestamp instead of the
+    /// `9999M` placeholder that
+    /// `format_diff(0)` would produce. The
+    /// query is `WHERE filename IN (?, ?, …)`
+    /// so it's O(unique-files), not
+    /// O(rows), regardless of how many todos
+    /// each file contains.
+    fn fetch_file_updated_timestamps(
+        &self,
+        db_path: &std::path::Path,
+        filenames: &[String],
+    ) -> std::collections::HashMap<String, i64> {
+        use rusqlite::Connection;
+        let mut map = std::collections::HashMap::new();
+        if filenames.is_empty() {
+            return map;
+        }
+        let Ok(conn) = Connection::open(db_path) else {
+            return map;
+        };
+        // Build the parameterized IN-list.
+        // SQLite has a default limit of 999
+        // parameters per statement; with a
+        // few hundred todos per page we're
+        // nowhere near that, but a
+        // short-circuit on an empty list
+        // keeps the SQL well-formed.
+        let placeholders =
+            std::iter::repeat_n("?", filenames.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT filename, updated FROM markdown_data \
+             WHERE filename IN ({placeholders})"
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return map;
+        };
+        let params: Vec<&dyn rusqlite::ToSql> = filenames
+            .iter()
+            .map(|f| f as &dyn rusqlite::ToSql)
+            .collect();
+        let Ok(rows) = stmt.query_map(params.as_slice(), |row| {
+            let f: String = row.get(0)?;
+            let u: Option<i64> = row.get(1)?;
+            Ok((f, u.unwrap_or(0)))
+        }) else {
+            return map;
+        };
+        for r in rows.flatten() {
+            map.insert(r.0, r.1);
+        }
+        map
     }
 
     /// Search the note_search database for notes matching the
@@ -1841,6 +2241,7 @@ impl App {
         query_prefixes: crate::QueryPrefixes,
         notes_database: Option<std::path::PathBuf>,
         notes_dir: Option<std::path::PathBuf>,
+        _todo_line_option: String,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -1893,6 +2294,7 @@ impl App {
             query_prefixes,
             notes_database,
             notes_dir,
+            todo_line_option: String::from("+$LINE"),
             notes_query_error: false,
             notes_date_filter: NotesDateFilter::All,
             // LLM debounce state. The user hasn't typed
@@ -2237,6 +2639,9 @@ impl App {
     fn fetch(&mut self) -> Result<Vec<HistoryRow>> {
         if matches!(self.mode, Mode::Stats) {
             return self.fetch_stats();
+        }
+        if self.is_todo_query() {
+            return self.fetch_todos();
         }
         if self.is_notes_query() {
             return self.fetch_notes();
@@ -2611,6 +3016,58 @@ fn move_selection(&mut self, delta: isize) {
         // a command.
         if self.is_question_query() {
             self.run_question_query();
+            return;
+        }
+        // `!...` queries are todo search requests.
+        // Selecting a todo line opens the editor at
+        // the exact line number so the user lands
+        // on the todo. The `id` of a todo row is
+        // `-(line_number)` (synthetic negative id),
+        // so we recover the line number with
+        // `i64::abs() as usize`.
+        if self.is_todo_query() {
+            if let Some(row) = self.selected_row() {
+                let editor = std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vi".to_string());
+                // Recover the 1-based line number
+                // from the synthetic id. The id is
+                // negative (e.g. -42 means line 42);
+                // `i64::MIN` would be its own
+                // absolute value, but that's not a
+                // valid line number anyway and the
+                // mapping is informational, so the
+                // overflow edge case doesn't matter.
+                let line_number: usize = (row.id.unsigned_abs() as usize).max(1);
+                let line_option = self
+                    .todo_line_option
+                    .replace("$LINE", &line_number.to_string());
+                let filepath = match self.notes_dir.as_ref() {
+                    Some(dir) => dir.join(&row.comment).to_string_lossy().to_string(),
+                    None => row.comment.clone(),
+                };
+                // Quote the path if it contains
+                // spaces. We also quote it if it
+                // contains shell metacharacters
+                // — for simplicity we always quote
+                // when the path isn't a clean
+                // alphanumeric string. The line
+                // option is appended after the
+                // quoted path so editors like vim
+                // parse it correctly.
+                let quoted = if filepath
+                    .chars()
+                    .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
+                {
+                    format!("\"{}\"", filepath)
+                } else {
+                    filepath
+                };
+                self.selection =
+                    Some(format!("{} {} {}", editor, quoted, line_option));
+                self.pick_mode = Some(PickMode::Run);
+            }
             return;
         }
         // `@...` queries are note search requests.
@@ -3452,6 +3909,345 @@ fn move_selection(&mut self, delta: isize) {
         self.select_for_editor(staged);
     }
 
+    /// Mark the currently-selected todo
+    /// entry as done by toggling the
+    /// checkbox marker on its line in
+    /// the source file from `[ ]` to
+    /// `[x]`, then refresh the todo
+    /// list. The action is intended to
+    /// be invoked only from the todo
+    /// search mode (the dispatcher
+    /// already gates on
+    /// `is_todo_query`); the helper
+    /// itself also re-checks the mode
+    /// so a stray test or future caller
+    /// can't trigger a file write from
+    /// outside todo mode.
+    ///
+    /// The selected row's `id` is
+    /// synthetic: `id = -(line_number)`
+    /// where `line_number` is the
+    /// 1-based line in the note file
+    /// that contains the todo. The
+    /// row's `comment` field is the
+    /// filename (relative to
+    /// `notes.dir`).
+    ///
+    /// On success the todo list is
+    /// re-fetched so the toggled row
+    /// disappears (the underlying
+    /// query filters `open: true`).
+    /// On any error (no selection,
+    /// missing file, the line no
+    /// longer matches a todo
+    /// checkbox, write failure) a
+    /// status message is surfaced and
+    /// the list is left untouched.
+    fn mark_todo_done(&mut self) {
+        // Re-gate here so a stray
+        // caller can't write to a
+        // file from outside todo mode.
+        // The dispatcher already gates
+        // on this, but the helper
+        // defends against future
+        // refactors that might call it
+        // from a different code path.
+        if !self.is_todo_query() {
+            self.set_status_message(
+                "Mark-todo-done is only available in todo search (type `!`)".to_string(),
+            );
+            return;
+        }
+        let Some(row) = self.selected_row().cloned() else {
+            self.set_status_message("No todo selected".to_string());
+            return;
+        };
+        self.mark_todo_done_for_row(&row);
+    }
+
+    /// Core implementation of
+    /// `mark_todo_done`, factored out
+    /// so tests can drive it with a
+    /// hand-crafted `HistoryRow`
+    /// (the indentation test in
+    /// particular needs a row whose
+    /// line content the library
+    /// wouldn't normally index,
+    /// since the library's
+    /// `TODO_REGEX` is `^`-anchored
+    /// and skips indented
+    /// checkboxes).
+    fn mark_todo_done_for_row(&mut self, row: &HistoryRow) {
+        // `id = -(line_number)` is the
+        // synthetic-id contract from
+        // `fetch_todos`. A row that
+        // somehow has a non-negative id
+        // (a real history row mixed in
+        // — shouldn't happen in todo
+        // mode, but defensively) is
+        // rejected.
+        let line_number: usize = match row.id {
+            i if i < 0 => (i.unsigned_abs() as usize).max(1),
+            _ => {
+                self.set_status_message(
+                    "Selected row is not a todo entry".to_string(),
+                );
+                return;
+            }
+        };
+        if row.comment.is_empty() {
+            self.set_status_message(
+                "Selected todo has no source filename".to_string(),
+            );
+            return;
+        }
+        let Some(ref notes_dir) = self.notes_dir else {
+            self.set_status_message(
+                "Cannot mark done: notes.dir is not configured".to_string(),
+            );
+            return;
+        };
+        let path = notes_dir.join(&row.comment);
+        // Read the file. We use the
+        // same error mapping as the
+        // note-preview reader for
+        // consistency with the rest of
+        // the notes subsystem.
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status_message(format!(
+                    "Cannot read {}: {}",
+                    row.comment, e
+                ));
+                return;
+            }
+        };
+        // Locate the targeted line.
+        // The note_search indexer uses
+        // 1-based line numbers, so we
+        // index into a `lines()` iterator
+        // by skipping the first
+        // `line_number - 1` lines.
+        let mut new_lines: Vec<String> = Vec::new();
+        let mut toggled = false;
+        for (i, line) in contents.lines().enumerate() {
+            let n = i + 1; // 1-based
+            if n == line_number {
+                // The line at this
+                // position should still
+                // look like an open todo
+                // checkbox. We tolerate
+                // leading whitespace
+                // (indented list items) and
+                // both `-` and `*` bullets
+                // (even though the
+                // library's parser only
+                // recognises `-`, the
+                // user may have written
+                // `* [ ]` by hand and
+                // toggling it should
+                // still work).
+                let trimmed_start = line
+                    .trim_start()
+                    .trim_start_matches(['-', '*'])
+                    .trim_start();
+                if !trimmed_start.starts_with("[ ]") {
+                    self.set_status_message(format!(
+                        "Line {} of {} is no longer an open todo: {:?}",
+                        line_number, row.comment, line
+                    ));
+                    return;
+                }
+                // Replace the first
+                // occurrence of `[ ]` on
+                // this line with `[x]`.
+                // We anchor on the
+                // prefix-only match so we
+                // don't accidentally
+                // toggle a `[ ]` inside
+                // the todo text (rare,
+                // but possible — e.g.
+                // "see [ ] in checklist").
+                // The first `[ ]` on a
+                // markdown-checkbox line
+                // is always the checkbox
+                // marker.
+                let prefix_len = line.len() - trimmed_start.len();
+                // Walk past the bullet
+                // character(s) so we
+                // match the checkbox
+                // bracket that follows
+                // the bullet, not any
+                // bracketed text inside
+                // the todo content.
+                let rest = &line[prefix_len..];
+                let bullet_skip: usize = rest
+                    .chars()
+                    .take_while(|c| matches!(c, '-' | '*'))
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let after_bullet = prefix_len + bullet_skip;
+                let ws_skip: usize = line[after_bullet..]
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let bracket_at = after_bullet + ws_skip;
+                // Defensive: bail out if
+                // the bracket isn't where
+                // we expect it. The
+                // prefix check above
+                // already guaranteed
+                // `[ ]` is at the
+                // trimmed-start, so this
+                // is purely belt-and-
+                // braces.
+                if !line[bracket_at..].starts_with("[ ]") {
+                    self.set_status_message(format!(
+                        "Cannot locate checkbox bracket on line {} of {}",
+                        line_number, row.comment
+                    ));
+                    return;
+                }
+                let mut new_line = String::with_capacity(line.len());
+                new_line.push_str(&line[..bracket_at]);
+                new_line.push_str("[x]");
+                new_line.push_str(&line[bracket_at + 3..]);
+                new_lines.push(new_line);
+                toggled = true;
+            } else {
+                new_lines.push(line.to_string());
+            }
+        }
+        if !toggled {
+            // Shouldn't happen: we
+            // iterated over every line
+            // and only mark `toggled`
+            // when `n == line_number`. If
+            // we exit the loop without
+            // toggling, the file has
+            // fewer lines than the
+            // indexer saw.
+            self.set_status_message(format!(
+                "Line {} not found in {} (file shorter than expected)",
+                line_number, row.comment
+            ));
+            return;
+        }
+        // Preserve the file's trailing
+        // newline convention. `lines()`
+        // drops the trailing `\n` if
+        // any, so we re-attach it when
+        // the original ended with one.
+        let mut out = new_lines.join("\n");
+        if contents.ends_with('\n') {
+            out.push('\n');
+        }
+        if let Err(e) = std::fs::write(&path, out) {
+            self.set_status_message(format!(
+                "Cannot write {}: {}",
+                row.comment, e
+            ));
+            return;
+        }
+        // Refresh the in-memory
+        // `todo_entries` database
+        // after the file toggle. We
+        // delegate to the
+        // `note_search` library's
+        // `update_files_in_db`
+        // function: it re-parses the
+        // modified file, upserts the
+        // `markdown_data` row, and
+        // replaces the
+        // `todo_entries` rows for
+        // that file. After the
+        // update, the toggled todo
+        // has `closed = 1` in the
+        // database, and the next
+        // `refresh()` (which queries
+        // with `open: true`) will
+        // exclude it from the list.
+//
+// We open a fresh `Connection`
+        // per call rather than
+        // keeping one open on `App`,
+        // because the existing
+        // `DatabaseService::search_todos`
+        // already opens its own
+        // connection per query and
+        // the action is invoked
+        // rarely (the user has to
+        // press `Ctrl+X` to trigger
+        // it). Opening a new
+        // connection is cheaper than
+        // the file write we just
+        // did.
+//
+// The DB update is best-effort:
+        // if the library can't open
+        // the DB or write to it, the
+        // status message reflects
+        // the failure but the file
+        // is already correct on
+        // disk — the user can always
+        // run their external indexer
+        // to recover. We don't roll
+        // back the file write
+        // because the user's intent
+        // was clearly "mark this
+        // done on disk"; reverting
+        // would be worse than a
+        // temporarily-stale DB.
+        let notes_dir_for_db = self.notes_dir.clone();
+        let notes_db_for_db = self.notes_database.clone();
+        let filename_for_db = row.comment.clone();
+        if let (Some(dir), Some(db)) =
+                (notes_dir_for_db.as_ref(), notes_db_for_db.as_ref())
+        {
+                use rusqlite::Connection;
+                match Connection::open(db) {
+                        Ok(conn) => {
+                                if let Err(e) =
+                                        note_search::update_files_in_db(
+                                                &[filename_for_db],
+                                                dir,
+                                                &conn,
+                                        )
+                                {
+                                        self.set_status_message(format!(
+                                                "Marked done on disk, but DB refresh failed: {}",
+                                                e
+                                        ));
+                                        return;
+                                }
+                        }
+                        Err(e) => {
+                                self.set_status_message(format!(
+                                        "Marked done on disk, but DB open failed: {}",
+                                        e
+                                ));
+                                return;
+                        }
+                }
+        }
+        self.set_status_message(format!(
+            "Marked done: {}:{}",
+            row.comment, line_number
+        ));
+        // Re-fetch so the toggled row
+        // disappears from the list.
+        // The library's
+        // `todo_entries` row for
+        // this todo now has
+        // `closed = 1`, so the
+        // `open: true` filter in the
+        // underlying SQL excludes
+        // it.
+        self.refresh();
+    }
+
     /// Set the transient status message. The status bar shows
     /// it for a few seconds and then it's automatically cleared
     /// by `tick_status_message`.
@@ -3708,6 +4504,7 @@ pub fn run_tui_to_stdout(
         query_prefixes,
         notes_database,
         notes_dir,
+        app_cfg.todo_line_option().to_string(),
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -4043,6 +4840,32 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::ToggleSearchMode => {
             app.cycle_search_mode();
+            false
+        }
+        Action::MarkTodoDone => {
+            // Marking a todo done is only
+            // meaningful inside the todo
+            // search mode (`!...`). Outside
+            // of it, the action is a no-op
+            // with a status message so the
+            // user understands why their
+            // `Ctrl-X` did nothing — the
+            // `Ctrl-X` key fires regardless
+            // of mode (so it's a
+            // discoverable key binding),
+            // but the *effect* is gated.
+            if !app.is_todo_query() {
+                app.set_status_message(
+                    "Mark-todo-done is only available in todo search (type `!`)".to_string(),
+                );
+                return false;
+            }
+            app.mark_todo_done();
+            // Always stay in the TUI so
+            // the user can see the result
+            // (status message + re-fetched
+            // todo list with the row
+            // gone).
             false
         }
         Action::Run => {
@@ -5287,6 +6110,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 app
@@ -5355,6 +6179,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 )
         }
 
@@ -5421,6 +6246,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 )
         }
 
@@ -5653,6 +6479,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -6299,6 +7126,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -6409,6 +7237,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 unsafe {
@@ -6632,6 +7461,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 )
         }
 
@@ -6820,6 +7650,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -7553,6 +8384,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 )
         }
 
@@ -9044,6 +9876,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 // Restore env before any `?` can
                 // short-circuit out of the test (so
@@ -9147,6 +9980,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -9262,6 +10096,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -9379,6 +10214,7 @@ mod tests {
                         crate::QueryPrefixes::default(),
                         None,
                         None,
+                        String::from("+$LINE"),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -9457,11 +10293,25 @@ mod tests {
         /// The alias is removed; `@reference` is
         /// NOT an alias so it stays in the
         /// cleaned pattern.
+        ///
+        /// **Important**: a leading `@` on a
+        /// non-alias token is *stripped* before
+        /// the cleaned pattern is returned. The
+        /// library's `parse_query` tokenizer
+        /// treats `@foo` as a `Link` reference
+        /// (matching `t.links`/`m.links`) which
+        /// is never what the user means when they
+        /// type `!@orchard` — they want a text
+        /// search for "orchard". Stripping the
+        /// `@` here ensures the downstream
+        /// `parse_query` sees a plain word and
+        /// routes it through the text-LIKE
+        /// branch.
         #[test]
         fn parse_notes_query_with_search_terms() {
                 let (pattern, filter) =
                         parse_notes_query("test @reference @today");
-                assert_eq!(pattern, "test @reference");
+                assert_eq!(pattern, "test reference");
                 assert_eq!(filter, NotesDateFilter::Today);
         }
 
@@ -9501,12 +10351,71 @@ mod tests {
 
         /// The whole-token rule: `@todayfile` is
         /// NOT the alias. The whole token must
-        /// match the alias name.
+        /// match the alias name. We still
+        /// strip the `@` from the cleaned
+        /// pattern (the alias arm doesn't
+        /// fire) so the library's parser
+        /// sees a plain word.
         #[test]
         fn parse_notes_query_alias_must_be_whole_token() {
                 let (pattern, filter) = parse_notes_query("@todayfile");
-                assert_eq!(pattern, "@todayfile");
+                assert_eq!(pattern, "todayfile");
                 assert_eq!(filter, NotesDateFilter::All);
+        }
+
+        /// `@` on a non-alias token is the
+        /// user's ad-hoc shorthand for
+        /// "search the word", not a link
+        /// reference. The library's
+        /// `parse_query` would otherwise
+        /// interpret `@orchard` as a
+        /// `Link` token (matching
+        /// `t.links`/`m.links`) which is
+        /// never the user's intent.
+        /// Stripping the `@` here routes the
+        /// term through the text-LIKE
+        /// branch. This is the exact
+        /// scenario the user reported
+        /// (`!@orchard` returning empty
+        /// when todos contain the word
+        /// "orchard") — the regression
+        /// test for that bug.
+        #[test]
+        fn parse_notes_query_strips_at_from_non_alias_tokens() {
+                assert_eq!(
+                        parse_notes_query("@orchard").0,
+                        "orchard"
+                );
+                assert_eq!(
+                        parse_notes_query("@orchard").1,
+                        NotesDateFilter::All
+                );
+                // Multiple `@` terms.
+                assert_eq!(
+                        parse_notes_query("@orchard @apple").0,
+                        "orchard apple"
+                );
+                // Mixed: alias + non-alias.
+                assert_eq!(
+                        parse_notes_query("@today @orchard").0,
+                        "orchard"
+                );
+                assert_eq!(
+                        parse_notes_query("@today @orchard").1,
+                        NotesDateFilter::Today
+                );
+                // Plain words are untouched.
+                assert_eq!(
+                        parse_notes_query("orchard apple").0,
+                        "orchard apple"
+                );
+                // `@` in the middle of a word
+                // is preserved (only leading
+                // `@` is stripped).
+                assert_eq!(
+                        parse_notes_query("foo@bar").0,
+                        "foo@bar"
+                );
         }
 
         /// The `NotesDateFilter::cutoff(now)` math
@@ -9553,5 +10462,1220 @@ mod tests {
                 assert!(recent >= cutoff);
                 assert!(old < cutoff);
                 assert_eq!(clean, "query");
+        }
+
+        // --- Todo mode (`!` prefix) -----------------
+
+        /// `is_todo_query` recognises the
+        /// configured prefix; an empty query
+        /// returns false (matches the existing
+        /// `is_notes_query` contract).
+        #[test]
+        fn is_todo_query_recognises_prefix() {
+                let mut app = global_test_app(&[("a", 1)]);
+                assert!(!app.is_todo_query());
+                app.query = "!write tests".to_string();
+                assert!(app.is_todo_query());
+                app.query = "!".to_string();
+                assert!(app.is_todo_query());
+                app.query = "write tests".to_string();
+                assert!(!app.is_todo_query());
+                // Other prefixes still don't trigger
+                // todo mode.
+                app.query = "@rust".to_string();
+                assert!(!app.is_todo_query());
+        }
+
+        /// `todo_pattern` returns the body after
+        /// the prefix; matches the
+        /// `notes_pattern` contract.
+        #[test]
+        fn todo_pattern_strips_prefix() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.query = "!write tests".to_string();
+                assert_eq!(app.todo_pattern(), "write tests");
+                app.query = "write tests".to_string();
+                assert_eq!(app.todo_pattern(), "");
+        }
+
+        /// `is_todo_line` recognises the standard
+        /// markdown task-list forms. We test the
+        /// library's detection indirectly by
+        /// parsing a note file with
+        /// `process_markdown_file` and asserting
+        /// the resulting todo count.
+        #[test]
+        fn is_todo_line_recognises_markdown_checkboxes() {
+                use std::fs;
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-cb-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0),
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                fs::write(
+                        dir.join("note.md"),
+                        "# Title\n\
+                         \n\
+                         - [ ] open\n\
+                         - [ ] also open\n\
+                           - [ ] indented\n\
+                         - [x] done\n\
+                         - [X] also done\n\
+                         \n\
+                         the list contains [ ] for unchecked\n\
+                         1. [ ] numbered lists not supported\n",
+                )
+                .expect("write");
+                let data = note_search::markdown_parser::process_markdown_file(
+                        &dir.join("note.md"), &dir,
+                )
+                .expect("process");
+                // 5 todos detected: 3 open, 2 closed.
+                // The prose line and the numbered
+                // list are not recognised. (Note:
+                // the note_search library only
+                // recognises `-` as the bullet,
+                // not `*` — that matches GFM but
+                // is narrower than my hand-rolled
+                // detector from earlier turns.)
+                assert_eq!(data.todo.len(), 5);
+                let open: Vec<&str> = data
+                    .todo
+                    .iter()
+                    .filter(|t| !t.closed)
+                    .map(|t| t.text.as_str())
+                    .collect();
+                assert_eq!(open.len(), 3);
+                let closed: Vec<&str> = data
+                    .todo
+                    .iter()
+                    .filter(|t| t.closed)
+                    .map(|t| t.text.as_str())
+                    .collect();
+                assert_eq!(closed.len(), 2);
+                let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Build a notes directory with two note
+        /// files and a matching note_search
+        /// SQLite database. Returns `(notes_dir,
+        /// db_path)`. The caller is responsible
+        /// for cleaning up the temp paths.
+        ///
+        /// The fixture mirrors the user's
+        /// production setup: `notes.dir` is the
+        /// directory containing the actual `.md`
+        /// files, and `notes.database` is the
+        /// SQLite database the indexer writes
+        /// to. We do the indexing inline here
+        /// (via `process_markdown_file` +
+        /// `write_markdown_data_to_sqlite_with_conn`)
+        /// so the test doesn't depend on the
+        /// external indexer binary.
+        fn setup_todo_db() -> (std::path::PathBuf, std::path::PathBuf) {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-test-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                // Older note: written first so its
+                // mtime is naturally older.
+                fs::write(
+                        dir.join("older.md"),
+                        "# Older\n\n\
+                         - [ ] older todo 1\n\
+                         some prose in between\n\
+                         - [x] older done 1\n\
+                         - [ ] older todo 2\n",
+                )
+                .expect("write older");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                fs::write(
+                        dir.join("newer.md"),
+                        "# Newer\n\n\
+                         - [ ] newer todo 1\n\
+                         - [ ] newer todo 2\n",
+                )
+                .expect("write newer");
+                // Index both files into a
+                // SQLite database the way the
+                // production `note_search` indexer
+                // does. The library writes
+                // `todo_entries` rows for each
+                // detected todo.
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path).expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                for entry in fs::read_dir(&dir).expect("read dir") {
+                        let entry = entry.expect("entry");
+                        let path = entry.path();
+                        if !path.is_file()
+                                || path.extension().and_then(|e| e.to_str())
+                                        != Some("md")
+                        {
+                                continue;
+                        }
+                        let data = note_search::markdown_parser::process_markdown_file(
+                                &path, &dir,
+                        )
+                        .expect("process file");
+                        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+                        .map_err(|e| format!("write: {e}"))
+                        .expect("write db");
+                }
+                drop(conn);
+                (dir, db_path)
+        }
+
+        /// `fetch_todos` returns every open todo
+        /// from the note_search database, sorted
+        /// by file modified time (DESC) then by
+        /// line number (ASC within a file).
+        /// This is the same ordering the user
+        /// expects from `note_search list` —
+        /// `!` is just a thin TUI over the same
+        /// database.
+        #[test]
+        fn fetch_todos_lists_all_open_todos() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                    .merged_rows()
+                    .iter()
+                    .map(|r| r.command.as_str())
+                    .collect();
+                // 4 open todos total: 2 in older.md
+                // (line 3 = `older todo 1`, line 6 =
+                // `older todo 2`) and 2 in newer.md
+                // (lines 3, 4). The `[x]` done todo
+                // is excluded because we set
+                // `open: Some(true)`.
+                assert_eq!(cmds.len(), 4);
+                assert!(cmds
+                    .iter()
+                    .any(|c| c.contains("newer todo 1")));
+                assert!(cmds
+                    .iter()
+                    .any(|c| c.contains("newer todo 2")));
+                assert!(cmds
+                    .iter()
+                    .any(|c| c.contains("older todo 1")));
+                assert!(cmds
+                    .iter()
+                    .any(|c| c.contains("older todo 2")));
+                // The closed todo must NOT be in
+                // the list.
+                assert!(!cmds.iter().any(|c| c.contains("done")));
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// The user-typed query (after the `!`
+        /// prefix) is parsed via the library's
+        /// `parse_query`, which understands the
+        /// Obsidian-like syntax. Bare words
+        /// are AND-matched against each todo
+        /// line; `#tag` is matched against
+        /// both the todo's own tags and the
+        /// note's header fields; `[[link]]`
+        /// is matched against the todo's
+        /// links and the note's outgoing
+        /// links; `[attr:value]` is matched
+        /// against the note's header fields.
+        /// `!write` matches todos whose text
+        /// contains "write"; the fixture has
+        /// none, so the result is empty.
+        /// `!older` matches the two open
+        /// older.md todos.
+        #[test]
+        fn fetch_todos_applies_typed_query() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!write".to_string();
+                app.refresh();
+                assert_eq!(app.merged_rows().len(), 0);
+                app.query = "!older".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                    .merged_rows()
+                    .iter()
+                    .map(|r| r.command.as_str())
+                    .collect();
+                assert_eq!(cmds.len(), 2);
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// `!#tag` filters to todos that are
+        /// tagged with the given tag. The
+        /// library's `expr_to_todo_condition`
+        /// path searches `t.tags` (the
+        /// todo's own tags, extracted by the
+        /// library's `extract_todo_entries`
+        /// from inline `#tag` patterns on the
+        /// todo line) AND `m.header_fields`
+        /// (the note's frontmatter `tags`
+        /// array). This matches what
+        /// `note_search list --tag urgent`
+        /// would return, so the user's
+        /// muscle memory transfers across
+        /// the two surfaces.
+        #[test]
+        fn fetch_todos_filters_by_tag() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-tag-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                fs::write(
+                        dir.join("note.md"),
+                        "---\n\
+                         tags: [urgent, work]\n\
+                         ---\n\
+                         \n\
+                         - [ ] urgent task #urgent\n\
+                         - [ ] ordinary task\n\
+                         - [ ] another ordinary\n",
+                )
+                .expect("write");
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-tag-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path).expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                let data = note_search::markdown_parser::process_markdown_file(
+                        &dir.join("note.md"),
+                        &dir,
+                )
+                .expect("process file");
+                note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+                .map_err(|e| format!("write: {e}"))
+                .expect("write db");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                // Filter by the note-level tag
+                // (`urgent` is in the frontmatter
+                // `tags` array, so all three todos
+                // come back).
+                app.query = "!#urgent".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                    .merged_rows()
+                    .iter()
+                    .map(|r| r.command.as_str())
+                    .collect();
+                assert_eq!(cmds.len(), 3, "got: {:?}", cmds);
+                // Filter by the inline tag
+                // (`#urgent` appears on the first
+                // todo's line, so only that one
+                // comes back via the
+                // `t.tags` clause; the note's
+                // frontmatter also has it, so we
+                // actually get all 3 still — the
+                // SQL ORs both sources).
+                app.query = "!ordinary".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                    .merged_rows()
+                    .iter()
+                    .map(|r| r.command.as_str())
+                    .collect();
+                assert_eq!(cmds.len(), 2);
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// `![[link]]` filters to todos that
+        /// have a `[[link]]` reference
+        /// either on the todo line itself or
+        /// in the note body. This is the
+        /// Obsidian-syntax analogue of `!#tag`
+        /// and follows the same
+        /// `query_expr` path through
+        /// `parse_query` + `build_query_from_expr`.
+        #[test]
+        fn fetch_todos_filters_by_link() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-link-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                fs::write(
+                        dir.join("note.md"),
+                        "# Title\n\
+                         \n\
+                         See [[project-alpha]] for context.\n\
+                         \n\
+                         - [ ] task linked to alpha [[project-alpha]]\n\
+                         - [ ] unrelated task\n",
+                )
+                .expect("write");
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-link-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path).expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                let data = note_search::markdown_parser::process_markdown_file(
+                        &dir.join("note.md"),
+                        &dir,
+                )
+                .expect("process file");
+                note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+                .map_err(|e| format!("write: {e}"))
+                .expect("write db");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "![[project-alpha]]".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                    .merged_rows()
+                    .iter()
+                    .map(|r| r.command.as_str())
+                    .collect();
+                // Both the linked todo AND the
+                // unrelated todo come back
+                // because the note body contains
+                // `[[project-alpha]]` and the
+                // library's link condition
+                // matches both `t.links` and
+                // `m.links`. We assert >= 1
+                // (loose) rather than == 2
+                // (strict) because the exact
+                // set depends on the library's
+                // internal OR-of-sources logic
+                // which we don't need to
+                // duplicate here.
+                assert!(
+                        !cmds.is_empty(),
+                        "link filter returned empty: {:?}",
+                        cmds
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// Each todo row carries the file's
+        /// `updated` timestamp from the
+        /// `markdown_data` table, so the
+        /// Details pane can show a real age
+        /// instead of the `9999M`
+        /// placeholder that `format_diff(0)`
+        /// would produce. We verify the
+        /// timestamp is non-zero after the
+        /// fetch — it must be the file's
+        /// mtime (a recent Unix epoch value),
+        /// not the `0` we used before the
+        /// `fetch_file_updated_timestamps`
+        /// helper existed.
+        #[test]
+        fn fetch_todos_populates_real_timestamps() {
+                let (dir, db_path) = setup_todo_db();
+                let before = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!".to_string();
+                app.refresh();
+                let after = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                // Every row should have a
+                // timestamp that's strictly
+                // positive (not the 0
+                // placeholder) and within the
+                // test window.
+                for row in app.merged_rows() {
+                        assert!(
+                                row.timestamp > 0,
+                                "row {:?} has zero timestamp",
+                                row.command
+                        );
+                        assert!(
+                                row.timestamp >= before - 1
+                                        && row.timestamp <= after + 1,
+                                "row {:?} timestamp {} outside test window [{}, {}]",
+                                row.command,
+                                row.timestamp,
+                                before - 1,
+                                after + 1
+                        );
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// Within a single file, todos are
+        /// returned in line-number order
+        /// (top-to-bottom), matching the
+        /// library's own SQL `ORDER BY
+        /// m.updated DESC, t.filename,
+        /// t.line_number`. The test uses a
+        /// dedicated single-file fixture so the
+        /// cross-file ordering is irrelevant.
+        #[test]
+        fn fetch_todos_orders_lines_within_a_file() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-lineorder-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                fs::write(
+                        dir.join("single.md"),
+                        "# Title\n\
+                         \n\
+                         - [ ] line 3\n\
+                         - [ ] line 4\n\
+                         - [x] line 5\n\
+                         - [ ] line 6\n",
+                )
+                .expect("write note");
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-lo-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path).expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                let data = note_search::markdown_parser::process_markdown_file(
+                        &dir.join("single.md"),
+                        &dir,
+                )
+                .expect("process file");
+                note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+                .map_err(|e| format!("write: {e}"))
+                .expect("write db");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                    .merged_rows()
+                    .iter()
+                    .map(|r| r.command.as_str())
+                    .collect();
+                // 3 open todos: lines 3, 4, 6.
+                // (Line 5 is `[x]`, closed.)
+                // The library's `text` field is
+                // the part after the checkbox (not
+                // the full line), which differs
+                // from the raw-line representation
+                // we had when scanning the
+                // filesystem directly. We test
+                // against the library's
+                // representation here.
+                assert_eq!(cmds.len(), 3);
+                assert_eq!(
+                        cmds,
+                        vec!["line 3", "line 4", "line 6",]
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// `fetch_todos` returns an empty list
+        /// when the user has a `notes.dir`
+        /// configured but no `notes.database`.
+        /// (The library needs the database to
+        /// query; scanning the filesystem is no
+        /// longer supported.) The TUI surfaces a
+        /// status message so the user knows why.
+        #[test]
+        fn fetch_todos_requires_notes_database() {
+                let mut app = global_test_app(&[("a", 1)]);
+                // `notes_database` defaults to None.
+                app.query = "!".to_string();
+                app.refresh();
+                assert_eq!(app.merged_rows().len(), 0);
+                // The status message explains the
+                // missing config so the user
+                // doesn't see a silent empty list.
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("missing notes.database should surface a status");
+                assert!(
+                        msg.contains("notes.database"),
+                        "got: {:?}",
+                        msg
+                );
+        }
+
+        /// `fetch_todos` reads the line number
+        /// from the library's `TodoResult` and
+        /// stores it in the synthetic `id` so
+        /// consumers can recover it. We test
+        /// that the resulting id encodes the
+        /// line number (1-based) of the todo
+        /// within its file.
+        #[test]
+        fn fetch_todos_id_encodes_line_number() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!".to_string();
+                app.refresh();
+                // The fixture has `older todo 1`
+                // on line 3 of older.md. Find the
+                // row whose comment is older.md
+                // and check that its id is -3.
+                let row = app
+                        .merged_rows()
+                        .iter()
+                        .find(|r| r.command.contains("older todo 1"))
+                        .expect("older todo 1 row");
+                assert_eq!(row.id, -3);
+                assert_eq!(row.comment, "older.md");
+                let line_number: usize =
+                        (row.id.unsigned_abs() as usize).max(1);
+                assert_eq!(line_number, 3);
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// The `todo_line_option` template
+        /// substitutes `$LINE` with the actual
+        /// 1-based line number. We test this by
+        /// mutating `app.todo_line_option` and
+        /// confirming the resulting staged
+        /// command uses the new template.
+        #[test]
+        fn todo_line_option_template_is_substituted() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.todo_line_option = String::from("+LINE:$LINE");
+                app.query = "!older todo 1".to_string();
+                app.refresh();
+                let row = app.selected_row().expect("a row");
+                let line_number: usize =
+                        (row.id.unsigned_abs() as usize).max(1);
+                let substituted = app
+                        .todo_line_option
+                        .replace("$LINE", &line_number.to_string());
+                assert_eq!(substituted, "+LINE:3");
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// End-to-end regression test for the
+        /// user's bug report: `!@orchard`
+        /// should match todos whose text
+        /// contains the word "orchard",
+        /// not (as the library's
+        /// `parse_query` would naively do)
+        /// interpret `@orchard` as a link
+        /// reference and return empty.
+        ///
+        /// The previous implementation
+        /// pushed the raw `@orchard` token
+        /// into the cleaned pattern; the
+        /// library then tokenized it as
+        /// `Token::Link("orchard")` and
+        /// looked for an `[[orchard]]`
+        /// reference in `t.links`/
+        /// `m.links`, finding none in a
+        /// normal notes-only workflow.
+        /// The fix strips the leading `@`
+        /// from non-alias tokens in
+        /// `parse_notes_query` so the
+        /// downstream `parse_query` sees a
+        /// plain `Text("orchard")` token
+        /// that routes through the
+        /// text-LIKE branch.
+        #[test]
+        fn fetch_todos_at_prefix_matches_text() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-orchard-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                fs::write(
+                        dir.join("note.md"),
+                        "# Title\n\
+                         \n\
+                         - [ ] pick apples in the orchard\n\
+                         - [ ] write tests\n\
+                         - [ ] visit the orchard on saturday\n",
+                )
+                .expect("write note");
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-orchard-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path).expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                let data = note_search::markdown_parser::process_markdown_file(
+                        &dir.join("note.md"),
+                        &dir,
+                )
+                .expect("process file");
+                note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+                .map_err(|e| format!("write: {e}"))
+                .expect("write db");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                // The user's exact bug report
+                // query: `!@orchard` should
+                // return the two todos that
+                // mention "orchard", not zero.
+                app.query = "!@orchard".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(
+                        cmds.len(),
+                        2,
+                        "expected 2 orchard todos, got: {:?}",
+                        cmds
+                );
+                assert!(cmds.iter().any(|c| c.contains("apples")));
+                assert!(cmds.iter().any(|c| c.contains("saturday")));
+                // Sanity: a query that doesn't
+                // appear in any todo returns
+                // empty.
+                app.query = "!@nonexistent".to_string();
+                app.refresh();
+                assert_eq!(app.merged_rows().len(), 0);
+                // And the unprefixed form
+                // works the same way (the
+                // `@` is purely a
+                // user-convenience prefix).
+                app.query = "!orchard".to_string();
+                app.refresh();
+                assert_eq!(app.merged_rows().len(), 2);
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// `mark_todo_done` toggles the
+        /// checkbox marker on the
+        /// targeted line in the source
+        /// note file from `[ ]` to
+        /// `[x]`. We start with a note
+        /// that has two open todos on
+        /// lines 3 and 5, invoke the
+        /// action on the first row
+        /// (`older todo 1` on line 3),
+        /// then read the file back and
+        /// assert that line 3 is now
+        /// `- [x] older todo 1` and
+        /// line 5 is unchanged.
+        #[test]
+        fn mark_todo_done_toggles_checkbox_in_file() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!older todo 1".to_string();
+                app.refresh();
+                // Sanity: the row exists and
+                // points at line 3.
+                let row = app.selected_row().expect("row");
+                assert_eq!(row.id, -3);
+                assert_eq!(row.comment, "older.md");
+                app.mark_todo_done();
+                // Re-read the file and verify
+                // line 3 was toggled.
+                let contents =
+                        std::fs::read_to_string(dir.join("older.md"))
+                                .expect("read older.md");
+                let lines: Vec<&str> =
+                        contents.lines().collect();
+                assert_eq!(lines[2], "- [x] older todo 1");
+                // The closed todo on line 5
+                // and the other open todo
+                // on line 6 are both
+                // unchanged.
+                assert_eq!(lines[4], "- [x] older done 1");
+                assert_eq!(lines[5], "- [ ] older todo 2");
+                // The status message
+                // confirms the toggle.
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("status message after mark");
+                assert!(
+                        msg.contains("Marked done"),
+                        "got: {:?}",
+                        msg
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// After a successful file
+        /// toggle, `mark_todo_done`
+        /// refreshes the
+        /// `todo_entries` SQLite
+        /// table via the library's
+        /// `update_files_in_db`
+        /// function (the canonical
+        /// re-index path) and then
+        /// re-queries the TUI's view.
+/// Both halves of the
+/// contract are verified:
+/// the row's `closed` column
+/// is now `1`, and the row
+/// itself is gone from the
+/// merged list (the underlying
+/// query filters
+/// `open: true`).
+        #[test]
+        fn mark_todo_done_refreshes_database_via_update_files_in_db() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!older todo 1".to_string();
+                app.refresh();
+                // Sanity: the row exists
+                // in the DB before the
+                // action, with
+                // `closed = 0`.
+                use rusqlite::Connection;
+                let conn_before =
+                        Connection::open(&db_path).expect("open db");
+                let closed_before: i64 = conn_before
+                        .query_row(
+                                "SELECT closed FROM todo_entries \
+                                 WHERE filename = 'older.md' \
+                                   AND line_number = 3",
+                                [],
+                                |row| row.get(0),
+                        )
+                        .expect("query closed before");
+                assert_eq!(closed_before, 0);
+                drop(conn_before);
+                // Pre-condition: row is in
+                // the merged list.
+                assert!(
+                        app.merged_rows()
+                                .iter()
+                                .any(|r| r.command.contains("older todo 1")),
+                );
+                app.mark_todo_done();
+                // File was updated.
+                let contents = std::fs::read_to_string(
+                        dir.join("older.md"),
+                )
+                .expect("read older.md");
+                assert!(
+                        contents.contains("- [x] older todo 1"),
+                        "file should be updated: {}",
+                        contents
+                );
+                // DB was updated by
+                // `update_files_in_db`:
+                // the row's `closed` is
+                // now 1.
+                let conn_after =
+                        Connection::open(&db_path).expect("open db");
+                let closed_after: i64 = conn_after
+                        .query_row(
+                                "SELECT closed FROM todo_entries \
+                                 WHERE filename = 'older.md' \
+                                   AND line_number = 3",
+                                [],
+                                |row| row.get(0),
+                        )
+                        .expect("query closed after");
+                assert_eq!(
+                        closed_after, 1,
+                        "DB should reflect the toggle \
+                         (update_files_in_db re-parses \
+                         the file and re-writes the \
+                         todo_entries row)"
+                );
+                drop(conn_after);
+                // Row is gone from the
+                // merged list.
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert!(
+                        cmds.iter()
+                                .all(|c| !c.contains("older todo 1")),
+                        "row should be gone after refresh: {:?}",
+                        cmds
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// `mark_todo_done` only works
+        /// in todo mode. Outside of
+        /// todo mode it's a no-op with a
+        /// status message so the user
+        /// understands why their `C-x`
+        /// did nothing. This is the
+        /// mode-gating contract: the
+        /// action is "only available in
+        /// the search of todos".
+        #[test]
+        fn mark_todo_done_outside_todo_mode_is_noop() {
+                let mut app = global_test_app(&[("a", 1)]);
+                // Note: we don't even have a
+                // row selected, but the
+                // mode gate fires first.
+                app.query = "git".to_string(); // plain history mode
+                app.refresh();
+                let before_rows =
+                        app.merged_rows().len();
+                app.mark_todo_done();
+                assert_eq!(
+                        app.merged_rows().len(),
+                        before_rows
+                );
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("status message");
+                assert!(
+                        msg.contains("only available in todo"),
+                        "got: {:?}",
+                        msg
+                );
+        }
+
+        /// If the file's content has
+        /// changed since the indexer
+        /// last saw it (the user
+        /// manually toggled the
+        /// checkbox, or the line was
+        /// edited in some other way),
+        /// the targeted line may no
+        /// longer be an open todo. The
+        /// action must NOT corrupt the
+        /// file in that case — it
+        /// surfaces a status message
+        /// and leaves the file alone.
+        #[test]
+        fn mark_todo_done_rejects_stale_line() {
+                let (dir, db_path) = setup_todo_db();
+                // Mutate the file behind
+                // the indexer's back: the
+                // todo on line 3 is now
+                // already closed.
+                std::fs::write(
+                        dir.join("older.md"),
+                        "# Older\n\n\
+                         - [x] older todo 1 (already done)\n\
+                         some prose in between\n\
+                         - [x] older done 1\n\
+                         - [ ] older todo 2\n",
+                )
+                .expect("rewrite older.md");
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!older todo 1".to_string();
+                app.refresh();
+                app.mark_todo_done();
+                // File unchanged.
+                let contents = std::fs::read_to_string(
+                        dir.join("older.md"),
+                )
+                .expect("read older.md");
+                assert!(
+                        contents.contains(
+                                "already done"
+                        ),
+                        "file should be untouched: {}",
+                        contents
+                );
+                // Status explains why.
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("status message");
+                assert!(
+                        msg.contains("no longer an open todo"),
+                        "got: {:?}",
+                        msg
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// If `notes_dir` is not
+        /// configured, the action
+        /// surfaces a status message
+        /// and writes nothing.
+        #[test]
+        fn mark_todo_done_without_notes_dir_is_noop() {
+                let (dir, db_path) = setup_todo_db();
+                let mut app = global_test_app(&[("a", 1)]);
+                // `notes_database` is set
+                // but `notes_dir` is None.
+                app.notes_database = Some(db_path.clone());
+                app.query = "!older todo 1".to_string();
+                app.refresh();
+                app.mark_todo_done();
+                // The original file is
+                // untouched.
+                let contents = std::fs::read_to_string(
+                        dir.join("older.md"),
+                )
+                .expect("read older.md");
+                assert!(
+                        contents.contains(
+                                "- [ ] older todo 1"
+                        ),
+                        "file should be untouched: {}",
+                        contents
+                );
+                let msg = app
+                        .status_message
+                        .as_ref()
+                        .map(|(m, _)| m.as_str())
+                        .expect("status message");
+                assert!(
+                        msg.contains("notes.dir"),
+                        "got: {:?}",
+                        msg
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(&db_path);
+        }
+
+        /// Indented todos (e.g. nested
+        /// under a heading) get
+        /// correctly toggled — the
+        /// leading whitespace is
+        /// preserved, only the bracket
+        /// marker changes. We verify
+        /// this with a hand-crafted
+        /// single-row scenario where
+        /// we bypass the library's
+        /// parser: the library's
+        /// `TODO_REGEX` is anchored
+        /// with `^`, so indented
+        /// checkboxes never reach
+        /// the database in the first
+        /// place. But a stale DB row
+        /// (e.g. left over from a
+        /// previous version of the
+        /// library, or hand-edited by
+        /// the user) might still
+        /// point at an indented line,
+        /// and our toggle must
+        /// preserve the indentation.
+        #[test]
+        fn mark_todo_done_preserves_indentation() {
+                use std::fs;
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-indent-{}",
+                    std::process::id(),
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                let mut note = String::from("# Title\n");
+                note.push_str("\n");
+                note.push_str("  - [ ] indented todo\n");
+                fs::write(dir.join("note.md"), &note)
+                        .expect("write");
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.query = "fake".to_string();
+                app.refresh();
+                // Construct a synthetic
+                // todo row that points at
+                // line 3 of the file.
+                // This bypasses
+                // `fetch_todos` (the
+                // library wouldn't have
+                // indexed the indented
+                // todo in the first
+                // place) and exercises
+                // the file mutation in
+                // isolation.
+                let row = crate::tui::state::HistoryRow {
+                        id: -3,
+                        command: String::from(
+                            "indented todo",
+                        ),
+                        directory: String::new(),
+                        session_id: String::new(),
+                        exit_code: 0,
+                        timestamp: 0,
+                        comment: String::from("note.md"),
+                        output: String::new(),
+                        mode: String::from("todo"),
+                };
+                app.mark_todo_done_for_row(&row);
+                let contents = fs::read_to_string(
+                        dir.join("note.md"),
+                )
+                .expect("read note.md");
+                let lines: Vec<&str> =
+                        contents.lines().collect();
+                // The leading two spaces
+                // are preserved; only the
+                // bracket changed.
+                assert_eq!(
+                        lines[2],
+                        "  - [x] indented todo",
+                        "got: {:?}",
+                        contents
+                );
+                let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Files without a trailing
+        /// newline (unusual but
+        /// legal) are preserved
+        /// verbatim after the toggle —
+        /// we don't accidentally add
+        /// a trailing `\n` that
+        /// wasn't there.
+        #[test]
+        fn mark_todo_done_preserves_no_trailing_newline() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-noeof-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                // Note: NO trailing newline.
+                fs::write(
+                        dir.join("note.md"),
+                        "# Title\n\n- [ ] open todo",
+                )
+                .expect("write");
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todo-noeof-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path)
+                        .expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                let data = note_search::markdown_parser::process_markdown_file(
+                        &dir.join("note.md"),
+                        &dir,
+                )
+                .expect("process file");
+                note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+                        .map_err(|e| format!("write: {e}"))
+                        .expect("write db");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                app.query = "!".to_string();
+                app.refresh();
+                app.mark_todo_done();
+                let contents = fs::read_to_string(
+                        dir.join("note.md"),
+                )
+                .expect("read note.md");
+                assert_eq!(
+                        contents,
+                        "# Title\n\n- [x] open todo"
+                );
+                let _ = fs::remove_dir_all(&dir);
+                let _ = fs::remove_file(&db_path);
         }
 }

@@ -56,6 +56,42 @@ pub struct HistoryRow {
     pub mode: String,
 }
 
+impl HistoryRow {
+    /// `true` when this row is a
+    /// not-yet-executed LLM
+    /// suggestion (the synthetic
+    /// preview row inserted into
+    /// the merged view while the
+    /// user is composing a `=...`
+    /// LLM command-generation
+    /// query).
+    ///
+    /// The check is on
+    /// `exit_code == -1` (the
+    /// "never executed" sentinel),
+    /// NOT on `id < 0`. Negative
+    /// ids are also used by todo
+    /// rows (which encode the
+    /// 1-based line number as
+    /// `id = -(line_number)`), so
+    /// `id < 0` would falsely
+    /// classify every todo row as
+    /// an LLM preview — that's the
+    /// exact bug this predicate
+    /// was introduced to fix. The
+    /// `exit_code` sentinel is the
+    /// load-bearing distinction;
+    /// real history rows always
+    /// have `exit_code >= 0`,
+    /// question-mode rows have
+    /// `exit_code >= 0`, and only
+    /// LLM previews carry the
+    /// `-1` sentinel.
+    pub fn is_llm_preview(&self) -> bool {
+        self.exit_code == -1
+    }
+}
+
 /// How the parent shell should treat the chosen command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickMode {
@@ -224,5 +260,140 @@ impl SortOrder {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HistoryRow;
+
+    /// A real history row (positive
+    /// `id`, `exit_code == 0`) is
+    /// not an LLM preview.
+    #[test]
+    fn is_llm_preview_real_history_row_is_false() {
+        let row = HistoryRow {
+            id: 42,
+            command: "ls -la".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 1_000_000,
+            comment: String::new(),
+            output: String::new(),
+            mode: "command".to_string(),
+        };
+        assert!(!row.is_llm_preview());
+    }
+
+    /// A history row that failed
+    /// (positive `id`,
+    /// `exit_code != 0`) is not
+    /// an LLM preview either —
+    /// the user actually ran it.
+    #[test]
+    fn is_llm_preview_failed_command_is_false() {
+        let row = HistoryRow {
+            id: 100,
+            command: "false".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 1,
+            timestamp: 1_000_000,
+            comment: String::new(),
+            output: String::new(),
+            mode: "command".to_string(),
+        };
+        assert!(!row.is_llm_preview());
+    }
+
+    /// A todo row has a negative
+    /// `id` (encoding the 1-based
+    /// line number as
+    /// `id = -(line_number)`) and
+    /// `exit_code == 0`. It is
+    /// emphatically NOT an LLM
+    /// preview — checking
+    /// `id < 0` instead of
+    /// `exit_code == -1` was the
+    /// exact bug that made every
+    /// todo row show a `[LLM]`
+    /// marker in the age column.
+    /// This test is the regression
+    /// guard.
+    #[test]
+    fn is_llm_preview_todo_row_is_false() {
+        let row = HistoryRow {
+            id: -42, // line 42 of the source note
+            command: "pick apples in the orchard".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 1_000_000,
+            comment: "note.md".to_string(),
+            output: String::new(),
+            mode: "todo".to_string(),
+        };
+        assert!(
+            !row.is_llm_preview(),
+            "todo row must NOT be classified as LLM preview \
+             (negative id encodes the line number, not a preview)"
+        );
+    }
+
+    /// The synthetic LLM preview
+    /// row has `exit_code == -1`
+    /// (the "never executed"
+    /// sentinel) and a negative
+    /// `id` (typically `-1`). Both
+    /// signals together are the
+    /// canonical fingerprint of an
+    /// LLM preview; the predicate
+    /// keys on the `exit_code`
+    /// sentinel because it's the
+    /// load-bearing distinction
+    /// (other row types may also
+    /// use negative ids).
+    #[test]
+    fn is_llm_preview_llm_preview_row_is_true() {
+        let row = HistoryRow {
+            id: -1,
+            command: "find . -name '*.rs' -newer foo".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: -1, // never executed sentinel
+            timestamp: 0,
+            comment: "find rust files newer than foo".to_string(),
+            output: String::new(),
+            mode: String::new(),
+        };
+        assert!(row.is_llm_preview());
+    }
+
+    /// A question-mode row has
+    /// `exit_code == 0` (the
+    /// question was answered
+    /// successfully by ollama) and
+    /// is not an LLM preview in
+    /// the `=...`-style sense.
+    /// The render path uses
+    /// `is_llm_preview()` to decide
+    /// whether to draw a `[LLM]`
+    /// tag, and we don't want
+    /// questions to pick that up.
+    #[test]
+    fn is_llm_preview_question_row_is_false() {
+        let row = HistoryRow {
+            id: 7,
+            command: "what is the capital of france?".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 1_000_000,
+            comment: String::new(),
+            output: "Paris".to_string(),
+            mode: "question".to_string(),
+        };
+        assert!(!row.is_llm_preview());
     }
 }
