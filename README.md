@@ -127,6 +127,16 @@ match standard workflow expectations. This project aims to provide:
   next candidates.
 - **Bulk deletion with confirmation:** `smarthistory clean` accepts the
   same filter flags as `search` and prompts before deleting.
+- **Note search on `@...`:** when you prefix a query with
+  `@` and press `Enter`, the TUI searches a
+  [note_search](https://github.com/snharbec/note_search) SQLite database
+  for matching notes. Results are displayed in the history list with
+  the note filename, title, and age (based on the note's `updated`
+  timestamp). Selecting a note opens it in your `$EDITOR`. The full
+  note content is shown in the details pane. Requires
+  `notes.database` and `notes.dir` to be configured (or the
+  `NOTE_SEARCH_DATABASE` / `NOTE_SEARCH_DIR` environment variables).
+  The prefix character is configurable via `prefix.notes=...`.
 - **Debug logging:** `SMARTHISTORY_DEBUG=1` enables per-press logging of
   cache decisions to `~/.local/cache/smarthistory/widget-debug.log`.
 - **Atuin import** for users migrating from atuin.
@@ -171,6 +181,9 @@ Supported keys:
 | `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
 | `ollama.url=http://host:port` | URL of a local ollama instance used by the LLM command-generation mode (the `=...` query prefix in the TUI). Must be paired with `ollama.model`. | (feature disabled) |
 | `ollama.model=<name>` | ollama model name to use, e.g. `llama3.2`, `qwen2.5-coder`, `codellama`. Must be paired with `ollama.url`. The model must already be pulled (`ollama pull <name>`). | (feature disabled) |
+| `notes.database=~/path` | Path to a [note_search](https://github.com/snharbec/note_search) SQLite database. When set, the `@` prefix searches notes instead of shell history. Can also be set via the `NOTE_SEARCH_DATABASE` environment variable. | (feature disabled) |
+| `notes.dir=~/path` | Path to the directory containing note files. Used to read note content for the preview pane and to resolve filenames when opening a note in the editor. Can also be set via the `NOTE_SEARCH_DIR` environment variable. | (feature disabled) |
+| `prefix.notes=@` | Prefix character for note search mode. Change this if `@` conflicts with other key bindings. | `@` |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -890,6 +903,35 @@ When the leading `%` is present the input border is tinted
 magenta (same as the LLM mode) and the status bar shows a
 `QUESTION` chip (red when ollama is not configured, magenta
 when it is).
+
+### Note search mode (`@...`)
+
+Prefix a query with `@` to search for notes in a
+[note_search](https://github.com/snharbec/note_search) SQLite database.
+The query is matched against the note filename, title, body, and tags.
+Results are displayed in the history list with the note filename,
+title, and age (based on the note's `updated` timestamp). Selecting a
+note opens it in your `$EDITOR`. The full note content is shown in
+the details pane.
+
+```
+> @rust
+# Shows all notes matching "rust" in filename, title, body, or tags
+# Results are sorted by updated timestamp (newest first)
+# Press Enter to open the selected note in $EDITOR
+```
+
+Configuration requires both `notes.database` and `notes.dir` (or the
+`NOTE_SEARCH_DATABASE` and `NOTE_SEARCH_DIR` environment variables):
+
+```ini
+notes.database=~/notes/note.sqlite
+notes.dir=~/notes
+```
+
+The prefix character is configurable via `prefix.notes=...` in the
+config file. When the notes database is not configured, typing `@`
+shows an empty list and the input border turns red.
 
 ### Example session
 
