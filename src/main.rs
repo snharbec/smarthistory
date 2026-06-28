@@ -2536,19 +2536,18 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 // Store the comment if present.
-                if let Some(ref comment) = row.comment {
-                    if !comment.is_empty() {
+                if let Some(ref comment) = row.comment
+                    && !comment.is_empty() {
                         conn.execute(
                             "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
                              ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
                             params![row.command, comment],
                         )?;
                     }
-                }
 
                 // Store the output if present.
-                if let Some(ref output) = row.output {
-                    if !output.is_empty() {
+                if let Some(ref output) = row.output
+                    && !output.is_empty() {
                         // Get the history id for this row.
                         let history_id: i64 = conn.query_row(
                             "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
@@ -2562,7 +2561,6 @@ fn main() -> anyhow::Result<()> {
                             params![history_id, output],
                         )?;
                     }
-                }
             }
 
             eprintln!(

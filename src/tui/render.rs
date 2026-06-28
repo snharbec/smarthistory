@@ -677,6 +677,11 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
     row(
         &mut lines,
+        binding_for(Action::DeleteWordBackward),
+        "delete one word backward (readline `Ctrl-W` semantics)",
+    );
+    row(
+        &mut lines,
         binding_for(Action::ClearQuery),
         "clear the query",
     );

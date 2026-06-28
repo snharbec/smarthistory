@@ -257,6 +257,156 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or_else(|| s.len())
 }
 
+/// Walk left from `cursor` (a character index in
+/// `s`) and return the new cursor position after
+/// deleting one "word" backward in the
+/// readline/bash/zsh sense:
+///
+/// 1. **Trailing whitespace first**: skip any
+///    run of whitespace (`is_whitespace()` —
+///    covers spaces, tabs, Unicode whitespace)
+///    immediately to the left of `cursor`.
+/// 2. **Then the preceding word**: skip the run
+///    of non-whitespace characters immediately
+///    to the left of where step 1 stopped.
+/// 3. **Stop at 0**: never go past the start of
+///    the buffer.
+///
+/// The function is pure: it returns the *new*
+/// cursor position (a character index) without
+/// mutating `s`. The caller is responsible for
+/// actually deleting the slice `s[new_cursor..cursor]`
+/// (using `String::replace_range` with the
+/// corresponding byte indices) and updating the
+/// cursor. Keeping the two steps separate lets
+/// the caller do the deletion atomically with a
+/// single `replace_range` rather than N
+/// individual `String::remove` calls (each of
+/// which has to recompute the byte index from a
+/// character index).
+///
+/// Examples (cursor → return):
+/// - `s = ""`, cursor = 0 → 0
+/// - `s = "abc"`, cursor = 3 → 0 (whole word)
+/// - `s = "abc"`, cursor = 2 → 0 (rest of word)
+/// - `s = "abc def"`, cursor = 7 → 4 (the `def`)
+/// - `s = "abc def"`, cursor = 4 → 0 (the `abc`,
+///   even though there are no leading spaces —
+///   `def` is the word immediately before the
+///   cursor)
+/// - `s = "abc   def"`, cursor = 7 → 0 (eat the
+/// Walk left from `cursor` (a character index in
+/// `s`) and return the new cursor position after
+/// deleting one "word" backward, in a
+/// readline/bash/zsh-inspired semantic:
+///
+/// 1. **Trailing whitespace run**: skip any run
+///    of whitespace (`is_whitespace()`) chars
+///    immediately to the left of `cursor`.
+/// 2. **Preceding non-whitespace run**: skip
+///    the run of non-whitespace chars
+///    immediately to the left of where step 1
+///    stopped. We only walk one run — the
+///    function never reaches further back to
+///    consume additional whitespace runs.
+/// 3. **Stop at 0**: never go past the start of
+///    the buffer.
+///
+/// Both steps are skipped automatically when
+/// there's nothing to skip (an empty step 1
+/// when the char immediately to the left of the
+/// cursor is non-whitespace; an empty step 2
+/// when step 1 walked all the way back to
+/// position 0).
+///
+/// The function is pure: it returns the *new*
+/// cursor position (a character index) without
+/// mutating `s`. The caller is responsible for
+/// actually deleting the slice
+/// `s[new_cursor..cursor]` (using
+/// `String::replace_range` with the corresponding
+/// byte indices from `char_to_byte_index`).
+///
+/// Examples (`s`, cursor → return, with the
+/// implied query state shown for clarity):
+///
+/// - `("abc", 3) → 0` — eat the whole word.
+/// - `("abc def", 7) → 4` — eat `def`, leaving
+///   `abc ` with cursor right after the
+///   remaining space (position 4).
+/// - `("abc def", 4) → 0` — the char
+///   immediately to the left of cursor is a
+///   space, so step 1 eats the space and step 2
+///   eats `abc`. The result is `def` with
+///   cursor at 0.
+/// - `("git status", 10) → 4` — eat `status`,
+///   leaving `git `.
+/// - `("abc   ", 6) → 0` — only whitespace
+///   was eaten; step 2 walks back through `abc`
+///   (which has nothing before it on the left
+///   except the start of the buffer).
+/// - `("  abc", 5) → 3` — eat `abc`, leaving
+///   the two leading spaces intact.
+/// - `("git status  ", 12) → 4` — step 1 eats
+///   the 2 trailing spaces (positions 10..12),
+///   step 2 eats `status` (positions 4..10).
+///   The space at position 3 (between `git`
+///   and `status`) is NOT eaten — step 1 only
+///   walks back from the cursor, not forward
+///   through the already-deleted range.
+/// - `("", 0) → 0` — empty buffer, no-op.
+///
+/// Note: this is *similar to* but not identical
+/// to readline/bash's `unix-word-rubout`.
+/// Standard `unix-word-rubout` may eat one
+/// additional whitespace char (the one
+/// immediately preceding the word it ate).
+/// Our algorithm eats the trailing whitespace
+/// run first, then the preceding word. The
+/// difference is minor (one character at the
+/// word boundary) and the chosen semantic
+/// matches what `backward-kill-word` does in
+/// zsh's `wordstyle` shell.
+fn delete_word_backward_at_cursor(s: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = s.chars().take(cursor).collect();
+    let mut idx = chars.len();
+    // Step 1: skip a trailing whitespace run.
+    // Whitespace is defined by
+    // `char::is_whitespace`, which covers the
+    // standard ASCII whitespace plus the Unicode
+    // whitespace category (so `　` / `\t` /
+    // non-breaking space are all treated as word
+    // boundaries, matching `unicode-word-boundary`
+    // rules that readline uses by default on
+    // modern systems).
+    while idx > 0 && chars[idx - 1].is_whitespace() {
+        idx -= 1;
+    }
+    // Step 2: skip the preceding non-whitespace
+    // run. We only walk one run — that's the
+    // difference between `unix-word-rubout`
+    // (this function) and a hypothetical
+    // "eat all non-whitespace" function that
+    // would walk the whole prefix.
+    while idx > 0 && !chars[idx - 1].is_whitespace() {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Convenience wrapper for the comment-edit
+/// buffer, which has no cursor concept — operate
+/// on the logical end of the string. Equivalent
+/// to "what would `delete_word_backward_at_cursor`
+/// return if the cursor were at the end?".
+fn delete_word_backward_in_string(s: &mut String) {
+    let cursor = s.chars().count();
+    let new_cursor = delete_word_backward_at_cursor(s, cursor);
+    let start_byte = char_to_byte_index(s, new_cursor);
+    let end_byte = char_to_byte_index(s, cursor);
+    s.replace_range(start_byte..end_byte, "");
+}
+
 /// Tokenize a command line into shell-quote-aware tokens.
 ///
 /// Returns one entry per whitespace-separated word, with
@@ -645,20 +795,20 @@ impl App {
     /// True if the current query is a regex (prefixed with configured regex prefix).
     fn is_regex_query(&self) -> bool {
         let p = self.query_prefixes.regex;
-        !self.query.is_empty() && self.query.chars().next() == Some(p)
+        !self.query.is_empty() && self.query.starts_with(p)
     }
 
     /// True if the current query is a fuzzy search (prefixed with configured fuzzy prefix).
     fn is_fuzzy_query(&self) -> bool {
         let p = self.query_prefixes.fuzzy;
-        !self.query.is_empty() && self.query.chars().next() == Some(p)
+        !self.query.is_empty() && self.query.starts_with(p)
     }
 
     /// True if the current query is an output-content search
     /// (prefixed with configured output prefix).
     fn is_output_query(&self) -> bool {
         let p = self.query_prefixes.output;
-        !self.query.is_empty() && self.query.chars().next() == Some(p)
+        !self.query.is_empty() && self.query.starts_with(p)
     }
 
     /// True if the current query is an LLM command-generation
@@ -667,7 +817,7 @@ impl App {
     /// the prefix (not just the prefix alone or with only whitespace).
     fn is_llm_query(&self) -> bool {
         let p = self.query_prefixes.llm;
-        self.query.starts_with(p) && self.query[p.len_utf8()..].trim().len() > 0
+        self.query.starts_with(p) && !self.query[p.len_utf8()..].trim().is_empty()
     }
 
     /// True if the current query is a general question
@@ -676,7 +826,7 @@ impl App {
     /// the prefix (not just the prefix alone or with only whitespace).
     fn is_question_query(&self) -> bool {
         let p = self.query_prefixes.question;
-        self.query.starts_with(p) && self.query[p.len_utf8()..].trim().len() > 0
+        self.query.starts_with(p) && !self.query[p.len_utf8()..].trim().is_empty()
     }
 
     /// The regex pattern, i.e. everything after the leading regex prefix.
@@ -737,7 +887,7 @@ impl App {
     /// (prefixed with the configured notes prefix, default `@`).
     fn is_notes_query(&self) -> bool {
         let p = self.query_prefixes.notes;
-        !self.query.is_empty() && self.query.chars().next() == Some(p)
+        !self.query.is_empty() && self.query.starts_with(p)
     }
 
     /// The note search body, i.e. everything after the
@@ -785,7 +935,6 @@ impl App {
         
         match service.search_notes_by_query(pattern) {
             Ok(results) => {
-                let mut debug_count = 0;
                 let mut rows: Vec<HistoryRow> = results.iter().map(|note| {
                     let title = note.title.as_deref().unwrap_or("");
                     let comment = if title.is_empty() {
@@ -793,14 +942,6 @@ impl App {
                     } else {
                         format!("{} — {}", title, note.filename)
                     };
-                    // Debug: print first few timestamps
-                    if debug_count < 3 {
-                        eprintln!(
-                            "DEBUG note: {} created={:?} updated={:?}",
-                            note.filename, note.created, note.updated
-                        );
-                        debug_count += 1;
-                    }
                     let ts = note.updated.or(note.created).unwrap_or(0);
                     HistoryRow {
                         id: 0,
@@ -2614,6 +2755,82 @@ fn move_selection(&mut self, delta: isize) {
         }
     }
 
+    /// Delete one word backward from the cursor
+    /// position. Matches the readline / bash / zsh
+    /// `Ctrl-W` semantics:
+    ///
+    /// 1. **Trailing whitespace first**: if the
+    ///    character(s) immediately before the cursor
+    ///    are whitespace, eat them.
+    /// 2. **Then the preceding word**: walk left
+    ///    through the run of non-whitespace
+    ///    characters immediately before the cursor
+    ///    and eat them too.
+    /// 3. **Stop at the start of the buffer** (or at
+    ///    cursor position 0, whichever comes first).
+    ///
+    /// If the cursor is in the middle of a word
+    /// (e.g. `git |status` with the cursor between
+    /// the space and `status`), only the characters
+    /// to the left of the cursor are deleted — the
+    /// cursor's position is respected. This matches
+    /// the existing `Backspace` behaviour, which
+    /// already supports mid-buffer cursor position
+    /// via `query_cursor`.
+    ///
+    /// The function operates on the query field by
+    /// default, but routes to the comment-edit
+    /// buffer when one is open (so the same shortcut
+    /// works in the `EditComment` overlay).
+    ///
+    /// UTF-8 handling: `query_cursor` and the
+    /// buffer's `.chars()` are in characters; we
+    /// only convert to a byte index once, at the
+    /// moment of the `String::remove` call, via
+    /// `char_to_byte_index`. We delete one character
+    /// at a time (rather than slicing) so the buffer
+    /// stays valid UTF-8 throughout — a multi-byte
+    /// character is removed as a single unit.
+    fn delete_word_backward(&mut self) {
+        if let Some(ref mut buf) = self.comment_edit {
+            // The comment-edit buffer has no cursor
+            // concept — it's just a `String`. Apply
+            // the same word-backward logic but
+            // operate on the buffer's logical end.
+            delete_word_backward_in_string(buf);
+            return;
+        }
+        if self.query_cursor == 0 {
+            // Nothing to the left of the cursor —
+            // don't flag the query as touched, just
+            // bail. Mirrors `backspace`'s "no-op at
+            // position 0" contract.
+            return;
+        }
+        self.query_touched = true;
+        // Walk left in *characters*, counting how
+        // many we delete. The cursor is in
+        // characters, so the index math is
+        // straightforward: the new cursor position
+        // is `start_of_word`.
+        let start_of_word = delete_word_backward_at_cursor(&self.query, self.query_cursor);
+        // Apply the deletion as a single `replace`
+        // so we don't do N UTF-8-safe `String::remove`
+        // calls (each of which has to recompute the
+        // byte index). The slice `&self.query[start..end]`
+        // is a byte slice; we trust it because
+        // `start_of_word` and `self.query_cursor` are
+        // both character indices that we've
+        // validated to be in-range.
+        let start_byte = char_to_byte_index(&self.query, start_of_word);
+        let end_byte = char_to_byte_index(&self.query, self.query_cursor);
+        self.query.replace_range(start_byte..end_byte, "");
+        self.query_cursor = start_of_word;
+        self.recompile_regex();
+        self.refresh();
+        self.llm_touch();
+    }
+
     fn clear_query(&mut self) {
         if let Some(ref mut buf) = self.comment_edit {
             buf.clear();
@@ -2917,7 +3134,6 @@ fn move_selection(&mut self, delta: isize) {
         
         if let Err(e) = output_result {
             self.set_status_message(format!("Question: output store failed: {}", e));
-            return;
         }
     }
 
@@ -3356,14 +3572,13 @@ fn run_loop(
         }
 
         // Check for LLM result from background thread.
-        if let Some(request) = app.llm_request.as_ref() {
-            if let Ok(result) = request.receiver.try_recv() {
+        if let Some(request) = app.llm_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv() {
                 // Take ownership of the request before processing.
                 if let Some(request) = app.llm_request.take() {
                     app.process_llm_result(request, result);
                 }
             }
-        }
 
         if !crossterm::event::poll(Duration::from_millis(100))? {
             // No input ready. Still a chance to drive the
@@ -3386,9 +3601,9 @@ fn run_loop(
         // If an LLM request is in flight, check if this is a
         // cancel key. If so, cancel the request without leaving
         // the TUI.
-        if app.llm_request.is_some() {
-            if let Some(action) = action_for_key(&app.bindings, &key) {
-                if matches!(action, Action::Cancel) {
+        if app.llm_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+                && matches!(action, Action::Cancel) {
                     if let Some(request) = app.llm_request.take() {
                         request.cancelled.store(true, Ordering::Relaxed);
                     }
@@ -3396,8 +3611,6 @@ fn run_loop(
                     app.set_status_message("LLM request cancelled".to_string());
                     continue;
                 }
-            }
-        }
 
         if app.is_output_viewing() {
             handle_output_view_key(app, key, page_size);
@@ -3656,6 +3869,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::Backspace => {
             app.backspace();
+            false
+        }
+        Action::DeleteWordBackward => {
+            app.delete_word_backward();
             false
         }
         Action::CommandAction => {
@@ -4271,6 +4488,17 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('u') => {
                 app.clear_query();
+                return false;
+            }
+            KeyCode::Char('w') => {
+                // Same shortcut as the main TUI:
+                // delete one word backward from the
+                // cursor in the comment buffer.
+                // `delete_word_backward` already
+                // routes to the comment-edit
+                // buffer when one is open, so we
+                // can call it directly.
+                app.delete_word_backward();
                 return false;
             }
             _ => return false,
@@ -8203,5 +8431,300 @@ mod tests {
                 app.correct_view = None;
                 app.accept_corrected_command();
                 assert!(app.selection.is_none());
+        }
+
+        // --- Delete-word-backward (`Ctrl-W`) -------------------
+
+        /// `Action::DeleteWordBackward` is bound to
+        /// `Ctrl-W` by default. The default key
+        /// matches the readline/bash/zsh muscle
+        /// memory for "kill previous word".
+        #[test]
+        fn delete_word_backward_default_key_routes() {
+                let bindings = KeyBindings::defaults();
+                let key = KeyEvent::new(
+                        KeyCode::Char('w'),
+                        KeyModifiers::CONTROL,
+                );
+                let action = action_for_key(&bindings, &key)
+                        .expect("Ctrl-W is bound by default");
+                assert_eq!(action, Action::DeleteWordBackward);
+        }
+
+        /// Basic case: cursor at end of `git status`,
+        /// press `Ctrl-W`, get `git `. The trailing
+        /// word `status` is eaten; the space between
+        /// `git` and `status` stays. We don't flag
+        /// the query as touched for an empty /
+        /// prefilled query — see the
+        /// `delete_word_backward_at_start_is_noop`
+        /// test for that boundary case.
+        #[test]
+        fn delete_word_backward_removes_trailing_word() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "git status".to_string();
+                app.query_cursor = app.query.chars().count();
+                app.delete_word_backward();
+                // `status` (positions 4..10) is
+                // eaten; the space at position 3
+                // stays. Result: "git ", cursor at
+                // the start of where `status` used
+                // to be (position 4).
+                assert_eq!(app.query, "git ");
+                assert_eq!(app.query_cursor, 4);
+        }
+
+        /// When the cursor is preceded by trailing
+        /// whitespace, the whitespace is eaten
+        /// along with the preceding word. So
+        /// `git status  ` (with 2 trailing spaces)
+        /// with the cursor at the end becomes `git`
+        /// after one `Ctrl-W`. This matches
+        /// readline/bash's `unix-word-rubout`: the
+        /// char immediately to the left of the
+        /// cursor is whitespace, so we eat that
+        /// whitespace run, then eat the preceding
+        /// word.
+        #[test]
+        fn delete_word_backward_eats_trailing_whitespace_first() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "git status  ".to_string();
+                app.query_cursor = app.query.chars().count();
+                app.delete_word_backward();
+                // Step 1 eats the 2 trailing spaces
+                // (positions 10..12), then step 2
+                // eats `status` (positions 4..10).
+                // Total deleted: positions 4..12
+                // (8 chars). Remaining: "git " (the
+                // space between `git` and `status`,
+                // at position 3, is NOT eaten because
+                // step 1 only walks back from the
+                // cursor, not forward through the
+                // already-deleted range). Cursor at 4.
+                assert_eq!(app.query, "git ");
+                assert_eq!(app.query_cursor, 4);
+        }
+
+        /// Multiple consecutive spaces are all
+        /// kept in the result — the function
+        /// only eats ONE word (the trailing
+        /// non-whitespace run) and the whitespace
+        /// immediately to its left (one run of
+        /// whitespace). It doesn't reach further
+        /// back to consume additional whitespace
+        /// runs. So `git    status` with the
+        /// cursor at the end becomes `git    `
+        /// (the 4 spaces between `git` and
+        /// `status` stay; only `status` is
+        /// eaten).
+        #[test]
+        fn delete_word_backward_handles_multiple_spaces() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "git    status".to_string();
+                app.query_cursor = app.query.chars().count();
+                app.delete_word_backward();
+                // `status` (positions 7..13) is
+                // eaten; the 4 spaces between
+                // `git` and `status` stay. Result:
+                // "git    ", cursor at 7.
+                assert_eq!(app.query, "git    ");
+                assert_eq!(app.query_cursor, 7);
+        }
+
+        /// Cursor at the start of the buffer is a
+        /// no-op. No panic, no underflow. We don't
+        /// flag the query as touched (mirrors
+        /// `backspace_at_position_zero_is_noop`).
+        #[test]
+        fn delete_word_backward_at_start_is_noop() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "anything".to_string();
+                app.query_cursor = 0;
+                app.delete_word_backward();
+                assert_eq!(app.query, "anything");
+                assert_eq!(app.query_cursor, 0);
+        }
+
+        /// Cursor mid-buffer, between a space and
+        /// the next word: the space AND the word
+        /// before the space are eaten. The cursor
+        /// is at position 4 in `git status`, which
+        /// is right after the space and right
+        /// before the `s` of `status`. Pressing
+        /// `Ctrl-W` eats the trailing whitespace
+        /// (1 char) plus the preceding non-
+        /// whitespace run `git` (3 chars), so the
+        /// result is `status` with the cursor at
+        /// position 0.
+        ///
+        /// This is the standard readline/bash
+        /// `unix-word-rubout` behaviour: if the
+        /// char immediately to the left of the
+        /// cursor is whitespace, the function
+        /// eats both that whitespace run AND the
+        /// preceding word.
+        #[test]
+        fn delete_word_backward_respects_cursor_position() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "git status".to_string();
+                // Position 4 is right after the space
+                // and right before the `s` of
+                // `status`. Cursor at position 4 =
+                // chars().take(4) = "git ".
+                app.query_cursor = 4;
+                app.delete_word_backward();
+                // Eat "git " (positions 0..4) —
+                // the trailing whitespace AND the
+                // preceding word. Result: "status",
+                // cursor at 0.
+                assert_eq!(app.query, "status");
+                assert_eq!(app.query_cursor, 0);
+        }
+
+        /// Multi-byte UTF-8: the cursor is in
+        /// characters, so an accented character
+        /// counts as one step. The word-deletion
+        /// logic must respect the character /
+        /// byte distinction so it doesn't
+        /// accidentally split a multi-byte
+        /// codepoint.
+        #[test]
+        fn delete_word_backward_handles_multibyte() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "café au lait".to_string();
+                app.query_cursor = app.query.chars().count();
+                app.delete_word_backward();
+                // `lait` (positions 8..12) is eaten;
+                // the spaces and `café au` stay.
+                // The `é` (one character, 2 bytes)
+                // is preserved correctly because
+                // `String::replace_range` operates
+                // on byte indices that we computed
+                // via `char_to_byte_index`.
+                assert_eq!(app.query, "café au ");
+                assert_eq!(app.query_cursor, 8);
+        }
+
+        /// Cursor mid-word: only the part of the
+        /// word to the LEFT of the cursor is
+        /// eaten. The cursor is in position 5 of
+        /// `cargotest`, between the `o` of
+        /// `cargo` and the `t` of `test`. The
+        /// function walks back through the
+        /// non-whitespace run to the left of the
+        /// cursor (positions 4, 3, 2, 1, 0 =
+        /// "cargo", 5 chars), stopping at the
+        /// start of the buffer because there's no
+        /// whitespace before it. The result is
+        /// `test` with the cursor at position 0.
+        ///
+        /// This is readline/bash's
+        /// `unix-word-rubout` behaviour: only
+        /// the characters to the LEFT of the
+        /// cursor are considered. The part of
+        /// the word to the right of the cursor
+        /// is preserved. (Note: this differs
+        /// from `backward-kill-word` in some
+        /// shells which would delete the whole
+        /// word regardless of cursor position.)
+        #[test]
+        fn delete_word_backward_mid_word_eats_left_of_cursor() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = "cargotest".to_string();
+                // Position 5 is between `o` and `t`.
+                app.query_cursor = 5;
+                app.delete_word_backward();
+                // Eat `cargo` (positions 0..5).
+                // The `test` part to the right of
+                // the cursor stays. Result: "test",
+                // cursor at 0.
+                assert_eq!(app.query, "test");
+                assert_eq!(app.query_cursor, 0);
+        }
+
+        /// Empty query is a clean no-op, just like
+        /// `backspace` on an empty buffer.
+        #[test]
+        fn delete_word_backward_on_empty_query() {
+                let mut app = stats_test_app(&[("ls", 1)]);
+                app.query = String::new();
+                app.query_cursor = 0;
+                app.delete_word_backward();
+                assert_eq!(app.query, "");
+                assert_eq!(app.query_cursor, 0);
+        }
+
+        /// The comment-edit buffer uses the same
+        /// logic — when a comment is being edited,
+        /// `Ctrl-W` deletes the previous word in
+        /// the comment. We test the underlying
+        /// helper (`delete_word_backward_in_string`)
+        /// for the comment-edit path; the wrapper
+        /// (`App::delete_word_backward`) routes to
+        /// the right buffer based on whether a
+        /// comment edit is in progress.
+        #[test]
+        fn delete_word_backward_in_string_helper() {
+                // The comment-edit buffer has no
+                // cursor concept — operate on the
+                // logical end of the string. The
+                // helper is what the App method
+                // calls when
+                // `self.comment_edit.is_some()`.
+                let mut s = String::from("hello world");
+                delete_word_backward_in_string(&mut s);
+                // `world` (positions 6..11) is
+                // eaten; the space at position 5
+                // stays. Result: "hello ".
+                assert_eq!(s, "hello ");
+                // Second press: the char to the
+                // left of the cursor (end of `s`)
+                // is a space. Eat the space, then
+                // the preceding word `hello`.
+                // Result: empty.
+                delete_word_backward_in_string(&mut s);
+                assert_eq!(s, "");
+        }
+
+        /// The free function
+        /// `delete_word_backward_at_cursor` is
+        /// what the App method calls when the
+        /// query field is the active buffer. It
+        /// returns the new cursor position (in
+        /// characters) without mutating the
+        /// string — the caller applies the
+        /// deletion as a single `replace_range`
+        /// call. Pin the contract here so future
+        /// refactors of the cursor logic can't
+        /// accidentally change the readline
+        /// semantics.
+        #[test]
+        fn delete_word_backward_at_cursor_helper() {
+                // Empty string, cursor 0: returns 0.
+                assert_eq!(delete_word_backward_at_cursor("", 0), 0);
+                // Single word, cursor at end:
+                // returns 0 (whole word consumed).
+                assert_eq!(delete_word_backward_at_cursor("abc", 3), 0);
+                // Cursor mid-word: returns the start
+                // of the word (which is also the
+                // start of the buffer in this case).
+                assert_eq!(delete_word_backward_at_cursor("abc", 2), 0);
+                assert_eq!(delete_word_backward_at_cursor("abc", 1), 0);
+                // Two words, cursor at end: returns
+                // the start of the second word.
+                assert_eq!(delete_word_backward_at_cursor("abc def", 7), 4);
+                // Trailing whitespace only: cursor
+                // at end of `abc   ` returns 0
+                // (step 1 eats 3 spaces, step 2
+                // walks back through `abc`).
+                assert_eq!(delete_word_backward_at_cursor("abc   ", 6), 0);
+                // Two words with multiple spaces:
+                // cursor at end of `abc   def`.
+                // Char at end is `f` (non-ws), so
+                // step 1 doesn't run; step 2 walks
+                // back from `f` to the space at
+                // position 6. Returns 6 (start of
+                // `def`).
+                assert_eq!(delete_word_backward_at_cursor("abc   def", 9), 6);
         }
 }

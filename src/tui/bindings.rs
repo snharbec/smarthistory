@@ -129,6 +129,26 @@ pub enum Action {
     End,
     /// Delete one character from the query (Backspace).
     Backspace,
+    /// Delete one word backward from the cursor
+    /// position in the query (the readline / bash
+    /// `Ctrl-W` semantics). Trailing whitespace
+    /// immediately before the cursor is eaten first;
+    /// the cursor then walks left through the
+    /// preceding run of non-whitespace characters
+    /// and removes them. When the cursor is at the
+    /// start of the buffer, the action is a no-op
+    /// (nothing to delete). Multi-byte UTF-8 input is
+    /// handled — the cursor is in characters, and
+    /// `String::remove` is given a byte index that
+    /// we compute correctly from the character
+    /// index.
+    ///
+    /// This is a much faster way to clear a mistyped
+    /// token than pressing Backspace repeatedly —
+    /// the same shortcut works in bash / readline /
+    /// zsh line editors and the user's muscle
+    /// memory transfers.
+    DeleteWordBackward,
     /// Open the command palette: a menu where the user can pick
     /// any action by name, with its current binding displayed.
     /// Useful when the user has forgotten (or rebound) a shortcut.
@@ -174,6 +194,7 @@ impl Action {
             Action::Home => "home",
             Action::End => "end",
             Action::Backspace => "backspace",
+            Action::DeleteWordBackward => "delete-word-backward",
             Action::CommandAction => "command-action",
             Action::ThemePicker => "theme-picker",
             Action::ToggleSearchMode => "toggle-search-mode",
@@ -210,6 +231,7 @@ impl Action {
             Action::Home => "Home",
             Action::End => "End",
             Action::Backspace => "Backspace",
+            Action::DeleteWordBackward => "Delete word backward",
             Action::CommandAction => "Command palette",
             Action::ThemePicker => "Theme picker",
             Action::ToggleSearchMode => "Toggle search mode",
@@ -231,7 +253,8 @@ impl Action {
             | Action::PageDown
             | Action::Home
             | Action::End
-            | Action::Backspace => "navigation",
+            | Action::Backspace
+            | Action::DeleteWordBackward => "navigation",
             Action::CycleMode
             | Action::ToggleDuplicateFilter
             | Action::CycleExitFilter
@@ -288,6 +311,7 @@ impl Action {
             Action::Home => "Home",
             Action::End => "End",
             Action::Backspace => "Backspace",
+            Action::DeleteWordBackward => "C-w",
             Action::CommandAction => ":",
             Action::ThemePicker => "T",
             Action::ToggleSearchMode => "F3",
@@ -557,6 +581,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::Home,
     Action::End,
     Action::Backspace,
+    Action::DeleteWordBackward,
     Action::CommandAction,
     Action::ThemePicker,
     Action::ToggleSearchMode,
@@ -655,7 +680,7 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
         }
         bindings.set(*a, specs);
     }
-    
+
     // Detect duplicate key bindings (same key bound to multiple actions).
     // The first action in ALL_ACTIONS order wins; the others are silently
     // shadowed. We warn about all shadowed bindings so the user can fix
@@ -681,7 +706,7 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
             }
         }
     }
-    
+
     bindings
 }
 
