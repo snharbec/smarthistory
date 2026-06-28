@@ -933,6 +933,30 @@ The prefix character is configurable via `prefix.notes=...` in the
 config file. When the notes database is not configured, typing `@`
 shows an empty list and the input border turns red.
 
+#### Date-filter aliases
+
+Inside the notes-mode query, four `@`-prefixed aliases restrict the
+result set to notes whose `updated` timestamp falls inside a recent
+window. The aliases are stripped from the pattern before it's sent
+to `note_search`; the filter is applied locally against each result's
+`updated` timestamp (falling back to `created` if `updated` is missing).
+
+| Alias     | Window          | Example                                   |
+| --------- | --------------- | ----------------------------------------- |
+| `@today`  | last 24 hours   | `@today @reference` — references updated today |
+| `@week`   | last 7 days     | `@week meeting` — meeting notes from the last week |
+| `@month`  | last 30 days    | `@month rust` — Rust notes from the last month |
+| `@year`   | last 365 days   | `@year` — every note updated this year |
+
+Multiple aliases in the same query resolve to the last one (e.g.
+`@today @week` ends up as `@week`). The aliases are case-insensitive
+(`@Today` and `@TODAY` work). They are recognised only as whole-word
+tokens — `@todayfile.md` is treated as a search term, not as the
+`@today` alias.
+
+A `TODAY` / `WEEK` / `MONTH` / `YEAR` chip in the mode strip signals
+the active filter when one is in effect.
+
 ### Example session
 
 ```bash

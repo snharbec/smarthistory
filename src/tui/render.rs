@@ -17,7 +17,7 @@ use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
     format_diff, format_time, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView,
-    OutputView, QuestionView,
+    NotesDateFilter, OutputView, QuestionView,
 };
 use regex::Regex;
 
@@ -1280,6 +1280,18 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     // noise — the user has to actively choose
     // `Frequency` to see this chip, so its presence
     // is itself the signal.
+    // Notes-mode date-filter chip is shown only
+    // when (a) we're in notes mode AND (b) a
+    // date-filter alias is currently active
+    // (`@today` / `@week` / `@month` / `@year`).
+    // Otherwise it stays hidden so the chip strip
+    // is uncluttered for users who don't use the
+    // aliases.
+    let notes_date_chip = if app.is_notes_query() && app.notes_date_filter != NotesDateFilter::All {
+        Some(notes_date_filter_badge(app.notes_date_filter))
+    } else {
+        None
+    };
     let sort_chip = if app.sort_order != SortOrder::default() {
         Some(sort_order_badge(app.sort_order))
     } else {
@@ -1306,6 +1318,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = sort_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = notes_date_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -1392,6 +1408,40 @@ fn output_mode_badge() -> Span<'static> {
         Style::default()
             .fg(Theme::badge_fg_color())
             .bg(Theme::info_color())
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The notes-mode date-filter chip. Shown only
+/// when (a) the user is in notes search mode and
+/// (b) the current query contains an active
+/// date-filter alias (`@today`, `@week`,
+/// `@month`, `@year`). The chip label is the
+/// alias name in uppercase, tinted with the
+/// success color (green) so it's visually
+/// distinct from the existing `OUTPUT` /
+/// `FREQ` / `LLM` chips.
+///
+/// We surface the filter in the mode strip
+/// because the date filter is invisible in the
+/// list itself: the user typed `@today test`,
+/// sees notes matching `test` and the current
+/// day, and might wonder why some notes that
+/// obviously contain `test` are missing. The
+/// chip answers the question.
+fn notes_date_filter_badge(filter: NotesDateFilter) -> Span<'static> {
+    let label = match filter {
+        NotesDateFilter::All => "ALL",
+        NotesDateFilter::Today => "TODAY",
+        NotesDateFilter::Week => "WEEK",
+        NotesDateFilter::Month => "MONTH",
+        NotesDateFilter::Year => "YEAR",
+    };
+    Span::styled(
+        format!(" {} ", label),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(Theme::success_color())
             .add_modifier(Modifier::BOLD),
     )
 }

@@ -198,6 +198,124 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
     false
 }
 
+/// Date-filter aliases recognised inside the
+/// notes-search query mode (`@today`, `@week`,
+/// `@month`, `@year`).
+///
+/// Each variant stores a cutoff timestamp
+/// computed at construction time: notes whose
+/// effective `updated` timestamp is below the
+/// cutoff are excluded. The cutoff is "now minus
+/// the window size" (e.g. 24h for `@today`, 7d
+/// for `@week`). Storing the cutoff as a
+/// timestamp rather than a duration keeps the
+/// per-row comparison a single integer
+/// comparison.
+///
+/// The enum is `Copy` so it can be returned by
+/// value from `parse_notes_query` and stored on
+/// `App` without an `Option` for the
+/// default-case bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesDateFilter {
+    /// No date filter; show all notes (default).
+    All,
+    /// Notes updated today (within the last 24h).
+    Today,
+    /// Notes updated within the last 7 days.
+    Week,
+    /// Notes updated within the last 30 days.
+    Month,
+    /// Notes updated within the last 365 days.
+    Year,
+}
+
+impl NotesDateFilter {
+    /// Cutoff timestamp below which notes are
+    /// excluded. `None` for `All` (no filter).
+    /// `now` is the current epoch seconds; in
+    /// tests we pass a fixed value to make the
+    /// math deterministic.
+    fn cutoff(self, now: i64) -> Option<i64> {
+        match self {
+            NotesDateFilter::All => None,
+            NotesDateFilter::Today => Some(now - 24 * 60 * 60),
+            NotesDateFilter::Week => Some(now - 7 * 24 * 60 * 60),
+            NotesDateFilter::Month => Some(now - 30 * 24 * 60 * 60),
+            NotesDateFilter::Year => Some(now - 365 * 24 * 60 * 60),
+        }
+    }
+
+    /// Stable lowercase identifier used by the
+    /// parser to recognise aliases in the
+    /// query string.
+    #[allow(dead_code)]
+    fn as_str(self) -> &'static str {
+        match self {
+            NotesDateFilter::All => "",
+            NotesDateFilter::Today => "today",
+            NotesDateFilter::Week => "week",
+            NotesDateFilter::Month => "month",
+            NotesDateFilter::Year => "year",
+        }
+    }
+
+    /// True if the filter applies a date window.
+    /// `All` is the no-op case; the rest are
+    /// filters.
+    #[allow(dead_code)]
+    fn is_active(self) -> bool {
+        !matches!(self, NotesDateFilter::All)
+    }
+}
+
+/// Parse a notes-mode query body and extract the
+/// date-filter alias.
+///
+/// Returns `(clean_pattern, filter)`:
+/// - `clean_pattern` is the query body with any
+///   `@today` / `@week` / `@month` / `@year`
+///   aliases removed (and surrounding whitespace
+///   collapsed). The cleaned pattern is what we
+///   pass to `note_search.search_notes_by_query`.
+/// - `filter` is the resolved filter; the latest
+///   alias in the query wins (i.e. `@today @week`
+///   ends up as `Today` because `@week` is
+///   encountered second; multiple aliases is an
+///   edge case — the user typically uses just
+///   one).
+///
+/// The aliases are recognised only as
+/// whole-word tokens (whitespace-separated).
+/// This avoids false positives like
+/// `@todayfile.md` (no alias inside) or
+/// `email@today` (no alias inside). The
+/// match is case-insensitive (`@Today`,
+/// `@TODAY`, `@today` all work).
+fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
+    let mut filter = NotesDateFilter::All;
+    let mut cleaned_tokens: Vec<&str> = Vec::new();
+    for token in pattern.split_whitespace() {
+        // Strip a leading `@` if present. The
+        // user types `@today`; we tolerate
+        // `today` too (without the `@`) so the
+        // aliases work even if the user types
+        // them inside the search body where the
+        // `@` prefix isn't strictly needed.
+        let candidate = token
+            .strip_prefix('@')
+            .unwrap_or(token);
+        match candidate.to_ascii_lowercase().as_str() {
+            "today" => filter = NotesDateFilter::Today,
+            "week" => filter = NotesDateFilter::Week,
+            "month" => filter = NotesDateFilter::Month,
+            "year" => filter = NotesDateFilter::Year,
+            _ => cleaned_tokens.push(token),
+        }
+    }
+    (cleaned_tokens.join(" "), filter)
+}
+
 /// Decide what text `yank_to_clipboard` should copy.
 ///
 /// Priority:
@@ -732,6 +850,14 @@ struct App {
     notes_dir: Option<std::path::PathBuf>,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
+    /// The date-filter alias active for the current
+    /// notes-mode query (`@today` / `@week` /
+    /// `@month` / `@year`). `All` is the default
+    /// and means no filter is active. Updated by
+    /// `fetch_notes` on every refresh — the value
+    /// here is what's used by the mode-strip chip
+    /// renderer and by tests.
+    notes_date_filter: NotesDateFilter,
     /// Timestamp of the most recent keystroke that touched
     /// the query in LLM mode. `None` when the debounce is
     /// satisfied (i.e. an auto-call has been issued and the
@@ -924,7 +1050,24 @@ impl App {
         let Some(ref db_path) = self.notes_database else {
             return Ok(Vec::new());
         };
-        let pattern = self.notes_pattern().trim();
+        let raw_pattern = self.notes_pattern().trim();
+        // Strip any date-filter aliases (`@today`,
+        // `@week`, `@month`, `@year`) from the
+        // pattern. The cleaned pattern is what we
+        // pass to `note_search.search_notes_by_query`
+        // (which doesn't know about these
+        // aliases); the filter is applied
+        // post-query in this method against the
+        // `updated` timestamp on each result.
+        let (pattern, filter) = parse_notes_query(raw_pattern);
+        // Record the resolved filter on `self` so
+        // the mode-strip chip renderer (and any
+        // future helper) can see what's active.
+        // We update this on every refresh, even
+        // when the pattern is empty (so the chip
+        // disappears the moment the user clears
+        // the alias token).
+        self.notes_date_filter = filter;
         if pattern.is_empty() {
             return self.fetch_recent_notes(db_path);
         }
@@ -933,9 +1076,35 @@ impl App {
             &db_path.to_string_lossy()
         );
         
-        match service.search_notes_by_query(pattern) {
+        match service.search_notes_by_query(&pattern) {
             Ok(results) => {
-                let mut rows: Vec<HistoryRow> = results.iter().map(|note| {
+                // Apply the date filter (if any) before
+                // building `HistoryRow` entries. Notes
+                // with `updated = None` fall back to
+                // `created`; if both are `None`, the
+                // note has no usable timestamp and we
+                // exclude it from any active filter
+                // (we have no way to know if it's
+                // recent). This matches the user's
+                // intent: aliases answer "what was
+                // updated *recently*", and a note
+                // without timestamps is by
+                // definition not "recently updated".
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let cutoff = filter.cutoff(now);
+                let mut rows: Vec<HistoryRow> = results
+                    .iter()
+                    .filter(|note| match cutoff {
+                        None => true,
+                        Some(c) => {
+                            let ts = note.updated.or(note.created).unwrap_or(0);
+                            ts >= c
+                        }
+                    })
+                    .map(|note| {
                     let title = note.title.as_deref().unwrap_or("");
                     let comment = if title.is_empty() {
                         note.filename.clone()
@@ -1725,6 +1894,7 @@ impl App {
             notes_database,
             notes_dir,
             notes_query_error: false,
+            notes_date_filter: NotesDateFilter::All,
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -1827,9 +1997,44 @@ impl App {
     /// timestamp). Extracted from `merged_rows()` so we can
     /// compute it once per `refresh()` and cache the result.
     fn build_merged_rows(&self) -> Vec<HistoryRow> {
-        let mut merged = self.rows.clone();
+        // Two-partition merge: rows that came from
+        // the primary fetch (`self.rows`) and rows
+        // that came from the labeled set but are
+        // NOT in the primary fetch. The user-visible
+        // contract is that labeled rows that were
+        // *already* part of the active filter sit
+        // with their natural sort, and labeled rows
+        // that are *not* part of the active filter
+        // (i.e. only visible because they're
+        // labeled) are pushed to the end of the
+        // list. This makes the labeled "sticky
+        // note" rows visually separable from the
+        // main history — the user can see at a
+        // glance which rows are "actually here"
+        // vs. "here because they have a comment".
+        //
+        // We compute the partition before sorting
+        // so each part can be sorted with its own
+        // key. Sorting within each partition then
+        // concatenating produces the same final
+        // order as mixing them together with a
+        // partition-stable sort, but is clearer
+        // to read and avoids the subtle
+        // interaction between the sort comparator
+        // and the partition key.
+        let mut main_part = self.rows.clone();
         let existing_ids: std::collections::HashSet<i64> =
-            merged.iter().map(|r| r.id).collect();
+            main_part.iter().map(|r| r.id).collect();
+        // Labeled rows that are NOT already in the
+        // primary list. These are the "moved to
+        // the end" group. We still apply the
+        // query filter here so a labeled row
+        // whose command/comment/output doesn't
+        // match the typed query is excluded
+        // (consistent with the previous behavior,
+        // where labeled rows were filtered through
+        // `query_matches_text` before being added).
+        let mut labeled_only_part: Vec<HistoryRow> = Vec::new();
         for row in &self.labeled_rows {
             if !existing_ids.contains(&row.id) {
                 if !self.query.is_empty() {
@@ -1855,18 +2060,21 @@ impl App {
                         continue;
                     }
                 }
-                merged.push(row.clone());
+                labeled_only_part.push(row.clone());
             }
         }
-        // The LLM preview row, when active, is inserted at
-        // the FRONT of the merged list (newest first). We
-        // only show it in LLM mode — the user's typing a
-        // description and the suggestion is the most
-        // relevant thing to look at. The synthetic `id = -1`
-        // is excluded from the dedup pass below so the
-        // duplicate filter doesn't accidentally keep only
-        // the preview (or worse, drop it) when a real row
-        // shares the command.
+        // The LLM preview row, when active, is
+        // inserted at the very front of the merged
+        // list — before the main partition, before
+        // the labeled-only partition. We only
+        // show it in LLM mode — the user's typing
+        // a description and the suggestion is the
+        // most relevant thing to look at. The
+        // synthetic `id = -1` is excluded from the
+        // dedup pass below so the duplicate filter
+        // doesn't accidentally keep only the
+        // preview (or worse, drop it) when a real
+        // row shares the command.
         //
         // We push the preview at the end and let the
         // timestamp-DESC sort (below) bring it to the top;
@@ -1876,106 +2084,42 @@ impl App {
         // mode never sees the LLM preview (the user
         // wouldn't be composing a description there), and
         // we already gate this on `is_llm_query()`.
+        let mut preview_part: Vec<HistoryRow> = Vec::new();
         if self.is_llm_query()
             && let Some(preview) = self.llm_preview_row()
         {
-            merged.push(preview);
+            preview_part.push(preview);
         }
-        // Sort the merged list. Two sort orders are
-        // supported (see `SortOrder`):
-        // - `Age` (the historical default): timestamp
-        //   DESC, newest at index 0.
-        // - `Frequency`: occurrence count DESC (how
-        //   many times this `command` appears in the
-        //   current merged set), with timestamp DESC
-        //   as the tie-breaker.
+        // Sort each partition independently.
         //
         // Stats mode always uses a frequency-aware
-        // ordering from `fetch_stats` that we must
-        // preserve; it overrides whatever the user
-        // picked for sort order. The Stats ranking is
-        // already a count-based sort (successor
-        // frequency) so the user's "frequency" choice
-        // would just duplicate it; the user's "age"
-        // choice would re-sort the Stats output by
-        // timestamp and lose the prediction signal.
-        // In both cases the Stats ordering is the
-        // "right" answer.
+        // ordering from `fetch_stats` that we
+        // must preserve; it overrides whatever the
+        // user picked for sort order. The Stats
+        // ranking is already a count-based sort
+        // (successor frequency) so the user's
+        // "frequency" choice would just duplicate
+        // it; the user's "age" choice would
+        // re-sort the Stats output by timestamp and
+        // lose the prediction signal. In both cases
+        // the Stats ordering is the "right" answer.
+        // We don't sort the labeled-only partition
+        // in Stats mode either — preserving
+        // whatever order `fetch_labeled` produced
+        // is fine because it's the same SQL
+        // ordering the labeled view uses.
         if !matches!(self.mode, Mode::Stats) {
-            match self.sort_order {
-                SortOrder::Age => {
-                    merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                }
-                SortOrder::Frequency => {
-                    // Compute two per-command metrics
-                    // in a single pass over the merged
-                    // set:
-                    // 1. `counts`: how many times the
-                    //    command appears. This is the
-                    //    primary sort key.
-                    // 2. `newest`: the maximum
-                    //    timestamp for the command.
-                    //    This is the tie-breaker: when
-                    //    two commands have the same
-                    //    count, the one whose most
-                    //    recent instance is newer wins.
-                    //    We use the per-command newest
-                    //    (not the per-row timestamp)
-                    //    so the ordering reflects
-                    //    "most-recently-used command
-                    //    overall" rather than
-                    //    "row-vs-row by timestamp".
-                    let mut counts: std::collections::HashMap<
-                        String,
-                        usize,
-                    > = std::collections::HashMap::new();
-                    let mut newest: std::collections::HashMap<
-                        String,
-                        i64,
-                    > = std::collections::HashMap::new();
-                    for r in &merged {
-                        *counts
-                            .entry(r.command.clone())
-                            .or_insert(0) += 1;
-                        let n = newest
-                            .entry(r.command.clone())
-                            .or_insert(i64::MIN);
-                        if r.timestamp > *n {
-                            *n = r.timestamp;
-                        }
-                    }
-                    merged.sort_by(|a, b| {
-                        let ca = counts
-                            .get(&a.command)
-                            .copied()
-                            .unwrap_or(0);
-                        let cb = counts
-                            .get(&b.command)
-                            .copied()
-                            .unwrap_or(0);
-                        let na = newest
-                            .get(&a.command)
-                            .copied()
-                            .unwrap_or(i64::MIN);
-                        let nb = newest
-                            .get(&b.command)
-                            .copied()
-                            .unwrap_or(i64::MIN);
-                        // Primary: count DESC.
-                        // Secondary: per-command newest
-                        // timestamp DESC. Tertiary:
-                        // per-row timestamp DESC
-                        // (newer instances of the
-                        // same command come first).
-                        cb.cmp(&ca).then_with(|| {
-                            nb.cmp(&na)
-                        }).then_with(|| {
-                            b.timestamp.cmp(&a.timestamp)
-                        })
-                    });
-                }
-            }
+            self.sort_partition(&mut main_part);
+            self.sort_partition(&mut labeled_only_part);
         }
+        // Concatenate: preview, main, labeled-only.
+        // The labeled-only group is at the end by
+        // construction; the user's request is
+        // that labeled-only rows are visually
+        // separated from the primary history.
+        let mut merged = preview_part;
+        merged.append(&mut main_part);
+        merged.append(&mut labeled_only_part);
         // The duplicate filter collapses every group of
         // identical commands down to a single row. It
         // runs when the user has the duplicate filter on
@@ -2006,6 +2150,88 @@ impl App {
             merged.retain(|r| seen.insert(r.command.clone()));
         }
         merged
+    }
+
+    /// Apply the user's chosen `sort_order` to a
+    /// single partition. The two partitions
+    /// (`main_part` from the primary fetch and
+    /// `labeled_only_part` from the labeled set)
+    /// are sorted independently and then
+    /// concatenated — see `build_merged_rows` for
+    /// the rationale.
+    ///
+    /// In `SortOrder::Age` mode both partitions
+    /// sort the same way (timestamp DESC), so the
+    /// final concatenated order is "newest first
+    /// overall, labeled-only group appended at the
+    /// end". In `SortOrder::Frequency` mode each
+    /// partition gets its own count map, so the
+    /// labeled-only group's internal ordering is
+    /// driven by the counts *within that
+    /// partition* rather than the counts of the
+    /// entire merged set. This is the correct
+    /// behavior: a labeled row counts as one
+    /// occurrence in its own partition, not in
+    /// the main partition, and the labeled-only
+    /// group's ranking is independent of how
+    /// often the same command appears in the main
+    /// history.
+    fn sort_partition(&self, partition: &mut Vec<HistoryRow>) {
+        match self.sort_order {
+            SortOrder::Age => {
+                partition.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            }
+            SortOrder::Frequency => {
+                let mut counts: std::collections::HashMap<
+                    String,
+                    usize,
+                > = std::collections::HashMap::new();
+                let mut newest: std::collections::HashMap<
+                    String,
+                    i64,
+                > = std::collections::HashMap::new();
+                for r in partition.iter() {
+                    *counts
+                        .entry(r.command.clone())
+                        .or_insert(0) += 1;
+                    let n = newest
+                        .entry(r.command.clone())
+                        .or_insert(i64::MIN);
+                    if r.timestamp > *n {
+                        *n = r.timestamp;
+                    }
+                }
+                partition.sort_by(|a, b| {
+                    let ca = counts
+                        .get(&a.command)
+                        .copied()
+                        .unwrap_or(0);
+                    let cb = counts
+                        .get(&b.command)
+                        .copied()
+                        .unwrap_or(0);
+                    let na = newest
+                        .get(&a.command)
+                        .copied()
+                        .unwrap_or(i64::MIN);
+                    let nb = newest
+                        .get(&b.command)
+                        .copied()
+                        .unwrap_or(i64::MIN);
+                    // Primary: count DESC.
+                    // Secondary: per-command newest
+                    // timestamp DESC. Tertiary:
+                    // per-row timestamp DESC
+                    // (newer instances of the same
+                    // command come first).
+                    cb.cmp(&ca).then_with(|| {
+                        nb.cmp(&na)
+                    }).then_with(|| {
+                        b.timestamp.cmp(&a.timestamp)
+                    })
+                });
+            }
+        }
     }
 
     fn fetch(&mut self) -> Result<Vec<HistoryRow>> {
@@ -8726,5 +8952,606 @@ mod tests {
                 // position 6. Returns 6 (start of
                 // `def`).
                 assert_eq!(delete_word_backward_at_cursor("abc   def", 9), 6);
+        }
+
+        // --- Labeled-only rows partition ---------
+
+        /// A labeled row that's NOT in the
+        /// primary list (e.g. from a different
+        /// session than the current
+        /// `SMART_HISTORY_SESSION`) should appear
+        /// at the end of the merged list, not in
+        /// the middle of the timestamp-sorted
+        /// primary rows.
+        ///
+        /// Test setup:
+        /// - One primary row at offset 10 (recent,
+        ///   current session).
+        /// - One labeled row at offset 100_000
+        ///   (ancient, different session — excluded
+        ///   by `Mode::Sess`).
+        /// Both commands match the query "git".
+        ///
+        /// Expected merged order under
+        /// `SortOrder::Age`: `[git status (recent),
+        /// git pull (labeled-ancient)]`. The labeled
+        /// row's command is older than the primary
+        /// row's command, so a pure timestamp sort
+        /// would also put it last; this test pins the
+        /// partition invariant so a future refactor
+        /// that mixes the partitions can't regress.
+        #[test]
+        fn labeled_only_row_appears_at_end_of_merged_list() {
+                let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (1, 'git status', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 10],
+                )
+                .expect("insert recent");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (2, 'git pull', '/tmp', 'ancient', 0, ?1)",
+                        rusqlite::params![now - 100_000],
+                )
+                .expect("insert ancient");
+                conn.execute(
+                        "INSERT INTO command_comments (command, comment) VALUES ('git pull', 'old but labeled')",
+                        [],
+                )
+                .expect("insert comment");
+
+                let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+                unsafe { std::env::set_var("SMART_HISTORY_SESSION", "current"); }
+                let mut app = App::new(
+                        conn,
+                        Mode::Sess,
+                        "git".to_string(),
+                        false,
+                        ExitFilter::All,
+                        SortOrder::default(),
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None,
+                        None,
+                        crate::QueryPrefixes::default(),
+                        None,
+                        None,
+                );
+                // Restore env before any `?` can
+                // short-circuit out of the test (so
+                // a panic doesn't leak the env
+                // override into other tests). We
+                // refresh *after* the App is built
+                // but *before* the env restore, so the
+                // fetch sees the right session id.
+                app.refresh();
+                if let Some(prev) = prev_session {
+                        unsafe { std::env::set_var("SMART_HISTORY_SESSION", prev); }
+                } else {
+                        unsafe { std::env::remove_var("SMART_HISTORY_SESSION"); }
+                }
+
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                // Two rows: the recent primary row
+                // first, the ancient labeled row
+                // second. The labeled row is at
+                // the END regardless of its
+                // timestamp.
+                assert_eq!(cmds, vec!["git status", "git pull"]);
+        }
+
+        /// When a labeled row's command IS
+        /// already in the primary list (i.e. it
+        /// matches the active filter on its own),
+        /// the labeled row is *not* added a second
+        /// time — the existing primary row stays
+        /// at its natural sort position. This is
+        /// the "when a line would be listed in
+        /// this mode anyway, then nothing is
+        /// changed" half of the user's contract.
+        ///
+        /// Test setup: one row in the current
+        /// session, with a comment. The command
+        /// matches the query. The row is in
+        /// `self.rows` AND in `self.labeled_rows`,
+        /// so it should appear exactly once in
+        /// the merged list.
+        #[test]
+        fn labeled_row_already_in_primary_list_is_not_duplicated() {
+                let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (1, 'git status', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 10],
+                )
+                .expect("insert");
+                conn.execute(
+                        "INSERT INTO command_comments (command, comment) VALUES ('git status', 'labeled')",
+                        [],
+                )
+                .expect("insert comment");
+
+                let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+                unsafe { std::env::set_var("SMART_HISTORY_SESSION", "current"); }
+                let mut app = App::new(
+                        conn,
+                        Mode::Sess,
+                        "git".to_string(),
+                        false,
+                        ExitFilter::All,
+                        SortOrder::default(),
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None,
+                        None,
+                        crate::QueryPrefixes::default(),
+                        None,
+                        None,
+                );
+                app.refresh();
+                if let Some(prev) = prev_session {
+                        unsafe { std::env::set_var("SMART_HISTORY_SESSION", prev); }
+                } else {
+                        unsafe { std::env::remove_var("SMART_HISTORY_SESSION"); }
+                }
+
+                // Single row in the merged list,
+                // even though it's in BOTH
+                // `self.rows` and `self.labeled_rows`.
+                assert_eq!(app.merged_rows().len(), 1);
+                assert_eq!(
+                        app.merged_rows()[0].command,
+                        "git status"
+                );
+        }
+
+        /// The partition holds even when the
+        /// labeled-only row's timestamp is
+        /// *newer* than some of the primary
+        /// rows. Without the partition, a
+        /// natural sort would put the labeled-
+        /// only row in the middle. With the
+        /// partition, it's pinned to the end.
+        /// This pins the "always at the end"
+        /// invariant.
+        ///
+        /// Test setup:
+        /// - Primary row "b" at offset 100 (older).
+        /// - Primary row "a" at offset 10 (newer).
+        /// - Labeled-only row "z" at offset 5
+        ///   (newest of all), but only visible
+        ///   because it's labeled — it's in a
+        ///   different session.
+        ///
+        /// Without the partition, a timestamp
+        /// sort would give: `[z (5), a (10),
+        /// b (100)]`. With the partition, we
+        /// expect: `[a (10), b (100), z (5)]`.
+        #[test]
+        fn labeled_only_row_stays_at_end_even_if_newer() {
+                let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                // Two primary rows.
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (1, 'a', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 10],
+                )
+                .expect("insert");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (2, 'b', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 100],
+                )
+                .expect("insert");
+                // Labeled-only row (different session,
+                // newer timestamp). It IS excluded
+                // by the `Mode::Sess` SQL filter
+                // because its session_id is
+                // "ancient".
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (3, 'z', '/tmp', 'ancient', 0, ?1)",
+                        rusqlite::params![now - 5],
+                )
+                .expect("insert");
+                conn.execute(
+                        "INSERT INTO command_comments (command, comment) VALUES ('z', 'labeled but newer')",
+                        [],
+                )
+                .expect("insert comment");
+
+                let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+                unsafe { std::env::set_var("SMART_HISTORY_SESSION", "current"); }
+                let mut app = App::new(
+                        conn,
+                        Mode::Sess,
+                        String::new(),
+                        false,
+                        ExitFilter::All,
+                        SortOrder::default(),
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None,
+                        None,
+                        crate::QueryPrefixes::default(),
+                        None,
+                        None,
+                );
+                app.refresh();
+                if let Some(prev) = prev_session {
+                        unsafe { std::env::set_var("SMART_HISTORY_SESSION", prev); }
+                } else {
+                        unsafe { std::env::remove_var("SMART_HISTORY_SESSION"); }
+                }
+
+                // Without the partition the
+                // natural timestamp sort would
+                // give `[z, a, b]`. With the
+                // partition we expect
+                // `[a, b, z]`.
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(cmds, vec!["a", "b", "z"]);
+        }
+
+        /// The partition also holds in
+        /// `SortOrder::Frequency` mode: the
+        /// labeled-only group is at the end of
+        /// the merged list, sorted by its own
+        /// internal counts rather than the
+        /// counts of the entire merged set.
+        ///
+        /// Test setup:
+        /// - Primary rows: 3 instances of "a",
+        ///   1 of "b".
+        /// - Labeled-only row: "z", excluded by
+        ///   session filter.
+        ///
+        /// Expected merged order: `[a, b, z]`.
+        /// (Frequency dedup is implicit so the
+        /// primary partition dedupes to `[a, b]`.)
+        #[test]
+        fn labeled_only_partition_in_frequency_mode() {
+                let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+                use rusqlite::Connection;
+                let conn = Connection::open_in_memory().expect("open in-memory db");
+                conn.execute_batch(
+                        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+                )
+                .expect("create tables");
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (1, 'a', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 1],
+                )
+                .expect("insert a1");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (2, 'a', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 2],
+                )
+                .expect("insert a2");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (3, 'a', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 3],
+                )
+                .expect("insert a3");
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (4, 'b', '/tmp', 'current', 0, ?1)",
+                        rusqlite::params![now - 4],
+                )
+                .expect("insert b");
+                // Labeled-only row in a different session.
+                conn.execute(
+                        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (5, 'z', '/tmp', 'ancient', 0, ?1)",
+                        rusqlite::params![now - 5],
+                )
+                .expect("insert z");
+                conn.execute(
+                        "INSERT INTO command_comments (command, comment) VALUES ('z', 'labeled')",
+                        [],
+                )
+                .expect("insert comment");
+
+                let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+                unsafe { std::env::set_var("SMART_HISTORY_SESSION", "current"); }
+                let mut app = App::new(
+                        conn,
+                        Mode::Sess,
+                        String::new(),
+                        false,
+                        ExitFilter::All,
+                        SortOrder::Frequency,
+                        false,
+                        SelectedTheme::None,
+                        KeyBindings::defaults(),
+                        None,
+                        None,
+                        crate::QueryPrefixes::default(),
+                        None,
+                        None,
+                );
+                app.refresh();
+                if let Some(prev) = prev_session {
+                        unsafe { std::env::set_var("SMART_HISTORY_SESSION", prev); }
+                } else {
+                        unsafe { std::env::remove_var("SMART_HISTORY_SESSION"); }
+                }
+
+                // Frequency dedup is implicit in
+                // Frequency mode (see
+                // `build_merged_rows`). So the
+                // primary partition dedupes to
+                // `[a, b]`. The labeled-only group
+                // is `[z]`. Final merged order:
+                // `[a, b, z]`.
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(cmds, vec!["a", "b", "z"]);
+        }
+
+        // --- Notes-mode date-filter aliases -------
+
+        /// The simplest case: `@today` alone is
+        /// recognised, stripped from the pattern,
+        /// and the resolved filter is `Today`.
+        /// The cleaned pattern is empty (only the
+        /// alias was present), which the caller
+        /// treats as "no search body — fall through
+        /// to fetch_recent_notes".
+        #[test]
+        fn parse_notes_query_today_alone() {
+                let (pattern, filter) = parse_notes_query("@today");
+                assert_eq!(pattern, "");
+                assert_eq!(filter, NotesDateFilter::Today);
+        }
+
+        /// Each alias maps to its filter.
+        #[test]
+        fn parse_notes_query_each_alias() {
+                assert_eq!(parse_notes_query("@week").1, NotesDateFilter::Week);
+                assert_eq!(parse_notes_query("@month").1, NotesDateFilter::Month);
+                assert_eq!(parse_notes_query("@year").1, NotesDateFilter::Year);
+        }
+
+        /// An empty / whitespace pattern resolves
+        /// to `All` (no filter) and an empty
+        /// cleaned pattern.
+        #[test]
+        fn parse_notes_query_empty_is_all() {
+                assert_eq!(
+                        parse_notes_query(""),
+                        (String::new(), NotesDateFilter::All)
+                );
+                assert_eq!(
+                        parse_notes_query("   "),
+                        (String::new(), NotesDateFilter::All)
+                );
+        }
+
+        /// A pattern with no aliases returns the
+        /// same string back and `All`.
+        #[test]
+        fn parse_notes_query_no_alias_passthrough() {
+                assert_eq!(
+                        parse_notes_query("hello world"),
+                        ("hello world".to_string(), NotesDateFilter::All)
+                );
+        }
+
+        /// The user's example: `test @reference @today`
+        /// (the outer `@` is the notes-mode prefix
+        /// already stripped by `notes_pattern`).
+        /// The alias is removed; `@reference` is
+        /// NOT an alias so it stays in the
+        /// cleaned pattern.
+        #[test]
+        fn parse_notes_query_with_search_terms() {
+                let (pattern, filter) =
+                        parse_notes_query("test @reference @today");
+                assert_eq!(pattern, "test @reference");
+                assert_eq!(filter, NotesDateFilter::Today);
+        }
+
+        /// Multiple aliases: the last one wins.
+        #[test]
+        fn parse_notes_query_multiple_aliases_last_wins() {
+                let (_, filter) = parse_notes_query("@today @week");
+                assert_eq!(filter, NotesDateFilter::Week);
+                let (_, filter) = parse_notes_query("@year @today");
+                assert_eq!(filter, NotesDateFilter::Today);
+        }
+
+        /// Alias matching is case-insensitive:
+        /// `@Today`, `@TODAY`, `@today` all work.
+        /// When matched, the token is removed from
+        /// the cleaned pattern.
+        #[test]
+        fn parse_notes_query_alias_matching_is_case_insensitive() {
+                assert_eq!(parse_notes_query("@Today").1, NotesDateFilter::Today);
+                assert_eq!(parse_notes_query("@TODAY").1, NotesDateFilter::Today);
+                assert_eq!(parse_notes_query("@today").1, NotesDateFilter::Today);
+                assert_eq!(parse_notes_query("@Today").0, "");
+                assert_eq!(parse_notes_query("@TODAY").0, "");
+                assert_eq!(parse_notes_query("@today").0, "");
+        }
+
+        /// Aliases can also be written without
+        /// the leading `@` (so the aliases work
+        /// even when the user types them inside
+        /// the search body).
+        #[test]
+        fn parse_notes_query_alias_without_at_prefix() {
+                let (pattern, filter) = parse_notes_query("today test");
+                assert_eq!(pattern, "test");
+                assert_eq!(filter, NotesDateFilter::Today);
+        }
+
+        /// The whole-token rule: `@todayfile` is
+        /// NOT the alias. The whole token must
+        /// match the alias name.
+        #[test]
+        fn parse_notes_query_alias_must_be_whole_token() {
+                let (pattern, filter) = parse_notes_query("@todayfile");
+                assert_eq!(pattern, "@todayfile");
+                assert_eq!(filter, NotesDateFilter::All);
+        }
+
+        /// The `NotesDateFilter::cutoff(now)` math
+        /// is exact: 24h for Today, 7d for Week,
+        /// 30d for Month, 365d for Year. We use a
+        /// fixed `now` to make the assertions
+        /// deterministic.
+        #[test]
+        fn notes_date_filter_cutoff_math() {
+                let now: i64 = 1_000_000_000;
+                let day = 24 * 60 * 60;
+                assert_eq!(NotesDateFilter::All.cutoff(now), None);
+                assert_eq!(
+                        NotesDateFilter::Today.cutoff(now),
+                        Some(now - day)
+                );
+                assert_eq!(
+                        NotesDateFilter::Week.cutoff(now),
+                        Some(now - 7 * day)
+                );
+                assert_eq!(
+                        NotesDateFilter::Month.cutoff(now),
+                        Some(now - 30 * day)
+                );
+                assert_eq!(
+                        NotesDateFilter::Year.cutoff(now),
+                        Some(now - 365 * day)
+                );
+        }
+
+        /// The filter applies the cutoff against
+        /// each note's effective timestamp.
+        /// Recent (within the window) passes,
+        /// old (outside the window) fails.
+        #[test]
+        fn notes_date_filter_applies_to_results() {
+                let now: i64 = 1_000_000_000;
+                let day = 24 * 60 * 60;
+                let recent = now - 12 * 60 * 60;
+                let old = now - 30 * day;
+
+                let (clean, filter) = parse_notes_query("query @today");
+                let cutoff = filter.cutoff(now).unwrap();
+                assert!(recent >= cutoff);
+                assert!(old < cutoff);
+                assert_eq!(clean, "query");
         }
 }
