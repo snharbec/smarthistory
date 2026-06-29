@@ -395,7 +395,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |
 | `Ctrl+H`  | TUI     | Open the help overlay (current settings + shortcut reference). |
-| `:`       | TUI     | Open the command palette (run any action by name).        |
+| `:`       | TUI     | Open the command palette (run any action by name). The palette closes only on keys mapped to the `Cancel` action (default `Esc`); no other key closes it. In particular, `q` and `Q` are *not* special — they're just printable characters that type into the palette's filter, so `q` in a filter like "quit" or "query" doesn't close the palette out from under the user. Configure with `key.cancel=...` (e.g. `key.cancel=F1` makes only `F1` close the palette). `Ctrl+C` always closes the palette and aborts the entire TUI session. |
 | `T`       | TUI     | Open the theme picker (live preview, Enter commits, Esc reverts). |
 | `Ctrl+Y`  | TUI     | Yank the captured output (or the selected command) to the system clipboard via `arboard`. Shows a "Yanked N chars" message in the status bar; falls back to "Nothing to yank" when no row is selected. |
 | `Ctrl+K`  | TUI     | Ask the local ollama instance for a short description (at most 4 sentences) of what the selected command does. The response opens in a full-screen overlay; press `Esc` / `Enter` / `q` / `Ctrl-K` again to close, `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` to scroll. The description is *not* persisted — use `Ctrl-E` to save a comment. Falls back to a status message when no row is selected or ollama is not configured. Rebindable via `key.describe=...`. |
@@ -1162,6 +1162,46 @@ The prefix character is configurable via
 `prefix.todo=...` in the config file. When
 `notes.database` is not configured, typing `!` surfaces
 a status message and the list stays empty.
+
+### Directories mode (`#...`)
+
+Prefix a query with `#` (default, configurable via
+`prefix.directories=...`) to list every unique
+directory that's been used in the global history.
+The list is sorted by each directory's most-recent
+history row's timestamp DESC, so the directory the
+user visited most recently appears at the top.
+Each row surfaces that directory's most-recent
+command as the row label (visible in the history
+list and detail pane), so you can see "what was I
+doing here last?" alongside the path.
+
+Selecting a row stages `cd <absolute-path>` and
+exits the TUI so the parent shell runs the command.
+The full path is shell-quoted if it contains
+whitespace or shell-metacharacters (`<>|&;\"'$`\\\`),
+so paths with spaces work without a manual edit.
+Substring filter: `#home` shows only directories
+whose path contains `home`; tokens are AND-matched
+(`#home a` requires both substrings).
+
+#### Tmux-pane activity marker
+
+When you enter directories mode (type `#`), the
+TUI runs `tmux list-panes -a -F "#S | #P |
+# {pane_current_path}"` once and caches the result
+for the rest of the session. Directories that
+match at least one pane's working directory (after
+canonicalisation — important on macOS where
+`/Users/...` and `/Volumes/HUGE/...` are the same
+physical dir) get a `T` mark in the capture column.
+The snapshot is fetched only once, so scrolling
+through the list never re-spawns `tmux`.
+
+If `tmux` isn't on PATH, isn't running, or returns
+nothing, no mark appears — silent failure. The
+TUI's foreground never blocks on `tmux` for more
+than `TMUX_PANE_PROBE_TIMEOUT_MS` (default 1000 ms).
 
 ### Example session
 

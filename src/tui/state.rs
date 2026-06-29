@@ -92,6 +92,51 @@ impl HistoryRow {
     }
 }
 
+/// One pane observed in
+/// `tmux list-panes -a -F
+/// '#S | #P | #{pane_current_path}'`.
+/// The directories view shows a
+/// per-row marker when at least
+/// one pane's `path` matches the
+/// row's `directory` (under
+/// canonicalization), so the user
+/// can see at a glance which
+/// directories currently have
+/// live tmux sessions attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxPaneInfo {
+    /// Session name (`#S`). May
+    /// contain spaces and shell
+    /// metacharacters
+    /// (e.g. `💾 Host PVE-1  `),
+    /// so callers must treat it as
+    /// an opaque label rather
+    /// than a filesystem path.
+    pub session: String,
+    /// Pane id (`#P`). Format is
+    /// `%<n>` where `<n>` is the
+    /// pane's index within its
+    /// window. Most users see
+    /// `%0` (the only pane) or
+    /// `%1`/`%2` (after a
+    /// `split-window`).
+    pub pane: String,
+    /// Pane current working
+    /// directory
+    /// (`#{pane_current_path}`).
+    /// Canonicalised at parse time
+    /// so `/Users/har/x` and
+    /// `/Volumes/HUGE/har/x`
+    /// (macOS volume mount) map
+    /// to the same string the
+    /// directories-fetch code
+    /// produces. Empty strings
+    /// are filtered out at parse
+    /// time (a brand-new pane
+    /// has no cwd yet).
+    pub path: String,
+}
+
 /// How the parent shell should treat the chosen command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickMode {

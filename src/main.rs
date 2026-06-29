@@ -734,6 +734,17 @@ pub struct QueryPrefixes {
     /// a row opens `$EDITOR <file> +<line>` so the
     /// user lands directly on the todo line.
     pub todo: char,
+    /// Prefix for the directories view (default
+    /// `#`). Lists every unique directory
+    /// that's been used in the global history,
+    /// sorted by the most-recent history row's
+    /// timestamp DESC. Each row also surfaces
+    /// that directory's most-recently-executed
+    /// command so the user has context for "what
+    /// was I doing in there". Selecting a row
+    /// stages a `cd <path>` command and exits
+    /// the TUI so the parent shell runs it.
+    pub directories: char,
 }
 
 impl Default for QueryPrefixes {
@@ -746,6 +757,7 @@ impl Default for QueryPrefixes {
             question: '%',
             notes: '@',
             todo: '!',
+            directories: '#',
         }
     }
 }
@@ -1270,6 +1282,7 @@ impl Config {
             "question" => prefixes.question = c,
             "notes" => prefixes.notes = c,
             "todo" => prefixes.todo = c,
+            "directories" => prefixes.directories = c,
             _ => {}
         }
     }

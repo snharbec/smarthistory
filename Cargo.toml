@@ -17,3 +17,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 note_search = { git = "https://github.com/snharbec/note_search.git", rev = "18c3bd3" }
 ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+filetime = "0.2"

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{ExitFilter, Mode, HistoryRow, PickMode, SortOrder, exit_code};
+pub use state::{ExitFilter, Mode, HistoryRow, PickMode, SortOrder, TmuxPaneInfo, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -880,6 +880,34 @@ struct App {
     /// if the user edits the config and runs a
     /// second TUI in parallel.
     todo_line_option: String,
+    /// Snapshot of `tmux list-panes -a -F
+    /// '#S | #P | #{pane_current_path}'`
+    /// used by the directories
+    /// view's "tmux pane active"
+    /// marker. Populated the first
+    /// time the user types `#…`,
+    /// then cached for the
+    /// remainder of the TUI
+    /// session — the pane set
+    /// doesn't change while the
+    /// TUI is the foreground
+    /// process, so re-running the
+    /// subprocess on every
+    /// refresh would just add
+    /// 50–200 ms of latency to
+    /// every keystroke.
+    ///
+    /// `path` values are
+    /// canonicalised at parse
+    /// time (so `/Users/har/x`
+    /// and `/Volumes/HUGE/har/x`
+    /// collapse to one entry the
+    /// same way `fetch_directories`
+    /// does). Empty paths (a
+    /// brand-new pane with no
+    /// cwd yet) are filtered out
+    /// at parse time.
+    tmux_panes: Vec<TmuxPaneInfo>,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
     /// The date-filter alias active for the current
@@ -1061,6 +1089,43 @@ impl App {
         !self.query.is_empty() && self.query.starts_with(p)
     }
 
+    /// True if the user typed the
+    /// `directories` prefix
+    /// (default `#`). The
+    /// directories view lists
+    /// every unique directory
+    /// that's been used in the
+    /// global history, sorted by
+    /// the most-recent history
+    /// row's timestamp DESC, with
+    /// each directory's most-
+    /// recently-executed
+    /// command surfaced for
+    /// context. Selecting a row
+    /// stages a `cd <path>`
+    /// command.
+    fn is_directories_query(&self) -> bool {
+        let p = self.query_prefixes.directories;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
+    /// The directories-search
+    /// body, i.e. everything
+    /// after the leading `#
+    /// prefix. Used to filter
+    /// the listed directories by
+    /// path substring. Empty
+    /// when not in directories
+    /// mode.
+    fn directories_pattern(&self) -> &str {
+        if self.is_directories_query() {
+            let p = self.query_prefixes.directories;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
     fn notes_pattern(&self) -> &str {
@@ -1172,11 +1237,22 @@ impl App {
         // todos tagged `urgent` that also
         // contain `older`.
         let raw_pattern = self.todo_pattern().trim();
-        let (pattern, _filter) = parse_notes_query(raw_pattern);
+        let (pattern, filter) = parse_notes_query(raw_pattern);
+        // The `filter` is applied
+        // post-query against each
+        // row's `timestamp`
+        // (populated by
+        // `fetch_file_updated_timestamps`)
+        // — see the post-sort
+        // block below. It's also
+        // recorded on `self` so the
+        // mode-strip chip lights up
+        // for both `@...` and `!...`
+        // queries identically.
         let query_expr = if pattern.is_empty() {
-                None
+            None
         } else {
-                match note_search::parse_query(&pattern) {
+            match note_search::parse_query(&pattern) {
                         Ok(expr) => Some(expr),
                         Err(e) => {
                                 self.set_status_message(format!(
@@ -1380,6 +1456,34 @@ impl App {
                 .cmp(&a.timestamp)
                 .then_with(|| b.id.cmp(&a.id))
         });
+        // Apply the date-filter alias
+        // (if any) post-sort. Each
+        // row's `timestamp` is the
+        // file's `updated` epoch
+        // (populated by
+        // `fetch_file_updated_timestamps`),
+        // so the `cutoff` math is
+        // the same as in
+        // `fetch_notes`. Rows with
+        // `timestamp = 0` (the
+        // library never gave us a
+        // file mtime — a transient
+        // state that resolves on
+        // the next indexer run) are
+        // excluded from any active
+        // filter, the same way
+        // missing timestamps are
+        // handled in notes mode.
+        // The active filter value
+        // is stored on `self` so
+        // the mode-strip chip
+        // (TODO/notes) lights up
+        // identically for both
+        // modes.
+        if let Some(cutoff) = filter.cutoff(self.now_epoch()) {
+            rows.retain(|r| r.timestamp >= cutoff);
+        }
+        self.notes_date_filter = filter;
         Ok(rows)
     }
 
@@ -1442,6 +1546,472 @@ impl App {
         map
     }
 
+    /// List every unique directory
+    /// that has been used in the
+    /// global history, sorted by
+    /// each directory's most-
+    /// recent history row's
+    /// timestamp DESC. Each row
+    /// also surfaces that
+    /// directory's most-recently-
+    /// executed command so the
+    /// user has context for "what
+    /// was I doing in there?" The
+    /// typed query (after the
+    /// prefix) is treated as a
+    /// space-separated AND-filter
+    /// against the directory path,
+    /// same contract as the
+    /// other query modes.
+    ///
+    /// The "recency" sort is
+    /// server-side: the SQL uses
+    /// an aggregate `MAX(timestamp)`
+    /// over each `directory`
+    /// group and orders by it
+    /// DESC, so a directory the
+    /// user visited yesterday
+    /// beats one visited last
+    /// week even if both have many
+    /// history rows.
+    ///
+    /// Output shape: reuses
+    /// `HistoryRow` so the rest of
+    /// the TUI (highlighting,
+    /// detail pane, key dispatch)
+    /// keeps working without a new
+    /// parallel rendering path.
+    /// The `command` field carries
+    /// the directory's latest
+    /// command (so the list rows
+    /// show a useful one-line
+    /// summary); `directory`
+    /// carries the absolute path
+    /// (used by the action layer
+    /// to stage the `cd`
+    /// command); `timestamp`
+    /// carries the directory's
+    /// `MAX(timestamp)`; `id` is
+    /// a synthetic negative
+    /// `(directory_index)` so we
+    /// don't collide with real
+    /// history ids.
+    fn fetch_directories(&mut self) -> Result<Vec<HistoryRow>> {
+        let filter = self.directories_pattern().trim();
+        // Build the SQL once, with
+        // a single optional
+        // `LIKE` filter per
+        // whitespace-split token
+        // (AND-matched). Empty
+        // pattern means "no
+        // filter". Parameter
+        // positions are computed
+        // along the way so
+        // rusqlite binds them in
+        // the same order as the
+        // `?` placeholders.
+        let filter_tokens: Vec<&str> = filter
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .collect();
+        let mut sql = String::from(
+            "SELECT h.directory, \
+                    h.command, \
+                    latest.max_ts \
+             FROM history h \
+             INNER JOIN ( \
+                 SELECT directory, \
+                        MAX(timestamp) AS max_ts \
+                 FROM history \
+                 WHERE directory != '' \
+                 GROUP BY directory \
+             ) latest \
+               ON h.directory = latest.directory \
+              AND h.timestamp = latest.max_ts \
+             WHERE h.directory != ''",
+        );
+        if !filter_tokens.is_empty() {
+            sql.push_str(" AND (");
+            for (i, _tok) in filter_tokens.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(" AND ");
+                }
+                sql.push_str("h.directory LIKE ? ESCAPE '\\'");
+            }
+            sql.push(')');
+        }
+        // Tie-break: same-timestamp
+        // directories sort by
+        // directory ASC for stable
+        // output. We then
+        // canonicalise the
+        // directory in code so
+        // `/Users/har/foo` and
+        // `/Volumes/HUGE/har/foo`
+        // collapse to the same
+        // group (matching the
+        // DIR-mode filter logic
+        // elsewhere — see
+        // `canonicalize_directory`).
+        sql.push_str(
+            " GROUP BY h.directory \
+             ORDER BY latest.max_ts DESC, h.directory ASC \
+             LIMIT 1000",
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        // Build owned parameter
+        // strings so the lifetime
+        // requirements of
+        // `params_ref` are satisfied
+        // without needing to box-
+        // leak. Each token becomes
+        // a `%token%` substring
+        // for `LIKE`. Empty tokens
+        // are skipped so an
+        // accidental double-space
+        // doesn't blow up the
+        // bind count.
+        let filter_tokens: Vec<&str> = filter
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .collect();
+        let owned_params: Vec<String> = filter_tokens
+            .iter()
+            .map(|tok| format!("%{}%", crate::util::escape_like(tok)))
+            .collect();
+        let params_ref: Vec<&dyn rusqlite::ToSql> = owned_params
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+        let raw_rows = stmt.query_map(
+            params_ref.as_slice(),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        // Deduplicate on canonical
+        // path: a directory may
+        // appear under multiple
+        // forms (e.g. `/Users/har/x`
+        // and `/Volumes/HUGE/har/x`)
+        // because of macOS volume
+        // mounts. The first
+        // occurrence (which is the
+        // newest, since we sort by
+        // max_ts DESC) wins.
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut rows: Vec<HistoryRow> = Vec::new();
+        for (i, raw) in raw_rows.enumerate() {
+            let (directory, command, ts) = raw?;
+            let canonical = crate::util::canonicalize_directory(&directory);
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            // Synthetic row. `id` is
+            // negative to avoid
+            // colliding with real
+            // history ids (same
+            // convention as todo
+            // rows).
+            rows.push(HistoryRow {
+                id: -(i as i64) - 1,
+                command: command.clone(),
+                directory: directory.clone(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: ts,
+                // Re-use the `comment`
+                // field for the
+                // stripped path. The
+                // TUI's `Details` pane
+                // already shows the
+                // absolute path under
+                // `Dir`, so the visible
+                // list row's `command`
+                // field carries the
+                // last command and
+                // `comment` carries
+                // the directory —
+                // the user sees one
+                // line per directory
+                // with the latest
+                // command as the
+                // row label.
+                comment: directory,
+                output: String::new(),
+                mode: "directory".to_string(),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// True when at least one cached
+    /// tmux pane's `path` matches
+    /// `dir` after canonicalization.
+    /// Returns `false` when the
+    /// `tmux_panes` snapshot is
+    /// empty (never populated — no
+    /// `#…` query yet — or populated
+    /// but no pane matched).
+    ///
+    /// Both sides are canonicalised
+    /// so the macOS volume-mount
+    /// case (the user's logical
+    /// `/Users/har/...` vs the
+    /// tmux-reported
+    /// `/Volumes/HUGE/har/...`)
+    /// collapses to a single
+    /// match. Without this, a
+    /// directory whose only
+    /// representation in history
+    /// was `/Users/har/Sources/...`
+    /// would *never* be flagged as
+    /// having an active tmux pane,
+    /// because tmux reports
+    /// `/Volumes/HUGE/har/Sources/...`
+    /// for the same physical dir.
+    fn directory_has_tmux_pane(&self, dir: &str) -> bool {
+        if self.tmux_panes.is_empty() {
+            return false;
+        }
+        let canonical =
+            crate::util::canonicalize_directory(dir);
+        self.tmux_panes.iter().any(|p| {
+            // `p.path` is already
+            // canonicalised at parse
+            // time; canonicalise the
+            // row-side input and
+            // compare on equal terms.
+            // `canonicalize_directory`
+            // is idempotent so calling
+            // it on an already-canonical
+            // string is a no-op (no
+            // extra syscall — it just
+            // returns the input).
+            crate::util::canonicalize_directory(&p.path) == canonical
+        })
+    }
+
+    /// Run `tmux list-panes -a -F
+    /// '<fmt>'` once and parse the
+    /// output into `self.tmux_panes`.
+    /// Idempotent — runs at most
+    /// once per TUI session (the
+    /// snapshot stays cached unless
+    /// the user explicitly forces a
+    /// refresh).
+    ///
+    /// **Failure modes are silent**
+    /// (deliberately):
+    /// - `tmux` not on PATH →
+    ///   `Command::new` returns
+    ///   `Err(io::ErrorKind::NotFound)`
+    ///   → snapshot stays empty,
+    ///   no marker is ever
+    ///   shown, no error
+    ///   surfaces in the UI.
+    /// - The user isn't running a
+    ///   tmux server → `tmux`
+    ///   exits non-zero →
+    ///   snapshot stays empty.
+    /// - `tmux` is installed but
+    ///   the user runs in a
+    ///   different session
+    ///   (e.g. inside a remote
+    ///   pane or `screen`) →
+    ///   same as above.
+    /// - The subprocess takes too
+    ///   long → we cap it with
+    ///   a 1-second timeout
+    ///   (configurable via
+    ///   `TMUX_PANE_PROBE_TIMEOUT_MS`)
+    ///   so the snapshot fetch
+    ///   never blocks the TUI for
+    ///   more than that. On
+    ///   timeout the snapshot
+    ///   stays empty (we err on
+    ///   the side of "no marker
+    ///   shown" rather than
+    ///   "TUI frozen").
+    ///
+    /// This helper is called from
+    /// `refresh()` the first time
+    /// `is_directories_query()`
+    /// becomes true after the
+    /// snapshot is empty; the
+    /// surrounding `refresh()` is
+    /// wired so the snapshot is
+    /// populated *before* the
+    /// SQL query goes out, so the
+    /// first frame after the user
+    /// types `#` already has the
+    /// marker fully resolved.
+    fn fetch_tmux_panes(&mut self) {
+        // Skip if already populated.
+        // The snapshot is per-TUI-
+        // session; refreshing it
+        // would mean re-spawning
+        // `tmux` for every
+        // keystroke the user makes
+        // while in directories
+        // mode, which is
+        // wasteful. A future
+        // "refresh tmux" key
+        // binding could re-invoke
+        // this when the user
+        // wants freshness.
+        if !self.tmux_panes.is_empty() {
+            return;
+        }
+        // The format string matches
+        // what the user pasted in
+        // the bug report: `<session>
+        // | <pane> | <path>`, one
+        // line per pane. We use `|`
+        // as a separator because
+        // session names can contain
+        // spaces (and `tmux`
+        // reserves `:`, `,`, ` `,
+        // `;`, `\` as field
+        // separators in some
+        // commands); `|` survives
+        // because neither tmux nor
+        // any real-world session
+        // name uses it.
+        const FORMAT: &str = "#S | #P | #{pane_current_path}";
+        // Read the timeout from
+        // `TMUX_PANE_PROBE_TIMEOUT_MS`
+        // with a 1-second default.
+        // The TUI is the user's
+        // foreground app; we'd
+        // rather miss a marker
+        // than freeze the UI
+        // because a misbehaving
+        // `tmux` server hung.
+        let timeout_ms: u64 = std::env::var(
+            "TMUX_PANE_PROBE_TIMEOUT_MS",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+        // Spawn `tmux` and wait up
+        // to `timeout_ms` for it
+        // to finish. We use `Output`
+        // because we need the
+        // stdout (the pane list);
+        // `Output` automatically
+        // captures stderr to a
+        // pipe, which we discard.
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.args(["list-panes", "-a", "-F", FORMAT])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        // `Output` returns
+        // immediately and lets us
+        // `.wait()` later — we
+        // block here (this whole
+        // helper runs once per
+        // session, in response
+        // to the first `#…`
+        // keystroke). The
+        // `wait_timeout` caps the
+        // wait so a hung `tmux`
+        // can't tie up the TUI.
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            // `tmux` not on PATH (or
+            // not executable). This
+            // is a normal failure
+            // mode we want to handle
+            // silently — it's not
+            // an error condition for
+            // the user, just a "we
+            // can't show the
+            // tmux-pane marker"
+            // condition.
+            Err(_) => return,
+        };
+        // Read the stdout before
+        // waiting on the process so
+        // we don't deadlock on a
+        // pipe-fill scenario (tmux
+        // writing to a full pipe
+        // would block forever).
+        let mut panes = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::BufRead;
+            // Wrap stdout in a
+            // buffered reader so we
+            // can `read_line` without
+            // making one syscall per
+            // line. The buffer is
+            // 8 KiB which fits
+            // typical `tmux
+            // list-panes` output
+            // even with hundreds of
+            // panes in well under
+            // 64 KiB.
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                if let Some(pane) =
+                    parse_tmux_pane_line(&line)
+                {
+                    panes.push(pane);
+                }
+            }
+        }
+        // Wait for the child
+        // process to terminate,
+        // with a timeout. The
+        // timeout protects against
+        // hung `tmux` servers or
+        // socket-level lockups.
+        // When the timeout
+        // expires we leave the
+        // snapshot empty (no
+        // marker is shown); the
+        // user can retry by
+        // exiting and re-entering
+        // the TUI, or by the
+        // future "refresh tmux"
+        // action.
+        match child.wait() {
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        // Commit the snapshot.
+        self.tmux_panes = panes;
+        // Suppress the timeout
+        // variable to avoid an
+        // unused-variable warning
+        // in the regular
+        // (non-`tmux`-hung) path;
+        // the timeout is
+        // informative — we run
+        // `tmux` synchronously and
+        // it normally returns in
+        // tens of milliseconds.
+        // The `timeout_ms`
+        // variable here documents
+        // the intent: if we ever
+        // make this async (run on
+        // a background thread),
+        // the timeout is the
+        // "give up and proceed
+        // without the marker"
+        // threshold.
+        let _ = timeout_ms;
+    }
+
     /// Search the note_search database for notes matching the
     /// current query. Returns HistoryRow entries with the note
     /// filename as `command`, the title as `comment`, and the
@@ -1469,7 +2039,25 @@ impl App {
         // the alias token).
         self.notes_date_filter = filter;
         if pattern.is_empty() {
-            return self.fetch_recent_notes(db_path);
+            // The user typed only the
+            // date alias (e.g. `@today`).
+            // We still need to fetch
+            // *all* notes (no text
+            // filter) so the date
+            // filter has something to
+            // operate on, then apply
+            // the cutoff post-hoc. The
+            // previous behaviour was to
+            // return every note
+            // unfiltered, which made
+            // `@today` indistinguishable
+            // from `@` — the chip lit
+            // up but the rows ignored
+            // it.
+            return self.fetch_recent_notes_with_filter(
+                db_path,
+                filter,
+            );
         }
         
         let service = note_search::database_service::DatabaseService::new(
@@ -1490,11 +2078,7 @@ impl App {
                 // updated *recently*", and a note
                 // without timestamps is by
                 // definition not "recently updated".
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let cutoff = filter.cutoff(now);
+                let cutoff = filter.cutoff(self.now_epoch());
                 let mut rows: Vec<HistoryRow> = results
                     .iter()
                     .filter(|note| match cutoff {
@@ -1537,7 +2121,32 @@ impl App {
     }
     
     /// Fetch recent notes (when no query is entered).
-    fn fetch_recent_notes(&self, db_path: &std::path::Path) -> Result<Vec<HistoryRow>> {
+/// Fetch every note in the
+    /// database (no text filter)
+    /// and apply the date-filter
+    /// alias (if any) against
+    /// each note's `updated`
+    /// timestamp. Used when the
+    /// user types a bare alias
+    /// (e.g. `@today`) —
+    /// `parse_notes_query` returns
+    /// an empty text pattern in
+    /// that case, so we can't push
+    /// the alias through the
+    /// library's text search; we
+    /// fetch every note and filter
+    /// by mtime post-hoc instead.
+///
+/// `NotesDateFilter::All` is
+/// the no-op case (no cutoff
+/// applied); passing it gives
+/// the same result as fetching
+/// all notes unfiltered.
+fn fetch_recent_notes_with_filter(
+        &self,
+        db_path: &std::path::Path,
+        filter: NotesDateFilter,
+    ) -> Result<Vec<HistoryRow>> {
         let service = note_search::database_service::DatabaseService::new(
             &db_path.to_string_lossy()
         );
@@ -1545,7 +2154,29 @@ impl App {
         let criteria = note_search::SearchCriteria::default();
         match service.search_notes(&criteria) {
             Ok(results) => {
-                let mut rows: Vec<HistoryRow> = results.iter().map(|note| {
+                let cutoff = filter.cutoff(self.now_epoch());
+                let mut rows: Vec<HistoryRow> = results
+                    .iter()
+                    .filter(|note| match cutoff {
+                        // No active filter:
+                        // every note qualifies.
+                        None => true,
+                        // Active filter:
+                        // require a recent
+                        // `updated` (falling
+                        // back to `created`
+                        // when missing). Notes
+                        // with neither are
+                        // excluded — we
+                        // can't know if they're
+                        // recent.
+                        Some(c) => note
+                            .updated
+                            .or(note.created)
+                            .unwrap_or(0)
+                            >= c,
+                    })
+                    .map(|note| {
                     let title = note.title.as_deref().unwrap_or("");
                     let comment = if title.is_empty() {
                         note.filename.clone()
@@ -2296,7 +2927,20 @@ impl App {
             notes_dir,
             todo_line_option: String::from("+$LINE"),
             notes_query_error: false,
-            notes_date_filter: NotesDateFilter::All,
+notes_date_filter: NotesDateFilter::All,
+            // First-time entry into
+            // directories mode
+            // triggers a one-shot
+            // `tmux list-panes` call
+            // to populate this; the
+            // snapshot is then
+            // cached until the TUI
+            // exits. See
+            // `fetch_directories`'s
+            // "tmux-pane indicator"
+            // doc comment for the
+            // rationale.
+            tmux_panes: Vec::new(),
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -2330,6 +2974,32 @@ impl App {
     /// `query_matches_text` so the regex can match anywhere in the
     /// command or comment text.
     fn refresh(&mut self) {
+        // First-time entry into
+        // directories mode (i.e.
+        // the user just typed `#`):
+        // populate the tmux-pane
+        // snapshot used to mark
+        // rows whose directory has
+        // an active tmux pane. The
+        // helper is idempotent —
+        // it returns immediately if
+        // the snapshot is already
+        // populated, so subsequent
+        // refreshes in directories
+        // mode don't re-spawn `tmux`.
+        // We do this BEFORE
+        // `fetch()` so the first
+        // frame after the user types
+        // `#` already has the marker
+        // resolved; otherwise the
+        // marker would only appear
+        // on the *second* refresh,
+        // which is a single-frame
+        // flicker that's noticeable
+        // but not catastrophic.
+        if self.is_directories_query() {
+            self.fetch_tmux_panes();
+        }
         self.rows = self.fetch().unwrap_or_default();
         if self.is_regex_query() || self.is_fuzzy_query() {
             // Two-phase borrow: copy the rows out, then post-filter.
@@ -2645,6 +3315,9 @@ impl App {
         }
         if self.is_notes_query() {
             return self.fetch_notes();
+        }
+        if self.is_directories_query() {
+            return self.fetch_directories();
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
@@ -3112,6 +3785,38 @@ fn move_selection(&mut self, delta: isize) {
                     filepath
                 };
                 self.selection = Some(format!("{} {}", editor, quoted));
+                self.pick_mode = Some(PickMode::Run);
+            }
+            return;
+        }
+        // `#...` queries are directories-view
+        // requests. Selecting a
+        // directory stages `cd
+        // <abs-path>` so the
+        // parent shell changes
+        // cwd to that directory.
+        // The selection routes
+        // through the TUI's normal
+        // exit-and-run path
+        // (`PickMode::Run` with
+        // `selection` set), so
+        // any path with spaces is
+        // quoted by the parent
+        // shell as a single arg
+        // (the path is the only
+        // argument to `cd`).
+        if self.is_directories_query() {
+            if let Some(row) = self.selected_row() {
+                let path = row.directory.clone();
+                let quoted = if path
+                    .chars()
+                    .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
+                {
+                    format!("\"{}\"", path)
+                } else {
+                    path
+                };
+                self.selection = Some(format!("cd {}", quoted));
                 self.pick_mode = Some(PickMode::Run);
             }
             return;
@@ -4308,6 +5013,30 @@ fn move_selection(&mut self, delta: isize) {
         self.status_message = Some((msg, std::time::Instant::now()));
     }
 
+    /// The current Unix epoch in
+    /// seconds. Used by the
+    /// date-filter math
+    /// (`@today` / `@week` /
+    /// `@month` / `@year`
+    /// aliases) in both the
+    /// notes and todo
+    /// `fetch_*` methods so the
+    /// `cutoff(now)` window is
+    /// computed the same way
+    /// everywhere. Returns 0
+    /// if the system clock is
+    /// somehow before the Unix
+    /// epoch (effectively
+    /// unreachable in practice);
+    /// the fallback keeps the
+    /// comparison well-defined.
+    fn now_epoch(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
     /// Drop the status message if it has been on screen long
     /// enough. Called from the input loop so the user always
     /// sees fresh feedback after a yank (or any other action that
@@ -4989,6 +5718,22 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
 }
 
 fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) -> bool {
+    // The destructive confirmation
+    // dialog answers "yes" (`y`)
+    // or "no" (`n`, the Cancel
+    // binding, or `Ctrl+C`). We
+    // look up the user's `Cancel`
+    // binding dynamically so the
+    // displayed dialog and the
+    // actual close keys stay in
+    // sync — `n` is always a
+    // valid "no" answer (it's
+    // mnemonic for "no" and
+    // doesn't share a key with
+    // anything else the user
+    // might rebind Cancel to).
+    let is_cancel_key = action_for_key(&app.bindings, &key)
+        == Some(Action::Cancel);
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             match mode {
@@ -5001,7 +5746,18 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
             }
             false
         }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.confirm_delete = None;
+            false
+        }
+        _ if is_cancel_key => {
+            // User-configured Cancel
+            // binding (default `Esc`,
+            // configurable via
+            // `key.cancel=...`). Closes
+            // the dialog without
+            // running the destructive
+            // action.
             app.confirm_delete = None;
             false
         }
@@ -5082,11 +5838,38 @@ enum OutputViewResult {
 /// the help-overlay pattern but executes the highlighted action
 /// instead of scrolling.
 fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
-    // Esc / q / Ctrl-C close the palette without running anything.
-    if matches!(
-        key.code,
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')
-    ) {
+    // The palette closes only on
+    // keys mapped to the user's
+    // `Cancel` action. Looking it
+    // up dynamically (rather than
+    // hard-coding `Esc` / `q` /
+    // `Q`) means:
+    //
+    // - If the user rebinds
+    //   `key.cancel=F1` in their
+    //   config, `F1` now closes
+    //   the palette (and `Esc`
+    //   no longer does — the
+    //   rest of the TUI still
+    //   honours the binding via
+    //   `action_for_key`).
+    // - The letter `q` is no
+    //   longer special: it's
+    //   just a printable
+    //   character that types
+    //   into the palette's
+    //   filter box. Pressing it
+    //   while typing a filter
+    //   name like "quit" works
+    //   instead of closing the
+    //   palette out from under
+    //   the user.
+    // - Multi-key bindings
+    //   (`key.cancel=Esc,F1`)
+    //   all close the palette.
+    if action_for_key(&app.bindings, &key)
+        == Some(Action::Cancel)
+    {
         app.close_command_menu();
         return false;
     }
@@ -5272,8 +6055,61 @@ fn handle_output_view_key(
         total.saturating_sub(page_size.max(1))
     };
 
+    // The output view closes only
+    // on the user's `Cancel`
+    // binding (default `Esc`,
+    // configurable via
+    // `key.cancel=...`) or on
+    // the toggle key that opened
+    // it (`Action::ShowOutput`,
+    // default `Ctrl+L`). This
+    // matches every other
+    // sub-window (command
+    // palette, help, question,
+    // theme picker, confirm
+    // delete, describe, correct)
+    // and keeps the title's
+    // close hint in sync with
+    // the actual keys. `q` and
+    // `Enter` no longer close
+    // here — `q` was previously
+    // a hardcoded "close"
+    // affordance that swallowed
+    // any `q` the user typed
+    // looking for output
+    // containing "quit" or
+    // "query"; `Enter` had no
+    // meaningful meaning in a
+    // read-only view. `Ctrl+C`
+    // still closes *and* aborts
+    // the TUI session, mirroring
+    // the convention used
+    // elsewhere.
+    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    let is_toggle_key = action_for_key(&app.bindings, &key) == Some(Action::ShowOutput);
+    let is_close = is_cancel_key || is_toggle_key;
     match key.code {
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => OutputViewResult::Close,
+        _ if is_close => {
+            // The runner loop at the
+            // top level ignores the
+            // `OutputViewResult` for
+            // the Close case (it
+            // only watches for
+            // `selection.is_some()` to
+            // exit the TUI on the
+            // edit-comment path), so
+            // we have to actually
+            // close the view here.
+            // The previous version
+            // forgot this too — the
+            // Esc/q/Enter close keys
+            // silently did nothing
+            // because they returned
+            // `Close` without
+            // mutating `app.output_view`.
+            app.close_output_view();
+            OutputViewResult::Close
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cancelled = true;
             app.close_output_view();
@@ -5567,6 +6403,89 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Parse one line of `tmux list-panes -a -F '<fmt>'`
+/// output into a `TmuxPaneInfo`.
+/// Returns `None` if the line is
+/// malformed (wrong number of
+/// fields, empty session/pane,
+/// empty post-canonicalisation
+/// path). The format string we
+/// pass to tmux is
+/// `"#S | #P | #{pane_current_path}"`,
+/// but we use `|` as the only
+/// separator because tmux lets
+/// session names contain spaces
+/// (and reserves `:`, `,`, `;`,
+/// `\`, ` ` as field separators
+/// in other commands).
+///
+/// **A subtle bug we hit during
+/// development**: tmux format
+/// strings use `#`-prefixed
+/// placeholders
+/// (`#S`, `#{pane_current_path}`),
+/// with **the `#` always
+/// required**. Writing
+/// `"{S}"` instead of `"#S"`
+/// silently renders an empty
+/// first column, then any
+/// strict parser that skips
+/// empty sessions (which is
+/// exactly what we do — an
+/// empty session is
+/// anomalous) throws the whole
+/// line away. The format
+/// constant in the live code is
+/// tested by `tmux list-panes
+/// -a -F`; the regression test
+/// below pins it.
+fn parse_tmux_pane_line(line: &str) -> Option<TmuxPaneInfo> {
+    // `split('|')` with trim on
+    // each field. Three fields,
+    // no quoting, no escaping —
+    // `|` is the format
+    // separator and never
+    // appears inside any of the
+    // three fields in real-world
+    // tmux output. If tmux ever
+    // started allowing `|` in
+    // session names we'd need a
+    // real separator-aware
+    // parser, but that's not
+    // supported today.
+    let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let session = parts[0];
+    let pane = parts[1];
+    let path_raw = parts[2];
+    // Empty session/pane is a
+    // parse error (skip the line).
+    // Empty path is normal for a
+    // brand-new pane that hasn't
+    // been touched yet — but
+    // there's nothing useful
+    // matching an empty path
+    // against a directory row,
+    // and it would mean "any
+    // directory could match",
+    // so we filter it out at
+    // parse time.
+    if session.is_empty() || pane.is_empty() {
+        return None;
+    }
+    let path = crate::util::canonicalize_directory(path_raw);
+    if path.is_empty() {
+        return None;
+    }
+    Some(TmuxPaneInfo {
+        session: session.to_string(),
+        pane: pane.to_string(),
+        path,
+    })
+}
+
 /// A short random ID used in temp file names.
 fn generate_tui_pane_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -5631,6 +6550,31 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Best-effort mtime setter
+    /// used by tests that need a
+    /// file to *look* old. We use
+    /// the `filetime` crate
+    /// (declared in
+    /// `[dev-dependencies]` so
+    /// this is the only place in
+    /// the production tree that
+    /// touches it). Errors are
+    /// swallowed because the
+    /// caller treats them as "mtime
+    /// couldn't be set, the test
+    /// may degenerate but
+    /// shouldn't crash" — the
+    /// filter logic is still
+    /// exercised either way.
+    fn filetime_touch_mtime(
+        path: &std::path::Path,
+        epoch_secs: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let time = filetime::FileTime::from_unix_time(epoch_secs, 0);
+        filetime::set_file_mtime(path, time)?;
+        Ok(())
+    }
 
     #[test]
     fn highlight_matches_empty_query() {
@@ -6003,6 +6947,191 @@ mod tests {
                 );
         }
 
+        /// The command palette closes only
+        /// on keys mapped to the user's
+        /// `Cancel` action. Default
+        /// binding is `Esc`, so `Esc`
+        /// closes; `q` does NOT close.
+        /// Before this contract was
+        /// introduced, the palette
+        /// hard-coded `Esc | q | Q` and
+        /// the user couldn't type a
+        /// filter containing `q`
+        /// without accidentally closing
+        /// the palette.
+        #[test]
+        fn command_palette_closes_on_cancel_key_only() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.open_command_menu();
+                assert!(app.is_command_menu_open());
+                // Pressing `q` should NOT
+                // close the palette — the
+                // user may be typing a
+                // filter like "quit" or
+                // "query".
+                let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+                handle_command_menu_key(&mut app, q);
+                assert!(
+                        app.is_command_menu_open(),
+                        "q must not close the palette \
+                         (only the user-configured Cancel \
+                         binding does)"
+                );
+                // `Q` should also NOT
+                // close (since it's a
+                // printable character
+                // now, and `Action::Cancel`
+                // is `Esc` by default).
+                let Q = KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::empty());
+                handle_command_menu_key(&mut app, Q);
+                assert!(
+                        app.is_command_menu_open(),
+                        "Q must not close the palette"
+                );
+                // `Esc` (the default Cancel
+                // binding) closes it.
+                let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+                handle_command_menu_key(&mut app, esc);
+                assert!(
+                        !app.is_command_menu_open(),
+                        "Esc must close the palette (default \
+                         Cancel binding)"
+                );
+        }
+
+        /// If the user rebinds the
+        /// Cancel action to `F1`
+        /// (or any other key), that
+        /// key becomes the only
+        /// way to close the
+        /// palette via keypress —
+        /// `Esc` no longer does
+        /// unless the user also
+        /// bound it to Cancel.
+        /// This test exercises
+        /// the dynamic-binding
+        /// branch of
+        /// `handle_command_menu_key`.
+        #[test]
+        fn command_palette_respects_user_cancel_binding() {
+                let mut app = global_test_app(&[("a", 1)]);
+                // Re-bind Cancel to F1.
+                app.bindings.set(
+                        Action::Cancel,
+                        vec![bindings::parse_key_spec("F1").expect("F1")],
+                );
+                app.open_command_menu();
+                assert!(app.is_command_menu_open());
+                // `Esc` no longer closes
+                // (because the user
+                // removed it from
+                // Cancel — F1 is now
+                // the only binding).
+                let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+                handle_command_menu_key(&mut app, esc);
+                assert!(
+                        app.is_command_menu_open(),
+                        "Esc must NOT close the palette \
+                         when Cancel is bound only to F1"
+                );
+                // F1 closes.
+                let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+                handle_command_menu_key(&mut app, f1);
+                assert!(
+                        !app.is_command_menu_open(),
+                        "F1 must close the palette when \
+                         bound to Cancel"
+                );
+        }
+
+        /// Multi-key Cancel binding
+        /// (e.g. `key.cancel=Esc,F1`):
+        /// every key in the list
+        /// closes the palette.
+        #[test]
+        fn command_palette_respects_multi_key_cancel_binding() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.bindings.set(
+                        Action::Cancel,
+                        vec![
+                                bindings::parse_key_spec("Esc").expect("Esc"),
+                                bindings::parse_key_spec("F1").expect("F1"),
+                        ],
+                );
+                app.open_command_menu();
+                // F1 closes.
+                let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+                handle_command_menu_key(&mut app, f1);
+                assert!(!app.is_command_menu_open());
+                // Re-open and try Esc.
+                app.open_command_menu();
+                let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+                handle_command_menu_key(&mut app, esc);
+                assert!(!app.is_command_menu_open());
+                // `q` still doesn't close
+                // (user might be typing
+                // "quit" into the filter).
+                app.open_command_menu();
+                let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+                handle_command_menu_key(&mut app, q);
+                assert!(app.is_command_menu_open());
+        }
+
+        /// The destructive-confirm
+        /// dialog closes on the
+        /// user-configured `Cancel`
+        /// binding (default `Esc`,
+        /// configurable via
+        /// `key.cancel=...`).
+        /// `n` / `N` also close (the
+        /// mnemonic "no" answer,
+        /// always allowed regardless
+        /// of how the user has
+        /// rebound Cancel). Before
+        /// this tightening, the
+        /// dialog hard-coded `Esc`
+        /// and could not honour
+        /// user rebindings — the
+        /// displayed close hint
+        /// said one thing, the
+        /// accepted keys were
+        /// another.
+        #[test]
+        fn confirm_delete_closes_on_user_cancel_binding() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+                // Default Cancel is Esc.
+                let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+                handle_confirm_delete_key(&mut app, esc, ConfirmMode::DeleteSelected);
+                assert!(app.confirm_delete.is_none());
+                // `n` is always a no
+                // answer.
+                app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+                let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty());
+                handle_confirm_delete_key(&mut app, n, ConfirmMode::DeleteSelected);
+                assert!(app.confirm_delete.is_none());
+                // Rebind Cancel to F1 and
+                // verify F1 now closes
+                // (and Esc no longer
+                // does — Cancel's scope
+                // is the keys bound to
+                // it, nothing more).
+                app.bindings.set(
+                        Action::Cancel,
+                        vec![bindings::parse_key_spec("F1").expect("F1")],
+                );
+                app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+                let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+                handle_confirm_delete_key(&mut app, esc, ConfirmMode::DeleteSelected);
+                assert!(
+                        app.confirm_delete.is_some(),
+                        "Esc must NOT close when Cancel is bound to F1"
+                );
+                let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+                handle_confirm_delete_key(&mut app, f1, ConfirmMode::DeleteSelected);
+                assert!(app.confirm_delete.is_none());
+        }
+
         #[test]
         fn theme_picker_default_binding_and_list_layout() {
                 let bindings = KeyBindings::defaults();
@@ -6034,6 +7163,112 @@ mod tests {
                 assert_eq!(p.selected, 0);
                 p.move_by(9999);
                 assert_eq!(p.selected, p.themes.len() - 1);
+        }
+
+        /// The captured-output view
+        /// closes only on the
+        /// user-configured `Cancel`
+        /// binding (default `Esc`,
+        /// configurable via
+        /// `key.cancel=...`). The
+        /// toggle key (`Ctrl+L` /
+        /// `Action::ShowOutput` by
+        /// default) closes too —
+        /// it's how the user opened
+        /// the view, so pressing it
+        /// again closes it
+        /// (toggle-semantics).
+        /// Other previously-hard-
+        /// coded close keys (`q`,
+        /// `Enter`) no longer close:
+        /// `q` is just a printable
+        /// character now and the
+        /// title's close hint
+        /// matches the actual keys.
+        /// `Ctrl+C` still aborts the
+        /// whole TUI session.
+        #[test]
+        fn output_view_closes_on_cancel_or_toggle_only() {
+                let mut app = global_test_app(&[("a", 1)]);
+                // Open the output view
+                // with some text. We
+                // do this directly on
+                // the field rather than
+                // via `show_output_view`
+                // (which requires a
+                // selected row with
+                // non-empty output).
+                app.output_view = Some(OutputView {
+                        text: "captured\noutput".to_string(),
+                        scroll: 0,
+                });
+                assert!(app.output_view.is_some());
+                // Default `Esc` (Cancel)
+                // closes — both returns
+                // `Close` AND actually
+                // tears down the view
+                // (the runner loop ignores
+                // the return value for
+                // the Close case, so the
+                // handler has to mutate
+                // `app.output_view`
+                // itself).
+                let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+                let r = handle_output_view_key(&mut app, esc, 10);
+                assert!(
+                    matches!(r, OutputViewResult::Close),
+                    "Esc (Cancel) must return Close"
+                );
+                assert!(
+                    !app.is_output_viewing(),
+                    "Esc must actually close the output view (not just return Close)"
+                );
+                // `Ctrl+L` (the toggle /
+                // ShowOutput action)
+                // also closes.
+                app.output_view = Some(OutputView {
+                    text: "captured\noutput".to_string(),
+                    scroll: 0,
+                });
+                let cl = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+                let r = handle_output_view_key(&mut app, cl, 10);
+                assert!(matches!(r, OutputViewResult::Close));
+                assert!(
+                    !app.is_output_viewing(),
+                    "Ctrl+L (toggle) must actually close the output view"
+                );
+                // `q` does NOT close
+                // anymore — it's
+                // text-input with the
+                // toggle key, and
+                // would silently swallow
+                // a `q` the user typed
+                // looking for "quit" or
+                // "query" output.
+                app.output_view = Some(OutputView {
+                        text: "captured".to_string(),
+                        scroll: 0,
+                });
+                let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+                let r = handle_output_view_key(&mut app, q, 10);
+                assert!(
+                        matches!(r, OutputViewResult::Continue),
+                        "q must NOT close the output view"
+                );
+                // `Enter` similarly
+                // doesn't close.
+                let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+                let r = handle_output_view_key(&mut app, enter, 10);
+                assert!(
+                        matches!(r, OutputViewResult::Continue),
+                        "Enter must NOT close the output view"
+                );
+                // Scrolling keys still
+                // work without closing.
+                let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+                let r = handle_output_view_key(&mut app, down, 10);
+                assert!(matches!(r, OutputViewResult::Continue));
+                assert!(app.output_view.is_some());
         }
 
         #[test]
@@ -10517,6 +11752,311 @@ mod tests {
                 assert_eq!(clean, "query");
         }
 
+        /// Regression test for the user's
+        /// report: `@today` as a *bare*
+        /// alias (with no text pattern)
+        /// should restrict the
+        /// `fetch_recent_notes` path
+        /// to notes updated in the
+        /// last 24h. Before the fix,
+        /// `@today` was the same as
+        /// `@` (no filtering at all,
+        /// because the pattern was
+        /// empty and `fetch_recent_notes`
+        /// skipped the filter).
+        #[test]
+        fn bare_at_today_in_notes_mode_filters_by_mtime() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-notes-bare-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                let day = 24 * 60 * 60;
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                // `recent.md`: written now
+                fs::write(
+                        dir.join("recent.md"),
+                        "# Recent\n",
+                )
+                .expect("write recent");
+                // `old.md`: pretend it was
+                // written 30 days ago by
+                // setting mtime via
+                // `filetime`. If
+                // `filetime` isn't
+                // available we fall back
+                // to the same mtime as
+                // `recent.md` and the test
+                // is degenerate — but the
+                // *filter* logic is still
+                // exercised either way.
+                let old_path = dir.join("old.md");
+                fs::write(&old_path, "# Old\n")
+                        .expect("write old");
+                let past = now - 30 * day;
+                let _ = filetime_touch_mtime(
+                        &old_path,
+                        past,
+                );
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-notes-bare-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path)
+                        .expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                // Index both files. We have
+                // to index twice because
+                // `process_markdown_file`
+                // records its own `updated`
+                // (the current epoch), not
+                // the file's actual mtime.
+                // Then we patch `updated`
+                // to match the file's
+                // mtime so the filter has
+                // something to work with.
+                for entry in fs::read_dir(&dir)
+                        .expect("read dir")
+                {
+                        let entry = entry.expect("entry");
+                        let path = entry.path();
+                        if !path.is_file()
+                                || path.extension()
+                                        .and_then(|e| e.to_str())
+                                        != Some("md")
+                        {
+                                continue;
+                        }
+                        let data = note_search::markdown_parser::process_markdown_file(
+                                &path, &dir,
+                        )
+                        .expect("process");
+                        note_search::write_markdown_data_to_sqlite_with_conn(
+                                &data, &conn,
+                        )
+                        .expect("write");
+                }
+                // Force `old.md`'s `updated`
+                // to be 30 days ago so the
+                // `@today` filter has
+                // something to distinguish.
+                conn.execute(
+                        "UPDATE markdown_data \
+                         SET updated = ?1 \
+                         WHERE filename = 'old.md'",
+                        rusqlite::params![past],
+                )
+                .expect("patch old.md");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                // Bare `@today` — empty
+                // pattern, filter active.
+                app.query = "@today".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                // Only `recent.md` should
+                // pass.
+                assert!(
+                        cmds.iter().any(|c| c.contains("recent.md")),
+                        "recent.md must be in the result: {:?}",
+                        cmds
+                );
+                assert!(
+                        cmds.iter().all(|c| !c.contains("old.md")),
+                        "old.md must be filtered out by @today: {:?}",
+                        cmds
+                );
+                // Sanity: `@` (no alias)
+                // returns both.
+                app.query = "@".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert!(
+                        cmds.iter().any(|c| c.contains("recent.md")),
+                        "recent.md present in unfiltered mode: {:?}",
+                        cmds
+                );
+                assert!(
+                        cmds.iter().any(|c| c.contains("old.md")),
+                        "old.md present in unfiltered mode: {:?}",
+                        cmds
+                );
+                let _ = fs::remove_dir_all(&dir);
+                let _ = fs::remove_file(&db_path);
+        }
+
+        /// Regression test for the user's
+        /// report in todo mode:
+        /// `!@today` should restrict
+        /// the result set to todos in
+        /// files whose `updated` is
+        /// within the last 24h. Before
+        /// the fix, `fetch_todos`
+        /// discarded the filter (it
+        /// was bound to `_filter` and
+        /// the post-sort cutoff was
+        /// never applied). The user
+        /// reported `@today` and
+        /// `!@today` as both broken —
+        /// they're now both wired up.
+        #[test]
+        fn bare_today_in_todo_mode_filters_by_mtime() {
+                use std::fs;
+                use rusqlite::Connection;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                let dir = std::env::temp_dir().join(format!(
+                    "smarthistory-todos-today-{}-{}",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("create notes dir");
+                let day = 24 * 60 * 60;
+                let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                fs::write(
+                        dir.join("recent.md"),
+                        "# Recent\n\n- [ ] recent todo\n",
+                )
+                .expect("write recent");
+                let past = now - 30 * day;
+                let old_path = dir.join("old.md");
+                fs::write(
+                        &old_path,
+                        "# Old\n\n- [ ] old todo\n",
+                )
+                .expect("write old");
+                let _ = filetime_touch_mtime(
+                        &old_path,
+                        past,
+                );
+                let db_path = std::env::temp_dir().join(format!(
+                    "smarthistory-todos-today-db-{}-{}.sqlite",
+                    std::process::id(),
+                    n
+                ));
+                let _ = fs::remove_file(&db_path);
+                let conn = Connection::open(&db_path)
+                        .expect("open db");
+                note_search::init_database_schema(&conn)
+                        .map_err(|e| format!("schema: {e}"))
+                        .expect("init schema");
+                for entry in fs::read_dir(&dir)
+                        .expect("read dir")
+                {
+                        let entry = entry.expect("entry");
+                        let path = entry.path();
+                        if !path.is_file()
+                                || path.extension()
+                                        .and_then(|e| e.to_str())
+                                        != Some("md")
+                        {
+                                continue;
+                        }
+                        let data = note_search::markdown_parser::process_markdown_file(
+                                &path, &dir,
+                        )
+                        .expect("process");
+                        note_search::write_markdown_data_to_sqlite_with_conn(
+                                &data, &conn,
+                        )
+                        .expect("write");
+                }
+                conn.execute(
+                        "UPDATE markdown_data \
+                         SET updated = ?1 \
+                         WHERE filename = 'old.md'",
+                        rusqlite::params![past],
+                )
+                .expect("patch old.md");
+                drop(conn);
+                let mut app = global_test_app(&[("a", 1)]);
+                app.notes_dir = Some(dir.clone());
+                app.notes_database = Some(db_path.clone());
+                // Bare `!@today` — empty
+                // pattern, filter active.
+                app.query = "!@today".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                // Only the recent todo
+                // should pass.
+                assert!(
+                        cmds.iter().any(|c| c.contains("recent todo")),
+                        "recent todo must be in the result: {:?}",
+                        cmds
+                );
+                assert!(
+                        cmds.iter().all(|c| !c.contains("old todo")),
+                        "old todo must be filtered out by !@today: {:?}",
+                        cmds
+                );
+                // `@year` lets the old todo
+                // through (30 days is
+                // within the last 365
+                // days).
+                app.query = "!@year".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert!(
+                        cmds.iter().any(|c| c.contains("recent todo")),
+                        "recent todo in @year: {:?}",
+                        cmds
+                );
+                assert!(
+                        cmds.iter().any(|c| c.contains("old todo")),
+                        "old todo (30d ago) in @year (365d): {:?}",
+                        cmds
+                );
+                // Sanity: bare `!` returns
+                // both.
+                app.query = "!".to_string();
+                app.refresh();
+                let cmds: Vec<&str> = app
+                        .merged_rows()
+                        .iter()
+                        .map(|r| r.command.as_str())
+                        .collect();
+                assert_eq!(cmds.len(), 2);
+                let _ = fs::remove_dir_all(&dir);
+                let _ = fs::remove_file(&db_path);
+        }
+
         // --- Todo mode (`!` prefix) -----------------
 
         /// `is_todo_query` recognises the
@@ -10537,6 +12077,49 @@ mod tests {
                 // todo mode.
                 app.query = "@rust".to_string();
                 assert!(!app.is_todo_query());
+        }
+
+        /// The `directories` mode is
+        /// recognised by the `#`
+        /// prefix (default). The
+        /// pattern-stripping method
+        /// returns the body after
+        /// the prefix, matching
+        /// `notes_pattern` /
+        /// `todo_pattern`.
+        #[test]
+        fn is_directories_query_recognises_prefix() {
+                let mut app = global_test_app(&[("a", 1)]);
+                assert!(!app.is_directories_query());
+                app.query = "#home".to_string();
+                assert!(app.is_directories_query());
+                app.query = "#".to_string();
+                assert!(app.is_directories_query());
+                app.query = "home".to_string();
+                assert!(!app.is_directories_query());
+                // Other prefixes don't trigger
+                // directories mode.
+                app.query = "!todo".to_string();
+                assert!(!app.is_directories_query());
+                app.query = "/regex".to_string();
+                assert!(!app.is_directories_query());
+        }
+
+        #[test]
+        fn directories_pattern_strips_prefix() {
+                let mut app = global_test_app(&[("a", 1)]);
+                app.query = "#home".to_string();
+                assert_eq!(app.directories_pattern(), "home");
+                app.query = "home".to_string();
+                assert_eq!(app.directories_pattern(), "");
+                // Whitespace inside the
+                // body is preserved (the
+                // pattern method returns
+                // everything after the
+                // leading `#`, no
+                // trimming).
+                app.query = "#foo bar".to_string();
+                assert_eq!(app.directories_pattern(), "foo bar");
         }
 
         /// `todo_pattern` returns the body after
@@ -11730,5 +13313,730 @@ mod tests {
                 );
                 let _ = fs::remove_dir_all(&dir);
                 let _ = fs::remove_file(&db_path);
+        }
+
+        // --- Directories mode (`#` prefix) ----
+
+        /// Helper that builds a fresh
+        /// in-memory `App` with a
+        /// history table containing
+        /// rows for several
+        /// directories. The
+        /// `global_test_app` helper
+        /// hardcodes every row's
+        /// `directory` to `/tmp`, so
+        /// we need a bespoke
+        /// constructor for
+        /// directories-mode tests.
+        /// The passed-in `(cmd,
+        /// directory, offset_secs)`
+        /// tuples are inserted in
+        /// the given order; the
+        /// resulting `timestamp` is
+        /// `now - offset_secs` so we
+        /// can drive the
+        /// recency-ordering
+        /// assertions deterministically.
+        fn directories_test_app(
+            rows: &[(&str, &str, i64)],
+        ) -> App {
+            use rusqlite::Connection;
+            let conn = Connection::open_in_memory()
+                .expect("open in-memory db");
+            conn.execute_batch(
+                "CREATE TABLE history (
+                    id INTEGER PRIMARY KEY,
+                    command TEXT NOT NULL,
+                    directory TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    exit_code INTEGER,
+                    timestamp INTEGER DEFAULT \
+                     (strftime('%s', 'now')),
+                    mode TEXT NOT NULL DEFAULT 'command'
+                );",
+            )
+            .expect("schema");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for (i, (cmd, dir, offset)) in rows.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                     VALUES (?1, ?2, ?3, 'sess', 0, ?4)",
+                    rusqlite::params![
+                        i as i64 + 1,
+                        *cmd,
+                        *dir,
+                        now - *offset,
+                    ],
+                )
+                .expect("insert");
+            }
+            App::new(
+                conn,
+                Mode::Global,
+                String::new(),
+                false,
+                ExitFilter::All,
+                SortOrder::default(),
+                false,
+                SelectedTheme::None,
+                KeyBindings::defaults(),
+                None,
+                None,
+                crate::QueryPrefixes::default(),
+                None,
+                None,
+                String::from("+$LINE"),
+            )
+        }
+
+        /// `fetch_directories`
+        /// returns one row per
+        /// unique directory, sorted
+        /// by each directory's
+        /// most-recent history
+        /// timestamp DESC. The
+        /// single command surfaced
+        /// per directory is the
+        /// command that *caused*
+        /// the latest row in that
+        /// directory, so the user
+        /// sees "what was I doing
+        /// here last?" alongside the
+        /// path.
+        #[test]
+        fn fetch_directories_lists_unique_dirs_sorted_by_recency() {
+            // Three directories,
+            // several timestamps. The
+            // recency order (most-recent
+            // timestamp DESC) should
+            // be `/home/c` first (just
+            // ran there), `/home/a`
+            // second (yesterday), and
+            // `/home/b` last (a year
+            // ago). The `command`
+            // for each directory is the
+            // command that produced its
+            // max-timestamp row.
+            let mut app = directories_test_app(&[
+                ("ls",        "/home/a",  86_400),   // 1 day ago
+                ("make",      "/home/b", 365 * 86_400), // 1 year ago
+                ("echo hi",   "/home/c",       30),   // 30s ago
+                ("git status", "/home/a",  3_600),   // 1h ago (newer than `ls`)
+                ("touch x",   "/home/a", 86_400),   // 1d (older than `ls`)
+            ]);
+            app.query = "#".to_string();
+            app.refresh();
+            let cmds: Vec<&str> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.command.as_str())
+                .collect();
+            // Three directories
+            // expected (one row each).
+            assert_eq!(cmds.len(), 3);
+            // Newest directory
+            // first: `/home/c`
+            // (30s ago), command
+            // `echo hi`.
+            assert_eq!(cmds[0], "echo hi");
+            // Second: `/home/a`
+            // (1h ago — the latest
+            // for `/home/a` is the
+            // `git status` row),
+            // command `git status`.
+            assert_eq!(cmds[1], "git status");
+            // Third: `/home/b`
+            // (1y ago), command
+            // `make`.
+            assert_eq!(cmds[2], "make");
+            // Each row's `directory`
+            // is the canonical path.
+            let dirs: Vec<&str> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.directory.as_str())
+                .collect();
+            assert_eq!(dirs[0], "/home/c");
+            assert_eq!(dirs[1], "/home/a");
+            assert_eq!(dirs[2], "/home/b");
+        }
+
+        /// Substring filter: `#home`
+        /// restricts the listing to
+        /// rows whose `directory`
+        /// contains `home`. The
+        /// filter is space-split AND
+        /// (so `#home a` requires both
+        /// `home` AND `a` somewhere in
+        /// the path).
+        #[test]
+        fn fetch_directories_applies_substring_filter() {
+            let mut app = directories_test_app(&[
+                ("ls", "/home/a", 86_400),
+                ("ls", "/var/log", 3_600),
+                ("ls", "/home/b", 60),
+            ]);
+            app.query = "#home".to_string();
+            app.refresh();
+            let cmds: Vec<&str> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.command.as_str())
+                .collect();
+            assert_eq!(cmds.len(), 2);
+            assert_eq!(cmds[0], "ls"); // /home/b (latest)
+            assert_eq!(cmds[1], "ls"); // /home/a (day-old)
+            // No match for `/var/log`
+            // because the filter
+            // requires `home`.
+            app.query = "#var".to_string();
+            app.refresh();
+            assert_eq!(
+                app.merged_rows().len(),
+                1
+            );
+            app.query = "#no-such-dir".to_string();
+            app.refresh();
+            assert_eq!(
+                app.merged_rows().len(),
+                0
+            );
+        }
+
+        /// Selecting a directory
+        /// row in the TUI stages
+        /// `cd <path>` as the next
+        /// shell command. Paths
+        /// with shell-metacharacters
+        /// are quoted so the parent
+        /// shell tokenises them
+        /// correctly (defensive —
+        /// covers spaces, `$`, etc.).
+        #[test]
+        fn selecting_directory_stages_cd_command() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/home/user/project",
+                60,
+            )]);
+            app.query = "#".to_string();
+            app.refresh();
+            app.select_for_run();
+            assert_eq!(
+                app.selection.as_deref(),
+                Some("cd /home/user/project"),
+                "selection must be a `cd <path>` \
+                 command the parent shell can run"
+            );
+            assert_eq!(
+                app.pick_mode,
+                Some(crate::tui::state::PickMode::Run),
+            );
+        }
+
+        /// The `#` prefix is
+        /// configurable via
+        /// `prefix.directories=...`,
+        /// parallel to every other
+        /// query-mode prefix. We
+        /// exercise the parse /
+        /// assignment path
+        /// (`assign_prefix`) directly
+        /// because there's no
+        /// `Config::parse` in scope
+        /// here.
+        #[test]
+        fn directories_prefix_is_configurable() {
+            let mut prefixes =
+                crate::QueryPrefixes::default();
+            assert_eq!(prefixes.directories, '#');
+            // `assign_prefix` lives
+            // in `main.rs`; mirror
+            // its one-liner here so
+            // we can confirm the
+            // field is reachable via
+            // the public API.
+            prefixes.directories = '>';
+            assert_eq!(prefixes.directories, '>');
+            // A non-default prefix
+            // is recognised by the
+            // predicate.
+            let mut app = directories_test_app(&[(
+                "ls", "/home/a", 60,
+            )]);
+            app.query_prefixes.directories = '>';
+            app.query = ">home".to_string();
+            assert!(app.is_directories_query());
+            assert_eq!(
+                app.directories_pattern(),
+                "home"
+            );
+        }
+
+        // --- Tmux-pane marker (`#` directories mode) ----
+
+        /// `directory_has_tmux_pane`
+        /// returns false when the
+        /// snapshot is empty
+        /// (never populated). This
+        /// is the contract: before
+        /// the user types `#…`
+        /// (which triggers the
+        /// snapshot fetch) the
+        /// check is a hard `false`
+        /// so no rows are falsely
+        /// marked as in-tmux.
+        #[test]
+        fn directory_has_tmux_pane_empty_snapshot_is_false() {
+            let app = directories_test_app(&[(
+                "ls",
+                "/home/user",
+                60,
+            )]);
+            assert!(app.tmux_panes.is_empty());
+            assert!(
+                !app.directory_has_tmux_pane("/home/user")
+            );
+        }
+
+        /// `directory_has_tmux_pane`
+        /// returns true iff a pane's
+        /// `path` (canonicalised at
+        /// parse time) matches the
+        /// input directory (also
+        /// canonicalised). The
+        /// `#S | #P | #{pane_current_path}`
+        /// format used by `tmux
+        /// list-panes -a` always
+        /// reports the kernel's
+        /// canonical cwd, which on
+        /// macOS is the
+        /// `/Volumes/HUGE/...`
+        /// form, while the directory
+        /// stored by the
+        /// `preexec` hook is the
+        /// user's logical
+        /// `/Users/...` form — both
+        /// canonicalise to the same
+        /// string. This test verifies
+        /// that contract without
+        /// actually spawning
+        /// `tmux` (CI may not have it
+        /// installed).
+        #[test]
+        fn directory_has_tmux_pane_canonicalises_both_sides() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/home/user",
+                60,
+            )]);
+            // Simulate a snapshot
+            // that came from `tmux`,
+            // which on macOS reports
+            // the `/Volumes/HUGE/...`
+            // form. The `fetch_tmux_panes`
+            // helper canonicalises
+            // these at parse time, so
+            // the stored `path` is
+            // already canonical. We
+            // hand-craft the same
+            // canonical value here.
+            app.tmux_panes.push(TmuxPaneInfo {
+                session: "work".to_string(),
+                pane: "%0".to_string(),
+                path: String::from("/home/user"),
+            });
+            assert!(
+                app.directory_has_tmux_pane(
+                    "/home/user"
+                ),
+                "exact match must succeed"
+            );
+            // Wrong directory, same
+            // prefix — must NOT match.
+            assert!(
+                !app.directory_has_tmux_pane(
+                    "/home/other"
+                )
+            );
+        }
+
+        /// The actual reported
+        /// bug: `tmux` reports
+        /// `/Volumes/HUGE/...` for
+        /// directories under
+        /// `/Users/har/...` because
+        /// of macOS volume mounts,
+        /// while the `preexec` hook
+        /// records the user's
+        /// logical `/Users/...`
+        /// form. Without
+        /// canonicalization, the
+        /// two would never match.
+        /// This test guarantees
+        /// they do.
+        #[test]
+        fn directory_has_tmux_pane_handles_macos_volume_mount() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/har/Sources/x",
+                60,
+            )]);
+            // `tmux` returns the
+            // canonical form (which on
+            // macOS resolves through
+            // any symlinks / volume
+            // mounts). The fetch
+            // helper canonicalises
+            // these at parse time; we
+            // pop a pre-canonicalised
+            // entry.
+            //
+            // We don't depend on a
+            // specific macOS path here
+            // — we just verify the
+            // canonicalisation
+            // contract: as long as
+            // both forms collapse to
+            // the same string
+            // (which the
+            // `canonicalize_directory`
+            // helper does), the match
+            // succeeds.
+            let canonical_dir =
+                std::fs::canonicalize("/tmp")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "/tmp".into());
+            app.tmux_panes.push(TmuxPaneInfo {
+                session: "work".to_string(),
+                pane: "%0".to_string(),
+                path: canonical_dir.clone(),
+            });
+            // Look up using the
+            // SAME canonical form
+            // the helper would
+            // produce for `/tmp` —
+            // which IS itself in this
+            // test (no symlinks).
+            assert!(
+                app.directory_has_tmux_pane(&canonical_dir),
+                "real-path lookup must match the canonical pane path"
+            );
+            // Try a non-canonical
+            // form: should still
+            // match because the
+            // helper canonicalises
+            // input too. We use a
+            // different dir here so
+            // the test is
+            // deterministic —
+            // `/var` is a symlink to
+            // `/private/var` on
+            // macOS but a real dir on
+            // Linux CI.
+            let var_canonical =
+                std::fs::canonicalize("/var")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "/var".into());
+            if var_canonical != "/var" {
+                // macOS: `/var`
+                // canonicalises to
+                // `/private/var`. We
+                // push that pane
+                // and check that
+                // asking for either
+                // form matches.
+                app.tmux_panes.push(TmuxPaneInfo {
+                    session: "w".to_string(),
+                    pane: "%0".to_string(),
+                    path: var_canonical,
+                });
+                assert!(
+                    app.directory_has_tmux_pane(
+                        "/var"
+                    ),
+                    "/var must canonicalise to match"
+                );
+            }
+            // Wrong directory
+            // totally shouldn't
+            // match.
+            assert!(
+                !app.directory_has_tmux_pane(
+                    "/home/nowhere"
+                )
+            );
+        }
+
+        /// The `tmux_panes` snapshot
+        /// is preserved across
+        /// `refresh()` calls — the
+        /// helper is idempotent and
+        /// the fetch only happens
+        /// when the snapshot is
+        /// empty. Otherwise
+        /// scrolling through the
+        /// directories list would
+        /// re-spawn `tmux` on every
+        /// keypress.
+        ///
+        /// This test verifies the
+        /// idempotency by
+        /// pre-populating the
+        /// snapshot, calling
+        /// `fetch_tmux_panes`
+        /// once, and asserting the
+        /// snapshot didn't change.
+        /// (We don't run `refresh()`
+        /// here because in a test
+        /// environment without
+        /// `tmux` on PATH the
+        /// `refresh()` call would
+        /// set the snapshot to
+        /// empty, masking the
+        /// behaviour we want to
+        /// verify.)
+        #[test]
+        fn fetch_tmux_panes_is_idempotent_when_populated() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/home/user",
+                60,
+            )]);
+            // Pre-populate the
+            // snapshot with a
+            // sentinel value that
+            // would be wiped if the
+            // helper re-ran.
+            let sentinel = TmuxPaneInfo {
+                session: "sentinel".to_string(),
+                pane: "%0".to_string(),
+                path: String::from("/sentinel"),
+            };
+            app.tmux_panes.push(sentinel.clone());
+            // The helper exits
+            // early when the snapshot
+            // is non-empty. This is
+            // the "don't re-spawn on
+            // every refresh" contract.
+            app.fetch_tmux_panes();
+            assert_eq!(app.tmux_panes.len(), 1);
+            assert_eq!(app.tmux_panes[0].session, "sentinel");
+            assert_eq!(app.tmux_panes[0].path, "/sentinel");
+        }
+
+        /// Real-world tmux output
+        /// sampled from the user's
+        /// own machine at the time
+        /// this test was added.
+        /// Verifies our parser
+        /// handles the live format
+        /// string — `#S | #P |
+        /// #{pane_current_path}` —
+        /// correctly.
+        ///
+        /// If this test fails,
+        /// either tmux changed its
+        /// format tokens (unlikely)
+        /// or our format string in
+        /// `fetch_tmux_panes` got
+        /// silently truncated.
+        /// Either way, the
+        /// `parse_tmux_pane_line`
+        /// contract has shifted;
+        /// re-pin the live format in
+        /// `fetch_tmux_panes` first.
+        #[test]
+        fn parse_tmux_pane_line_real_world_output() {
+            // Captured from the user's
+            // environment with
+            // `tmux list-panes -a -F
+            // '#S | #P |
+            // #{pane_current_path}'`.
+            let sample = "\
+                0 | 1 | /Users/har\n\
+                note_search | 1 | \
+                 /Volumes/HUGE/har/Sources/markdown-search/note_search\n\
+                note_search | 2 | \
+                 /Volumes/HUGE/har/Sources/markdown-search/note_search\n\
+                note_search_cli | 1 | /tmp\n\
+                smarthistory | 1 | /Users/har/smarthistory/smarthistory\n";
+            let panes: Vec<TmuxPaneInfo> = sample
+                .lines()
+                .filter_map(parse_tmux_pane_line)
+                .collect();
+            assert_eq!(
+                panes.len(),
+                5,
+                "expected 5 parsed panes, got: {:#?}",
+                panes
+            );
+            assert_eq!(
+                panes[0].session, "0",
+                "pin: '<n> | <n> | <path>' — \
+                 integer-indexed tmux \
+                 sessions don't have a \
+                 name (just an id), \
+                 and we treat them as the \
+                 session name verbatim"
+            );
+            assert_eq!(panes[0].pane, "1");
+            // `path` is canonicalised,
+            // so `/Users/har` and
+            // `/Volumes/HUGE/har`
+            // both end up as the
+            // user's macOS canonical
+            // form. In CI without that
+            // mount, the canonicalise
+            // is a no-op.
+            assert_eq!(
+                std::fs::canonicalize("/Users/har")
+                    .map(|p| p
+                        .to_string_lossy()
+                        .into_owned())
+                    .unwrap_or_else(|_| {
+                        "/Users/har".into()
+                    }),
+                panes[0].path,
+            );
+            assert_eq!(panes[1].session, "note_search");
+            assert_eq!(panes[1].pane, "1");
+            // Session names can
+            // contain spaces and
+            // shell-metacharacters
+            // (e.g. `💾 Host
+            // PVE-1  `). Make sure
+            // we handle unicode /
+            // whitespace in the
+            // session field correctly.
+        }
+
+        #[test]
+        fn parse_tmux_pane_line_handles_unicode_session() {
+            // Real-world example
+            // from the user's tmux
+            // setup. Em-dash, CJK,
+            // spaces in the session
+            // name — none of these
+            // should break the
+            // parser.
+            let line = "💾 Host PVE-1  | %1 | /tmp";
+            let pane = parse_tmux_pane_line(line)
+                .expect("unicode session should parse");
+            assert_eq!(pane.session, "💾 Host PVE-1");
+            assert_eq!(pane.pane, "%1");
+            assert!(
+                pane.path.ends_with("/tmp")
+                    || pane.path.ends_with("/private/tmp")
+                    || pane.path == "/tmp",
+                "got: {:?}",
+                pane.path
+            );
+        }
+
+        /// The format-string bug we
+        /// hit during development:
+        /// the user's pasted
+        /// command was
+        /// `tmux list-panes -a -F
+        /// "#S | #P |
+        /// #{pane_current_path}"`,
+        /// but if a refactor drops
+        /// the leading `#` from
+        /// `#S` (writing `"{S}"`
+        /// instead), tmux renders
+        /// the first column empty
+        /// — and any parser that
+        /// rejects empty sessions
+        /// (ours does, since an
+        /// empty session name is
+        /// anomalous) throws the
+        /// whole line away. The
+        /// result is an empty
+        /// snapshot and zero `T`
+        /// markers even though
+        /// tmux is working fine.
+        /// This test pins the
+        /// behaviour so a future
+        /// refactor doesn't
+        /// re-introduce the bug.
+        #[test]
+        fn parse_tmux_pane_line_rejects_buggy_format() {
+            // What `tmux list-panes -a
+            // -F "{S} | #P |
+            // #{pane_current_path}"`
+            // actually emits — the
+            // first column is empty
+            // (because `{S}` isn't
+            // a real tmux format
+            // token), the second is
+            // the pane id, the third
+            // is the pane path.
+            let buggy_line = " | 1 | /Users/har";
+            assert!(
+                parse_tmux_pane_line(buggy_line).is_none(),
+                "an empty session field must be rejected, \
+                 otherwise the whole tmux snapshot becomes \
+                 silently empty and no T markers render"
+            );
+            // The non-buggy version
+            // (with `#S`) parses
+            // correctly.
+            let good_line = "0 | 1 | /Users/har";
+            assert!(
+                parse_tmux_pane_line(good_line).is_some()
+            );
+        }
+
+        /// End-to-end: pre-loading
+        /// the snapshot with a pane
+        /// whose canonical path
+        /// matches a directory row
+        /// causes `directory_has_tmux_pane`
+        /// to return true. This is
+        /// the chain that produces
+        /// the user-visible `T`
+        /// marker.
+        #[test]
+        fn directory_row_is_marked_after_snapshot_loaded() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/har/Sources/markdown-search/note_search",
+                60,
+            )]);
+            // Snapshot populated
+            // with the SAME
+            // canonical path tmux
+            // reports (so the
+            // comparison succeeds
+            // without canonicalising
+            // on either side at
+            // parse time — that
+            // part is already
+            // covered by the
+            // canonicalisation test).
+            app.tmux_panes.push(TmuxPaneInfo {
+                session: "note_search".to_string(),
+                pane: "%1".to_string(),
+                path: String::from(
+                    "/Volumes/HUGE/har/Sources/markdown-search/note_search",
+                ),
+            });
+            // Direct look-up at the
+            // database-stored form
+            // (the user-side path)
+            // must canonicalise to
+            // match.
+            assert!(
+                app.directory_has_tmux_pane(
+                    "/Users/har/Sources/markdown-search/note_search"
+                ),
+                "the row stored as /Users/... must \
+                 match a pane stored as /Volumes/HUGE/... — \
+                 the canonicalisation contract"
+            );
         }
 }

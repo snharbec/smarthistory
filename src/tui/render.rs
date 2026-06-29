@@ -23,22 +23,22 @@ use regex::Regex;
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
     if let Some(ref view) = app.output_view {
-        draw_output_view(f, view);
+        draw_output_view(f, app, view);
         return;
     }
 
     if let Some(ref view) = app.describe_view {
-        draw_describe_view(f, view);
+        draw_describe_view(f, app, view);
         return;
     }
 
     if let Some(ref view) = app.correct_view {
-        draw_correct_view(f, view);
+        draw_correct_view(f, app, view);
         return;
     }
 
     if let Some(ref view) = app.question_view {
-        draw_question_view(f, view);
+        draw_question_view(f, app, view);
         return;
     }
 
@@ -118,6 +118,27 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: ConfirmMode) {
         .title_style(Theme::error())
         .border_style(Theme::error());
 
+    // Use the user's actual `Cancel`
+    // binding(s) instead of
+    // hard-coding `Esc`. The
+    // dialog has its own
+    // dedicated handler
+    // (`handle_confirm_delete_key`)
+    // that closes on the user's
+    // Cancel binding plus `n`
+    // and `Ctrl+C`, so the
+    // label here matches the
+    // behavior. Falls back to a
+    // short hint when Cancel is
+    // fully unbound so the
+    // pane doesn't show a stale
+    // spec.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
     let text = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -131,7 +152,7 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: ConfirmMode) {
             Span::raw(" to confirm, "),
             Span::styled("n", Theme::highlight()),
             Span::raw(" or "),
-            Span::styled("Esc", Theme::highlight()),
+            Span::styled(cancel_hint, Theme::highlight()),
             Span::raw(" to cancel."),
         ]),
     ];
@@ -170,12 +191,44 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn draw_output_view(f: &mut Frame, view: &OutputView) {
+fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
     let area = f.area();
+    // The output view toggles on
+    // its own open key (default
+    // `Ctrl+L` —
+    // `Action::ShowOutput`),
+    // configurable via
+    // `key.show-output=...`.
+    // Show the actual binding(s)
+    // in the title so the user
+    // can see what to press, and
+    // add the `Cancel` binding
+    // so they can also see how
+    // to dismiss the view
+    // without toggling it back
+    // on.^E (edit-comment)
+    // stays literal because
+    // that's a different
+    // independent action.
+    let show_keys = format_key_specs(app.bindings.specs(Action::ShowOutput));
+    let toggle_hint = if show_keys.is_empty() {
+        "no key".to_string()
+    } else {
+        format!("{} toggle", show_keys)
+    };
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        "no key".to_string()
+    } else {
+        format!("{} close", cancel_keys)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Captured output (\u{2191}\u{2193} scroll, ^E edit, ^L close) ")
+        .title(format!(
+            " Captured output (\u{2191}\u{2193} scroll, ^E edit, {}, {}) ",
+            toggle_hint, close_hint
+        ))
         .title_style(Theme::accent())
         .border_style(Theme::dim());
 
@@ -231,23 +284,49 @@ fn draw_output_view(f: &mut Frame, view: &OutputView) {
 /// offset; short ones (the typical case — the
 /// prompt asks for at most four sentences) fit on
 /// a single screen and don't need scrolling.
-fn draw_describe_view(f: &mut Frame, view: &DescribeView) {
+fn draw_describe_view(f: &mut Frame, app: &App, view: &DescribeView) {
     let area = f.area();
+    // Use the actual `Describe` binding(s)
+    // (default `Ctrl+K`,
+    // configurable via `key.describe=...`).
+    // Describe toggles on the same
+    // key that opened it, so the
+    // "close hint" is the same
+    // spec. We separate the
+    // strings so multi-key
+    // bindings render both
+    // options ("Ctrl+K, F1 close").
+    let describe_keys = format_key_specs(app.bindings.specs(Action::Describe));
+    let close_hint = if describe_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        format!("{} close", describe_keys)
+    };
+    // Account for the close
+    // hint's length so the
+    // command text isn't
+    // over-truncated on narrow
+    // panes. The 20 was a rough
+    // estimate of "(↑↓ scroll, ^K close)".
+    let hint_len = close_hint.chars().count() + 4;
     // Build a short title that shows the command
     // being described. Long commands are truncated
     // with an ellipsis so the title stays
     // single-line and within the border.
     let title = {
-        let max = (area.width as usize).saturating_sub(20).max(20);
+        let max = (area.width as usize).saturating_sub(15 + hint_len).max(20);
         if view.command.chars().count() > max {
             let keep = max.saturating_sub(1);
             let mut s: String = view.command.chars().take(keep).collect();
             s.push('…');
-            format!(" Describe: {} (\u{2191}\u{2193} scroll, ^K close) ", s)
+            format!(
+                " Describe: {} (\u{2191}\u{2193} scroll, {}) ",
+                s, close_hint
+            )
         } else {
             format!(
-                " Describe: {} (\u{2191}\u{2193} scroll, ^K close) ",
-                view.command
+                " Describe: {} (\u{2191}\u{2193} scroll, {}) ",
+                view.command, close_hint
             )
         }
     };
@@ -331,13 +410,25 @@ fn draw_describe_view(f: &mut Frame, view: &DescribeView) {
 /// are handled by the height of the available
 /// space and the user can resize the terminal if
 /// they need more room.
-fn draw_correct_view(f: &mut Frame, view: &CorrectView) {
+fn draw_correct_view(f: &mut Frame, app: &App, view: &CorrectView) {
     use ratatui::text::Span;
     let area = f.area();
+    // Render the user's actual
+    // Cancel binding(s) instead
+    // of hard-coding `Esc`.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Correct (Enter to run corrected, Esc to cancel) ")
+        .title(format!(
+            " Correct (Enter to run corrected, {} to cancel) ",
+            cancel_hint
+        ))
         .title_style(Theme::accent())
         .border_style(Theme::dim());
 
@@ -442,20 +533,56 @@ fn draw_correct_view(f: &mut Frame, view: &CorrectView) {
 /// Mirrors the describe overlay in shape (a piece of
 /// text + a scroll offset) but is driven by the user's
 /// question rather than by a command description.
-fn draw_question_view(f: &mut Frame, view: &QuestionView) {
+fn draw_question_view(f: &mut Frame, app: &App, view: &QuestionView) {
     let area = f.area();
-    // Build a short title that shows the question.
+    // Build a short title that
+    // shows the question. The
+    // close hint reflects the
+    // user's `Cancel` binding
+    // (default `Esc`,
+    // configurable via
+    // `key.cancel=...`). The
+    // legacy `q/Esc` hardcoded
+    // hint was misleading when
+    // the user had rebound
+    // Cancel away from Esc —
+    // and the question overlay
+    // historically closed on
+    // both `q` and `Esc`, so
+    // showing only one true
+    // form keeps the label and
+    // behavior consistent.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        format!("{} close", cancel_keys)
+    };
+    // Account for the
+    // close-hint's length so the
+    // question text isn't
+    // over-truncated on narrow
+    // panes. The 25 was a
+    // rough estimate of
+    // "(↑↓ scroll, q/Esc close)"
+    // — we now use a tighter
+    // bound based on the actual
+    // hint string.
+    let hint_len = close_hint.chars().count() + 4;
     let title = {
-        let max = (area.width as usize).saturating_sub(25).max(20);
+        let max = (area.width as usize).saturating_sub(15 + hint_len).max(20);
         if view.question.chars().count() > max {
             let keep = max.saturating_sub(1);
             let mut s: String = view.question.chars().take(keep).collect();
             s.push('…');
-            format!(" Question: {} (\u{2191}\u{2193} scroll, q/Esc close) ", s)
+            format!(
+                " Question: {} (\u{2191}\u{2193} scroll, {}) ",
+                s, close_hint
+            )
         } else {
             format!(
-                " Question: {} (\u{2191}\u{2193} scroll, q/Esc close) ",
-                view.question
+                " Question: {} (\u{2191}\u{2193} scroll, {}) ",
+                view.question, close_hint
             )
         }
     };
@@ -506,10 +633,27 @@ fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
     let bg = PALETTE.with(|p| p.borrow().bg);
     let fg = PALETTE.with(|p| p.borrow().fg);
 
+    // Render the user's configured
+    // `Cancel` and `OpenHelp`
+    // bindings (rebindable via
+    // `key.cancel=...` /
+    // `key.open-help=...`) so the
+    // title always tells them how
+    // to close / reopen. The
+    // legacy `q` fallback was
+    // hard-coded and lied when
+    // the user had moved the
+    // bindings.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        String::from("(no key bound)")
+    } else {
+        format!("{} to close", cancel_keys)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Help — Esc/Enter/q to close ")
+        .title(format!(" Help — {} ", close_hint))
         .title_style(Theme::accent())
         .border_style(Theme::dim())
         .style(Style::default().bg(bg));
@@ -869,10 +1013,32 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "    e.g. `key.open-help=M-h` to bind the help overlay to Alt+h.",
     ));
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        "Press Esc, Enter, or q to close this help.",
-        warning,
-    )]));
+    // Footer hint: mirror the
+    // user's actual Cancel
+    // binding(s) here too, so
+    // the close hint is
+    // consistent between the
+    // title and the body of
+    // the help. The legacy
+    // "Esc, Enter, or q"
+    // message was wrong on
+    // two counts: `q` only
+    // closed the help if the
+    // user hadn't rebound
+    // Cancel, and `Enter` is
+    // a real (separate) key
+    // in the help overlay
+    // (it would close it
+    // because the user
+    // hasn't yet rebound
+    // Cancel).
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let hint = if cancel_keys.is_empty() {
+        "Press the configured key to close this help.".to_string()
+    } else {
+        format!("Press {} to close this help.", cancel_keys)
+    };
+    lines.push(Line::from(vec![Span::styled(hint, warning)]));
 
     lines
 }
@@ -888,10 +1054,34 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     let bg = PALETTE.with(|p| p.borrow().bg);
     let fg = PALETTE.with(|p| p.borrow().fg);
 
+    // Render the user's configured
+    // `Cancel` bindings (default
+    // `Esc`, configurable via
+    // `key.cancel=...`) so the
+    // title always tells them how
+    // to close the palette. We
+    // used to hard-code
+    // "Esc/q to close" here —
+    // which both lied (the user
+    // couldn't actually close
+    // with `q` if they had bound
+    // Cancel to something else)
+    // and tripped users typing
+    // `q` into the filter box.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let title = if cancel_keys.is_empty() {
+        // User unbound Cancel
+        // entirely. Still show
+        // something so the pane
+        // doesn't look unlabelled.
+        String::from(" Command palette ")
+    } else {
+        format!(" Command palette — {} to close ", cancel_keys)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Command palette  Esc/q to close ")
+        .title(title)
         .title_style(Theme::accent())
         .border_style(Theme::dim())
         .style(Style::default().bg(bg));
@@ -1055,18 +1245,38 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 
     // ---- Footer ----
+    // Render the actual `Cancel`
+    // binding(s) instead of
+    // hard-coding `Esc`. The
+    // footer is the user's only
+    // reminder of how to dismiss
+    // the picker; a misleading
+    // label (`Esc close` when
+    // Esc isn't bound to Cancel)
+    // would be worse than no
+    // label. Falls back to a
+    // short "no key" hint when
+    // Cancel is unbound so the
+    // pane doesn't show a stale
+    // key spec.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        format!("{} close", cancel_keys)
+    };
     let footer = Line::from(vec![
         Span::styled(
             format!(" {}/{} actions", filtered.len(), menu.actions.len()),
             dim_style,
         ),
-        Span::raw("  up/down move  Enter run  Esc close"),
+        Span::raw(format!("  up/down move  Enter run  {} ", close_hint)),
     ]);
     let footer_para = Paragraph::new(footer).style(Style::default().bg(bg));
     f.render_widget(footer_para, chunks[2]);
 }
 
-fn draw_theme_picker(f: &mut Frame, _app: &App, picker: &ThemePicker) {
+fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
     use ratatui::widgets::List;
 
     let bg = PALETTE.with(|p| p.borrow().bg);
@@ -1079,10 +1289,27 @@ fn draw_theme_picker(f: &mut Frame, _app: &App, picker: &ThemePicker) {
     let outer = centered_rect(75, 70, f.area());
     f.render_widget(ratatui::widgets::Clear, outer);
 
+    // Use the user's actual
+    // `Cancel` binding(s) in
+    // the title. Enter commits
+    // is fixed (the theme
+    // picker has no `Commit`
+    // action — only Enter can
+    // commit because that's
+    // the universal "select
+    // this row" key in
+    // `draw_list`). The revert
+    // hint is dynamic.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let revert_hint = if cancel_keys.is_empty() {
+        "no key".to_string()
+    } else {
+        format!("{} reverts", cancel_keys)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Theme picker  Enter commits / Esc reverts ")
+        .title(format!(" Theme picker  Enter commits / {} ", revert_hint))
         .title_style(Theme::accent())
         .border_style(Theme::dim())
         .style(Style::default().bg(bg));
@@ -1643,6 +1870,34 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         Span::styled(" . ", Theme::dim())
     };
 
+    // Tmux-pane activity marker.
+    // A bright ` T ` shows that
+    // there's at least one tmux
+    // pane whose cwd matches
+    // this row's `directory`
+    // (after canonicalization);
+    // a dim `.` keeps the column
+    // width stable otherwise.
+    // Only fired for directory
+    // rows (`row.mode == "directory"`)
+    // since the canonical
+    // contract for the rest of
+    // the history is "the cwd
+    // the user ran the command
+    // in", which doesn't have a
+    // single pane attached to it
+    // at any given moment.
+    let tmux_span = if row.mode == "directory" && app.directory_has_tmux_pane(&row.directory) {
+        Span::styled(
+            " T ",
+            Style::default()
+                .fg(Theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" . ", Theme::dim())
+    };
+
     // LLM preview marker. The
     // synthetic row the auto-call
     // produces is identified by
@@ -1688,6 +1943,7 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
 
     let mut spans = vec![
         capture_span,
+        tmux_span,
         llm_preview_span,
         Span::styled(format!(" {} ", age_padded), Theme::accent()),
         Span::raw(" "),
@@ -2048,6 +2304,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let is_notes = app.is_notes_query();
     let is_question = app.is_question_query();
     let is_todo = app.is_todo_query();
+    let is_directories = app.is_directories_query();
     let (prompt, title, content) = match app.comment_edit {
         Some(ref buf) => ("comment> ", " comment ", buf.as_str()),
         None => {
@@ -2089,6 +2346,22 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 // the boundary between shell history
                 // and external note files.
                 ("!", " todo ", app.query.as_str())
+            } else if is_directories {
+                // Directories mode: list every
+                // unique directory that's
+                // been used in the global
+                // history, sorted by recency.
+                // Each row surfaces the
+                // directory's latest
+                // command; selecting the
+                // row stages `cd <path>`.
+                // The accent (cyan) tint
+                // signals "browse"-style —
+                // the user is moving
+                // *between* directories
+                // rather than running a
+                // command.
+                ("#", " directories ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -2125,6 +2398,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::info_color())
             } else if is_todo {
                 Style::default().fg(Theme::warning_color())
+            } else if is_directories {
+                Style::default().fg(Theme::accent_color())
             } else {
                 Theme::accent()
             })
@@ -2153,6 +2428,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::info_color())
             } else if is_todo {
                 Style::default().fg(Theme::warning_color())
+            } else if is_directories {
+                Style::default().fg(Theme::accent_color())
             } else {
                 Theme::dim()
             })
