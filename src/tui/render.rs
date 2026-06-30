@@ -1887,16 +1887,17 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // in", which doesn't have a
     // single pane attached to it
     // at any given moment.
-    let tmux_span = if row.mode == "directory" && app.directory_has_tmux_pane(&row.directory) {
-        Span::styled(
-            " T ",
-            Style::default()
-                .fg(Theme::accent_color())
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(" . ", Theme::dim())
-    };
+    let tmux_span =
+        if row.mode == "directory" && app.directory_tmux_pane_id(&row.directory).is_some() {
+            Span::styled(
+                " T ",
+                Style::default()
+                    .fg(Theme::accent_color())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(" . ", Theme::dim())
+        };
 
     // LLM preview marker. The
     // synthetic row the auto-call

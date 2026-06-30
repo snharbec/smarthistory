@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{ExitFilter, Mode, HistoryRow, PickMode, SortOrder, TmuxPaneInfo, exit_code};
+pub use state::{ExitFilter, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -907,7 +907,7 @@ struct App {
     /// brand-new pane with no
     /// cwd yet) are filtered out
     /// at parse time.
-    tmux_panes: Vec<TmuxPaneInfo>,
+    tmux_windows: Vec<TmuxWindowInfo>,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
     /// The date-filter alias active for the current
@@ -1750,14 +1750,16 @@ impl App {
         Ok(rows)
     }
 
-    /// True when at least one cached
-    /// tmux pane's `path` matches
-    /// `dir` after canonicalization.
-    /// Returns `false` when the
-    /// `tmux_panes` snapshot is
-    /// empty (never populated — no
-    /// `#…` query yet — or populated
-    /// but no pane matched).
+    /// Look up the cached tmux
+    /// window whose `path`
+    /// matches `dir` (after
+    /// canonicalization) and
+    /// return its `pane_id`.
+    /// Returns `None` when the
+    /// snapshot is empty (never
+    /// populated — no `#…`
+    /// query yet — or populated
+    /// but no window matched).
     ///
     /// Both sides are canonicalised
     /// so the macOS volume-mount
@@ -1771,35 +1773,39 @@ impl App {
     /// representation in history
     /// was `/Users/har/Sources/...`
     /// would *never* be flagged as
-    /// having an active tmux pane,
+    /// having an active tmux window,
     /// because tmux reports
     /// `/Volumes/HUGE/har/Sources/...`
     /// for the same physical dir.
-    fn directory_has_tmux_pane(&self, dir: &str) -> bool {
-        if self.tmux_panes.is_empty() {
-            return false;
+    ///
+    /// **First match wins**. The
+    /// snapshot is sorted in the
+    /// order tmux returns it,
+    /// which on `list-windows -a`
+    /// is window-id order. The
+    /// user pressing Enter on a
+    /// `T`-marked row goes to
+    /// whichever window tmux
+    /// reports first — that's
+    /// predictable and consistent
+    /// with the displayed mark.
+    fn directory_tmux_pane_id(&self, dir: &str) -> Option<String> {
+        if self.tmux_windows.is_empty() {
+            return None;
         }
         let canonical =
             crate::util::canonicalize_directory(dir);
-        self.tmux_panes.iter().any(|p| {
-            // `p.path` is already
-            // canonicalised at parse
-            // time; canonicalise the
-            // row-side input and
-            // compare on equal terms.
-            // `canonicalize_directory`
-            // is idempotent so calling
-            // it on an already-canonical
-            // string is a no-op (no
-            // extra syscall — it just
-            // returns the input).
-            crate::util::canonicalize_directory(&p.path) == canonical
-        })
+        self.tmux_windows
+            .iter()
+            .find(|w| {
+                crate::util::canonicalize_directory(&w.path) == canonical
+            })
+            .map(|w| w.pane_id.clone())
     }
 
     /// Run `tmux list-panes -a -F
     /// '<fmt>'` once and parse the
-    /// output into `self.tmux_panes`.
+    /// output into `self.tmux_windows`.
     /// Idempotent — runs at most
     /// once per TUI session (the
     /// snapshot stays cached unless
@@ -1851,7 +1857,7 @@ impl App {
     /// first frame after the user
     /// types `#` already has the
     /// marker fully resolved.
-    fn fetch_tmux_panes(&mut self) {
+    fn fetch_tmux_windows(&mut self) {
         // Skip if already populated.
         // The snapshot is per-TUI-
         // session; refreshing it
@@ -1865,32 +1871,55 @@ impl App {
         // binding could re-invoke
         // this when the user
         // wants freshness.
-        if !self.tmux_panes.is_empty() {
+        if !self.tmux_windows.is_empty() {
             return;
         }
-        // The format string matches
-        // what the user pasted in
-        // the bug report: `<session>
-        // | <pane> | <path>`, one
-        // line per pane. We use `|`
-        // as a separator because
-        // session names can contain
-        // spaces (and `tmux`
-        // reserves `:`, `,`, ` `,
-        // `;`, `\` as field
+        // The command matches the
+        // user's spec verbatim
+        // (minus the trailing
+        // `| grep "active:1"`,
+        // which we do in-process
+        // so we only spawn one
+        // subprocess and can
+        // short-circuit on a
+        // timeout without race
+        // conditions on a piped
+        // grep).
+        //
+        // Output format (one line
+        // per window):
+        //   <pane_id> | <path> |
+        //   active:<0|1> |
+        //   Layout: <window_layout>
+        //
+        // `pane_id` is the
+        // globally-unique pane id
+        // (e.g. `%2`) — sufficient
+        // as a `tmux ... -t <id>`
+        // target. We use `|` as
+        // the field separator
+        // because tmux lets session
+        // names contain spaces
+        // and reserves `:`, `,`,
+        // `;`, `\`, ` ` as
         // separators in some
-        // commands); `|` survives
-        // because neither tmux nor
-        // any real-world session
-        // name uses it.
-        const FORMAT: &str = "#S | #P | #{pane_current_path}";
+        // commands; `|` is safe
+        // in all current formats.
+        const FORMAT: &str = "\
+            #{pane_id} | \
+            #{pane_current_path} | \
+            active:#{window_active} | \
+            Layout: #{window_layout}";
         // Read the timeout from
         // `TMUX_PANE_PROBE_TIMEOUT_MS`
         // with a 1-second default.
-        // The TUI is the user's
-        // foreground app; we'd
-        // rather miss a marker
-        // than freeze the UI
+        // (Kept the old env-var
+        // name for back-compat —
+        // the timeout semantics
+        // are unchanged.) The TUI
+        // is the user's foreground
+        // app; we'd rather miss a
+        // marker than freeze the UI
         // because a misbehaving
         // `tmux` server hung.
         let timeout_ms: u64 = std::env::var(
@@ -1899,29 +1928,10 @@ impl App {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
-        // Spawn `tmux` and wait up
-        // to `timeout_ms` for it
-        // to finish. We use `Output`
-        // because we need the
-        // stdout (the pane list);
-        // `Output` automatically
-        // captures stderr to a
-        // pipe, which we discard.
         let mut cmd = std::process::Command::new("tmux");
-        cmd.args(["list-panes", "-a", "-F", FORMAT])
+        cmd.args(["list-windows", "-a", "-F", FORMAT])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        // `Output` returns
-        // immediately and lets us
-        // `.wait()` later — we
-        // block here (this whole
-        // helper runs once per
-        // session, in response
-        // to the first `#…`
-        // keystroke). The
-        // `wait_timeout` caps the
-        // wait so a hung `tmux`
-        // can't tie up the TUI.
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             // `tmux` not on PATH (or
@@ -1932,7 +1942,7 @@ impl App {
             // an error condition for
             // the user, just a "we
             // can't show the
-            // tmux-pane marker"
+            // tmux-window marker"
             // condition.
             Err(_) => return,
         };
@@ -1942,7 +1952,7 @@ impl App {
         // pipe-fill scenario (tmux
         // writing to a full pipe
         // would block forever).
-        let mut panes = Vec::new();
+        let mut windows = Vec::new();
         if let Some(stdout) = child.stdout.take() {
             use std::io::BufRead;
             // Wrap stdout in a
@@ -1952,9 +1962,9 @@ impl App {
             // line. The buffer is
             // 8 KiB which fits
             // typical `tmux
-            // list-panes` output
+            // list-windows` output
             // even with hundreds of
-            // panes in well under
+            // windows in well under
             // 64 KiB.
             let reader = std::io::BufReader::new(stdout);
             for line in reader.lines() {
@@ -1962,53 +1972,19 @@ impl App {
                     Ok(l) => l,
                     Err(_) => continue,
                 };
-                if let Some(pane) =
+                if let Some(window) =
                     parse_tmux_pane_line(&line)
                 {
-                    panes.push(pane);
+                    windows.push(window);
                 }
             }
         }
-        // Wait for the child
-        // process to terminate,
-        // with a timeout. The
-        // timeout protects against
-        // hung `tmux` servers or
-        // socket-level lockups.
-        // When the timeout
-        // expires we leave the
-        // snapshot empty (no
-        // marker is shown); the
-        // user can retry by
-        // exiting and re-entering
-        // the TUI, or by the
-        // future "refresh tmux"
-        // action.
         match child.wait() {
             Ok(_) => {}
             Err(_) => return,
         }
         // Commit the snapshot.
-        self.tmux_panes = panes;
-        // Suppress the timeout
-        // variable to avoid an
-        // unused-variable warning
-        // in the regular
-        // (non-`tmux`-hung) path;
-        // the timeout is
-        // informative — we run
-        // `tmux` synchronously and
-        // it normally returns in
-        // tens of milliseconds.
-        // The `timeout_ms`
-        // variable here documents
-        // the intent: if we ever
-        // make this async (run on
-        // a background thread),
-        // the timeout is the
-        // "give up and proceed
-        // without the marker"
-        // threshold.
+        self.tmux_windows = windows;
         let _ = timeout_ms;
     }
 
@@ -2940,7 +2916,7 @@ notes_date_filter: NotesDateFilter::All,
             // "tmux-pane indicator"
             // doc comment for the
             // rationale.
-            tmux_panes: Vec::new(),
+            tmux_windows: Vec::new(),
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -2998,7 +2974,7 @@ notes_date_filter: NotesDateFilter::All,
         // flicker that's noticeable
         // but not catastrophic.
         if self.is_directories_query() {
-            self.fetch_tmux_panes();
+            self.fetch_tmux_windows();
         }
         self.rows = self.fetch().unwrap_or_default();
         if self.is_regex_query() || self.is_fuzzy_query() {
@@ -3807,16 +3783,145 @@ fn move_selection(&mut self, delta: isize) {
         // argument to `cd`).
         if self.is_directories_query() {
             if let Some(row) = self.selected_row() {
-                let path = row.directory.clone();
-                let quoted = if path
-                    .chars()
-                    .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
+                // Two action paths for
+                // directory rows, branched
+                // on whether the row has
+                // an active tmux window
+                // attached (the `T` mark
+                // the user sees in the
+                // capture column):
+                //
+                // 1. `T`-marked row: a
+                //    tmux window with this
+                //    directory as cwd
+                //    exists. The user
+                //    wants to *jump to* it
+                //    — they're in some
+                //    other directory, this
+                //    is "I had a session
+                //    running here earlier".
+                //    We stage
+                //    `tmux select-pane -t <id> && tmux switch-client -t <id>`
+                //    so the parent shell
+                //    (which is itself
+                //    running in a tmux
+                //    client) re-attaches
+                //    to the target pane.
+                //
+                // 2. Unmarked row: no
+                //    active tmux window
+                //    for this directory.
+                //    The user wants a
+                //    fresh session rooted
+                //    here. We stage
+                //    `tmux new-session -d -s <basename> -c <dir>; tmux switch-client -t <basename>`
+                //    (the `;` is
+                //    shell-safe: the
+                //    parent shell eval's
+                //    the staged line and
+                //    the `new-session` must
+                //    finish before
+                //    `switch-client` runs).
+                //
+                // The basename is
+                // `std::path::Path::file_name`
+                // which returns the
+                // trailing path
+                // component (e.g.
+                // `/Users/har/work` →
+                // `work`). If two
+                // directories share the
+                // same basename (e.g.
+                // `/Users/har/x/work`
+                // and
+                // `/Users/har/y/work`),
+                // the second
+                // `new-session -s work`
+                // will fail with
+                // "duplicate session";
+                // the parent shell
+                // surfaces the error and
+                // the user can pick a
+                // different action
+                // (rename, or `cd
+                // manually` first).
+                // We don't try to be
+                // clever about
+                // disambiguation — the
+                // error path is rare
+                // enough that an
+                // explicit user action
+                // is preferable.
+                if let Some(pane_id) =
+                    self.directory_tmux_pane_id(
+                        &row.directory,
+                    )
                 {
-                    format!("\"{}\"", path)
+                    // `T`-marked path:
+                    // switch to the existing
+                    // pane. `&&` chains
+                    // the two tmux calls so
+                    // if `select-pane`
+                    // fails (e.g. the pane
+                    // disappeared between
+                    // snapshot and Enter)
+                    // the parent shell
+                    // doesn't try to
+                    // switch to a
+                    // non-existent target.
+                    self.selection = Some(format!(
+                        "tmux select-pane -t {} && \
+                         tmux switch-client -t {}",
+                        pane_id, pane_id
+                    ));
                 } else {
-                    path
-                };
-                self.selection = Some(format!("cd {}", quoted));
+                    // Unmarked path: open
+                    // a new session. The
+                    // parent shell runs
+                    // both commands; if
+                    // `new-session` fails
+                    // (e.g. the basename is
+                    // already taken),
+                    // `switch-client` to
+                    // the same name also
+                    // fails and the
+                    // parent shell surfaces
+                    // both errors via
+                    // its standard
+                    // non-zero-exit handling.
+                    let path = row.directory.clone();
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("smarthistory")
+                        .to_string();
+                    let quoted_path = if path
+                        .chars()
+                        .any(|c| c.is_whitespace()
+                            || "<>|&;\"'$`\\".contains(c))
+                    {
+                        format!("\"{}\"", path)
+                    } else {
+                        path
+                    };
+                    // `-A` would attach-and-
+                    // create in one step,
+                    // but it also attaches
+                    // the calling client
+                    // (which is the
+                    // smarthistory process
+                    // — we don't want tmux
+                    // stealing our TTY).
+                    // `-d` (detached) +
+                    // explicit
+                    // `switch-client` is the
+                    // correct shape.
+                    self.selection = Some(format!(
+                        "tmux new-session -d -s {} -c {}; \
+                         tmux switch-client -t {}",
+                        name, quoted_path, name
+                    ));
+                }
                 self.pick_mode = Some(PickMode::Run);
             }
             return;
@@ -6403,26 +6508,52 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
-/// Parse one line of `tmux list-panes -a -F '<fmt>'`
-/// output into a `TmuxPaneInfo`.
-/// Returns `None` if the line is
-/// malformed (wrong number of
-/// fields, empty session/pane,
-/// empty post-canonicalisation
-/// path). The format string we
-/// pass to tmux is
-/// `"#S | #P | #{pane_current_path}"`,
-/// but we use `|` as the only
-/// separator because tmux lets
-/// session names contain spaces
-/// (and reserves `:`, `,`, `;`,
-/// `\`, ` ` as field separators
-/// in other commands).
+/// Parse one line of
+/// `tmux list-windows -a -F
+/// '#{pane_id} |
+///  #{pane_current_path} |
+///  active:#{window_active}
+///  | Layout:
+///  #{window_layout}'`
+/// output into a
+/// `TmuxWindowInfo`. Returns
+/// `None` if the line is
+/// malformed, the active flag
+/// isn't `1`, or any required
+/// field is empty.
 ///
-/// **A subtle bug we hit during
-/// development**: tmux format
-/// strings use `#`-prefixed
-/// placeholders
+/// **Why a 4-field format**:
+/// the user's request was
+/// specifically the format
+/// `tmux list-windows -a -F
+/// "#{pane_id} |
+///  #{pane_current_path}
+///  | active:#{window_active}
+///  | Layout:
+///  #{window_layout}" |
+/// grep "active:1"`. We don't
+/// pipe through `grep` (a second
+/// subprocess) — we read all
+/// lines and filter in-process.
+/// The `active:1` filter has
+/// to be a substring match on
+/// the third field, with the
+/// `active:` prefix and
+/// exactly one character (`0`
+/// or `1`) following. The
+/// `|` separator is preserved
+/// because tmux lets session
+/// names contain spaces and
+/// reserves `:`, `,`, `;`,
+/// `\`, ` ` as field separators
+/// in some commands; `|` is
+/// safe in all current
+/// formats.
+///
+/// **A subtle bug we hit
+/// during development**: tmux
+/// format strings use
+/// `#`-prefixed placeholders
 /// (`#S`, `#{pane_current_path}`),
 /// with **the `#` always
 /// required**. Writing
@@ -6430,58 +6561,60 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
 /// silently renders an empty
 /// first column, then any
 /// strict parser that skips
-/// empty sessions (which is
-/// exactly what we do — an
-/// empty session is
-/// anomalous) throws the whole
-/// line away. The format
-/// constant in the live code is
-/// tested by `tmux list-panes
-/// -a -F`; the regression test
-/// below pins it.
-fn parse_tmux_pane_line(line: &str) -> Option<TmuxPaneInfo> {
+/// empty fields throws the
+/// whole line away. The
+/// `FORMAT` constant in
+/// `fetch_tmux_windows` is
+/// tested by
+/// `tmux list-windows -a -F`;
+/// the regression test below
+/// pins the correct format.
+fn parse_tmux_pane_line(line: &str) -> Option<TmuxWindowInfo> {
     // `split('|')` with trim on
-    // each field. Three fields,
+    // each field. Four fields,
     // no quoting, no escaping —
     // `|` is the format
     // separator and never
     // appears inside any of the
-    // three fields in real-world
-    // tmux output. If tmux ever
-    // started allowing `|` in
-    // session names we'd need a
-    // real separator-aware
-    // parser, but that's not
-    // supported today.
+    // four fields in real-world
+    // tmux output.
     let parts: Vec<&str> = line.split('|').map(str::trim).collect();
-    if parts.len() != 3 {
+    if parts.len() != 4 {
         return None;
     }
-    let session = parts[0];
-    let pane = parts[1];
-    let path_raw = parts[2];
-    // Empty session/pane is a
-    // parse error (skip the line).
-    // Empty path is normal for a
-    // brand-new pane that hasn't
-    // been touched yet — but
-    // there's nothing useful
-    // matching an empty path
-    // against a directory row,
-    // and it would mean "any
-    // directory could match",
-    // so we filter it out at
-    // parse time.
-    if session.is_empty() || pane.is_empty() {
+    let pane_id = parts[0];
+    let path_raw = parts[1];
+    let active_field = parts[2];
+    let _layout = parts[3];
+    // Active-flag check. The
+    // `active:` prefix is
+    // literal in the format
+    // string; the value is
+    // either `0` or `1`. We
+    // require exactly `1` to
+    // match the user's
+    // `grep "active:1"` filter,
+    // which gives "currently
+    // visible" — i.e. the
+    // window the user is
+    // looking at. `0` (inactive
+    // windows) is filtered out
+    // so the directories view
+    // doesn't mark dirs the
+    // user isn't actually using
+    // right now.
+    if active_field != "active:1" {
+        return None;
+    }
+    if pane_id.is_empty() {
         return None;
     }
     let path = crate::util::canonicalize_directory(path_raw);
     if path.is_empty() {
         return None;
     }
-    Some(TmuxPaneInfo {
-        session: session.to_string(),
-        pane: pane.to_string(),
+    Some(TmuxWindowInfo {
+        pane_id: pane_id.to_string(),
         path,
     })
 }
@@ -13516,7 +13649,20 @@ mod tests {
         /// correctly (defensive —
         /// covers spaces, `$`, etc.).
         #[test]
-        fn selecting_directory_stages_cd_command() {
+        /// The new contract: with an
+        /// empty `tmux_windows`
+        /// snapshot (no active
+        /// tmux session for this
+        /// directory), selecting
+        /// the directory row
+        /// creates a new tmux
+        /// session and switches to
+        /// it. (See
+        /// `select_t_marked_directory_stages_select_and_switch`
+        /// for the "T"-marked
+        /// branch.)
+        #[test]
+        fn selecting_unmarked_directory_creates_new_tmux_session() {
             let mut app = directories_test_app(&[(
                 "ls",
                 "/home/user/project",
@@ -13525,11 +13671,16 @@ mod tests {
             app.query = "#".to_string();
             app.refresh();
             app.select_for_run();
-            assert_eq!(
-                app.selection.as_deref(),
-                Some("cd /home/user/project"),
-                "selection must be a `cd <path>` \
-                 command the parent shell can run"
+            let staged = app.selection.as_deref()
+                .expect("selection must be set");
+            assert!(
+                staged.contains(
+                    "tmux new-session -d -s project -c /home/user/project"
+                )
+                && staged.contains(
+                    "tmux switch-client -t project"
+                ),
+                "staged command must create detached session with the directory basename, got: {staged:?}"
             );
             assert_eq!(
                 app.pick_mode,
@@ -13590,27 +13741,34 @@ mod tests {
         /// so no rows are falsely
         /// marked as in-tmux.
         #[test]
-        fn directory_has_tmux_pane_empty_snapshot_is_false() {
+        fn directory_tmux_pane_id_empty_snapshot_is_none() {
             let app = directories_test_app(&[(
                 "ls",
                 "/home/user",
                 60,
             )]);
-            assert!(app.tmux_panes.is_empty());
+            assert!(app.tmux_windows.is_empty());
             assert!(
-                !app.directory_has_tmux_pane("/home/user")
+                app.directory_tmux_pane_id(
+                    "/home/user"
+                ).is_none()
             );
         }
 
-        /// `directory_has_tmux_pane`
-        /// returns true iff a pane's
-        /// `path` (canonicalised at
-        /// parse time) matches the
-        /// input directory (also
+        /// `directory_tmux_pane_id`
+        /// returns `Some(pane_id)`
+        /// iff a window's `path`
+        /// (canonicalised at parse
+        /// time) matches the input
+        /// directory (also
         /// canonicalised). The
-        /// `#S | #P | #{pane_current_path}`
-        /// format used by `tmux
-        /// list-panes -a` always
+        /// `#{pane_id} |
+        ///  #{pane_current_path} |
+        ///  active:#{window_active}
+        ///  | Layout:
+        ///  #{window_layout}` format
+        /// used by `tmux
+        /// list-windows -a` always
         /// reports the kernel's
         /// canonical cwd, which on
         /// macOS is the
@@ -13627,40 +13785,38 @@ mod tests {
         /// `tmux` (CI may not have it
         /// installed).
         #[test]
-        fn directory_has_tmux_pane_canonicalises_both_sides() {
+        fn directory_tmux_pane_id_canonicalises_both_sides() {
             let mut app = directories_test_app(&[(
                 "ls",
                 "/home/user",
                 60,
             )]);
             // Simulate a snapshot
-            // that came from `tmux`,
-            // which on macOS reports
-            // the `/Volumes/HUGE/...`
-            // form. The `fetch_tmux_panes`
-            // helper canonicalises
-            // these at parse time, so
-            // the stored `path` is
+            // that came from `tmux`.
+            // `fetch_tmux_windows`
+            // canonicalises these
+            // at parse time, so the
+            // stored `path` is
             // already canonical. We
             // hand-craft the same
             // canonical value here.
-            app.tmux_panes.push(TmuxPaneInfo {
-                session: "work".to_string(),
-                pane: "%0".to_string(),
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%0".to_string(),
                 path: String::from("/home/user"),
             });
-            assert!(
-                app.directory_has_tmux_pane(
+            assert_eq!(
+                app.directory_tmux_pane_id(
                     "/home/user"
-                ),
-                "exact match must succeed"
+                ).as_deref(),
+                Some("%0"),
+                "exact match must return the pane id"
             );
             // Wrong directory, same
             // prefix — must NOT match.
             assert!(
-                !app.directory_has_tmux_pane(
+                app.directory_tmux_pane_id(
                     "/home/other"
-                )
+                ).is_none()
             );
         }
 
@@ -13679,7 +13835,7 @@ mod tests {
         /// This test guarantees
         /// they do.
         #[test]
-        fn directory_has_tmux_pane_handles_macos_volume_mount() {
+        fn directory_tmux_pane_id_handles_macos_volume_mount() {
             let mut app = directories_test_app(&[(
                 "ls",
                 "/Users/har/Sources/x",
@@ -13710,19 +13866,14 @@ mod tests {
                 std::fs::canonicalize("/tmp")
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "/tmp".into());
-            app.tmux_panes.push(TmuxPaneInfo {
-                session: "work".to_string(),
-                pane: "%0".to_string(),
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%42".to_string(),
                 path: canonical_dir.clone(),
             });
-            // Look up using the
-            // SAME canonical form
-            // the helper would
-            // produce for `/tmp` —
-            // which IS itself in this
-            // test (no symlinks).
-            assert!(
-                app.directory_has_tmux_pane(&canonical_dir),
+            assert_eq!(
+                app.directory_tmux_pane_id(&canonical_dir)
+                    .as_deref(),
+                Some("%42"),
                 "real-path lookup must match the canonical pane path"
             );
             // Try a non-canonical
@@ -13749,15 +13900,14 @@ mod tests {
                 // and check that
                 // asking for either
                 // form matches.
-                app.tmux_panes.push(TmuxPaneInfo {
-                    session: "w".to_string(),
-                    pane: "%0".to_string(),
+                app.tmux_windows.push(TmuxWindowInfo {
+                    pane_id: "%7".to_string(),
                     path: var_canonical,
                 });
                 assert!(
-                    app.directory_has_tmux_pane(
+                    app.directory_tmux_pane_id(
                         "/var"
-                    ),
+                    ).is_some(),
                     "/var must canonicalise to match"
                 );
             }
@@ -13765,13 +13915,13 @@ mod tests {
             // totally shouldn't
             // match.
             assert!(
-                !app.directory_has_tmux_pane(
+                app.directory_tmux_pane_id(
                     "/home/nowhere"
-                )
+                ).is_none()
             );
         }
 
-        /// The `tmux_panes` snapshot
+        /// The `tmux_windows` snapshot
         /// is preserved across
         /// `refresh()` calls — the
         /// helper is idempotent and
@@ -13787,7 +13937,7 @@ mod tests {
         /// idempotency by
         /// pre-populating the
         /// snapshot, calling
-        /// `fetch_tmux_panes`
+        /// `fetch_tmux_windows`
         /// once, and asserting the
         /// snapshot didn't change.
         /// (We don't run `refresh()`
@@ -13800,7 +13950,7 @@ mod tests {
         /// behaviour we want to
         /// verify.)
         #[test]
-        fn fetch_tmux_panes_is_idempotent_when_populated() {
+        fn fetch_tmux_windows_is_idempotent_when_populated() {
             let mut app = directories_test_app(&[(
                 "ls",
                 "/home/user",
@@ -13811,21 +13961,20 @@ mod tests {
             // sentinel value that
             // would be wiped if the
             // helper re-ran.
-            let sentinel = TmuxPaneInfo {
-                session: "sentinel".to_string(),
-                pane: "%0".to_string(),
+            let sentinel = TmuxWindowInfo {
+                pane_id: "%99".to_string(),
                 path: String::from("/sentinel"),
             };
-            app.tmux_panes.push(sentinel.clone());
+            app.tmux_windows.push(sentinel.clone());
             // The helper exits
             // early when the snapshot
             // is non-empty. This is
             // the "don't re-spawn on
             // every refresh" contract.
-            app.fetch_tmux_panes();
-            assert_eq!(app.tmux_panes.len(), 1);
-            assert_eq!(app.tmux_panes[0].session, "sentinel");
-            assert_eq!(app.tmux_panes[0].path, "/sentinel");
+            app.fetch_tmux_windows();
+            assert_eq!(app.tmux_windows.len(), 1);
+            assert_eq!(app.tmux_windows[0].pane_id, "%99");
+            assert_eq!(app.tmux_windows[0].path, "/sentinel");
         }
 
         /// Real-world tmux output
@@ -13834,64 +13983,64 @@ mod tests {
         /// this test was added.
         /// Verifies our parser
         /// handles the live format
-        /// string — `#S | #P |
-        /// #{pane_current_path}` —
+        /// string
+        /// (`#{pane_id} |
+        ///  #{pane_current_path} |
+        ///  active:#{window_active}
+        ///  | Layout:
+        ///  #{window_layout}`)
         /// correctly.
         ///
         /// If this test fails,
         /// either tmux changed its
         /// format tokens (unlikely)
         /// or our format string in
-        /// `fetch_tmux_panes` got
+        /// `fetch_tmux_windows` got
         /// silently truncated.
         /// Either way, the
         /// `parse_tmux_pane_line`
         /// contract has shifted;
         /// re-pin the live format in
-        /// `fetch_tmux_panes` first.
+        /// `fetch_tmux_windows` first.
         #[test]
         fn parse_tmux_pane_line_real_world_output() {
             // Captured from the user's
             // environment with
-            // `tmux list-panes -a -F
-            // '#S | #P |
-            // #{pane_current_path}'`.
+            // `tmux list-windows -a -F
+            // '#{pane_id} |
+            //  #{pane_current_path} |
+            //  active:#{window_active} |
+            //  Layout:
+            //  #{window_layout}'
+            //  | grep "active:1"`.
+            // (All rows below are
+            // active:1 because they
+            // come from grepped
+            // output.)
             let sample = "\
-                0 | 1 | /Users/har\n\
-                note_search | 1 | \
-                 /Volumes/HUGE/har/Sources/markdown-search/note_search\n\
-                note_search | 2 | \
-                 /Volumes/HUGE/har/Sources/markdown-search/note_search\n\
-                note_search_cli | 1 | /tmp\n\
-                smarthistory | 1 | /Users/har/smarthistory/smarthistory\n";
-            let panes: Vec<TmuxPaneInfo> = sample
+                %0 | /Users/har | active:1 | Layout: c17d,121x93,0,0,0\n\
+                %2 | /Volumes/HUGE/har/Sources/markdown-search/note_search | active:1 | Layout: 3971,121x93,0,0[121x46,0,0,2,121x46,0,47,10]\n\
+                %1 | /Users/har/smarthistory/smarthistory | active:1 | Layout: 7254,121x93,0,0[121x46,0,0,1,121x46,0,47,3]\n";
+            let windows: Vec<TmuxWindowInfo> = sample
                 .lines()
                 .filter_map(parse_tmux_pane_line)
                 .collect();
             assert_eq!(
-                panes.len(),
-                5,
-                "expected 5 parsed panes, got: {:#?}",
-                panes
+                windows.len(),
+                3,
+                "expected 3 parsed windows, got: {:#?}",
+                windows
             );
-            assert_eq!(
-                panes[0].session, "0",
-                "pin: '<n> | <n> | <path>' — \
-                 integer-indexed tmux \
-                 sessions don't have a \
-                 name (just an id), \
-                 and we treat them as the \
-                 session name verbatim"
-            );
-            assert_eq!(panes[0].pane, "1");
-            // `path` is canonicalised,
-            // so `/Users/har` and
-            // `/Volumes/HUGE/har`
-            // both end up as the
-            // user's macOS canonical
-            // form. In CI without that
-            // mount, the canonicalise
-            // is a no-op.
+            // First window: pane id
+            // `%0`, path
+            // canonicalises to the
+            // user's macOS
+            // `/Users/har` (no
+            // symlinks involved in
+            // this test dir, so
+            // canonicalisation is
+            // a no-op).
+            assert_eq!(windows[0].pane_id, "%0");
             assert_eq!(
                 std::fs::canonicalize("/Users/har")
                     .map(|p| p
@@ -13900,106 +14049,99 @@ mod tests {
                     .unwrap_or_else(|_| {
                         "/Users/har".into()
                     }),
-                panes[0].path,
+                windows[0].path,
             );
-            assert_eq!(panes[1].session, "note_search");
-            assert_eq!(panes[1].pane, "1");
-            // Session names can
-            // contain spaces and
-            // shell-metacharacters
-            // (e.g. `💾 Host
-            // PVE-1  `). Make sure
-            // we handle unicode /
-            // whitespace in the
-            // session field correctly.
+            // Second window: pane
+            // id `%2`, path
+            // already-canonical
+            // `/Volumes/HUGE/...`.
+            assert_eq!(windows[1].pane_id, "%2");
+            assert_eq!(
+                windows[1].path,
+                "/Volumes/HUGE/har/Sources/markdown-search/note_search"
+            );
         }
 
+        /// `parse_tmux_pane_line`
+        /// drops inactive windows
+        /// (`active:0` rows). The
+        /// user's spec pipes
+        /// through `grep "active:1"`
+        /// — we do the filter
+        /// in-process so we only
+        /// spawn one subprocess.
         #[test]
-        fn parse_tmux_pane_line_handles_unicode_session() {
-            // Real-world example
-            // from the user's tmux
-            // setup. Em-dash, CJK,
-            // spaces in the session
-            // name — none of these
-            // should break the
-            // parser.
-            let line = "💾 Host PVE-1  | %1 | /tmp";
-            let pane = parse_tmux_pane_line(line)
-                .expect("unicode session should parse");
-            assert_eq!(pane.session, "💾 Host PVE-1");
-            assert_eq!(pane.pane, "%1");
+        fn parse_tmux_pane_line_filters_inactive_windows() {
+            let inactive = "%0 | /Users/har | active:0 | Layout: c17d,121x93,0,0,0";
+            let active = "%0 | /Users/har | active:1 | Layout: c17d,121x93,0,0,0";
             assert!(
-                pane.path.ends_with("/tmp")
-                    || pane.path.ends_with("/private/tmp")
-                    || pane.path == "/tmp",
-                "got: {:?}",
-                pane.path
+                parse_tmux_pane_line(inactive).is_none(),
+                "active:0 must be filtered out"
+            );
+            assert!(
+                parse_tmux_pane_line(active).is_some()
             );
         }
 
         /// The format-string bug we
         /// hit during development:
-        /// the user's pasted
-        /// command was
-        /// `tmux list-panes -a -F
-        /// "#S | #P |
-        /// #{pane_current_path}"`,
-        /// but if a refactor drops
-        /// the leading `#` from
-        /// `#S` (writing `"{S}"`
-        /// instead), tmux renders
-        /// the first column empty
-        /// — and any parser that
-        /// rejects empty sessions
-        /// (ours does, since an
-        /// empty session name is
-        /// anomalous) throws the
+        /// tmux format strings use
+        /// `#`-prefixed placeholders
+        /// (`#S`, `#{pane_current_path}`),
+        /// with **the `#` always
+        /// required**. Writing
+        /// `"{S}"` instead of `"#S"`
+        /// silently renders an empty
+        /// first column, then any
+        /// strict parser that skips
+        /// empty fields throws the
         /// whole line away. The
-        /// result is an empty
-        /// snapshot and zero `T`
-        /// markers even though
-        /// tmux is working fine.
-        /// This test pins the
-        /// behaviour so a future
-        /// refactor doesn't
-        /// re-introduce the bug.
+        /// `FORMAT` constant in
+        /// `fetch_tmux_windows` is
+        /// tested by `tmux
+        /// list-windows -a -F`; the
+        /// regression test below
+        /// pins the correct format.
         #[test]
         fn parse_tmux_pane_line_rejects_buggy_format() {
-            // What `tmux list-panes -a
-            // -F "{S} | #P |
-            // #{pane_current_path}"`
-            // actually emits — the
-            // first column is empty
-            // (because `{S}` isn't
-            // a real tmux format
-            // token), the second is
-            // the pane id, the third
-            // is the pane path.
-            let buggy_line = " | 1 | /Users/har";
+            // What `tmux list-windows -a
+            // -F "{S} | ... | active:0 | ..."`
+            // (buggy format) would
+            // actually emit — first
+            // column empty. We don't
+            // pin every field here
+            // (the parse fails on
+            // the empty `pane_id`
+            // check); just the empty
+            // first column.
+            let buggy_line =
+                " | /Users/har | active:1 | Layout: x";
             assert!(
                 parse_tmux_pane_line(buggy_line).is_none(),
-                "an empty session field must be rejected, \
+                "an empty pane_id field must be rejected, \
                  otherwise the whole tmux snapshot becomes \
                  silently empty and no T markers render"
             );
             // The non-buggy version
-            // (with `#S`) parses
-            // correctly.
-            let good_line = "0 | 1 | /Users/har";
+            // (with `#{pane_id}`)
+            // parses correctly.
+            let good_line =
+                "%0 | /Users/har | active:1 | Layout: x";
             assert!(
                 parse_tmux_pane_line(good_line).is_some()
             );
         }
 
         /// End-to-end: pre-loading
-        /// the snapshot with a pane
+        /// the snapshot with a window
         /// whose canonical path
         /// matches a directory row
-        /// causes `directory_has_tmux_pane`
-        /// to return true. This is
-        /// the chain that produces
-        /// the user-visible `T`
-        /// marker.
+        /// causes
+        /// `directory_tmux_pane_id`
+        /// to return the pane id.
+        /// This is the chain that
+        /// produces the user-visible
+        /// `T` marker.
         #[test]
         fn directory_row_is_marked_after_snapshot_loaded() {
             let mut app = directories_test_app(&[(
@@ -14018,9 +14160,8 @@ mod tests {
             // part is already
             // covered by the
             // canonicalisation test).
-            app.tmux_panes.push(TmuxPaneInfo {
-                session: "note_search".to_string(),
-                pane: "%1".to_string(),
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%1".to_string(),
                 path: String::from(
                     "/Volumes/HUGE/har/Sources/markdown-search/note_search",
                 ),
@@ -14030,13 +14171,165 @@ mod tests {
             // (the user-side path)
             // must canonicalise to
             // match.
-            assert!(
-                app.directory_has_tmux_pane(
+            assert_eq!(
+                app.directory_tmux_pane_id(
                     "/Users/har/Sources/markdown-search/note_search"
-                ),
+                ).as_deref(),
+                Some("%1"),
                 "the row stored as /Users/... must \
-                 match a pane stored as /Volumes/HUGE/... — \
+                 match a window stored as /Volumes/HUGE/... — \
                  the canonicalisation contract"
+            );
+        }
+
+        /// Selecting a `T`-marked
+        /// directory row stages
+        /// `tmux select-pane -t <id>
+        /// && tmux switch-client -t
+        /// <id>`. The parent shell
+        /// (running the TUI as a
+        /// child) eval's the
+        /// staged command, which
+        /// (since we're inside a
+        /// tmux client) switches
+        /// the client to the
+        /// targeted pane.
+        #[test]
+        fn select_t_marked_directory_stages_select_and_switch() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/har/Sources/markdown-search/note_search",
+                60,
+            )]);
+            // Snapshot contains
+            // one active window for
+            // the directory above.
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%2".to_string(),
+                path: String::from(
+                    "/Volumes/HUGE/har/Sources/markdown-search/note_search",
+                ),
+            });
+            app.query = "#".to_string();
+            app.refresh();
+            // The row is the only
+            // one in merged_rows.
+            assert_eq!(app.merged_rows().len(), 1);
+            app.select_for_run();
+            let staged = app.selection.as_deref()
+                .expect("selection must be set");
+            assert!(
+                staged.contains(
+                    "tmux select-pane -t %2"
+                )
+                && staged.contains(
+                    "tmux switch-client -t %2"
+                ),
+                "staged command must call both \
+                 select-pane and switch-client with the \
+                 pane id, got: {staged:?}"
+            );
+            // The two must be
+            // `&&`-chained so the
+            // user doesn't end up
+            // switching to a
+            // half-targeted client if
+            // select-pane failed.
+            assert!(
+                staged.contains("&&"),
+                "select-pane and switch-client must be &&-chained, got: {staged:?}"
+            );
+            assert_eq!(
+                app.pick_mode,
+                Some(crate::tui::state::PickMode::Run),
+            );
+        }
+
+        /// Selecting an unmarked
+        /// directory row stages
+        /// `tmux new-session -d -s
+        /// <basename> -c <dir>;
+        /// tmux switch-client -t
+        /// <basename>`. The
+        /// basename is
+        /// `Path::file_name` of the
+        /// directory; a quote is
+        /// added if the path has
+        /// shell metacharacters.
+        #[test]
+        fn select_unmarked_directory_stages_new_session_and_switch() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/har/Projects/coolthing",
+                60,
+            )]);
+            // Empty snapshot —
+            // nothing matches.
+            app.query = "#".to_string();
+            app.refresh();
+            app.select_for_run();
+            let staged = app.selection.as_deref()
+                .expect("selection must be set");
+            assert!(
+                staged.contains(
+                    "tmux new-session -d -s coolthing -c /Users/har/Projects/coolthing"
+                ),
+                "staged command must create detached session with the directory basename, got: {staged:?}"
+            );
+            assert!(
+                staged.contains(
+                    "tmux switch-client -t coolthing"
+                ),
+                "staged command must switch-client to the new session, got: {staged:?}"
+            );
+            // The two are ;-chained
+            // (not &&): the user
+            // wants new-session to
+            // run regardless of
+            // any failure, and
+            // switch-client is a
+            // follow-up that may or
+            // may not succeed (e.g.
+            // session already exists
+            // in the user's setup
+            // with the same name —
+            // that's a different
+            // error the parent shell
+            // surfaces).
+            assert!(
+                staged.contains("; "),
+                "new-session and switch-client must be ;-chained, got: {staged:?}"
+            );
+        }
+
+        /// Paths with shell
+        /// metacharacters get
+        /// quoted in the staged
+        /// `cd <path>` — same
+        /// defensive quoting
+        /// already used in todo
+        /// mode. This is the v1
+        /// "be safe" contract; the
+        /// user can always edit
+        /// the staged command
+        /// before submit.
+        #[test]
+        fn select_unmarked_directory_quotes_paths_with_spaces() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/has spaces/project",
+                60,
+            )]);
+            app.query = "#".to_string();
+            app.refresh();
+            app.select_for_run();
+            let staged = app.selection.as_deref()
+                .expect("selection must be set");
+            assert!(
+                staged.contains(
+                    r#"-c "/Users/has spaces/project""#
+                ),
+                "path with spaces must be quoted, got: {staged:?}"
             );
         }
 }

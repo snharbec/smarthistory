@@ -15,6 +15,13 @@ regex = "1.10"
 rusqlite = "0.38.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Pin `time` to <0.3.52 because `time 0.3.52` changed the
+# `Parsing::parse` signature from 1-arg to 2-arg, but
+# `cookie 0.18.1` (transitive via `reqwest` → `note_search` →
+# `cookie_store`) still calls the old 1-arg form, producing
+# `error[E0061]: this method takes 2 arguments but 1
+# argument was supplied` at the build of `cookie`.
+time = "=0.3.51"
 note_search = { git = "https://github.com/snharbec/note_search.git", rev = "18c3bd3" }
 ureq = { version = "2", features = ["json"] }
 

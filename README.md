@@ -1188,20 +1188,68 @@ whose path contains `home`; tokens are AND-matched
 #### Tmux-pane activity marker
 
 When you enter directories mode (type `#`), the
-TUI runs `tmux list-panes -a -F "#S | #P |
-# {pane_current_path}"` once and caches the result
-for the rest of the session. Directories that
-match at least one pane's working directory (after
-canonicalisation — important on macOS where
-`/Users/...` and `/Volumes/HUGE/...` are the same
-physical dir) get a `T` mark in the capture column.
-The snapshot is fetched only once, so scrolling
+TUI runs `tmux list-windows -a -F "#{pane_id} |
+
+# {pane_current_path} | active:#{window_active}
+
+# | Layout: #{window_layout}"` once, filters
+
+`active:1` rows in-process (one subprocess, not
+two), and caches the result for the rest of the
+session. Directories that match at least one
+*active* window's cwd (after canonicalisation —
+important on macOS where `/Users/...` and
+`/Volumes/HUGE/...` are the same physical dir)
+get a `T` mark in the capture column. Inactive
+windows are filtered out so a pane you *can* see
+in `tmux list-windows` but haven't focused in a
+while doesn't mark a directory as "active". The
+snapshot is fetched only once, so scrolling
 through the list never re-spawns `tmux`.
 
 If `tmux` isn't on PATH, isn't running, or returns
 nothing, no mark appears — silent failure. The
 TUI's foreground never blocks on `tmux` for more
 than `TMUX_PANE_PROBE_TIMEOUT_MS` (default 1000 ms).
+
+#### Selecting a directory row
+
+Press Enter on a directory row to act on it. The
+TUI stages a command to the parent shell's
+line editor; pressing Enter on the parent's
+prompt runs it. Two paths:
+
+- **Row marked `T`** (an active tmux window
+  exists in this directory): the TUI stages
+  `tmux select-pane -t <pane_id> && tmux
+  switch-client -t <pane_id>` where `<pane_id>`
+  is the tmux pane id (e.g. `%2`). The `&&` is
+  load-bearing: if the pane disappeared between
+  the snapshot and Enter, the user lands back
+  in their current session instead of
+  switch-client'ing to a half-targeted
+  client.
+- **Unmarked row** (no active tmux window):
+  the TUI stages `tmux new-session -d -s
+  <basename> -c <dir>; tmux switch-client -t
+  <basename>` where `<basename>` is the
+  directory's trailing path component
+  (`Path::file_name`). Detached create +
+  explicit switch-client means the smarthistory
+  process itself doesn't get attached to the new
+  session. The `;` (not `&&`) is deliberate: a
+  duplicate-session failure from `new-session`
+  surfaces via the parent shell, and
+  `switch-client` to the same name then
+  naturally fails too.
+
+If two directories share the same basename
+(e.g. `/Users/har/x/work` and
+`/Users/har/y/work`), the second `new-session -s
+work` will fail with "duplicate session"; the
+parent shell surfaces the error. The TUI
+doesn't try to be clever about disambiguation —
+explicit user action is preferable.
 
 ### Example session
 
