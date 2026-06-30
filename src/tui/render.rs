@@ -1952,10 +1952,46 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         Span::raw(" "),
     ];
 
-    // Highlight query matches inside the command. When the query is
-    // a regex (prefixed with `/`) we use the compiled regex to find
-    // all matches and bold each one. Otherwise the standard plain-
-    // text multi-word highlight runs.
+    // Highlight query matches
+    // inside `row.command`.
+    // When the query is a regex
+    // (prefixed with `/`) we
+    // use the compiled regex to
+    // find all matches and bold
+    // each one. Otherwise the
+    // standard plain-text
+    // multi-word highlight
+    // runs.
+    //
+    // For directory rows,
+    // `fetch_directories`
+    // stores the **directory**
+    // (in shell-shortened form)
+    // in `row.command` and the
+    // last command run there
+    // in `row.comment`. So the
+    // primary text slot shows
+    // the directory (with
+    // query matches
+    // highlighted against the
+    // user's typed path
+    // pattern), and the
+    // secondary `# ...` slot
+    // shows the last command.
+    // This is the inverse of
+    // the layout for normal
+    // history rows (where
+    // `row.command` is the
+    // runnable command and
+    // `row.comment` is a free-
+    // form note). The field
+    // semantics are the same
+    // — only the rendering
+    // swaps them — so action
+    // handlers (which branch
+    // on `row.mode ==
+    // "directory"`) keep
+    // working unchanged.
     if app.is_regex_query() {
         spans.extend(highlight_regex_matches(
             &row.command,
@@ -1971,21 +2007,23 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     ));
 
     // Show a non-empty comment inline for every row, and fall back to
-    // the directory on the selected row when there is no comment.
+    // a contextual hint on the selected row when there is no
+    // comment. (The `comment` field carries the last command run in
+    // a directory for `#`-mode rows, so the secondary slot is the
+    // command — we don't `~`-expand it because it's not a path.)
     if !row.comment.is_empty() {
-        // For directory rows the
-        // `comment` is the
-        // directory itself (per
-        // `fetch_directories`). The
-        // shell-style `~` shortening
-        // applies here too — the
-        // user wants short paths
-        // everywhere they appear.
-        let comment_display = if row.mode == "directory" {
-            crate::util::expand_home(&row.comment).into_owned()
-        } else {
-            row.comment.clone()
-        };
+        // The secondary slot is
+        // the user's free-form
+        // comment for normal
+        // rows, and the last
+        // command run in the
+        // directory for `#`-mode
+        // rows. In neither case
+        // is it a path that
+        // needs `~` expansion;
+        // we just display the
+        // string verbatim.
+        let comment_display = row.comment.clone();
         spans.push(Span::styled(
             format!("# {} ", comment_display),
             Style::default()
@@ -1993,28 +2031,25 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
                 .add_modifier(Modifier::ITALIC),
         ));
     } else if is_selected {
-        // For directory rows, show
-        // the path with the user's
-        // home directory abbreviated
-        // to `~` — the same
-        // convention the shell uses,
-        // so the user sees the
-        // short form they're used
-        // to. The un-expanded
-        // absolute path is still
-        // available in the Details
-        // pane (where we keep the
-        // long form because there's
-        // no width pressure and the
-        // user might want to
-        // copy/paste the full
-        // path).
-        let dir_display = if row.mode == "directory" {
-            crate::util::expand_home(&row.directory)
+        // Selected-row fallback:
+        // the primary text is
+        // already the directory
+        // for `#`-mode rows, so
+        // the fallback hint is
+        // the last command run
+        // there; for normal rows
+        // the primary is the
+        // command, so the hint
+        // is the directory (with
+        // `~` expansion to match
+        // the shell convention).
+        if row.mode == "directory" {
+            let cmd_first_line = row.command.lines().next().unwrap_or("");
+            spans.push(Span::styled(format!("· {} ", cmd_first_line), Theme::dim()));
         } else {
-            std::borrow::Cow::Borrowed(row.directory.as_str())
-        };
-        spans.push(Span::styled(format!("· {} ", dir_display), Theme::dim()));
+            let dir_display = std::borrow::Cow::Borrowed(row.directory.as_str());
+            spans.push(Span::styled(format!("· {} ", dir_display), Theme::dim()));
+        }
     }
 
     Line::from(spans)

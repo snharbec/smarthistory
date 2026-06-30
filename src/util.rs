@@ -335,6 +335,202 @@ pub fn expand_home_with_config<'a>(
     shorten_home_path(path, &homes)
 }
 
+/// Expand a leading `~/x`
+/// using the home list.
+/// This is the *opposite*
+/// of `shorten_home_path`:
+/// the function takes a
+/// path that may be in
+/// short form (`~/x`) or
+/// already absolute
+/// (`/Users/har/x`,
+/// `/Volumes/HUGE/har/x`),
+/// and returns the
+/// absolute form using
+/// the **longest** home
+/// in the list (so
+/// `/Volumes/HUGE/har/x`
+/// wins over
+/// `/Users/har/x` when
+/// the homemap is set).
+///
+/// Used by
+/// `normalize_for_compare`
+/// to put both the
+/// DB-side and the
+/// tmux-side paths in
+/// the same absolute
+/// form before
+/// canonicalization. The
+/// previous behaviour
+/// was to call
+/// `shorten_home_path`
+/// (which is idempotent
+/// in the short
+/// direction) and then
+/// `canonicalize_directory`,
+/// but that left DB
+/// rows in `~/x` form
+/// unresolved on the
+/// canonicalize step
+/// (no real path
+/// `~/x` exists), so
+/// the tmux lookup
+/// never matched.
+///
+/// `~/x` (no path) is
+/// expanded to the
+/// first home. Absolute
+/// paths are returned
+/// unchanged. Other
+/// inputs (relative
+/// paths, paths outside
+/// any home) are
+/// returned verbatim.
+pub fn expand_home_to_absolute<'a>(
+    path: &'a str,
+    homes: &[String],
+) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    if path.is_empty() {
+        return Cow::Borrowed(path);
+    }
+    // `~/` expands to the
+    // longest home in the
+    // sorted list (most-
+    // specific wins).
+    if let Some(rest) = path.strip_prefix("~/") {
+        // Sort homes longest-
+        // first to match the
+        // convention used by
+        // `shorten_home_path`.
+        let mut sorted: Vec<&str> = homes
+            .iter()
+            .filter(|h| !h.is_empty())
+            .map(String::as_str)
+            .collect();
+        sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        if let Some(home) = sorted.first() {
+            return Cow::Owned(format!("{}/{}", home, rest));
+        }
+        return Cow::Borrowed(path);
+    }
+    // Bare `~` expands to
+    // the longest home.
+    if path == "~" {
+        let mut sorted: Vec<&str> = homes
+            .iter()
+            .filter(|h| !h.is_empty())
+            .map(String::as_str)
+            .collect();
+        sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        if let Some(home) = sorted.first() {
+            return Cow::Owned(home.to_string());
+        }
+        return Cow::Borrowed(path);
+    }
+    // Already absolute —
+    // pass through. The
+    // caller will
+    // `canonicalize_directory`
+    // it next, which
+    // handles macOS
+    // volume mounts.
+    Cow::Borrowed(path)
+}
+
+/// Normalize a path for
+/// equivalence comparisons
+/// across different sources
+/// (DB rows vs tmux-reported
+/// panes). The transformation
+/// is:
+/// 1. Expand a leading `~/`
+///    using the home list
+///    (so the DB's
+///    `~/Sources/foo` becomes
+///    `/Users/har/Sources/foo`
+///    or the homemap form).
+///    This step is what was
+///    missing before: a
+///    `~/x` DB row would
+///    fail
+///    `std::fs::canonicalize`
+///    (the path doesn't
+///    exist as `~/x`) and
+///    fall back to the
+///    un-resolved input,
+///    which never matches
+///    the tmux side.
+/// 2. Run
+///    `std::fs::canonicalize`
+///    to resolve any macOS
+///    volume mounts (so
+///    `/Users/har/x` and
+///    `/Volumes/HUGE/har/x`
+///    collapse to the same
+///    physical path on the
+///    user's setup).
+/// 3. If canonicalize fails
+///    (e.g. the directory
+///    was unmounted between
+///    insert and query),
+///    return the home-
+///    expanded form
+///    verbatim so the
+///    comparison still has
+///    a string to compare.
+///
+/// Two paths that refer to
+/// the same physical
+/// directory always
+/// normalize to the same
+/// string, so this is
+/// safe to use as a key in
+/// `tmux_windows.iter().find(...)`.
+pub fn normalize_for_compare(
+    path: &str,
+    homes: &[String],
+) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    // Step 1: expand a
+    // leading `~/` if the
+    // path uses the short
+    // form. We do this with
+    // `expand_home_to_absolute`
+    // so a
+    // `homemap=/Volumes/HUGE/har`
+    // config still wins in
+    // length-tie cases. The
+    // helper returns
+    // `Cow<'_, str>` so the
+    // allocation is avoided
+    // for paths that don't
+    // need expansion (e.g.
+    // tmux-reported absolute
+    // paths).
+    let expanded = expand_home_to_absolute(path, homes);
+    // Step 2: resolve any
+    // macOS volume mounts /
+    // symlinks. tmux reports
+    // a real absolute path
+    // so this typically
+    // succeeds.
+    let canonical = canonicalize_directory(&expanded);
+    if canonical.is_empty() {
+        // Canonicalize failed
+        // AND the input was
+        // empty (the
+        // canonicalize helper
+        // returns empty on
+        // empty input).
+        return String::new();
+    }
+    canonical
+}
+
 pub fn canonicalize_directory(path: &str) -> String {
     if path.is_empty() {
         return String::new();
@@ -973,6 +1169,178 @@ mod tests {
             )
             .as_ref(),
             "~/foo"
+        );
+    }
+
+    /// `expand_home_to_absolute`
+    /// is the inverse of
+    /// `shorten_home_path`:
+    /// `~/x` becomes
+    /// `<home>/x` using
+    /// the **longest** home
+    /// in the list (so a
+    /// homemap entry that's
+    /// longer than `$HOME`
+    /// wins). Absolute
+    /// paths and bare `~`
+    /// are also handled.
+    #[test]
+    fn expand_home_to_absolute_basic() {
+        let homes = vec!["/Users/har".to_string()];
+        // `~/x` expands to
+        // `<home>/x`.
+        assert_eq!(
+            expand_home_to_absolute(
+                "~/work",
+                &homes,
+            )
+            .as_ref(),
+            "/Users/har/work"
+        );
+        // `~/a/b/c` expands
+        // similarly.
+        assert_eq!(
+            expand_home_to_absolute(
+                "~/a/b/c",
+                &homes,
+            )
+            .as_ref(),
+            "/Users/har/a/b/c"
+        );
+        // Bare `~` expands
+        // to the first home.
+        assert_eq!(
+            expand_home_to_absolute("~", &homes)
+                .as_ref(),
+            "/Users/har"
+        );
+        // Already-absolute
+        // paths pass through
+        // unchanged.
+        assert_eq!(
+            expand_home_to_absolute(
+                "/etc/hosts",
+                &homes,
+            )
+            .as_ref(),
+            "/etc/hosts"
+        );
+        // Empty input passes
+        // through.
+        assert_eq!(
+            expand_home_to_absolute("", &homes)
+                .as_ref(),
+            ""
+        );
+    }
+
+    /// The homemap wins in
+    /// length-tie cases. With
+    /// `homemap=/Volumes/HUGE/har`
+    /// and `$HOME=/Users/har`,
+    /// `~/x` expands to the
+    /// homemap form because
+    /// it's the longer
+    /// prefix.
+    #[test]
+    fn expand_home_to_absolute_picks_most_specific() {
+        let homes = vec![
+            "/Users/har".to_string(),
+            "/Volumes/HUGE/har".to_string(),
+        ];
+        assert_eq!(
+            expand_home_to_absolute(
+                "~/work",
+                &homes,
+            )
+            .as_ref(),
+            "/Volumes/HUGE/har/work"
+        );
+    }
+
+    /// `normalize_for_compare`
+    /// puts a `~/x` DB row
+    /// and a
+    /// `/Users/har/x` tmux
+    /// pane in the same
+    /// canonical form so the
+    /// `directory_tmux_pane_id`
+    /// lookup succeeds. The
+    /// `~/x` expansion is the
+    /// load-bearing step —
+    /// without it, the
+    /// `std::fs::canonicalize`
+    /// call would fail (no
+    /// real `~/x` path
+    /// exists) and the two
+    /// sides would never
+    /// agree.
+    #[test]
+    fn normalize_for_compare_handles_tilde_form() {
+        let homes = vec!["/tmp".to_string()];
+        // `~/x` expands to
+        // `/tmp/x` and then
+        // canonicalizes (which
+        // succeeds on existing
+        // dirs; the test uses
+        // `/tmp` because it
+        // exists on every
+        // Unix).
+        let from_tilde = normalize_for_compare(
+            "~/self_test_norm_dir",
+            &homes,
+        );
+        let from_absolute =
+            normalize_for_compare(
+                "/tmp/self_test_norm_dir",
+                &homes,
+            );
+        // Both should
+        // canonicalize to the
+        // same value (modulo
+        // symlink resolution on
+        // `/tmp`).
+        assert_eq!(from_tilde, from_absolute);
+    }
+
+    /// Empty input returns
+    /// empty output (matches
+    /// the contract of
+    /// `canonicalize_directory`).
+    #[test]
+    fn normalize_for_compare_empty_input() {
+        assert_eq!(
+            normalize_for_compare("", &[]),
+            ""
+        );
+    }
+
+    /// Paths outside any
+    /// home pass through
+    /// (the absolute form is
+    /// canonicalized, the
+    /// rest of the
+    /// transformation
+    /// doesn't apply).
+    #[test]
+    fn normalize_for_compare_unrelated_path() {
+        let homes = vec!["/Users/har".to_string()];
+        // `/etc/hosts` isn't
+        // under any home, so
+        // the home-expansion
+        // step is a no-op. The
+        // canonicalize step
+        // resolves symlinks
+        // (but `/etc/hosts`
+        // isn't a symlink on
+        // most systems).
+        let result = normalize_for_compare(
+            "/etc/hosts",
+            &homes,
+        );
+        assert!(
+            !result.is_empty(),
+            "result must be non-empty for an existing path, got: {result:?}"
         );
     }
 }

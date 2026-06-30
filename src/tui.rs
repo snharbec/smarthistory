@@ -908,6 +908,34 @@ struct App {
     /// cwd yet) are filtered out
     /// at parse time.
     tmux_windows: Vec<TmuxWindowInfo>,
+    /// Cached home-prefix list
+    /// for path
+    /// normalization
+    /// (canonicalization +
+    /// homemap expansion).
+    /// Computed once at App
+    /// construction by
+    /// reading the user's
+    /// `Config` (`$HOME` +
+    /// `homemap=...`
+    /// entries). Used by
+    /// `directory_tmux_pane_id`
+    /// to normalize paths
+    /// from both the DB side
+    /// and the tmux side
+    /// before comparison, so
+    /// the two end up in
+    /// the same form
+    /// regardless of whether
+    /// the DB has the short
+    /// `~/x` form (after
+    /// `smarthistory update`)
+    /// or the long
+    /// `/Users/.../x` form
+    /// (when the precmd hook
+    /// captured a fresh
+    /// row).
+    home_list: Vec<String>,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
     /// The date-filter alias active for the current
@@ -1693,6 +1721,22 @@ impl App {
                 ))
             },
         )?;
+        // Use the cached
+        // home-prefix list
+        // (computed once at App
+        // construction; see
+        // `build_home_list`) so
+        // we don't re-read
+        // `~/.config/smarthistory/config`
+        // on every
+        // `fetch_directories`
+        // call. The list
+        // already has `$HOME`
+        // first and homemap
+        // entries after, so
+        // `shorten_home_path`
+        // does the right thing.
+        let home_list = self.home_list.clone();
         // Deduplicate on canonical
         // path: a directory may
         // appear under multiple
@@ -1712,37 +1756,81 @@ impl App {
             if !seen.insert(canonical.clone()) {
                 continue;
             }
-            // Synthetic row. `id` is
-            // negative to avoid
+            // The visible list line
+            // shows the **directory**
+            // as the primary text
+            // and the last command
+            // as the secondary text
+            // (the inverse of how
+            // normal history rows
+            // are laid out). We
+            // achieve that by
+            // storing the directory
+            // in `command` (so the
+            // existing
+            // `highlight_matches(
+            //   &row.command, ...)`
+            // path applies
+            // unchanged) and the
+            // last command in
+            // `comment` (so the
+            // existing `# ...`
+            // secondary-slot
+            // rendering picks it
+            // up). The `directory`
+            // field still holds
+            // the full absolute
+            // path because the
+            // tmux-pane lookup
+            // (`directory_tmux_pane_id`)
+            // canonicalises against
+            // it.
+            //
+            // The directory in
+            // `command` is the
+            // shell-friendly `~/x`
+            // form (matching the
+            // user's typing
+            // convention) so the
+            // query highlighting
+            // shows matches in the
+            // short form they're
+            // used to.
+            let short_dir = crate::util::shorten_home_path(
+                &directory, &home_list,
+            )
+            .into_owned();
+            // The command in
+            // `comment` is
+            // truncated because
+            // the secondary slot
+            // is narrow. The user
+            // can still see the
+            // full command in
+            // the Details pane.
+            let short_cmd = if command.is_empty() {
+                String::new()
+            } else if command.chars().count() > 60 {
+                let truncated: String =
+                    command.chars().take(57).collect();
+                format!("{}…", truncated)
+            } else {
+                command.clone()
+            };
+            // Synthetic row. `id`
+            // is negative to avoid
             // colliding with real
             // history ids (same
             // convention as todo
             // rows).
             rows.push(HistoryRow {
                 id: -(i as i64) - 1,
-                command: command.clone(),
-                directory: directory.clone(),
+                command: short_dir,
+                directory,
                 session_id: String::new(),
                 exit_code: 0,
                 timestamp: ts,
-                // Re-use the `comment`
-                // field for the
-                // stripped path. The
-                // TUI's `Details` pane
-                // already shows the
-                // absolute path under
-                // `Dir`, so the visible
-                // list row's `command`
-                // field carries the
-                // last command and
-                // `comment` carries
-                // the directory —
-                // the user sees one
-                // line per directory
-                // with the latest
-                // command as the
-                // row label.
-                comment: directory,
+                comment: short_cmd,
                 output: String::new(),
                 mode: "directory".to_string(),
             });
@@ -1793,12 +1881,89 @@ impl App {
         if self.tmux_windows.is_empty() {
             return None;
         }
-        let canonical =
-            crate::util::canonicalize_directory(dir);
+        // Normalize the
+        // DB-side path to a
+        // canonical absolute
+        // form so it matches
+        // the tmux-reported
+        // path regardless of
+        // how the row is
+        // stored.
+        //
+        // The DB may have:
+        // - `~/x` (after
+        //   `smarthistory
+        //   update` rewrote
+        //   it), or
+        // - `/Users/har/x` or
+        //   `/Volumes/HUGE/har/x`
+        //   (when the precmd
+        //   hook captured a
+        //   fresh row using
+        //   the user's logical
+        //   form).
+        //
+        // The tmux side has
+        // an absolute path
+        // (real filesystem
+        // path), which
+        // `canonicalize_directory`
+        // resolves through
+        // any macOS volume
+        // mounts.
+        //
+        // To make the two
+        // match, we expand
+        // `~/x` using the
+        // user's home list
+        // (so the DB-side
+        // `~/x` becomes
+        // `/Users/har/x` or
+        // the homemap form)
+        // BEFORE calling
+        // `canonicalize_directory`
+        // — otherwise the
+        // canonicalize would
+        // fail on `~/x` and
+        // fall back to the
+        // un-resolved input,
+        // which never matches
+        // the tmux side. (The
+        // homemap form (e.g.
+        // `/Volumes/HUGE/har/x`)
+        // gets resolved by
+        // `canonicalize_directory`
+        // to the same physical
+        // path tmux reports.)
+        let db_normalized = crate::util::normalize_for_compare(
+            dir, &self.home_list,
+        );
         self.tmux_windows
             .iter()
             .find(|w| {
-                crate::util::canonicalize_directory(&w.path) == canonical
+                // Both sides go through
+                // `normalize_for_compare`
+                // (expand `~/` +
+                // canonicalize) so a
+                // DB row stored as
+                // `~/x` and a tmux
+                // pane reported as
+                // `/Users/.../x`
+                // produce the same
+                // string and the
+                // comparison succeeds.
+                // Without the homemap
+                // expansion, the
+                // canonicalize step
+                // would fail on the
+                // `~/x` form and the
+                // two sides would
+                // never agree.
+                let tmux_normalized =
+                    crate::util::normalize_for_compare(
+                        &w.path, &self.home_list,
+                    );
+                tmux_normalized == db_normalized
             })
             .map(|w| w.pane_id.clone())
     }
@@ -2917,6 +3082,13 @@ notes_date_filter: NotesDateFilter::All,
             // doc comment for the
             // rationale.
             tmux_windows: Vec::new(),
+            // Cached home-prefix
+            // list, computed once
+            // at construction.
+            // See the `home_list`
+            // field doc for the
+            // full rationale.
+            home_list: build_home_list(),
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -4480,16 +4652,51 @@ fn move_selection(&mut self, delta: isize) {
             );
             return;
         };
-        let command = row.command.clone();
+        // The describe action
+        // asks the LLM to
+        // describe the *command*
+        // on the selected row.
+        // For `#`-mode rows the
+        // primary text is the
+        // directory (so
+        // `row.command` is the
+        // directory, not a
+        // runnable command) and
+        // `row.comment` holds the
+        // last command run
+        // there. We describe the
+        // last command (the
+        // interesting artifact)
+        // rather than the
+        // directory (which the
+        // LLM can only describe
+        // as a path, not as
+        // "what was the user
+        // doing here").
+        if row.mode == "directory"
+            && row.comment.is_empty()
+        {
+            self.set_status_message(
+                "Describe: directory has no \
+                 captured command to describe"
+                    .to_string(),
+            );
+            return;
+        }
+        let command = if row.mode == "directory" {
+            row.comment.clone()
+        } else {
+            row.command.clone()
+        };
         self.describe_view = None;
-        
+
         if self.llm.is_none() {
             self.set_status_message(
                 crate::llm::LlmError::NotConfigured.to_string(),
             );
             return;
         }
-        
+
         let prompt = crate::llm::build_describe_prompt(&command);
         self.spawn_llm_request(
             LlmRequestType::Describe { command },
@@ -4535,23 +4742,50 @@ fn move_selection(&mut self, delta: isize) {
             );
             return;
         };
-        // Clone the command out of the merged view
-        // so the borrow is dropped before we mutate
-        // `self` again. (See `start_describe` for
-        // the same pattern; both LLM-backed actions
-        // need this dance.)
-        let original_command = row.command.clone();
+        // The correct action asks
+        // the LLM to fix the
+        // *command* on the
+        // selected row. For
+        // `#`-mode rows the
+        // primary text is the
+        // directory (so
+        // `row.command` is the
+        // directory, not a
+        // runnable command) and
+        // `row.comment` holds the
+        // last command run
+        // there. We correct the
+        // last command (the
+        // thing the LLM can
+        // actually rewrite); the
+        // directory doesn't need
+        // a "corrected form".
+        if row.mode == "directory"
+            && row.comment.is_empty()
+        {
+            self.set_status_message(
+                "Correct: directory has no \
+                 captured command to correct"
+                    .to_string(),
+            );
+            return;
+        }
+        let original_command = if row.mode == "directory" {
+            row.comment.clone()
+        } else {
+            row.command.clone()
+        };
         // Close any existing overlay first so a
         // re-correct doesn't stack views.
         self.correct_view = None;
-        
+
         if self.llm.is_none() {
             self.set_status_message(
                 crate::llm::LlmError::NotConfigured.to_string(),
             );
             return;
         }
-        
+
         let prompt = crate::llm::build_correct_prompt(&original_command);
         self.spawn_llm_request(
             LlmRequestType::Correct { original_command },
@@ -6599,6 +6833,43 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
 /// `tmux list-windows -a -F`;
 /// the regression test below
 /// pins the correct format.
+
+/// Build the home-prefix list
+/// used by both
+/// `directory_tmux_pane_id`
+/// and `fetch_directories`.
+/// Reads the user's `Config`
+/// once (so the call site
+/// doesn't need to thread it
+/// through) and returns
+/// `$HOME` followed by the
+/// `homemap=...` entries,
+/// sorted longest-first so
+/// the most-specific home
+/// wins. Same convention as
+/// `shorten_home_path` /
+/// `expand_home_with_config`.
+/// Recomputed at App
+/// construction; per-TUI-
+/// session config changes
+/// don't propagate (same
+/// constraint the rest of
+/// the App has — config is
+/// read once at startup).
+fn build_home_list() -> Vec<String> {
+    let cfg = Config::load();
+    let mut homes: Vec<String> = std::iter::once(
+        std::env::var("HOME").unwrap_or_default(),
+    )
+    .chain(cfg.home_map().iter().filter_map(|p| {
+        p.to_str().map(str::to_string)
+    }))
+    .filter(|s| !s.is_empty())
+    .collect();
+    homes.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    homes
+}
+
 fn parse_tmux_pane_line(line: &str) -> Option<TmuxWindowInfo> {
     // `split('|')` with trim on
     // each field. Four fields,
@@ -13561,14 +13832,17 @@ mod tests {
         /// by each directory's
         /// most-recent history
         /// timestamp DESC. The
-        /// single command surfaced
-        /// per directory is the
-        /// command that *caused*
-        /// the latest row in that
-        /// directory, so the user
-        /// sees "what was I doing
-        /// here last?" alongside the
-        /// path.
+        /// directory (in shell-
+        /// friendly `~/x` form)
+        /// is the visible primary
+        /// text of the row, and
+        /// the last command run
+        /// in that directory is
+        /// kept in `row.comment`
+        /// (the secondary slot)
+        /// so the user still has
+        /// a hint of *what* they
+        /// were doing there.
         #[test]
         fn fetch_directories_lists_unique_dirs_sorted_by_recency() {
             // Three directories,
@@ -13579,9 +13853,10 @@ mod tests {
             // ran there), `/home/a`
             // second (yesterday), and
             // `/home/b` last (a year
-            // ago). The `command`
-            // for each directory is the
-            // command that produced its
+            // ago). The `comment`
+            // for each directory is
+            // the command that
+            // produced its
             // max-timestamp row.
             let mut app = directories_test_app(&[
                 ("ls",        "/home/a",  86_400),   // 1 day ago
@@ -13592,29 +13867,39 @@ mod tests {
             ]);
             app.query = "#".to_string();
             app.refresh();
-            let cmds: Vec<&str> = app
+            // Three directories
+            // expected (one row
+            // each). The visible
+            // primary text is the
+            // directory (now in
+            // `row.command`), so
+            // that's what we read
+            // here.
+            let visible: Vec<&str> = app
                 .merged_rows()
                 .iter()
                 .map(|r| r.command.as_str())
                 .collect();
-            // Three directories
-            // expected (one row each).
-            assert_eq!(cmds.len(), 3);
+            assert_eq!(visible.len(), 3);
             // Newest directory
-            // first: `/home/c`
-            // (30s ago), command
-            // `echo hi`.
-            assert_eq!(cmds[0], "echo hi");
-            // Second: `/home/a`
-            // (1h ago — the latest
-            // for `/home/a` is the
-            // `git status` row),
-            // command `git status`.
-            assert_eq!(cmds[1], "git status");
-            // Third: `/home/b`
-            // (1y ago), command
-            // `make`.
-            assert_eq!(cmds[2], "make");
+            // first.
+            assert_eq!(visible[0], "/home/c");
+            // Second.
+            assert_eq!(visible[1], "/home/a");
+            // Third.
+            assert_eq!(visible[2], "/home/b");
+            // The last command run
+            // in each directory
+            // lives in `row.comment`
+            // (the secondary slot).
+            let last_cmds: Vec<&str> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.comment.as_str())
+                .collect();
+            assert_eq!(last_cmds[0], "echo hi");
+            assert_eq!(last_cmds[1], "git status");
+            assert_eq!(last_cmds[2], "make");
             // Each row's `directory`
             // is the canonical path.
             let dirs: Vec<&str> = app
@@ -13634,7 +13919,15 @@ mod tests {
         /// filter is space-split AND
         /// (so `#home a` requires both
         /// `home` AND `a` somewhere in
-        /// the path).
+        /// the path). The visible
+        /// primary text on each row
+        /// is now the directory (per
+        /// the layout swap), so the
+        /// assertions read
+        /// `row.command` (the
+        /// directory) and the
+        /// comments confirm the
+        /// last-command metadata.
         #[test]
         fn fetch_directories_applies_substring_filter() {
             let mut app = directories_test_app(&[
@@ -13644,14 +13937,29 @@ mod tests {
             ]);
             app.query = "#home".to_string();
             app.refresh();
-            let cmds: Vec<&str> = app
+            let visible: Vec<&str> = app
                 .merged_rows()
                 .iter()
                 .map(|r| r.command.as_str())
                 .collect();
-            assert_eq!(cmds.len(), 2);
-            assert_eq!(cmds[0], "ls"); // /home/b (latest)
-            assert_eq!(cmds[1], "ls"); // /home/a (day-old)
+            assert_eq!(visible.len(), 2);
+            // `/home/b` is the latest
+            // of the matching
+            // directories (60s old),
+            // so it sorts first.
+            assert_eq!(visible[0], "/home/b");
+            assert_eq!(visible[1], "/home/a");
+            // The secondary slot
+            // carries the last
+            // command run in each
+            // directory.
+            let cmds: Vec<&str> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.comment.as_str())
+                .collect();
+            assert_eq!(cmds[0], "ls");
+            assert_eq!(cmds[1], "ls");
             // No match for `/var/log`
             // because the filter
             // requires `home`.
@@ -13667,6 +13975,146 @@ mod tests {
                 app.merged_rows().len(),
                 0
             );
+        }
+
+        /// Regression test for the
+        /// directory-row layout
+        /// swap: the visible
+        /// primary text is the
+        /// directory in shell-
+        /// shortened form
+        /// (`~/x` when under
+        /// `$HOME`) and the
+        /// secondary `# ...`
+        /// slot is the last
+        /// command run there.
+        /// Without the swap the
+        /// user would see the
+        /// command first and the
+        /// directory as a
+        /// secondary hint — the
+        /// inverse of what the
+        /// user wants in `#`-mode
+        /// (where they're
+        /// searching for paths,
+        /// not commands).
+        #[test]
+        fn fetch_directories_layout_swap() {
+            // The `~`-shortening
+            // depends on `$HOME` and
+            // the `home_map` config.
+            // We set `$HOME` for the
+            // duration of the test
+            // and clear `home_map`
+            // (the default empty
+            // list). This avoids
+            // depending on the
+            // caller's environment
+            // (parallel test runs
+            // could otherwise see
+            // different `home_map`
+            // values via the
+            // user's actual
+            // `~/.config/smarthistory/config`).
+            let _guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let saved_home =
+                std::env::var("HOME").ok();
+            // SAFETY: this test
+            // holds `ENV_LOCK` (the
+            // shared env-mutation
+            // mutex), so no other
+            // env-mutating test
+            // can run concurrently.
+            unsafe {
+                std::env::set_var(
+                    "HOME",
+                    "/Users/har",
+                );
+            }
+            let mut app = directories_test_app(&[(
+                "ls -la /tmp/foo bar",
+                "/Users/har/work/project",
+                60,
+            )]);
+            app.query = "#".to_string();
+            app.refresh();
+            let row = &app.merged_rows()[0];
+            // The primary text
+            // (which the user sees
+            // first in the list,
+            // and which the query
+            // highlights against)
+            // is the directory in
+            // `~/x` form. This is
+            // the load-bearing
+            // assertion: it locks
+            // in the swap.
+            assert_eq!(row.command, "~/work/project");
+            // The secondary slot
+            // (the `# ...` comment
+            // in the rendered
+            // line) is the last
+            // command run in that
+            // directory. The
+            // command here is short
+            // (under the 60-char
+            // truncation threshold)
+            // so it appears
+            // verbatim.
+            assert_eq!(row.comment, "ls -la /tmp/foo bar");
+            // The full directory
+            // (un-shortened) is
+            // still in `directory`
+            // for the tmux-pane
+            // lookup and Details
+            // pane.
+            assert_eq!(
+                row.directory,
+                "/Users/har/work/project"
+            );
+            if let Some(home) = saved_home {
+                unsafe {
+                    std::env::set_var("HOME", home);
+                }
+            }
+        }
+
+        /// Long commands are
+        /// truncated to 57
+        /// characters plus an
+        /// ellipsis when stored
+        /// in the secondary slot
+        /// (the comment field).
+        /// The truncation is
+        /// char-aware (uses
+        /// `chars().take(57)`)
+        /// so multi-byte UTF-8
+        /// doesn't get cut in
+        /// the middle of a
+        /// code point.
+        #[test]
+        fn fetch_directories_truncates_long_command() {
+            // 100-char command.
+            let long_cmd = "a".repeat(100);
+            let mut app = directories_test_app(&[(
+                &long_cmd,
+                "/Users/har/work",
+                60,
+            )]);
+            app.query = "#".to_string();
+            app.refresh();
+            let row = &app.merged_rows()[0];
+            // Truncated to 57
+            // `a`s + `…` = 58
+            // chars.
+            assert_eq!(
+                row.comment.chars().count(),
+                58
+            );
+            assert!(row.comment.ends_with('…'));
+            assert!(row.comment.starts_with('a'));
         }
 
         /// Selecting a directory
@@ -13949,6 +14397,133 @@ mod tests {
                     "/home/nowhere"
                 ).is_none()
             );
+        }
+
+        /// Regression test for the
+        /// homemap-aware
+        /// normalization: a DB
+        /// row stored in the
+        /// short `~/x` form
+        /// (after
+        /// `smarthistory
+        /// update`) must match
+        /// a tmux-reported
+        /// pane at the
+        /// absolute form
+        /// (e.g. `/Users/har/x`).
+        ///
+        /// Without the
+        /// homemap-aware
+        /// expansion, the
+        /// `std::fs::canonicalize`
+        /// step on the `~/x`
+        /// side would fail (no
+        /// real `~/x` path
+        /// exists) and fall
+        /// back to the un-
+        /// resolved input,
+        /// which never matched
+        /// the tmux side. The
+        /// result: a directory
+        /// row that DID have a
+        /// live tmux pane was
+        /// missing the `T`
+        /// marker.
+        ///
+        /// We use `$HOME` via
+        /// `set_var` (guarded
+        /// by `ENV_LOCK` so
+        /// the env mutation
+        /// doesn't race with
+        /// other env-mutating
+        /// tests) and rely on
+        /// `/tmp` (which
+        /// always exists) as
+        /// the test directory.
+        #[test]
+        fn directory_tmux_pane_id_handles_tilde_form_db_row() {
+            let _env_guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let saved_home =
+                std::env::var("HOME").ok();
+            // SAFETY: holds
+            // `ENV_LOCK`.
+            unsafe {
+                std::env::set_var(
+                    "HOME",
+                    "/tmp",
+                );
+            }
+            // Use `/tmp` as the
+            // test directory.
+            // `~/self_test_dir`
+            // is therefore
+            // `/tmp/self_test_dir`
+            // after homemap
+            // expansion, and the
+            // tmux pane has the
+            // same absolute path
+            // (already canonical,
+            // no macOS volume
+            // mount to worry
+            // about).
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/tmp",
+                60,
+            )]);
+            app.tmux_windows
+                .push(TmuxWindowInfo {
+                    pane_id: "%99".to_string(),
+                    // The path tmux
+                    // reports is
+                    // already the
+                    // canonical
+                    // absolute form
+                    // (no `~`).
+                    path: std::fs::canonicalize(
+                        "/tmp",
+                    )
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| {
+                        "/tmp".into()
+                    }),
+                });
+            // The user-facing
+            // directory in the
+            // DB is the short
+            // form `~/x` (or
+            // here, the home
+            // itself: `~`).
+            // This is the case
+            // the user reported:
+            // a row stored in
+            // `~/x` form should
+            // still get the `T`
+            // marker when a
+            // tmux pane is at
+            // the matching
+            // absolute path.
+            let canonical_tmp =
+                std::fs::canonicalize("/tmp")
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| {
+                        "/tmp".into()
+                    });
+            assert_eq!(
+                app.directory_tmux_pane_id(
+                    &canonical_tmp
+                )
+                .as_deref(),
+                Some("%99"),
+                "absolute-path DB row must match the tmux pane"
+            );
+            if let Some(home) = saved_home {
+                unsafe {
+                    std::env::set_var("HOME", home);
+                }
+            }
         }
 
         /// The `tmux_windows` snapshot
