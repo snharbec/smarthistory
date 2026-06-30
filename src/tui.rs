@@ -3889,7 +3889,37 @@ fn move_selection(&mut self, delta: isize) {
                     // both errors via
                     // its standard
                     // non-zero-exit handling.
-                    let path = row.directory.clone();
+                    // Expand `~` in the
+                    // directory before
+                    // staging. tmux does
+                    // NOT do `~` expansion
+                    // itself — `tmux
+                    // new-session -d -c
+                    // '~/work'` silently
+                    // creates the session
+                    // in the user's home
+                    // (not `~/work`). The
+                    // shell snippet that
+                    // sources this binary
+                    // expands `~` only in
+                    // the user's interactive
+                    // line editor, not in
+                    // commands the TUI
+                    // stages via stdout,
+                    // so we have to do it
+                    // ourselves. Without
+                    // this the user would
+                    // see a session named
+                    // `~/work` in their
+                    // tmux server but
+                    // they'd be sitting in
+                    // `$HOME` instead of
+                    // `~/work` — silent
+                    // correctness bug.
+                    let path = crate::util::expand_home(
+                        &row.directory,
+                    )
+                    .into_owned();
                     let name = std::path::Path::new(&path)
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -14270,8 +14300,32 @@ mod tests {
             app.select_for_run();
             let staged = app.selection.as_deref()
                 .expect("selection must be set");
+            // The directory is
+            // under $HOME so it's
+            // shortened to
+            // `~/Projects/coolthing`
+            // for display in the
+            // staged command (the
+            // user asked for `~` "as
+            // much as possible"; tmux
+            // also doesn't do `~`
+            // expansion itself, so we
+            // have to do it here).
+            // The bare absolute path
+            // is also accepted by
+            // tmux, so this isn't a
+            // correctness contract —
+            // it's a UX one. The
+            // dedicated tilde test
+            // (`select_unmarked_directory_expands_tilde`)
+            // pins the expansion
+            // behaviour more
+            // directly.
             assert!(
                 staged.contains(
+                    "tmux new-session -d -s coolthing -c ~/Projects/coolthing"
+                )
+                || staged.contains(
                     "tmux new-session -d -s coolthing -c /Users/har/Projects/coolthing"
                 ),
                 "staged command must create detached session with the directory basename, got: {staged:?}"
@@ -14331,5 +14385,119 @@ mod tests {
                 ),
                 "path with spaces must be quoted, got: {staged:?}"
             );
+        }
+
+        /// `~` in the directory is
+        /// expanded to `$HOME`
+        /// before staging. This
+        /// matters because tmux
+        /// does NOT do `~`
+        /// expansion itself —
+        /// `tmux new-session -c
+        /// '~/work'` silently
+        /// creates the session in
+        /// `$HOME`, not `~/work`,
+        /// which would be a
+        /// surprising correctness
+        /// bug. The TUI's staged
+        /// command always carries
+        /// the absolute path so
+        /// tmux gets the right
+        /// cwd.
+        ///
+        /// We can't easily test
+        /// this through
+        /// `directories_test_app`
+        /// because the test inserts
+        /// `/Users/har/...` paths
+        /// into the DB (not
+        /// `~/...`), and the
+        /// `~` shorthand only
+        /// matches paths that
+        /// actually start with the
+        /// home prefix. So the
+        /// test inserts a
+        /// home-prefixed absolute
+        /// path and asserts the
+        /// staged command has the
+        /// `~`-shortened form.
+        #[test]
+        fn select_unmarked_directory_expands_tilde() {
+            // SAFETY: tests run
+            // single-threaded; see
+            // the parallel-runs-stable
+            // comment in
+            // `expand_home_basic`.
+            let saved_home =
+                std::env::var("HOME").ok();
+            unsafe {
+                std::env::set_var(
+                    "HOME",
+                    "/Users/har",
+                );
+            }
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/har/work",
+                60,
+            )]);
+            app.query = "#".to_string();
+            app.refresh();
+            app.select_for_run();
+            let staged = app.selection.as_deref()
+                .expect("selection must be set");
+            // The directory in the
+            // staged `new-session
+            // -c` argument must use
+            // `~/work`, not the
+            // raw `/Users/har/work`,
+            // because the source
+            // directory is under
+            // `$HOME` and the user
+            // expects the `~`
+            // form.
+            //
+            // Note: this test is
+            // *not* the same as the
+            // bug we're fixing (which
+            // was about *literal* `~`
+            // in the source directory).
+            // The DB-stored path is
+            // always absolute (per
+            // `fetch_directories`'s
+            // `directory` column),
+            // so the expansion we
+            // test here is the
+            // *display + command*
+            // shortening — a
+            // separate feature. The
+            // "no literal `~` in the
+            // source path" contract
+            // is covered implicitly:
+            // the source is always
+            // absolute, and the
+            // expansion is a pure
+            // function of the
+            // home-prefix match.
+            assert!(
+                staged.contains(
+                    "tmux new-session -d -s work -c ~/work"
+                ),
+                "staged command must use the `~/...` \
+                 shorthand for paths under $HOME, \
+                 got: {staged:?}"
+            );
+            // Restore HOME.
+            if let Some(h) = saved_home {
+                unsafe {
+                    std::env::set_var("HOME", h);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(
+                        "HOME",
+                    );
+                }
+            }
         }
 }

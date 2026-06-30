@@ -254,6 +254,35 @@ enum Commands {
         /// Path to the input JSON file.
         filename: PathBuf,
     },
+    /// Walk the SQLite history
+    /// database and rewrite every
+    /// `directory` value to its
+    /// `~`-shorthened form (where
+    /// the directory is under
+    /// `$HOME` or any `homemap=...`
+    /// entry in the config file).
+    ///
+    /// `smarthistory add` (the
+    /// preexec hook entry point)
+    /// always records the
+    /// kernel-canonical absolute
+    /// path. For the directories
+    /// view and the staged `tmux
+    /// new-session` command, the
+    /// user wants the short `~`
+    /// form. `smarthistory update`
+    /// is a one-shot migration
+    /// that updates the rows in
+    /// place (preserving
+    /// `id`/`timestamp`); running
+    /// it twice is a no-op.
+    ///
+    /// New rows added after the
+    /// migration are stored
+    /// `~`-shortened from the
+    /// start (see
+    /// `current_directory_for_storage`).
+    Update,
 }
 
 /// Sub-commands of `smarthistory config`. `Get` preserves the
@@ -818,6 +847,38 @@ pub struct Config {
     todo_line_option: String,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
+    /// User-configured additional
+    /// "home" prefixes. The DB
+    /// stores absolute paths,
+    /// but when displayed or
+    /// queried, paths under any
+    /// of these prefixes are
+    /// shortened with `~` (the
+    /// same convention the shell
+    /// uses). The default
+    /// `$HOME` is always in the
+    /// set — `homemap=...` adds
+    /// extra entries.
+    ///
+    /// Use case: on macOS, the
+    /// user's home directory
+    /// lives on an external
+    /// volume and is mounted at
+    /// `/Volumes/HUGE/har/...`
+    /// while the shell exposes
+    /// `/Users/har/...`. The
+    /// preexec hook records the
+    /// kernel-canonical path
+    /// (the `/Volumes/HUGE/...`
+    /// form); the shell snippet
+    /// exposes the user's
+    /// logical path. Adding
+    /// `homemap=/Volumes/HUGE/har`
+    /// tells the TUI to
+    /// shorten both forms to
+    /// `~/...` so the user sees
+    /// a consistent short form.
+    home_map: Vec<std::path::PathBuf>,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -910,6 +971,18 @@ impl Config {
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
             query_prefixes: QueryPrefixes::default(),
+            // `~` expansion: `$HOME` is
+            // always in the set (the
+            // `expand_home` helper
+            // pulls it from the env
+            // at call time), so we
+            // start with an empty
+            // user-configured list.
+            // Multiple `homemap=...`
+            // lines in the config
+            // file append to this
+            // list.
+            home_map: Vec::new(),
         }
     }
 
@@ -1036,6 +1109,40 @@ impl Config {
                              keeping default \"{}\"",
                             value,
                             self.todo_line_option
+                        );
+                    }
+                }
+                "homemap" => {
+                    // Additional home
+                    // prefixes for `~`
+                    // expansion. Multiple
+                    // entries are allowed
+                    // (one per line, like
+                    // `prefix.<x>=...`); they
+                    // are appended in the
+                    // order written. The
+                    // default `$HOME` is
+                    // always added at
+                    // expansion time (we
+                    // don't bake it in here
+                    // because HOME may
+                    // change between
+                    // config-load and
+                    // TUI-launch). A value
+                    // that doesn't exist
+                    // on disk is still
+                    // accepted — the TUI
+                    // may legitimately want
+                    // to shorten a
+                    // hypothetical path
+                    // (e.g. a user
+                    // describing a
+                    // directory they've
+                    // since moved).
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        self.home_map.push(
+                            std::path::PathBuf::from(trimmed),
                         );
                     }
                 }
@@ -1216,6 +1323,21 @@ impl Config {
     /// Resolved query prefix characters.
     pub fn query_prefixes(&self) -> &QueryPrefixes {
         &self.query_prefixes
+    }
+
+    /// User-configured additional
+    /// home prefixes (the `homemap`
+    /// config option, one per
+    /// line, multiple allowed). The
+    /// default `$HOME` is always
+    /// added to this set at
+    /// `expand_home` call time
+    /// (we don't pre-bake it in
+    /// because HOME may change
+    /// between config-load and
+    /// TUI-launch).
+    pub fn home_map(&self) -> &[std::path::PathBuf] {
+        &self.home_map
     }
 
     /// Path to the note_search database, if configured.
@@ -2607,6 +2729,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Import { filename } => {
+            let _json = std::fs::read_to_string(&filename)?;
             let json = std::fs::read_to_string(&filename)?;
             let export: HistoryExport = serde_json::from_str(&json)?;
 
@@ -2681,6 +2804,203 @@ fn main() -> anyhow::Result<()> {
                 imported,
                 updated,
                 filename.display()
+            );
+        }
+        Commands::Update => {
+            // Walk the SQLite history
+            // table and rewrite every
+            // `directory` to its
+            // `~`-shorthened form
+            // (where the path is
+            // under `$HOME` or any
+            // `homemap=...` entry).
+            // Idempotent: running
+            // twice is a no-op (the
+            // second pass shortens
+            // `~/work` against the
+            // home list, finds no
+            // match, leaves the
+            // value unchanged).
+            let cfg = Config::load();
+            // We update rows in place
+            // (preserving `id` and
+            // `timestamp`). The
+            // dedup index
+            // `(command, directory,
+            // session_id)` would
+            // prevent inserting a
+            // new `~/work` row
+            // while an
+            // `/Users/har/work` row
+            // exists, so update is
+            // the only safe path.
+            // The check on
+            // `row.directory` vs
+            // the shortened form is
+            // `!=` so a row whose
+            // value is already
+            // shortened (post-
+            // `update` row that
+            // survived a second
+            // run) doesn't get
+            // touched.
+            let mut stmt = conn
+                .prepare("SELECT id, directory FROM history")
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "prepare: {e}"
+                    )
+                })?;
+            let mut updates: Vec<(i64, String)> = Vec::new();
+            let mut rows = stmt
+                .query([])
+                .map_err(|e| {
+                    anyhow::anyhow!("query: {e}")
+                })?;
+            while let Some(row) = rows.next().map_err(|e| {
+                anyhow::anyhow!("row: {e}")
+            })? {
+                let id: i64 = row.get(0).map_err(|e| {
+                    anyhow::anyhow!("id: {e}")
+                })?;
+                let directory: String = row
+                    .get(1)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "directory: {e}"
+                        )
+                    })?;
+                let shortened = crate::util::expand_home_with_config(
+                    &directory, cfg.home_map(),
+                );
+                if shortened.as_ref() != directory {
+                    updates.push((id, shortened.into_owned()));
+                }
+            }
+            drop(rows);
+            drop(stmt);
+            // Apply the updates.
+            // We commit them one by
+            // one (not a single
+            // multi-row UPDATE)
+            // because each row's
+            // shortened value is
+            // independent and a
+            // failure on one row
+            // shouldn't roll back
+            // the others. For
+            // thousands of rows
+            // this is fast enough
+            // — the dedup index
+            // makes each write
+            // O(log N).
+            //
+            // The unique index
+            // `(command, directory,
+            // session_id)` can
+            // collide when two rows
+            // for the same
+            // `(command, session_id)`
+            // have different
+            // `directory` values (one
+            // already shortened to
+            // `~/x`, the other still
+            // absolute `/Users/.../x`)
+            // and we try to update the
+            // second to the same
+            // `~/x` as the first. The
+            // right resolution: delete
+            // the row that's about to
+            // collide (the one with
+            // the conflicting new
+            // `directory`) before the
+            // UPDATE. The dedup
+            // semantics say "this
+            // `(command, session_id)`
+            // maps to a single
+            // directory"; collapsing
+            // is correct.
+            let mut updated = 0usize;
+            let mut skipped = 0usize;
+            for (id, new_dir) in &updates {
+                // Drop any existing row
+                // whose
+                // `(command, directory,
+                // session_id)` would
+                // collide with our
+                // target state. We do
+                // this per-id (not as
+                // a single DELETE before
+                // the loop) because we
+                // need the colliding
+                // row's `command` and
+                // `session_id` — those
+                // are derivable from the
+                // current row, which
+                // we're updating.
+                let row = conn.query_row(
+                    "SELECT command, session_id FROM history WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                );
+                let (cmd, sid) = match row {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to read history id={id}: {e}"
+                        );
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                if let Err(e) = conn.execute(
+                    "DELETE FROM history \
+                     WHERE command = ?1 \
+                       AND directory = ?2 \
+                       AND session_id = ?3 \
+                       AND id != ?4",
+                    rusqlite::params![cmd, new_dir, sid, id],
+                ) {
+                    eprintln!(
+                        "warning: failed to clear collision for id={id}: {e}"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+                match conn.execute(
+                    "UPDATE history SET directory = ?1 \
+                     WHERE id = ?2",
+                    rusqlite::params![new_dir, id],
+                ) {
+                    Ok(1) => updated += 1,
+                    Ok(0) => skipped += 1,
+                    Ok(_) => {
+                        // More rows than
+                        // expected — should
+                        // be impossible
+                        // because `id` is
+                        // the PRIMARY KEY,
+                        // but log and skip
+                        // rather than
+                        // panic.
+                        eprintln!(
+                            "warning: unexpected row count \
+                             for history id={id}"
+                        );
+                        skipped += 1;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to rewrite history id={id}: {e}"
+                        );
+                        skipped += 1;
+                    }
+                }
+            }
+            println!(
+                "rewrote {updated} row(s); skipped {skipped}",
+                updated = updated,
+                skipped = skipped
             );
         }
     }

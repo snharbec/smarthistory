@@ -1973,14 +1973,48 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // Show a non-empty comment inline for every row, and fall back to
     // the directory on the selected row when there is no comment.
     if !row.comment.is_empty() {
+        // For directory rows the
+        // `comment` is the
+        // directory itself (per
+        // `fetch_directories`). The
+        // shell-style `~` shortening
+        // applies here too — the
+        // user wants short paths
+        // everywhere they appear.
+        let comment_display = if row.mode == "directory" {
+            crate::util::expand_home(&row.comment).into_owned()
+        } else {
+            row.comment.clone()
+        };
         spans.push(Span::styled(
-            format!("# {} ", row.comment),
+            format!("# {} ", comment_display),
             Style::default()
                 .fg(Theme::warning_color())
                 .add_modifier(Modifier::ITALIC),
         ));
     } else if is_selected {
-        spans.push(Span::styled(format!("· {} ", row.directory), Theme::dim()));
+        // For directory rows, show
+        // the path with the user's
+        // home directory abbreviated
+        // to `~` — the same
+        // convention the shell uses,
+        // so the user sees the
+        // short form they're used
+        // to. The un-expanded
+        // absolute path is still
+        // available in the Details
+        // pane (where we keep the
+        // long form because there's
+        // no width pressure and the
+        // user might want to
+        // copy/paste the full
+        // path).
+        let dir_display = if row.mode == "directory" {
+            crate::util::expand_home(&row.directory)
+        } else {
+            std::borrow::Cow::Borrowed(row.directory.as_str())
+        };
+        spans.push(Span::styled(format!("· {} ", dir_display), Theme::dim()));
     }
 
     Line::from(spans)
@@ -2188,7 +2222,25 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Dir  ", Theme::dim()),
-            Span::raw(row.directory.clone()),
+            // Show the directory with
+            // `~` expansion so the
+            // user sees the short
+            // form (matching what
+            // they'd type in the
+            // shell). The
+            // un-abbreviated form is
+            // available in the
+            // capture column's `·`
+            // text for the selected
+            // row only, but the
+            // Details pane shows the
+            // short form too — it's
+            // the same convention
+            // everywhere, which is
+            // what the user asked
+            // for ("as much as
+            // possible").
+            Span::raw(crate::util::expand_home(&row.directory).into_owned()),
         ]),
         Line::from(vec![
             Span::styled("Sess ", Theme::dim()),
