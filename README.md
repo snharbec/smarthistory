@@ -422,6 +422,83 @@ DB row stored as `~/x` and a tmux pane reported at
 session and cached; silent failure if `tmux` is not on
 PATH or not running.
 
+#### Pinned directories (`sessiondirs=...`)
+
+Add one or more `sessiondirs=<path>` lines to the
+config to pin a directory whose sub-tree is *always*
+shown in the `#` list, even if no command has ever
+been run there. Each entry is recursively walked at
+TUI-startup time and every subdirectory becomes a
+row. This is the "show me my projects even when I
+haven't touched them yet" hook.
+
+```
+# ~/.config/smarthistory/config
+sessiondirs=~/work
+sessiondirs=~/Sources/playground
+```
+
+After restart, `#` lists every subdirectory under
+`~/work` and `~/Sources/playground`, in addition to
+the directories the user has actually run commands
+in. Pinned rows get `timestamp = 0` and so sort to
+the bottom of the list (the user's recent history
+surfaces first); the user types a pattern to filter
+to one. Rows that have a `.command` file (see
+below) show `(has .command)` in the secondary slot
+so the user knows the row will run a setup script
+on select.
+
+#### Per-directory setup scripts (`.command`)
+
+If the user places a file named `.command` in a
+directory (or in any ancestor), the directory becomes
+a "session" with a setup script. Selecting such a
+directory in the TUI runs
+
+```
+sh <path-to-.command> <selected-directory>
+```
+
+The first argument is always the selected directory;
+the script can read it as `$1` (or as the full arg
+list with `$@`). This is the "every project gets
+its own setup" hook — for example, a
+`project/.command` script that exports project-
+specific environment variables, activates a virtual
+environment, etc.
+
+The lookup walks the **ancestor chain** of the
+selected directory: the closest `.command` wins.
+This is the same convention as `.envrc` /
+`.env.local` / similar tools. So a single
+`project/.command` fires for every selection
+under `project/`, and a more specific
+`project/special/.command` overrides it for
+selections under `project/special/`.
+
+The form on Enter:
+
+- **Unmarked row** (no active tmux pane): the TUI
+  stages
+  `tmux new-session -d -s <basename> -c <dir>; \
+   sh <.command> <dir>; \
+   tmux switch-client -t <basename>`.
+  The `.command` runs *inside* the new session
+  before the user lands there, so the project is
+  already set up when the switch-client fires.
+- **T-marked row** (existing tmux pane matches):
+  the TUI stages the existing
+  `tmux select-pane && tmux switch-client` chain
+  plus
+  `; tmux send-keys -t <pane> "sh <.command> <dir>" Enter`
+  so the setup script runs in the existing pane.
+
+The `.command` is invoked via `sh` so the file
+doesn't need to be executable. A non-zero exit
+from the script surfaces via the parent shell's
+standard error path.
+
 # Prefix keys
 
 The first character of a TUI query selects the search
@@ -575,6 +652,35 @@ The TUI then treats this prefix as a "second home" alongside
 rewrites stored absolute paths to `~/x` form. The
 subcommand is idempotent — running it twice on the same
 database is a no-op.
+
+## Pinned directories (`sessiondirs`)
+
+Add one or more `sessiondirs=<path>` lines to the
+config to pin a directory whose sub-tree is *always*
+shown in the `#`-mode list, even if no command has
+ever been run there. Each entry is recursively
+walked at TUI startup; every subdirectory becomes a
+row in the directories list. This is the
+"show me my projects even when I haven't touched
+them yet" hook.
+
+```
+# ~/.config/smarthistory/config
+sessiondirs=~/work
+sessiondirs=~/Sources/playground
+```
+
+Each `sessiondirs` entry is independent: two
+different roots can both contribute rows, and a
+subdirectory that lives under two roots appears
+once (dedup is on canonical paths, so a symlink
+and the real path it points to also collapse to
+one entry). A non-existent path is silently
+skipped (the walker returns an empty list for a
+missing root, so the TUI never errors on
+startup). Combine with `.command` files (see the
+Search modes / Directories section) to set up
+project-specific environment on session start.
 
 ## LLM configuration
 

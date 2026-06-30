@@ -879,6 +879,37 @@ pub struct Config {
     /// `~/...` so the user sees
     /// a consistent short form.
     home_map: Vec<std::path::PathBuf>,
+    /// User-configured
+    /// "session dirs". Each
+    /// entry is a directory
+    /// whose sub-tree is
+    /// walked recursively at
+    /// TUI-startup time and
+    /// every directory found
+    /// is added to the
+    /// directories list (the
+    /// `#` mode) — even
+    /// when the user has
+    /// never run a command
+    /// in that directory.
+    /// This is the user's
+    /// "always show me these
+    /// projects" list.
+    ///
+    /// Configurable via one
+    /// or more `sessiondirs=...`
+    /// lines in the config
+    /// file. Multiple entries
+    /// are allowed (one per
+    /// line, like `prefix.<x>=...`).
+    /// A non-existent path is
+    /// silently skipped (the
+    /// user may have moved the
+    /// directory; the next
+    /// startup with the path
+    /// back in place picks it
+    /// up).
+    session_dirs: Vec<std::path::PathBuf>,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -983,6 +1014,15 @@ impl Config {
             // file append to this
             // list.
             home_map: Vec::new(),
+            // `sessiondirs=...`
+            // entries from the
+            // config file. Each is
+            // recursively walked at
+            // TUI startup; every
+            // subdirectory found is
+            // added to the
+            // directories list.
+            session_dirs: Vec::new(),
         }
     }
 
@@ -1143,6 +1183,70 @@ impl Config {
                     if !trimmed.is_empty() {
                         self.home_map.push(
                             std::path::PathBuf::from(trimmed),
+                        );
+                    }
+                }
+                "sessiondirs" => {
+                    // Recursively-walked
+                    // directories whose
+                    // sub-directories are
+                    // always shown in the
+                    // `#`-mode list, even
+                    // when the user has
+                    // never run a command
+                    // there. Multiple
+                    // entries are allowed
+                    // (one per line). A
+                    // non-existent path
+                    // is silently skipped
+                    // here — the recursive
+                    // walk in the TUI
+                    // will simply produce
+                    // an empty list for
+                    // it. We still record
+                    // the path so a
+                    // config-validation
+                    // tool can warn the
+                    // user (a future
+                    // `smarthistory check`
+                    // could surface this).
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        // Apply the same
+                        // `~` expansion we
+                        // use for
+                        // `notes.database` /
+                        // `notes.dir` /
+                        // `homemap`:
+                        // users naturally
+                        // write
+                        // `sessiondirs=~/work`
+                        // in their config,
+                        // and the literal
+                        // string `~` doesn't
+                        // exist as a real
+                        // path. Without
+                        // expansion, the
+                        // walker would
+                        // silently skip the
+                        // entry (the path
+                        // doesn't exist)
+                        // and the user's
+                        // pinned directories
+                        // would never appear
+                        // in the list. (This
+                        // is the bug the
+                        // user hit: their
+                        // config had
+                        // `sessiondirs=~/.config/tmux-sessions`,
+                        // the literal `~`
+                        // path doesn't
+                        // exist, and the
+                        // walker returned an
+                        // empty list for
+                        // it.)
+                        self.session_dirs.push(
+                            expand_tilde(trimmed),
                         );
                     }
                 }
@@ -1338,6 +1442,22 @@ impl Config {
     /// TUI-launch).
     pub fn home_map(&self) -> &[std::path::PathBuf] {
         &self.home_map
+    }
+
+    /// User-configured
+    /// session directories
+    /// (`sessiondirs=...`).
+    /// Each entry is
+    /// recursively walked at
+    /// TUI startup and every
+    /// subdirectory found is
+    /// added to the `#`-mode
+    /// list. See the
+    /// `session_dirs` field
+    /// doc for the full
+    /// rationale.
+    pub fn session_dirs(&self) -> &[std::path::PathBuf] {
+        &self.session_dirs
     }
 
     /// Path to the note_search database, if configured.
@@ -3336,5 +3456,103 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(parse_capture_lines("20"), Some(20));
         assert_eq!(parse_capture_lines("  15  "), Some(15));
         assert_eq!(parse_capture_lines("not a number"), None);
+    }
+
+    /// Regression test for
+    /// the "I have
+    /// `sessiondirs=~/foo`
+    /// in my config but no
+    /// directories are
+    /// added" bug: a
+    /// literal `~` in a
+    /// config value is a
+    /// user-friendly
+    /// shorthand for
+    /// `$HOME`, but the
+    /// config loader must
+    /// actually expand it
+    /// before passing the
+    /// path to the
+    /// filesystem walker.
+    /// Without this
+    /// expansion, the
+    /// walker would see a
+    /// path that doesn't
+    /// exist
+    /// (`std::path::Path::exists("~/x")`
+    /// is always `false`)
+    /// and silently skip
+    /// the entry — the
+    /// user's pinned
+    /// directories would
+    /// never appear in
+    /// the `#`-mode list.
+    /// The same expansion
+    /// is already applied
+    /// to `notes.database`
+    /// and `notes.dir`; we
+    /// add it here for
+    /// `sessiondirs` so
+    /// the user's mental
+    /// model ("`~` works
+    /// everywhere in the
+    /// config") holds.
+    #[test]
+    fn sessiondirs_expands_tilde() {
+        let home = std::env::var("HOME")
+            .expect("HOME must be set for this test");
+        // Exercise the
+        // production parse
+        // path: feed the
+        // config parser a
+        // string with
+        // `sessiondirs=~/work`
+        // and verify the
+        // result is the
+        // expanded path, not
+        // the literal `~/work`
+        // (which was the
+        // bug).
+        let mut cfg = Config::default();
+        cfg.parse("sessiondirs=~/work\n");
+        assert_eq!(
+            cfg.session_dirs().len(),
+            1,
+            "sessiondirs=~/work must produce exactly one entry"
+        );
+        let got = &cfg.session_dirs()[0];
+        // The stored path
+        // must be the
+        // `$HOME`-relative
+        // expansion, not the
+        // literal `~/work`
+        // (which is the bug
+        // we're fixing).
+        assert_ne!(
+            got.to_string_lossy(),
+            "~/work",
+            "sessiondirs=~/work must not store the literal `~` (the bug we're fixing)"
+        );
+        assert_eq!(
+            got.to_string_lossy(),
+            format!("{}/work", home),
+            "sessiondirs=~/work must expand to `$HOME/work`"
+        );
+        // And the resulting
+        // path must be a
+        // real (or at least
+        // plausibly real)
+        // path — i.e. it
+        // would pass
+        // `path.exists()` in
+        // `walk_subdirectories`.
+        // We don't *create*
+        // the directory
+        // here — we just
+        // confirm the
+        // expansion produced
+        // something that
+        // *could* exist on
+        // disk.
     }
 }

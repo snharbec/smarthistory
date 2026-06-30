@@ -936,6 +936,25 @@ struct App {
     /// captured a fresh
     /// row).
     home_list: Vec<String>,
+    /// Recursively-walked
+    /// subdirectories of
+    /// every
+    /// `sessiondirs=...`
+    /// config entry. Computed
+    /// once at App
+    /// construction (like
+    /// `home_list`); the
+    /// list is empty if no
+    /// `sessiondirs=...` is
+    /// configured. Used by
+    /// `fetch_directories`
+    /// to add the user's
+    /// pinned projects to
+    /// the `#`-mode list
+    /// even when the user
+    /// has never run a
+    /// command in them.
+    session_subdirs: Vec<std::path::PathBuf>,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
     /// The date-filter alias active for the current
@@ -1750,7 +1769,8 @@ impl App {
         let mut seen: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut rows: Vec<HistoryRow> = Vec::new();
-        for (i, raw) in raw_rows.enumerate() {
+        let mut next_id: i64 = -1;
+        for raw in raw_rows {
             let (directory, command, ts) = raw?;
             let canonical = crate::util::canonicalize_directory(&directory);
             if !seen.insert(canonical.clone()) {
@@ -1823,14 +1843,119 @@ impl App {
             // history ids (same
             // convention as todo
             // rows).
+            let id = next_id;
+            next_id -= 1;
             rows.push(HistoryRow {
-                id: -(i as i64) - 1,
+                id,
                 command: short_dir,
                 directory,
                 session_id: String::new(),
                 exit_code: 0,
                 timestamp: ts,
                 comment: short_cmd,
+                output: String::new(),
+                mode: "directory".to_string(),
+            });
+        }
+        // Augment with the user's
+        // `sessiondirs=...` entries.
+        // Every subdirectory of
+        // every configured root
+        // becomes a row, even if
+        // the user has never run
+        // a command there.
+        //
+        // Rows added by this loop
+        // get `timestamp = 0` so
+        // they sort to the bottom
+        // of the list (the
+        // history-driven rows
+        // have real recent
+        // timestamps and surface
+        // first). The user can
+        // still type `#<name>` to
+        // filter to one of these
+        // pinned rows.
+        //
+        // Dedup is via the same
+        // `seen` set the SQL loop
+        // used: a subdirectory
+        // that *also* has history
+        // (and thus already
+        // surfaced via SQL)
+        // won't appear twice. The
+        // history row wins
+        // (newer timestamp) and
+        // carries the last
+        // command; the
+        // sessiondirs row is
+        // suppressed.
+        //
+        // The secondary
+        // (`comment`) slot is
+        // empty for these rows,
+        // unless the directory
+        // (or an ancestor) has a
+        // `.command` file — in
+        // which case we surface
+        // "has .command" so the
+        // user knows the row
+        // will run a setup
+        // script on select.
+        for sub in &self.session_subdirs {
+            let canonical = crate::util::canonicalize_directory(
+                &sub.to_string_lossy(),
+            );
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            let directory_str =
+                sub.to_string_lossy().into_owned();
+            // Surface a hint when
+            // the row has a
+            // `.command` file
+            // (either in the
+            // directory itself or
+            // in an ancestor). The
+            // user can see at a
+            // glance "this row
+            // will run a setup
+            // script".
+            let has_command = crate::util::find_command_file(
+                std::path::Path::new(&directory_str),
+            )
+            .is_some();
+            let short_dir = crate::util::shorten_home_path(
+                &directory_str,
+                &home_list,
+            )
+            .into_owned();
+            let hint = if has_command {
+                String::from("(has .command)")
+            } else {
+                String::new()
+            };
+            let id = next_id;
+            next_id -= 1;
+            rows.push(HistoryRow {
+                id,
+                command: short_dir,
+                directory: directory_str,
+                session_id: String::new(),
+                exit_code: 0,
+                // `0` = unix epoch.
+                // The list is sorted
+                // by timestamp DESC
+                // (most-recent first)
+                // elsewhere, so
+                // epoch-zero rows
+                // land at the bottom
+                // of the list. The
+                // user types a
+                // pattern to filter
+                // to one of these.
+                timestamp: 0,
+                comment: hint,
                 output: String::new(),
                 mode: "directory".to_string(),
             });
@@ -3089,6 +3214,15 @@ notes_date_filter: NotesDateFilter::All,
             // field doc for the
             // full rationale.
             home_list: build_home_list(),
+            // Recursive walk of
+            // every
+            // `sessiondirs=...`
+            // entry, computed once
+            // at construction.
+            // See the
+            // `session_subdirs`
+            // field doc.
+            session_subdirs: build_session_subdirs(),
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -3954,13 +4088,37 @@ fn move_selection(&mut self, delta: isize) {
         // (the path is the only
         // argument to `cd`).
         if self.is_directories_query() {
-            if let Some(row) = self.selected_row() {
-                // Two action paths for
-                // directory rows, branched
-                // on whether the row has
-                // an active tmux window
-                // attached (the `T` mark
-                // the user sees in the
+            // Clone the row's
+            // `directory` (and
+            // the resolved tmux
+            // pane id) up front
+            // so the rest of the
+            // block can mutate
+            // `self.selection`
+            // without fighting
+            // the borrow
+            // checker. We can't
+            // hold the
+            // `selected_row()`
+            // borrow across
+            // `self.selection =`
+            // assignments.
+            let (directory, pane_id): (String, Option<String>) =
+                match self.selected_row() {
+                    Some(r) => (
+                        r.directory.clone(),
+                        self.directory_tmux_pane_id(
+                            &r.directory,
+                        ),
+                    ),
+                    None => return,
+                };
+            // Two action paths for
+            // directory rows, branched
+            // on whether the row has
+            // an active tmux window
+            // attached (the `T` mark
+            // the user sees in the
                 // capture column):
                 //
                 // 1. `T`-marked row: a
@@ -4024,11 +4182,7 @@ fn move_selection(&mut self, delta: isize) {
                 // enough that an
                 // explicit user action
                 // is preferable.
-                if let Some(pane_id) =
-                    self.directory_tmux_pane_id(
-                        &row.directory,
-                    )
-                {
+                if let Some(pane_id) = pane_id.clone() {
                     // `T`-marked path:
                     // switch to the existing
                     // pane. `&&` chains
@@ -4089,7 +4243,7 @@ fn move_selection(&mut self, delta: isize) {
                     // `~/work` — silent
                     // correctness bug.
                     let path = crate::util::expand_home(
-                        &row.directory,
+                        &directory,
                     )
                     .into_owned();
                     let name = std::path::Path::new(&path)
@@ -4124,8 +4278,190 @@ fn move_selection(&mut self, delta: isize) {
                         name, quoted_path, name
                     ));
                 }
+                // `.command` chain. If
+                // the directory (or an
+                // ancestor) has a
+                // `.command` file, run
+                // it with the
+                // directory as the
+                // first argument. The
+                // lookup walks up the
+                // parent tree, so a
+                // `project/.command`
+                // fires for any
+                // selection under
+                // `project/`. The
+                // `.command` is run
+                // *inside* the new
+                // session (so it
+                // affects the new
+                // session's
+                // environment) via
+                // `tmux send-keys`.
+                // For the `T`-marked
+                // branch (jumping to
+                // an existing pane)
+                // we still run the
+                // command, since the
+                // user explicitly
+                // picked the row and
+                // we shouldn't second-
+                // guess their intent.
+                //
+                // Form:
+                //   tmux send-keys -t <pane> "sh <command-file> <dir>" Enter
+                //
+                // The `sh` wrapper
+                // means the file
+                // doesn't need to be
+                // executable. The
+                // first argument is
+                // always the selected
+                // directory; the
+                // .command script can
+                // use `$1` (or `$@`
+                // for the full arg
+                // list) to read it.
+                //
+                // The chain uses `;`
+                // (not `&&`) for the
+                // `T`-marked branch:
+                // the user wants the
+                // jump to happen
+                // even if the
+                // .command script
+                // fails. A `.command`
+                // author who needs
+                // the jump to fail
+                // on script failure
+                // can `exit 1` from
+                // the script and the
+                // user will see the
+                // non-zero exit in
+                // the parent shell.
+                //
+                // For the unmarked
+                // branch (new
+                // session) we *wait*
+                // for the .command
+                // to finish before
+                // switch-client, so
+                // the user lands in
+                // a session that
+                // already has the
+                // project set up.
+                // This is `&&`
+                // between the
+                // command and the
+                // switch-client.
+                if let Some(cmd_path) =
+                    crate::util::find_command_file(
+                        std::path::Path::new(&directory),
+                    )
+                {
+                    let path_for_arg =
+                        crate::util::expand_home(&directory)
+                            .into_owned();
+                    let quoted_arg = if path_for_arg
+                        .chars()
+                        .any(|c| c.is_whitespace()
+                            || "<>|&;\"'$`\\".contains(c))
+                    {
+                        format!("\"{}\"", path_for_arg)
+                    } else {
+                        path_for_arg
+                    };
+                    let quoted_cmd = if cmd_path
+                        .to_string_lossy()
+                        .chars()
+                        .any(|c| c.is_whitespace()
+                            || "<>|&;\"'$`\\".contains(c))
+                    {
+                        format!("\"{}\"", cmd_path.display())
+                    } else {
+                        cmd_path.display().to_string()
+                    };
+                    // The script body:
+                    // `sh <file> <dir>`.
+                    // The first argument
+                    // is always the
+                    // selected directory
+                    // (the user said so).
+                    let command_run = format!(
+                        "sh {} {}",
+                        quoted_cmd, quoted_arg
+                    );
+                    if let Some(pane_id_inner) =
+                        pane_id.as_ref()
+                    {
+                        // T-marked:
+                        // chain with `;`
+                        // (jump happens
+                        // even on script
+                        // failure).
+                        let existing = self
+                            .selection
+                            .take()
+                            .unwrap_or_default();
+                        self.selection = Some(format!(
+                            "{} ; \
+                             tmux send-keys -t {} \
+                             {} Enter",
+                            existing,
+                            pane_id_inner,
+                            crate::util::shell_quote(
+                                &command_run,
+                            ),
+                        ));
+                    } else {
+                        // Unmarked: chain
+                        // the .command
+                        // BEFORE
+                        // switch-client
+                        // with `&&` so the
+                        // user lands in a
+                        // fully-set-up
+                        // session. We do
+                        // this by
+                        // replacing the
+                        // bare
+                        // `new-session` line
+                        // with one that
+                        // also runs the
+                        // .command. The
+                        // shape:
+                        //   tmux new-session -d -s NAME -c DIR ; sh FILE DIR ; tmux switch-client -t NAME
+                        let path = crate::util::expand_home(
+                            &directory,
+                        )
+                        .into_owned();
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("smarthistory")
+                            .to_string();
+                        let quoted_path = if path
+                            .chars()
+                            .any(|c| c.is_whitespace()
+                                || "<>|&;\"'$`\\".contains(c))
+                        {
+                            format!("\"{}\"", path)
+                        } else {
+                            path
+                        };
+                        self.selection = Some(format!(
+                            "tmux new-session -d -s {} -c {}; \
+                             sh {} {}; \
+                             tmux switch-client -t {}",
+                            name,
+                            quoted_path,
+                            quoted_cmd,
+                            quoted_arg,
+                            name
+                        ));
+                    }
+                }
                 self.pick_mode = Some(PickMode::Run);
-            }
             return;
         }
         if let Some(row) = self.selected_row() {
@@ -6868,6 +7204,80 @@ fn build_home_list() -> Vec<String> {
     .collect();
     homes.sort_by_key(|s| std::cmp::Reverse(s.len()));
     homes
+}
+
+/// Walk every
+/// `sessiondirs=...` config
+/// entry recursively and
+/// return the union of all
+/// subdirectories found.
+/// Used to populate
+/// `App::session_subdirs`
+/// at construction time.
+///
+/// Multiple `sessiondirs=`
+/// entries are allowed;
+/// each is walked
+/// independently. A
+/// non-existent or
+/// unreadable root is
+/// silently skipped (a
+/// walker that errors would
+/// fail the whole TUI
+/// startup on a missing
+/// mount). The result is
+/// deduplicated: a
+/// subdirectory that lives
+/// under two sessiondirs
+/// roots (e.g.
+/// `sessiondirs=/Users/har`
+/// and
+/// `sessiondirs=/Users/har/work`)
+/// appears once in the
+/// output. Dedup is on
+/// canonical paths so
+/// symlinks that point to
+/// the same physical dir
+/// also collapse to one
+/// entry.
+///
+/// Same
+/// per-TUI-session-static
+/// contract as
+/// `build_home_list`: the
+/// list is read once at
+/// App construction; the
+/// user has to restart the
+/// TUI for config changes
+/// to take effect.
+fn build_session_subdirs() -> Vec<std::path::PathBuf> {
+    let cfg = Config::load();
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for root in cfg.session_dirs() {
+        for sub in crate::util::walk_subdirectories(root) {
+            // Dedup on
+            // canonical
+            // path so a
+            // symlink
+            // and the
+            // real path
+            // it points
+            // to don't
+            // produce
+            // two rows.
+            let key = std::fs::canonicalize(&sub)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| {
+                    sub.to_string_lossy().into_owned()
+                });
+            if seen.insert(key) {
+                out.push(sub);
+            }
+        }
+    }
+    out
 }
 
 fn parse_tmux_pane_line(line: &str) -> Option<TmuxWindowInfo> {
@@ -13807,7 +14217,34 @@ mod tests {
                 )
                 .expect("insert");
             }
-            App::new(
+            // Build the App and
+            // immediately clear
+            // the `session_subdirs`
+            // field. `App::new`
+            // calls
+            // `build_session_subdirs`
+            // which reads the
+            // user's real
+            // `~/.config/smarthistory/config`.
+            // Tests that don't
+            // care about
+            // sessiondirs would
+            // otherwise be
+            // polluted by
+            // whatever the user
+            // happens to have
+            // configured (a real
+            // "I added
+            // `sessiondirs=...`
+            // to my config and
+            // now my tests fail"
+            // bug). Tests that
+            // DO need pinned
+            // directories should
+            // call
+            // `directories_test_app_with_sessions`
+            // below.
+            let mut app = App::new(
                 conn,
                 Mode::Global,
                 String::new(),
@@ -13823,7 +14260,57 @@ mod tests {
                 None,
                 None,
                 String::from("+$LINE"),
-            )
+            );
+            app.session_subdirs.clear();
+            app
+        }
+
+        /// A variant of
+        /// `directories_test_app`
+        /// that ALSO
+        /// pre-populates the
+        /// `session_subdirs`
+        /// field with the given
+        /// list. Use this when
+        /// a test needs the
+        /// pinned-directories
+        /// behaviour; use the
+        /// plain
+        /// `directories_test_app`
+        /// (which clears
+        /// `session_subdirs` by
+        /// `session_subdirs`
+        /// field with the given
+        /// list. Use this when
+        /// a test needs the
+        /// pinned-directories
+        /// behaviour; use the
+        /// plain
+        /// `directories_test_app`
+        /// (which clears
+        /// `session_subdirs` by
+        /// default) when the
+        /// test should NOT see
+        /// any sessiondirs.
+        ///
+        /// (The default-empty
+        /// behaviour is what
+        /// keeps tests
+        /// isolated from the
+        // developer's real
+        // `~/.config/smarthistory/config`
+        // — see
+        // `build_session_subdirs`
+        // for the
+        // cross-contamination
+        // story.)
+        fn directories_test_app_with_sessions(
+            rows: &[(&str, &str, i64)],
+            sessions: Vec<std::path::PathBuf>,
+        ) -> App {
+            let mut app = directories_test_app(rows);
+            app.session_subdirs = sessions;
+            app
         }
 
         /// `fetch_directories`
@@ -15074,5 +15561,287 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// The user can pin a
+        /// `sessiondirs=...`
+        /// directory in the
+        /// config and every
+        /// subdirectory (recursively
+        /// walked) appears as a
+        /// row in the directories
+        /// list, even if no
+        /// command has ever been
+        /// run there. We test this
+        /// by injecting a
+        /// `session_subdirs` entry
+        /// directly into the
+        /// `App` (the test
+        /// doesn't have a config
+        /// file to load) and
+        /// checking the row
+        /// surfaces.
+        #[test]
+        fn fetch_directories_includes_sessiondir_subdirs() {
+            // Build a temp
+            // directory tree to
+            // walk.
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let root = std::env::temp_dir().join(format!(
+                "smarthistory_sessiondir_{pid}_{n}"
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::create_dir_all(
+                root.join("a").join("b"),
+            );
+            let _ = std::fs::create_dir_all(
+                root.join("c"),
+            );
+            // sessiondir
+            // subdirectory set
+            // (the production
+            // path uses
+            // `build_session_subdirs`
+            // at App
+            // construction;
+            // for the test we
+            // pass it
+            // explicitly via
+            // the
+            // `directories_test_app_with_sessions`
+            // helper).
+            let mut app = directories_test_app_with_sessions(
+                &[],
+                vec![
+                    root.join("a"),
+                    root.join("a").join("b"),
+                    root.join("c"),
+                ],
+            );
+            app.query = "#".to_string();
+            app.refresh();
+            let rows = app.merged_rows();
+            // The pinned
+            // subdirs should
+            // appear even
+            // though we
+            // passed `&[]` to
+            // `directories_test_app`
+            // (no history).
+            let row_dirs: std::collections::HashSet<String> =
+                rows.iter()
+                    .map(|r| {
+                        std::fs::canonicalize(&r.directory)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| r.directory.clone())
+                    })
+                    .collect();
+            let expected: std::collections::HashSet<String> = app
+                .session_subdirs
+                .iter()
+                .map(|p| {
+                    std::fs::canonicalize(p)
+                        .map(|c| c.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| {
+                            p.to_string_lossy().into_owned()
+                        })
+                })
+                .collect();
+            for want in &expected {
+                assert!(
+                    row_dirs.contains(want),
+                    "pinned subdir {want:?} should be in merged_rows, got: {row_dirs:?}"
+                );
+            }
+            // The pinned
+            // rows have
+            // `timestamp = 0`
+            // (so they sort
+            // to the bottom
+            // of the
+            // newest-first
+            // list) and an
+            // empty `command`
+            // — except for
+            // `.command`
+            // hints.
+            for row in rows {
+                let canonical = std::fs::canonicalize(
+                    &row.directory,
+                )
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| row.directory.clone());
+                if expected.contains(&canonical) {
+                    assert_eq!(
+                        row.timestamp, 0,
+                        "sessiondir row must have timestamp 0, got: {}",
+                        row.timestamp
+                    );
+                    assert_eq!(
+                        row.mode, "directory",
+                        "sessiondir row must have mode='directory'"
+                    );
+                }
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// When a sessiondir row
+        /// has a `.command` file
+        /// in itself or an
+        /// ancestor, the TUI
+        /// surfaces "(has
+        /// .command)" in the
+        /// secondary slot so
+        /// the user knows the
+        /// row will run a setup
+        /// script on select.
+        #[test]
+        fn fetch_directories_surfaces_command_file_hint() {
+            // Build:
+            //   tmpdir/
+            //   tmpdir/project/         (has .command)
+            //   tmpdir/project/src/     (no .command)
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let root = std::env::temp_dir().join(format!(
+                "smarthistory_sessiondir_cmd_{pid}_{n}"
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let project = root.join("project");
+            let src = project.join("src");
+            let _ = std::fs::create_dir_all(&src);
+            let _ = std::fs::write(
+                project.join(".command"),
+                "#!/bin/sh\necho setup\n",
+            );
+            // `project/src`
+            // subdir is
+            // pinned (the
+            // walker would
+            // also pick up
+            // `project` if
+            // the user pinned
+            // `root`; we pin
+            // a leaf to test
+            // the ancestor
+            // walk).
+            let mut app = directories_test_app_with_sessions(
+                &[],
+                vec![src.clone()],
+            );
+            app.query = "#".to_string();
+            app.refresh();
+            let row = app
+                .merged_rows()
+                .iter()
+                .find(|r| {
+                    std::fs::canonicalize(&r.directory)
+                        .map(|c| {
+                            c == std::fs::canonicalize(&src).unwrap()
+                        })
+                        .unwrap_or(false)
+                })
+                .expect("src row must be in the list");
+            assert_eq!(
+                row.comment, "(has .command)",
+                "row's secondary slot should announce the .command, got: {:?}",
+                row.comment
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// When a sessiondir row
+        /// has a `.command` file
+        /// in itself or an
+        /// ancestor, selecting
+        /// the row chains
+        /// `sh <command-file> <dir>`
+        /// into the staged tmux
+        /// command. The first
+        /// argument is always
+        /// the selected
+        /// directory.
+        #[test]
+        fn select_directory_runs_command_file() {
+            // Build:
+            //   tmpdir/
+            //   tmpdir/project/         (has .command)
+            //   tmpdir/project/src/     (no .command)
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let root = std::env::temp_dir().join(format!(
+                "smarthistory_select_cmd_{pid}_{n}"
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let project = root.join("project");
+            let src = project.join("src");
+            let _ = std::fs::create_dir_all(&src);
+            let cmd_path = project.join(".command");
+            let _ = std::fs::write(
+                &cmd_path,
+                "#!/bin/sh\necho setup $1\n",
+            );
+            let mut app = directories_test_app(&[(
+                "ls",
+                &src.to_string_lossy(),
+                60,
+            )]);
+            app.query = "#".to_string();
+            app.refresh();
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set");
+            // The staged
+            // command must
+            // include both the
+            // new-session
+            // chain and the
+            // .command run.
+            // Form:
+            //   tmux new-session -d -s src -c <src>; \
+            //     sh <.command> <src>; \
+            //     tmux switch-client -t src
+            let cmd_str = cmd_path.to_string_lossy();
+            let src_str = src.to_string_lossy();
+            assert!(
+                staged.contains("tmux new-session"),
+                "staged must create a new tmux session, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("switch-client"),
+                "staged must switch-client to the new session, got: {staged:?}"
+            );
+            // The .command
+            // invocation
+            // should appear
+            // with the path
+            // and the
+            // selected
+            // directory as
+            // the first arg.
+            assert!(
+                staged.contains(&format!(
+                    "sh {} {}",
+                    cmd_str, src_str
+                )),
+                "staged must run `sh <.command> <dir>`, got: {staged:?}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
         }
 }
