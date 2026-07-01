@@ -201,6 +201,14 @@ pub enum Action {
     ThemePicker,
     /// Toggle between plain, regex, and fuzzy search modes.
     ToggleSearchMode,
+    /// Cycle the directory-source
+    /// filter for the
+    /// `#`-mode list: ALL →
+    /// TMUX → CFG → ALL. The
+    /// current source is
+    /// shown in the mode
+    /// strip as a chip.
+    CycleDirectorySource,
 }
 
 impl Action {
@@ -224,6 +232,7 @@ impl Action {
             Action::ClearQuery => "clear-query",
             Action::CycleExitFilter => "cycle-exit-filter",
             Action::CycleSortOrder => "cycle-sort-order",
+            Action::CycleDirectorySource => "cycle-directory-source",
             Action::Describe => "describe",
             Action::Correct => "correct",
             Action::Run => "run",
@@ -262,6 +271,7 @@ impl Action {
             Action::ClearQuery => "Clear query",
             Action::CycleExitFilter => "Cycle exit filter",
             Action::CycleSortOrder => "Cycle sort order",
+            Action::CycleDirectorySource => "Cycle directory source",
             Action::Describe => "Describe selected command",
             Action::Correct => "Correct selected command",
             Action::Run => "Run",
@@ -303,6 +313,7 @@ impl Action {
             | Action::ToggleDuplicateFilter
             | Action::CycleExitFilter
             | Action::CycleSortOrder
+            | Action::CycleDirectorySource
             | Action::ClearQuery
             | Action::ToggleSearchMode => "search",
             Action::MarkTodoDone => "todo",
@@ -344,6 +355,7 @@ impl Action {
             Action::ClearQuery => "C-u",
             Action::CycleExitFilter => "C-j",
             Action::CycleSortOrder => "F4",
+            Action::CycleDirectorySource => "C-M-g",
             Action::Describe => "C-k",
             Action::Correct => "C-t",
             Action::Run => "Enter",
@@ -615,6 +627,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::ClearQuery,
     Action::CycleExitFilter,
     Action::CycleSortOrder,
+    Action::CycleDirectorySource,
     Action::Describe,
     Action::Correct,
     Action::Run,

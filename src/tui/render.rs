@@ -1524,6 +1524,28 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Directory-source chip:
+    // shown only in
+    // directories mode and
+    // only when the
+    // source is not the
+    // default (`All`). The
+    // user's current
+    // `ALL` / `TMUX` /
+    // `CFG` choice is the
+    // load-bearing
+    // information here, so
+    // it's worth a chip
+    // when the user has
+    // chosen a non-default
+    // source.
+    let dirsrc_chip = if app.is_directories_query()
+        && app.directory_source != crate::tui::state::DirectorySource::All
+    {
+        Some(directory_source_badge(app.directory_source))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -1549,6 +1571,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = notes_date_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = dirsrc_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -1691,6 +1717,17 @@ fn sort_order_badge(order: SortOrder) -> Span<'static> {
         Style::default()
             .fg(Theme::badge_fg_color())
             .bg(Theme::warning_color())
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn directory_source_badge(source: crate::tui::state::DirectorySource) -> Span<'static> {
+    let label = source.label();
+    Span::styled(
+        format!(" DIR:{} ", label),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(Theme::highlight_color())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -2450,6 +2487,16 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 // rather than running a
                 // command.
                 ("#", " directories ", app.query.as_str())
+            } else if app.is_panes_query() {
+                // Panes mode: list the panes of
+                // the current tmux session
+                // (excluding this one). Each row
+                // shows the pane's current command
+                // and cwd; selecting it stages a
+                // `tmux switch-client` jump. The
+                // success (green) tint signals
+                // "live" panes.
+                ("*", " panes ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -2488,6 +2535,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::warning_color())
             } else if is_directories {
                 Style::default().fg(Theme::accent_color())
+            } else if app.is_panes_query() {
+                Style::default().fg(Theme::success_color())
             } else {
                 Theme::accent()
             })
@@ -2518,6 +2567,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::warning_color())
             } else if is_directories {
                 Style::default().fg(Theme::accent_color())
+            } else if app.is_panes_query() {
+                Style::default().fg(Theme::success_color())
             } else {
                 Theme::dim()
             })

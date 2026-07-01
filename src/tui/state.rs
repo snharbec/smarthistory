@@ -42,7 +42,7 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct HistoryRow {
     pub id: i64,
     pub command: String,
@@ -54,6 +54,22 @@ pub struct HistoryRow {
     pub output: String,
     /// The mode/type of this history entry: "command", "llm", or "question".
     pub mode: String,
+    /// Sub-source tag for
+    /// directory rows
+    /// (`mode ==
+    /// "directory"`):
+    /// one of `"history"`,
+    /// `"sessiondir"`,
+    /// `"tmux"`. Empty
+    /// for non-directory
+    /// rows. The TUI
+    /// uses this to filter
+    /// the `#`-mode list
+    /// by the
+    /// `directory_source`
+    /// filter (ALL / TMUX
+    /// / CFG).
+    pub source: String,
 }
 
 impl HistoryRow {
@@ -151,6 +167,87 @@ pub enum PickMode {
     EditStart,
     /// `Right` — prefill the line for editing, cursor at the end.
     EditEnd,
+}
+
+/// Filter applied to the
+/// directories list (`#`-mode
+/// rows). The TUI cycles
+/// through these with
+/// `Action::CycleDirectorySource`
+/// (default `C-M-g`).
+///
+/// - `All`: every row,
+///   regardless of where
+///   it came from
+///   (history-driven,
+///   tmux pane cwd, or
+///   `sessiondirs=...`
+///   config).
+/// - `Tmux`: only the
+///   directories that
+///   are the cwd of at
+///   least one active
+///   tmux pane. Lets
+///   the user jump to a
+///   session they're
+///   already running
+///   somewhere else
+///   without scrolling
+///   past their pinned
+///   project list.
+/// - `Config`: only the
+///   directories from
+///   `sessiondirs=...`
+///   in the config file
+///   (recursively
+///   walked). Lets the
+///   user see just the
+///   pinned projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectorySource {
+    All,
+    Tmux,
+    Config,
+}
+
+impl DirectorySource {
+    pub fn next(self) -> Self {
+        match self {
+            DirectorySource::All => DirectorySource::Tmux,
+            DirectorySource::Tmux => DirectorySource::Config,
+            DirectorySource::Config => DirectorySource::All,
+        }
+    }
+    /// Short display label
+    /// for the mode-strip
+    /// chip.
+    pub fn label(self) -> &'static str {
+        match self {
+            DirectorySource::All => "ALL",
+            DirectorySource::Tmux => "TMUX",
+            DirectorySource::Config => "CFG",
+        }
+    }
+    /// Parse the canonical
+    /// `all` / `tmux` /
+    /// `config` value as
+    /// used in the
+    /// persisted session
+    /// file. Returns
+    /// `None` for anything
+    /// else; the caller
+    /// falls back to
+    /// `All` on parse
+    /// failure (the
+    /// default).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Some(DirectorySource::All),
+            "tmux" => Some(DirectorySource::Tmux),
+            "config" | "cfg" | "sessiondirs" => Some(DirectorySource::Config),
+            _ => None,
+        }
+    }
 }
 
 /// Exit codes returned by the TUI binary, also used by the line-editor
@@ -332,6 +429,7 @@ mod tests {
             comment: String::new(),
             output: String::new(),
             mode: "command".to_string(),
+            source: String::new(),
         };
         assert!(!row.is_llm_preview());
     }
@@ -353,6 +451,7 @@ mod tests {
             comment: String::new(),
             output: String::new(),
             mode: "command".to_string(),
+            source: String::new(),
         };
         assert!(!row.is_llm_preview());
     }
@@ -383,6 +482,7 @@ mod tests {
             comment: "note.md".to_string(),
             output: String::new(),
             mode: "todo".to_string(),
+            source: String::new(),
         };
         assert!(
             !row.is_llm_preview(),
@@ -416,6 +516,7 @@ mod tests {
             comment: "find rust files newer than foo".to_string(),
             output: String::new(),
             mode: String::new(),
+            source: String::new(),
         };
         assert!(row.is_llm_preview());
     }
@@ -443,6 +544,7 @@ mod tests {
             comment: String::new(),
             output: "Paris".to_string(),
             mode: "question".to_string(),
+            source: String::new(),
         };
         assert!(!row.is_llm_preview());
     }

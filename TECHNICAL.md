@@ -408,6 +408,7 @@ When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
 | `Ctrl+D`  | TUI     | Delete the selected entry (with confirmation).                 |
 | `Ctrl+X`  | TUI     | **Todo mode only** — mark the selected todo as done. The action toggles the checkbox on its line in the source note file from `[ ]` to `[x]`, then calls the note_search library's `update_files_in_db` to re-index the file (the same path the external indexer uses), and finally re-fetches the todo list — the row disappears in the same frame because the underlying query filters `open: true`. Outside of todo mode (`!...`), the action is a no-op with a status message so the user knows why their key did nothing. Rebindable via `key.mark-todo-done=...`. |
 | `Ctrl+MD` | TUI     | Delete all matching entries (with confirmation). The previous default binding for this action was `Ctrl+X`; the binding moved to `Ctrl+M-D` so the todo-mode mark-done action could claim `Ctrl+X`. Configure with `key.delete-matching=...` if you want a different key. |
+| `Ctrl+MG` | TUI     | Cycle the directory-source filter for the `#`-mode list: `ALL` → `TMUX` → `CFG` → `ALL`. `ALL` (default) shows every row regardless of source; `TMUX` shows only the active tmux panes' cwds; `CFG` shows only the `sessiondirs=...` rows. The current source is shown in the mode strip as a `DIR:ALL` / `DIR:TMUX` / `DIR:CFG` chip. Works from **any** mode: if pressed outside directories (`#`) mode, switches INTO directories mode first (prepends `#`, stripping any existing search prefix and preserving the body), then cycles the source. Configure with `key.cycle-directory-source=...`. |
 | `Esc`     | TUI     | Cancel the picker (no command printed).                        |
 
 The current scope is shown in the RPROMPT. `Up` and `Down` always use
@@ -555,6 +556,26 @@ Each line is timestamped and tagged with the widget that emitted it
 (`prime_cache`, `up`, `down`, `cycle_mode`, `next_history`, etc.).
 The log is appended, so you can watch it from a second terminal while
 you interact.
+
+To debug the `#`-mode tmux-pane filter specifically (why a
+particular tmux pane's cwd is or isn't showing as a row), set
+`SMARTHISTORY_DEBUG_TMUX=1`. The TUI logs each filtered pane to
+`~/.local/cache/smarthistory/tmux-filter-debug.log` with the pane id,
+the rejected `pane_current_path`, and the reason (`does not start
+with /` / `is not a directory`). The log goes to a file rather than
+stderr (the TUI renders to stderr, so `eprintln!` output would be
+absorbed by the render path and never reach the user's terminal).
+Watch it from a second terminal:
+
+```sh
+export SMARTHISTORY_DEBUG_TMUX=1
+eval "$(smarthistory init zsh)"
+tail -f ~/.local/cache/smarthistory/tmux-filter-debug.log
+```
+
+Useful when a `DIR:TMUX` row looks wrong (a row showing a command
+line instead of a directory, a missing T marker, a stale path that
+has since been deleted, etc.).
 
 ### TUI session persistence
 
@@ -1300,6 +1321,99 @@ work` will fail with "duplicate session"; the
 parent shell surfaces the error. The TUI
 doesn't try to be clever about disambiguation —
 explicit user action is preferable.
+
+### Panes mode (`*...`)
+
+Prefix a query with `*` (default, configurable via
+`prefix.panes=...`) to list every pane in the
+**current tmux session** — the one the TUI is
+running in — *excluding* the pane the TUI itself
+occupies (read from `$TMUX_PANE`). The view is a
+quick "what else is running in this session?"
+pane switcher that lives inside the history
+picker.
+
+The data comes from a single `tmux list-panes -s
+-F "#{pane_id} | #{window_id} |
+
+# {pane_current_path} |
+
+# {pane_current_command}"` call, run once and
+
+cached for the TUI session (`App.session_panes`).
+Silent failure (empty list) if `tmux` isn't on
+PATH or `$TMUX_PANE` is unset (not inside
+(tmux). Each line is parsed into a `HistoryRow`:
+
+- `command` (primary text) = the pane's current
+  command (`#{pane_current_command}`).
+- `comment` (secondary `~/x` hint) = the pane's
+  cwd, shortened via `shorten_home_path` against
+  the cached `home_list` (so `$HOME` and
+  `homemap=...` paths collapse to `~/x`).
+- `directory` = the full canonical cwd.
+- `session_id` = the pane id (`%N`) — the
+  `select-pane -t` target.
+- `output` = the pane's global window id (`@N`) —
+  the `select-window -t` target. Repurposed as a
+  spare slot because panes rows have no captured
+  output; `Ctrl+L` (output view) on a panes row
+  would show the window id (a harmless
+  informational hint).
+- `source` = `"pane"` (so the directories-source
+  filter and the labeled-row merge ignore them).
+- `id` = a synthetic decreasing negative.
+
+The body after `*` is a substring filter matched
+AND across whitespace tokens (case-insensitive)
+against each pane's command **and** short cwd, so
+`*vim` finds panes running vim and `*work src`
+finds panes whose command-or-cwd contains both
+`work` and `src`.
+
+#### The last pane is selected by default
+
+The list is ordered so the **previously-active
+pane** (the one `tmux last-pane` would jump to,
+flagged by tmux's `#{?pane_last,1,0}` format
+variable) is at position 0 — the default
+selection on entering the mode. So just pressing
+`Enter` immediately flips you back to the pane you
+were in before the current one, with no
+navigation. The implementation reads the
+`pane_last` flag in the same `list-panes -s` call,
+assigns that pane a one-higher timestamp, then
+bubbles it to the front of `App.session_panes`. If
+the last pane equals the excluded current pane
+(an env-var quirk) no row is moved and the natural
+order is kept.
+
+#### Selecting a pane row
+
+Press Enter on a pane row to jump to it. The TUI
+stages
+
+```
+tmux select-window -t @<window_id> && tmux select-pane -t %<pane_id>
+```
+
+The `select-window` step is load-bearing: plain
+`select-pane -t %N` selects the pane **within its
+window** but does **not** switch the active
+window, so a target pane in another window would
+be unreachable. (This was the bug in the original
+implementation, which used `select-pane &&
+switch-client -t <pane_id>` — `switch-client`
+expects a *session* target, not a pane id, so it
+errored out and the jump didn't happen.) `&&`
+chains the two calls so a stale snapshot (window
+gone) doesn't try to select a dead pane. If the
+window id is somehow empty (parse fallback), the
+TUI degrades to a bare `tmux select-pane -t %N`.
+
+The current pane (`$TMUX_PANE`) is excluded at
+fetch time, so the user never stages a no-op
+jump to themselves.
 
 ### Example session
 

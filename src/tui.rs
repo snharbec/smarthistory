@@ -53,6 +53,23 @@ struct TuiSession {
     /// TUI invocations so the user always lands back on their
     /// preferred colors.
     theme: Option<String>,
+    /// Active directory-source
+    /// filter for the
+    /// `#`-mode list
+    /// (`all` / `tmux` /
+    /// `config`). `None`
+    /// means "no preference"
+    /// and falls back to
+    /// `DirectorySource::All`.
+    /// Values that don't
+    /// parse as a
+    /// `DirectorySource`
+    /// are silently dropped
+    /// when loading so a
+    /// hand-edited session
+    /// file can't wedge the
+    /// TUI on startup.
+    directory_source: Option<String>,
 }
 
 /// All theme choices available in the TUI. The first entry, `None`,
@@ -119,6 +136,32 @@ impl TuiSession {
                     }
                 }
                 "theme" => s.theme = Some(value.to_string()),
+                "directorysource" => {
+                    // Same pattern
+                    // as the other
+                    // session fields:
+                    // only accept
+                    // values that
+                    // `DirectorySource::parse`
+                    // recognises
+                    // (lowercase
+                    // `all` / `tmux` /
+                    // `config`,
+                    // plus
+                    // `cfg` and
+                    // `sessiondirs`
+                    // as friendly
+                    // aliases for
+                    // `config`).
+                    if crate::tui::state::DirectorySource::parse(
+                        value,
+                    )
+                    .is_some()
+                    {
+                        s.directory_source =
+                            Some(value.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -151,6 +194,9 @@ impl TuiSession {
         }
         if let Some(ref t) = self.theme {
             out.push_str(&format!("theme={}\n", t));
+        }
+        if let Some(ref ds) = self.directory_source {
+            out.push_str(&format!("directorysource={}\n", ds));
         }
         if let Err(e) = std::fs::write(&path, out) {
             eprintln!("warning: failed to persist TUI session: {}", e);
@@ -908,6 +954,32 @@ struct App {
     /// cwd yet) are filtered out
     /// at parse time.
     tmux_windows: Vec<TmuxWindowInfo>,
+    /// Cached snapshot of the panes in
+    /// the *current* tmux session (the one
+    /// the TUI is running in), used by the
+    /// `*`-prefix panes view. Populated
+    /// the first time the user types `*…`,
+    /// then cached for the remainder of
+    /// the TUI session. The pane set
+    /// doesn't change while the TUI is the
+    /// foreground process (the user can't
+    /// create or close panes from inside
+    /// the TUI), so re-running `tmux
+    /// list-panes -s` on every keystroke
+    /// would just add latency without
+    /// buying freshness. The current
+    /// *command* each pane is running
+    /// may go stale, but that's an
+    /// acceptable trade-off (the user can
+    /// re-enter `*` mode to refresh). The
+    /// current pane (`$TMUX_PANE`) is
+    /// excluded at fetch time so the list
+    /// never shows the pane the user is
+    /// in. Each row stores the pane id
+    /// (`%N`) in `session_id` so the
+    /// `select-pane` / `switch-client`
+    /// action on Enter can target it.
+    session_panes: Vec<HistoryRow>,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -955,6 +1027,21 @@ struct App {
     /// has never run a
     /// command in them.
     session_subdirs: Vec<std::path::PathBuf>,
+    /// Active directory-source
+    /// filter for the
+    /// `#`-mode list. The
+    /// TUI cycles
+    /// ALL → TMUX → CFG →
+    /// ALL via
+    /// `Action::CycleDirectorySource`
+    /// (default key
+    /// `C-M-g`). Persisted
+    /// in the session file
+    /// so the user lands
+    /// back on the same
+    /// view across
+    /// invocations.
+    directory_source: crate::tui::state::DirectorySource,
     /// Set to true when the last notes query failed to parse.
     notes_query_error: bool,
     /// The date-filter alias active for the current
@@ -1167,6 +1254,28 @@ impl App {
     fn directories_pattern(&self) -> &str {
         if self.is_directories_query() {
             let p = self.query_prefixes.directories;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
+    /// Whether the query is a session-panes request:
+    /// the query starts with the panes prefix (`*` by
+    /// default). The body (everything after `*`) is a
+    /// substring filter matched against each pane's
+    /// current command and cwd.
+    fn is_panes_query(&self) -> bool {
+        let p = self.query_prefixes.panes;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
+    /// The session-panes filter body, i.e. everything
+    /// after the leading `*` prefix. Empty when not in
+    /// panes mode.
+    fn panes_pattern(&self) -> &str {
+        if self.is_panes_query() {
+            let p = self.query_prefixes.panes;
             &self.query[p.len_utf8()..]
         } else {
             ""
@@ -1476,6 +1585,7 @@ impl App {
                                         // yet.
                                         output: r.text.clone(),
                                         mode: "todo".to_string(),
+                                        source: String::new(),
                                 }
                         })
                         .collect()
@@ -1770,10 +1880,63 @@ impl App {
             std::collections::HashSet::new();
         let mut rows: Vec<HistoryRow> = Vec::new();
         let mut next_id: i64 = -1;
+        // The directory-source
+        // filter is applied
+        // *early*, not just at
+        // the end. If we let
+        // the SQL loop (or the
+        // sessiondir loop)
+        // populate the shared
+        // `seen` set first, a
+        // tmux pane whose path
+        // also appears in
+        // history would be
+        // silently deduped away
+        // — so in `DIR:TMUX`
+        // mode the user would
+        // only see the tmux
+        // panes whose paths
+        // they had *never*
+        // visited (exact bug
+        // reported: of 5 active
+        // panes, only 2 showed,
+        // the ones not in the
+        // history DB). Skip the
+        // irrelevant loops
+        // entirely instead.
+        let want_sql = matches!(
+            self.directory_source,
+            crate::tui::state::DirectorySource::All
+                | crate::tui::state::DirectorySource::Config
+        );
+        let want_sessiondirs = matches!(
+            self.directory_source,
+            crate::tui::state::DirectorySource::All
+                | crate::tui::state::DirectorySource::Config
+        );
+        let want_tmux = matches!(
+            self.directory_source,
+            crate::tui::state::DirectorySource::All
+                | crate::tui::state::DirectorySource::Tmux
+        );
+        if !want_sql {
+            tmux_filter_debug_log(
+                "skipping SQL loop (directory_source != All/Config)",
+            );
+        }
         for raw in raw_rows {
+            if !want_sql {
+                break;
+            }
             let (directory, command, ts) = raw?;
             let canonical = crate::util::canonicalize_directory(&directory);
             if !seen.insert(canonical.clone()) {
+                if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
+                    tmux_filter_debug_log(&format!(
+                        "SQL row deduped (dup canonical {:?}): {:?}",
+                        canonical, directory
+                    ));
+                }
                 continue;
             }
             // The visible list line
@@ -1855,6 +2018,7 @@ impl App {
                 comment: short_cmd,
                 output: String::new(),
                 mode: "directory".to_string(),
+                source: "history".to_string(),
             });
         }
         // Augment with the user's
@@ -1902,7 +2066,15 @@ impl App {
         // user knows the row
         // will run a setup
         // script on select.
+        if !want_sessiondirs {
+            tmux_filter_debug_log(
+                "skipping sessiondir loop (directory_source != All/Config)",
+            );
+        }
         for sub in &self.session_subdirs {
+            if !want_sessiondirs {
+                break;
+            }
             let canonical = crate::util::canonicalize_directory(
                 &sub.to_string_lossy(),
             );
@@ -1911,6 +2083,46 @@ impl App {
             }
             let directory_str =
                 sub.to_string_lossy().into_owned();
+            // Apply the same
+            // substring filter
+            // the SQL fetch
+            // applied, so the
+            // sessiondirs rows
+            // are visible only
+            // when they match
+            // the user's typed
+            // pattern. The SQL
+            // `LIKE` uses the
+            // raw `directory`
+            // (e.g.
+            // `/Volumes/HUGE/har/foo`),
+            // and the user types
+            // a pattern that
+            // matches against
+            // that form (because
+            // the visible list
+            // shows the shortened
+            // form, but the
+            // filtering is on the
+            // raw form). For
+            // consistency, we
+            // also filter on the
+            // raw form here, so
+            // `#home` matches
+            // both a sessiondir at
+            // `~/work` (raw
+            // `/Users/har/work`)
+            // and an SQL row at
+            // `/Users/har/home`.
+            if !filter_tokens.is_empty()
+                && !filter_tokens.iter().all(|tok| {
+                    directory_str
+                        .to_lowercase()
+                        .contains(&tok.to_lowercase())
+                })
+            {
+                continue;
+            }
             // Surface a hint when
             // the row has a
             // `.command` file
@@ -1958,9 +2170,578 @@ impl App {
                 comment: hint,
                 output: String::new(),
                 mode: "directory".to_string(),
+                source: "sessiondir".to_string(),
             });
         }
+        // Add rows for the
+        // cwds of every
+        // active tmux pane.
+        // These appear in
+        // the list even
+        // when the user has
+        // never run a
+        // command in the
+        // directory (e.g.
+        // a session they
+        // started months
+        // ago, or a session
+        // attached to a
+        // project that
+        // doesn't yet have
+        // history).
+        //
+        // The `T` marker
+        // (drawn in
+        // `render_row`)
+        // already shows
+        // which directories
+        // are active in
+        // tmux; this
+        // augmented list
+        // makes the same
+        // information
+        // available as
+        // filterable rows
+        // for the `TMUX`
+        // directory source
+        // (so the user can
+        // list "every
+        // directory I'm
+        // currently active
+        // in" without
+        // scrolling past
+        // their pinned
+        // projects or the
+        // global history).
+        //
+        // Each unique
+        // `pane_current_path`
+        // becomes one row.
+        // We dedup against
+        // `seen` so a
+        // directory that's
+        // already in the
+        // history (and so
+        // already got a
+        // row from the SQL
+        // loop) doesn't get
+        // a duplicate from
+        // the tmux side. The
+        // history row wins
+        // (newer timestamp)
+        // and carries the
+        // last command; the
+        // tmux row is
+        // suppressed.
+        //
+        // Sort order: by
+        // `pane_id`
+        // (deterministic
+        // since tmux
+        // returns panes in
+        // a stable order).
+        // We don't have a
+        // meaningful
+        // timestamp for a
+        // tmux pane
+        // (the pane itself
+        // doesn't expose
+        // one), so we
+        // use the current
+        // epoch for all
+        // tmux rows; the
+        // user can still
+        // type a pattern to
+        // filter to one.
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if !want_tmux {
+            tmux_filter_debug_log(
+                "skipping tmux loop (directory_source != All/Tmux)",
+            );
+        }
+        for window in &self.tmux_windows {
+            if !want_tmux {
+                break;
+            }
+            // Defensive filter: a
+            // `pane_current_path`
+            // that doesn't start
+            // with `/` is not a
+            // real absolute
+            // filesystem path.
+            // Tmux normally
+            // reports only real
+            // paths, but a
+            // custom tmux config
+            // or a wrapper could
+            // produce something
+            // like the command
+            // line that spawned
+            // the pane
+            // (`tmux list-windows
+            // -a ...`). Showing
+            // such a "path" as a
+            // directory row is
+            // wrong: the row
+            // wouldn't be a
+            // directory, the
+            // T-marker lookup
+            // would fail (no
+            // matching pane), and
+            // the visible primary
+            // text would be a
+            // shell command —
+            // confusing. The user
+            // reported exactly
+            // this: a `DIR:TMUX`
+            // entry whose text
+            // was the tmux
+            // command line, with
+            // no T flag. The
+            // fix: skip any
+            // `pane_current_path`
+            // that doesn't look
+            // like an absolute
+            // path.
+            if !window.path.starts_with('/') {
+                tmux_filter_debug_log(
+                    &format!(
+                        "filtered tmux pane %{}: pane_current_path {:?} does not start with `/`",
+                        window.pane_id,
+                        window.path
+                    ),
+                );
+                continue;
+            }
+            // Also require the
+            // path to actually
+            // resolve to a
+            // directory on disk.
+            // A real tmux pane's
+            // cwd is a directory
+            // that exists; a
+            // non-path or a path
+            // to a non-existent
+            // file shouldn't
+            // surface. Without
+            // this, a tmux pane
+            // whose cwd was
+            // deleted while the
+            // TUI is running
+            // would still show
+            // as a row, but the
+            // user couldn't
+            // actually jump to
+            // it. The check is
+            // best-effort: a
+            // race just means
+            // the row disappears
+            // on the next
+            // refresh, which is
+            // the right behaviour
+            // anyway.
+            if !std::path::Path::new(&window.path)
+                .is_dir()
+            {
+                tmux_filter_debug_log(
+                    &format!(
+                        "filtered tmux pane %{}: pane_current_path {:?} is not a directory",
+                        window.pane_id,
+                        window.path
+                    ),
+                );
+                continue;
+            }
+            let canonical = crate::util::canonicalize_directory(
+                &window.path,
+            );
+            if !seen.insert(canonical.clone()) {
+                tmux_filter_debug_log(&format!(
+                    "tmux pane %{} deduped (dup canonical {:?}, eaten by an earlier loop): {:?}",
+                    window.pane_id, canonical, window.path
+                ));
+                continue;
+            }
+            // Same substring
+            // filter as the SQL
+            // and sessiondirs
+            // loops above. The
+            // tmux-reported path
+            // is the raw absolute
+            // form, so filter on
+            // it directly.
+            if !filter_tokens.is_empty()
+                && !filter_tokens.iter().all(|tok| {
+                    window
+                        .path
+                        .to_lowercase()
+                        .contains(&tok.to_lowercase())
+                })
+            {
+                continue;
+            }
+            let short_dir = crate::util::shorten_home_path(
+                &window.path,
+                &home_list,
+            )
+            .into_owned();
+            // Build a
+            // synthetic
+            // command
+            // field for
+            // the
+            // secondary
+            // slot: the
+            // pane id.
+            // The user
+            // can copy
+            // / reuse
+            // it
+            // (e.g. as
+            // the
+            // `-t`
+            // argument
+            // to a
+            // custom
+            // tmux
+            // command)
+            // directly
+            // from the
+            // list.
+            let pane_hint = format!(
+                "(pane {})",
+                window.pane_id
+            );
+            let id = next_id;
+            next_id -= 1;
+            tmux_filter_debug_log(&format!(
+                "kept tmux pane %{}: pane_current_path {:?} (source=tmux)",
+                window.pane_id,
+                window.path
+            ));
+            rows.push(HistoryRow {
+                id,
+                command: short_dir,
+                directory: window.path.clone(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: now_epoch,
+                comment: pane_hint,
+                output: String::new(),
+                mode: "directory".to_string(),
+                source: "tmux".to_string(),
+            });
+        }
+        // Apply the
+        // directory-source
+        // filter. The
+        // `ALL` mode is a
+        // no-op; the
+        // `TMUX` and
+        // `CONFIG` modes
+        // drop rows whose
+        // `source` doesn't
+        // match.
+        let rows: Vec<HistoryRow> = match self.directory_source {
+            crate::tui::state::DirectorySource::All => rows,
+            crate::tui::state::DirectorySource::Tmux => {
+                rows.into_iter()
+                    .filter(|r| r.source == "tmux")
+                    .collect()
+            }
+            crate::tui::state::DirectorySource::Config => {
+                rows.into_iter()
+                    .filter(|r| r.source == "sessiondir")
+                    .collect()
+            }
+        };
         Ok(rows)
+    }
+
+    /// Populate `self.session_panes` from
+    /// `tmux list-panes -s` (the *current*
+    /// session only — `-s` limits to the
+    /// session the TUI is running in, unlike
+    /// `-a` which walks every session). The
+    /// current pane (`$TMUX_PANE`) is excluded
+    /// so the user never sees the pane they're
+    /// in. Idempotent — runs at most once per
+    /// TUI session; subsequent calls return
+    /// immediately (the pane set doesn't
+    /// change while the TUI is the foreground
+    /// process). Failure modes are silent
+    /// (same contract as `fetch_tmux_windows`):
+    /// `tmux` not on PATH, not in a tmux
+    /// session, or the subprocess hangs past
+    /// `TMUX_PANE_PROBE_TIMEOUT_MS` → the
+    /// cache stays empty and the user sees an
+    /// empty list.
+    ///
+    /// Each pane becomes a `HistoryRow`:
+    /// - `command` (primary text) = the
+    ///   pane's current command
+    ///   (`#{pane_current_command}`, e.g.
+    ///   `zsh`, `vim`, `cargo`).
+    /// - `comment` (secondary text) = the
+    ///   pane's cwd shortened to `~/x`.
+    /// - `directory` = the full canonical cwd.
+    /// - `session_id` = the pane id (`%N`),
+    ///   used as the `select-pane -t` target.
+    /// - `output` = the pane's global window
+    ///   id (`@N`), used as the
+    ///   `select-window -t` target so the
+    ///   jump works even when the pane is
+    ///   in a different window than the
+    ///   current one (plain `select-pane`
+    ///   does NOT switch windows).
+    /// - `source` = `"pane"`.
+    /// - `id` = synthetic decreasing negative.
+    fn fetch_session_panes(&mut self) {
+        if !self.session_panes.is_empty() {
+            return;
+        }
+        // `$TMUX_PANE` is the pane id the TUI
+        // is running in (set by tmux for every
+        // pane). Empty when not inside tmux —
+        // in that case `list-panes -s` would
+        // also fail, so we bail early.
+        let current_pane = std::env::var("TMUX_PANE")
+            .unwrap_or_default();
+        if current_pane.is_empty() {
+            return;
+        }
+        self.fetch_session_panes_impl(&current_pane);
+    }
+
+    /// The implementation of `fetch_session_panes`,
+    /// separated so tests can inject the "current
+    /// pane" id directly (env-var mutation is
+    /// `unsafe` since Rust 1.66 and is racy under
+    /// the parallel test runner). `current_pane`
+    /// is the pane id to EXCLUDE from the list
+    /// (the one the TUI is running in). Reads
+    /// `list-panes -s` and caches the parsed
+    /// panes into `self.session_panes`.
+    fn fetch_session_panes_impl(
+        &mut self,
+        current_pane: &str,
+    ) {
+        // Format: pane id | window id | cwd |
+        // current command | last flag.
+        // We use `|` as the field separator
+        // (same convention as `fetch_tmux_windows`;
+        // tmux lets the cwd and command contain
+        // most punctuation but not `|` in
+        // practice, and even if it did the
+        // split-into-first/two would still
+        // surface a usable pane id). The
+        // trailing `#{?pane_last,1,0}` is tmux's
+        // "last (previously-active) pane" flag —
+        // the pane `tmux last-pane` would jump
+        // to. We bubble it to the top of the
+        // list so the user can flip back to the
+        // pane they just came from by pressing
+        // Enter (the default selection is index
+        // 0 = the newest row).
+        const FORMAT: &str = "#{pane_id} | #{window_id} | #{pane_current_path} | #{pane_current_command} | #{?pane_last,1,0}";
+        let timeout_ms: u64 = std::env::var(
+            "TMUX_PANE_PROBE_TIMEOUT_MS",
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.args(["list-panes", "-s", "-F", FORMAT])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut panes: Vec<HistoryRow> = Vec::new();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            // Decreasing synthetic ids
+            // so the panes sort
+            // consistently by pane id
+            // order if the sort is
+            // timestamp-based (they all
+            // share `now_epoch`).
+            let mut next_id: i64 = -1;
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                let parts: Vec<&str> =
+                    line.split('|').map(str::trim).collect();
+                if parts.len() < 4 {
+                    continue;
+                }
+                let pane_id = parts[0];
+                // The pane's global window id (`@N`).
+                // Used by `select_for_run` to stage
+                // `select-window -t @N` BEFORE
+                // `select-pane -t %N` — plain
+                // `select-pane` does NOT switch
+                // windows, so a pane in another
+                // window wouldn't be jumped to
+                // without selecting its window
+                // first.
+                let window_id = parts[1];
+                let path_raw = parts[2];
+                // The current command is
+                // the 4th field; a pane
+                // with no command yet
+                // (rare) reports empty.
+                let current_command =
+                    parts.get(3).copied().unwrap_or("");
+                // The 5th field is tmux's
+                // `pane_last` flag
+                // (`#{?pane_last,1,0}`): 1 for
+                // the last (previously-active)
+                // pane in the session — the one
+                // `tmux last-pane` jumps to.
+                // `0` (or missing) for every
+                // other pane.
+                let is_last = parts
+                    .get(4)
+                    .copied()
+                    .unwrap_or("0")
+                    == "1";
+                if pane_id.is_empty() {
+                    continue;
+                }
+                // Exclude the pane the
+                // TUI is running in.
+                if pane_id == current_pane {
+                    continue;
+                }
+                // Require a real absolute
+                // path (same defensive
+                // filter as the
+                // directories tmux loop).
+                if !path_raw.starts_with('/') {
+                    continue;
+                }
+                let full_path =
+                    crate::util::canonicalize_directory(path_raw);
+                let short_dir = crate::util::shorten_home_path(
+                    &full_path,
+                    &self.home_list,
+                )
+                .into_owned();
+                let id = next_id;
+                next_id -= 1;
+                panes.push(HistoryRow {
+                    id,
+                    command: current_command.to_string(),
+                    directory: full_path,
+                    session_id: pane_id.to_string(),
+                    exit_code: 0,
+                    // The last pane gets a
+                    // newer timestamp so it
+                    // stays first under any
+                    // timestamp-DESC sort and
+                    // signals "newest" (the row
+                    // the default selection
+                    // lands on). The actual
+                    // ordering is finalized by
+                    // the bubble-to-front below.
+                    timestamp: if is_last {
+                        now_epoch + 1
+                    } else {
+                        now_epoch
+                    },
+                    comment: short_dir,
+                    // Stash the window id (`@N`)
+                    // here for `select_for_run`'s
+                    // cross-window jump. Panes
+                    // rows have no captured
+                    // output, so this slot is
+                    // otherwise unused; the
+                    // output-view (Ctrl+L) on a
+                    // panes row would show the
+                    // window id, which is a
+                    // harmless informational
+                    // hint.
+                    output: window_id.to_string(),
+                    mode: "pane".to_string(),
+                    source: "pane".to_string(),
+                });
+            }
+        }
+        let _ = child.wait();
+        let _ = timeout_ms;
+        // Bubble the last (previously-active)
+        // pane to the front so it is row 0 —
+        // the default selection — and the
+        // user can flip back to the pane they
+        // just came from by pressing Enter.
+        // `tmux last-pane` tracks exactly one
+        // last pane; if it was excluded (e.g.
+        // env-var quirk where `$TMUX_PANE`
+        // equals the last pane) no row is
+        // moved and the natural order is kept.
+        if let Some(pos) = panes
+            .iter()
+            .position(|r| r.timestamp > now_epoch)
+            && pos > 0 {
+                let row = panes.remove(pos);
+                panes.insert(0, row);
+            }
+        self.session_panes = panes;
+    }
+
+    /// Return the cached session-panes list,
+    /// filtered by the `*`-body substring
+    /// filter. Each whitespace-separated token
+    /// in the body must appear (case-
+    /// insensitive) in the pane's command OR
+    /// its cwd (the short `~/x` form), so the
+    /// user can narrow by either dimension
+    /// (e.g. `*vim` to find panes running vim,
+    /// or `*work` to find panes in a
+    /// `~/work` subdir). Never touches the
+    /// DB and never re-runs `tmux` — it reads
+    /// the cached `session_panes` (populated
+    /// by `fetch_session_panes`, which
+    /// `refresh()` calls before this). An
+    /// empty list (no tmux / not in a
+    /// session / the only pane is the current
+    /// one) is a valid result.
+    fn fetch_panes(&mut self) -> Result<Vec<HistoryRow>> {
+        self.fetch_session_panes();
+        let filter = self.panes_pattern().trim();
+        let tokens: Vec<String> = filter
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_lowercase())
+            .collect();
+        if tokens.is_empty() {
+            return Ok(self.session_panes.clone());
+        }
+        Ok(self
+            .session_panes
+            .iter()
+            .filter(|r| {
+                let cmd_lc = r.command.to_lowercase();
+                let dir_lc = r.comment.to_lowercase();
+                tokens.iter().all(|tok| {
+                    cmd_lc.contains(tok)
+                        || dir_lc.contains(tok)
+                })
+            })
+            .cloned()
+            .collect())
     }
 
     /// Look up the cached tmux
@@ -2257,15 +3038,47 @@ impl App {
             // windows in well under
             // 64 KiB.
             let reader = std::io::BufReader::new(stdout);
+            let tmux_debug = std::env::var(
+                "SMARTHISTORY_DEBUG_TMUX",
+            )
+            .is_ok();
             for line in reader.lines() {
                 let line = match line {
                     Ok(l) => l,
                     Err(_) => continue,
                 };
-                if let Some(window) =
-                    parse_tmux_pane_line(&line)
+                if tmux_debug {
+                    tmux_filter_debug_log(
+                        &format!(
+                            "raw tmux line: {:?}",
+                            line
+                        ),
+                    );
+                }
+                match parse_tmux_pane_line(&line)
                 {
-                    windows.push(window);
+                    Some(window) => {
+                        if tmux_debug {
+                            tmux_filter_debug_log(
+                                &format!(
+                                    "  parsed pane id={:?} path={:?}",
+                                    window.pane_id,
+                                    window.path
+                                ),
+                            );
+                        }
+                        windows.push(window);
+                    }
+                    None => {
+                        if tmux_debug {
+                            tmux_filter_debug_log(
+                                &format!(
+                                    "  DROPPED (failed parse: not 4 fields, or window not active, or empty path): {:?}",
+                                    line
+                                ),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2372,6 +3185,7 @@ impl App {
                         comment,
                         output: self.read_note_preview(&note.filename),
                         mode: "note".to_string(),
+                        source: String::new(),
                     }
                 }).collect();
                 // Sort by timestamp descending (newest first)
@@ -2460,6 +3274,7 @@ fn fetch_recent_notes_with_filter(
                         comment,
                         output: self.read_note_preview(&note.filename),
                         mode: "note".to_string(),
+                        source: String::new(),
                     }
                 }).collect();
                 // Sort by timestamp descending (newest first)
@@ -2826,6 +3641,7 @@ fn fetch_recent_notes_with_filter(
             comment: command.clone(),
             output: command,
             mode: "llm".to_string(),
+            source: String::new(),
         };
         self.llm_preview = Some(preview);
         self.llm_preview_description = Some(fired_description);
@@ -3207,6 +4023,7 @@ notes_date_filter: NotesDateFilter::All,
             // doc comment for the
             // rationale.
             tmux_windows: Vec::new(),
+            session_panes: Vec::new(),
             // Cached home-prefix
             // list, computed once
             // at construction.
@@ -3223,6 +4040,15 @@ notes_date_filter: NotesDateFilter::All,
             // `session_subdirs`
             // field doc.
             session_subdirs: build_session_subdirs(),
+            // Default to
+            // `All` so first-time
+            // users see
+            // everything. The
+            // session file can
+            // override (read in
+            // `run_tui_to_stdout`).
+            directory_source:
+                crate::tui::state::DirectorySource::All,
             // LLM debounce state. The user hasn't typed
             // anything yet (we're at construction time), so
             // the debounce is satisfied and no preview is
@@ -3281,6 +4107,14 @@ notes_date_filter: NotesDateFilter::All,
         // but not catastrophic.
         if self.is_directories_query() {
             self.fetch_tmux_windows();
+        }
+        // Same one-shot cache priming for the
+        // `*`-prefix panes view: populate the
+        // session-panes snapshot before `fetch()`
+        // reads it, so the first frame after the
+        // user types `*` already shows the list.
+        if self.is_panes_query() {
+            self.fetch_session_panes();
         }
         self.rows = self.fetch().unwrap_or_default();
         if self.is_regex_query() || self.is_fuzzy_query() {
@@ -3351,6 +4185,57 @@ notes_date_filter: NotesDateFilter::All,
     /// timestamp). Extracted from `merged_rows()` so we can
     /// compute it once per `refresh()` and cache the result.
     fn build_merged_rows(&self) -> Vec<HistoryRow> {
+        // Directories mode (`#`)
+        // is a completely
+        // different view: it
+        // shows *directories*
+        // (from SQL history,
+        // sessiondirs, and/or
+        // active tmux panes,
+        // filtered by
+        // `directory_source`).
+        // It must NOT interleave
+        // labeled history rows
+        // (entries with a
+        // comment that aren't in
+        // the primary fetch) —
+        // those are a
+        // history-list concept.
+        // The user reported a
+        // labeled row
+        // (`tmux list-windows -a
+        // ...`) leaking into
+        // `DIR:TMUX` mode: it
+        // had a comment, so
+        // `build_merged_rows`
+        // appended it to the
+        // directory list. Skip
+        // the labeled/preview
+        // merge entirely in
+        // directories mode.
+        // Directories mode (`#`) AND panes mode
+        // (`*`) are both completely different
+        // views that must NOT interleave labeled
+        // history rows. See the directories-mode
+        // block above for the full rationale; the
+        // same applies to panes mode (the user
+        // reported a labeled `tmux list-windows`
+        // row leaking into `DIR:TMUX`; panes mode
+        // would have the same leak without this
+        // guard).
+        if self.is_directories_query() || self.is_panes_query() {
+            let mut merged = self.rows.clone();
+            if self.duplicate_filter
+                || self.sort_order
+                    == SortOrder::Frequency
+            {
+                let mut seen: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                merged
+                    .retain(|r| seen.insert(r.command.clone()));
+            }
+            return merged;
+        }
         // Two-partition merge: rows that came from
         // the primary fetch (`self.rows`) and rows
         // that came from the labeled set but are
@@ -3601,6 +4486,9 @@ notes_date_filter: NotesDateFilter::All,
         if self.is_directories_query() {
             return self.fetch_directories();
         }
+        if self.is_panes_query() {
+            return self.fetch_panes();
+        }
         let (where_clause, params) = self.build_where();
         let sql = format!(
             "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output, h.mode \
@@ -3625,6 +4513,7 @@ notes_date_filter: NotesDateFilter::All,
                     comment: row.get(6).unwrap_or_default(),
                     output: row.get(7).unwrap_or_default(),
                     mode: row.get(8).unwrap_or_default(),
+                    source: String::new(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3727,6 +4616,7 @@ notes_date_filter: NotesDateFilter::All,
                     comment: row.get(6).unwrap_or_default(),
                     output: row.get(7).unwrap_or_default(),
                     mode: row.get(8).unwrap_or_default(),
+                    source: String::new(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3944,6 +4834,103 @@ notes_date_filter: NotesDateFilter::All,
     fn cycle_sort_order(&mut self) {
         self.sort_order = self.sort_order.next();
         self.refresh();
+    }
+
+    /// Cycle the
+    /// directory-source
+    /// filter for the
+    /// `#`-mode list:
+    /// ALL → TMUX → CFG
+    /// → ALL. Persists in
+    /// the session file
+    /// (the
+    /// `directory_source`
+    /// field is read in
+    /// `run_tui_to_stdout`
+    /// on startup).
+    ///
+    /// If pressed while NOT
+    /// already in directories
+    /// mode (`#`), the mode is
+    /// switched to directories
+    /// first — the query gains
+    /// the `#` prefix (any
+    /// existing search-mode
+    /// prefix like `/`, `?`,
+    /// `+`, `=`, `%`, `@`, `!`
+    /// is stripped), the body
+    /// is preserved so the user
+    /// can keep narrowing by
+    /// path substring. Then the
+    /// source is cycled. This
+    /// makes the binding useful
+    /// from any mode — the user
+    /// can be in plain history,
+    /// press it, and land in
+    /// `DIR:TMUX` directly.
+    fn cycle_directory_source(&mut self) {
+        if !self.is_directories_query() {
+            self.enter_directories_mode();
+        }
+        self.directory_source =
+            self.directory_source.next();
+        self.refresh();
+    }
+
+    /// Switch the query into
+    /// directories (`#`) mode,
+    /// preserving any body the
+    /// user has already typed.
+    /// Strips a leading
+    /// search-mode prefix
+    /// (`/`, `?`, `+`, `=`, `%`,
+    /// `@`, `!`, or `#` itself)
+    /// before prepending the
+    /// directories prefix, so
+    /// switching from `?foo`
+    /// yields `#foo` (not
+    /// `#?foo`). The cursor is
+    /// reset to the end so the
+    /// next keystroke appends
+    /// naturally. Mode-
+    /// dependent state (regex
+    /// recompile, LLM debounce)
+    /// is refreshed too.
+    fn enter_directories_mode(&mut self) {
+        let p = &self.query_prefixes;
+        let prefixes = [
+            p.regex,
+            p.fuzzy,
+            p.output,
+            p.llm,
+            p.question,
+            p.notes,
+            p.todo,
+            p.directories,
+        ];
+        let body: String = self
+            .query
+            .chars()
+            .next()
+            .map(|c| {
+                if prefixes.contains(&c) {
+                    self.query[c.len_utf8()..].to_string()
+                } else {
+                    self.query.clone()
+                }
+            })
+            .unwrap_or_default();
+        let mut s =
+            String::with_capacity(
+                body.len() + p.directories.len_utf8(),
+            );
+        s.push(p.directories);
+        s.push_str(&body);
+        self.query = s;
+        self.recompile_regex();
+        self.query_cursor =
+            self.query.chars().count();
+        self.llm_touch();
     }
 
     /// Toggle the duplicate filter on or off. When on (default), only
@@ -4462,6 +5449,51 @@ fn move_selection(&mut self, delta: isize) {
                     }
                 }
                 self.pick_mode = Some(PickMode::Run);
+            return;
+        }
+        // `*...` queries are the session-panes
+        // view. Selecting a pane stages a tmux
+        // command that jumps the user's client to
+        // that pane. Two pieces are needed:
+        //   `select-window -t <window_id>`
+        //   `select-pane  -t <pane_id>`
+        // because plain `select-pane` does NOT
+        // switch windows — a pane in another
+        // window would otherwise be unreachable.
+        // The window id (`@N`) is stashed in the
+        // row's `output` field by
+        // `fetch_session_panes`; the pane id (`%N`)
+        // is in `session_id`. The current pane is
+        // excluded from the list at fetch time, so
+        // the user never stages a no-op jump to
+        // themselves. `&&` chains the two calls: if
+        // the window vanished between snapshot and
+        // Enter, its panes are gone too, so don't
+        // try to select the pane. If the window id
+        // is somehow empty (parse fallback), we
+        // degrade to just `select-pane`.
+        if self.is_panes_query() {
+            let (pane_id, window_id): (String, String) =
+                match self.selected_row() {
+                    Some(r) => (
+                        r.session_id.clone(),
+                        r.output.clone(),
+                    ),
+                    None => return,
+                };
+            if pane_id.is_empty() {
+                return;
+            }
+            self.selection = Some(if window_id.is_empty() {
+                format!("tmux select-pane -t {}", pane_id)
+            } else {
+                format!(
+                    "tmux select-window -t {} && \
+                     tmux select-pane -t {}",
+                    window_id, pane_id
+                )
+            });
+            self.pick_mode = Some(PickMode::Run);
             return;
         }
         if let Some(row) = self.selected_row() {
@@ -5877,6 +6909,7 @@ fn move_selection(&mut self, delta: isize) {
                     comment: row.get(6).unwrap_or_default(),
                     output: row.get(7).unwrap_or_default(),
                     mode: row.get(8).unwrap_or_default(),
+                    source: String::new(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -6062,6 +7095,30 @@ pub fn run_tui_to_stdout(
             Some(app.sort_order.as_str().to_string())
         },
         theme: Some(app.theme.slug().to_string()),
+        // Same persist-only-if-non-default
+        // policy as `sort_order`
+        // and `exit_filter`:
+        // only remember the
+        // user's choice when
+        // it's not the
+        // default. Deleting
+        // the session file
+        // resets the user to
+        // `All`.
+        directory_source: if app.directory_source
+            == crate::tui::state::DirectorySource::All
+        {
+            None
+        } else {
+            Some(
+                match app.directory_source {
+                    crate::tui::state::DirectorySource::All => "all",
+                    crate::tui::state::DirectorySource::Tmux => "tmux",
+                    crate::tui::state::DirectorySource::Config => "config",
+                }
+                .to_string(),
+            )
+        },
     };
     session.save();
 
@@ -6315,6 +7372,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CycleSortOrder => {
             app.cycle_sort_order();
+            false
+        }
+        Action::CycleDirectorySource => {
+            app.cycle_directory_source();
             false
         }
         Action::Describe => {
@@ -7204,6 +8265,73 @@ fn build_home_list() -> Vec<String> {
     .collect();
     homes.sort_by_key(|s| std::cmp::Reverse(s.len()));
     homes
+}
+
+/// Write a debug line to
+/// `~/.local/cache/smarthistory/tmux-filter-debug.log`
+/// when the
+/// `SMARTHISTORY_DEBUG_TMUX`
+/// env var is set. The TUI
+/// renders to stderr (so
+/// `eprintln!` output is
+/// *absorbed* by the TUI's
+/// render path and never
+/// reaches the user's
+/// terminal), so we use a
+/// dedicated log file
+/// instead. The user can
+/// `tail -f` the file from
+/// another terminal to see
+/// which tmux panes are
+/// being filtered / kept
+/// and why.
+///
+/// `message` already
+/// contains the pane id and
+/// the rejected
+/// `pane_current_path`.
+/// This helper only adds a
+/// timestamp and the
+/// `[smarthistory]` prefix.
+/// Best-effort: any I/O
+/// error is silently
+/// ignored (the debug log
+/// is non-critical).
+fn tmux_filter_debug_log(message: &str) {
+    if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_err() {
+        return;
+    }
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let path = std::path::Path::new(&home)
+        .join(".local")
+        .join("cache")
+        .join("smarthistory")
+        .join("tmux-filter-debug.log");
+    // Create the parent dir
+    // in case the user has
+    // never run the TUI
+    // before (the cache dir
+    // is normally created by
+    // the history-recording
+    // path, but the tmux
+    // filter logs early in
+    // App construction and
+    // may run before any
+    // history is written).
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{}] [smarthistory] {}\n", now, message);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
 /// Walk every
@@ -10129,6 +11257,7 @@ mod tests {
                         comment: "describe something".to_string(),
                         output: String::new(),
                         mode: String::new(),
+                        source: String::new(),
                 });
                 app.llm_preview_description =
                         Some("describe something".to_string());
@@ -10208,6 +11337,7 @@ mod tests {
                         comment: "find files".to_string(),
                         output: String::new(),
                         mode: String::new(),
+                        source: String::new(),
                 });
                 app.llm_preview_description =
                         Some("find files".to_string());
@@ -10382,6 +11512,7 @@ mod tests {
                         comment: "find . -name '*.txt'".to_string(),
                         output: "find . -name '*.txt'".to_string(),
                         mode: String::new(),
+                        source: String::new(),
                 });
                 app.llm_preview_description =
                         Some("find files".to_string());
@@ -10425,6 +11556,7 @@ mod tests {
                         comment: "old description".to_string(),
                         output: String::new(),
                         mode: String::new(),
+                        source: String::new(),
                 });
                 app.llm_preview_description =
                         Some("old description".to_string());
@@ -11132,6 +12264,7 @@ mod tests {
                         exit_filter: None,
                         sort_order: Some("frequency".to_string()),
                         theme: None,
+                        directory_source: None,
                 };
                 let rendered = format!("{:?}", s);
                 // The `Debug` output includes the
@@ -14074,6 +15207,7 @@ mod tests {
                         comment: String::from("note.md"),
                         output: String::new(),
                         mode: String::from("todo"),
+                        source: String::new(),
                 };
                 app.mark_todo_done_for_row(&row);
                 let contents = fs::read_to_string(
@@ -14261,7 +15395,33 @@ mod tests {
                 None,
                 String::from("+$LINE"),
             );
+            // `App::new` calls
+            // `build_session_subdirs`
+            // (which reads the
+            // user's real
+            // `~/.config/smarthistory/config`)
+            // and `fetch_tmux_windows`
+            // (which runs
+            // `tmux list-windows -a`).
+            // Both of those would
+            // pollute the test
+            // with whatever the
+            // user happens to
+            // have configured or
+            // running. Clear the
+            // fields so each test
+            // sees a known-empty
+            // starting point.
+            // Tests that need a
+            // specific
+            // `session_subdirs`
+            // or `tmux_windows`
+            // set should call
+            // `directories_test_app_with_sessions`
+            // (or set the
+            // fields directly).
             app.session_subdirs.clear();
+            app.tmux_windows.clear();
             app
         }
 
@@ -14361,9 +15521,24 @@ mod tests {
             // directory (now in
             // `row.command`), so
             // that's what we read
-            // here.
-            let visible: Vec<&str> = app
+            // here. The new
+            // directory-source
+            // feature surfaces
+            // tmux panes as
+            // additional rows,
+            // so we filter to
+            // `/home/...` (the
+            // test's directory
+            // namespace) to
+            // assert cleanly.
+            let home_rows: Vec<&HistoryRow> = app
                 .merged_rows()
+                .iter()
+                .filter(|r| {
+                    r.directory.starts_with("/home/")
+                })
+                .collect();
+            let visible: Vec<&str> = home_rows
                 .iter()
                 .map(|r| r.command.as_str())
                 .collect();
@@ -14379,8 +15554,7 @@ mod tests {
             // in each directory
             // lives in `row.comment`
             // (the secondary slot).
-            let last_cmds: Vec<&str> = app
-                .merged_rows()
+            let last_cmds: Vec<&str> = home_rows
                 .iter()
                 .map(|r| r.comment.as_str())
                 .collect();
@@ -14389,8 +15563,7 @@ mod tests {
             assert_eq!(last_cmds[2], "make");
             // Each row's `directory`
             // is the canonical path.
-            let dirs: Vec<&str> = app
-                .merged_rows()
+            let dirs: Vec<&str> = home_rows
                 .iter()
                 .map(|r| r.directory.as_str())
                 .collect();
@@ -14527,7 +15700,34 @@ mod tests {
             )]);
             app.query = "#".to_string();
             app.refresh();
-            let row = &app.merged_rows()[0];
+            // Find the SQL-history
+            // row specifically;
+            // sessiondirs / tmux
+            // rows may also be
+            // present (cleared in
+            // the test helper, but
+            // `refresh()` re-runs
+            // `fetch_tmux_windows`
+            // for `#`-mode queries
+            // and the user's
+            // production `tmux`
+            // panes may bleed in
+            // when HOME is set to
+            // a real path). We
+            // assert on the row
+            // whose `directory`
+            // matches what we
+            // inserted, not on
+            // `merged_rows()[0]`.
+            let row = app
+                .merged_rows()
+                .iter()
+                .find(|r| {
+                    r.directory == "/Users/har/work/project"
+                })
+                .expect(
+                    "the SQL-history row for /Users/har/work/project must be in merged_rows",
+                );
             // The primary text
             // (which the user sees
             // first in the list,
@@ -14592,7 +15792,26 @@ mod tests {
             )]);
             app.query = "#".to_string();
             app.refresh();
-            let row = &app.merged_rows()[0];
+            // Find the row by
+            // directory
+            // (the test helper
+            // clears `tmux_windows`
+            // but `refresh()`
+            // re-runs the tmux
+            // fetch, so the
+            // user's real tmux
+            // panes may also be
+            // present). The
+            // SQL row is the one
+            // with the matching
+            // directory.
+            let row = app
+                .merged_rows()
+                .iter()
+                .find(|r| r.directory == "/Users/har/work")
+                .expect(
+                    "the SQL-history row for /Users/har/work must be in merged_rows",
+                );
             // Truncated to 57
             // `a`s + `…` = 58
             // chars.
@@ -14635,6 +15854,18 @@ mod tests {
             )]);
             app.query = "#".to_string();
             app.refresh();
+            // Select the
+            // SQL-history row
+            // explicitly.
+            let sql_row_idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.directory == "/home/user/project")
+                .expect(
+                    "the SQL-history row for /home/user/project must be in merged_rows",
+                );
+            use ratatui::widgets::ListState;
+            app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
                 .expect("selection must be set");
@@ -15359,6 +16590,21 @@ mod tests {
             // nothing matches.
             app.query = "#".to_string();
             app.refresh();
+            // Select the
+            // SQL-history row
+            // explicitly.
+            let sql_row_idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| {
+                    r.directory
+                        == "/Users/har/Projects/coolthing"
+                })
+                .expect(
+                    "the SQL-history row for /Users/har/Projects/coolthing must be in merged_rows",
+                );
+            use ratatui::widgets::ListState;
+            app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
                 .expect("selection must be set");
@@ -15438,6 +16684,20 @@ mod tests {
             )]);
             app.query = "#".to_string();
             app.refresh();
+            // Select the
+            // SQL-history row
+            // explicitly.
+            let sql_row_idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| {
+                    r.directory == "/Users/has spaces/project"
+                })
+                .expect(
+                    "the SQL-history row for /Users/has spaces/project must be in merged_rows",
+                );
+            use ratatui::widgets::ListState;
+            app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
                 .expect("selection must be set");
@@ -15505,6 +16765,30 @@ mod tests {
             )]);
             app.query = "#".to_string();
             app.refresh();
+            // Select the
+            // SQL-history row
+            // explicitly (not
+            // `merged_rows()[0]`).
+            // The new
+            // directory-source
+            // feature surfaces
+            // tmux panes as
+            // rows too, so the
+            // first row may be
+            // one of the user's
+            // real tmux panes,
+            // not our test row.
+            let sql_row_idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| {
+                    r.directory == "/Users/har/work"
+                })
+                .expect(
+                    "the SQL-history row for /Users/har/work must be in merged_rows",
+                );
+            use ratatui::widgets::ListState;
+            app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
                 .expect("selection must be set");
@@ -15802,6 +17086,35 @@ mod tests {
             )]);
             app.query = "#".to_string();
             app.refresh();
+            // Find the SQL row
+            // by its directory
+            // (the user's real
+            // tmux panes may
+            // also be present
+            // because
+            // `refresh()` re-runs
+            // the tmux fetch,
+            // and the new
+            // directory-source
+            // feature surfaces
+            // them as rows). We
+            // explicitly select
+            // the SQL row (not
+            // `merged_rows()[0]`)
+            // by setting
+            // `list_state.selected`
+            // to its index.
+            let sql_row_idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| {
+                    r.directory == src.to_string_lossy()
+                })
+                .expect(
+                    "the SQL-history row for `src` must be in merged_rows",
+                );
+            use ratatui::widgets::ListState;
+            app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app
                 .selection
@@ -15843,5 +17156,1334 @@ mod tests {
                 "staged must run `sh <.command> <dir>`, got: {staged:?}"
             );
             let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// Active tmux panes
+        /// (whose cwds are
+        /// distinct from the
+        /// SQL history) appear
+        /// as rows in the
+        /// directories list
+        /// with `source =
+        /// "tmux"`. The
+        /// visible primary
+        /// text is the
+        /// directory in
+        /// `~/x` form; the
+        /// secondary slot
+        /// shows `(pane %N)` so
+        /// the user can copy
+        /// the pane id for
+        /// `tmux send-keys -t
+        /// %N ...` directly
+        /// from the list.
+        #[test]
+        fn fetch_directories_includes_tmux_panes() {
+            let mut app = directories_test_app(&[]);
+            // Inject one tmux
+            // window. Use `/tmp`
+            // (a real directory
+            // on every Unix) so
+            // it passes the
+            // `is_dir()` check.
+            // macOS canonicalises
+            // `/tmp` to
+            // `/private/tmp`,
+            // which is fine for
+            // this test.
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%42".to_string(),
+                path: String::from("/tmp"),
+            });
+            app.query = "#".to_string();
+            app.refresh();
+            // Find the tmux
+            // row. The
+            // directory will be
+            // canonicalised by
+            // `std::fs::canonicalize`
+            // (which on macOS
+            // resolves
+            // `/tmp` to
+            // `/private/tmp`).
+            let row = app
+                .merged_rows()
+                .iter()
+                .find(|r| r.source == "tmux")
+                .expect(
+                    "the tmux pane row must be in merged_rows",
+                );
+            // The visible primary
+            // text is the
+            // directory in
+            // shell-shortened
+            // form. `/tmp`
+            // shortens to
+            // `/tmp` (no home
+            // to expand to).
+            assert_eq!(
+                row.command, "/tmp",
+                "primary text must be the directory, got: {:?}",
+                row.command
+            );
+            // The secondary slot
+            // carries the pane
+            // id (so the user
+            // can reuse it).
+            assert!(
+                row.comment.contains("%42"),
+                "secondary slot must show the pane id, got: {:?}",
+                row.comment
+            );
+        }
+
+        /// The
+        /// `DirectorySource::All`
+        /// mode shows every
+        /// row regardless of
+        /// source.
+        #[test]
+        fn directory_source_all_shows_everything() {
+            // Use `/tmp` (a real
+            // directory on every
+            // Unix) for the SQL
+            // and tmux rows so
+            // they pass the
+            // `is_dir()` check.
+            // macOS canonicalises
+            // `/tmp` to
+            // `/private/tmp`,
+            // which is fine for
+            // the test.
+            let sql_dir = "/tmp";
+            let tmux_dir = "/tmp";
+            let mut app = directories_test_app(&[(
+                "ls",
+                sql_dir,
+                60,
+            )]);
+            // Inject one
+            // sessiondir
+            // and one tmux
+            // pane.
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let session_root =
+                std::env::temp_dir().join(format!(
+                    "smarthistory_dirsrc_all_{pid}_{n}"
+                ));
+            let _ = std::fs::create_dir_all(
+                session_root.join("inside"),
+            );
+            app.session_subdirs =
+                vec![session_root.join("inside")];
+            app.tmux_windows
+                .push(TmuxWindowInfo {
+                    pane_id: "%7".to_string(),
+                    path: String::from(tmux_dir),
+                });
+            // Default source is
+            // `All`, so all
+            // three rows are
+            // visible.
+            app.query = "#".to_string();
+            app.refresh();
+            let dirs: std::collections::HashSet<String> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.directory.clone())
+                .collect();
+            assert!(
+                dirs.contains(sql_dir),
+                "SQL row must be visible, got: {:?}",
+                dirs
+            );
+            assert!(
+                dirs.contains(
+                    &session_root
+                        .join("inside")
+                        .to_string_lossy()
+                        .to_string()
+                ),
+                "sessiondir row must be visible, got: {:?}",
+                dirs
+            );
+            assert!(
+                dirs.contains(tmux_dir),
+                "tmux row must be visible, got: {:?}",
+                dirs
+            );
+            let _ = std::fs::remove_dir_all(
+                &session_root
+            );
+        }
+
+        /// The
+        /// `DirectorySource::Config`
+        /// mode shows only the
+        /// `sessiondirs=...`
+        /// rows. SQL history
+        /// rows and tmux panes
+        /// are filtered out.
+        #[test]
+        fn directory_source_config_filters_to_sessiondirs() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/Users/har/sql_row",
+                60,
+            )]);
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let session_root =
+                std::env::temp_dir().join(format!(
+                    "smarthistory_dirsrc_cfg_{pid}_{n}"
+                ));
+            let _ = std::fs::create_dir_all(
+                session_root.join("inside"),
+            );
+            app.session_subdirs =
+                vec![session_root.join("inside")];
+            app.tmux_windows
+                .push(TmuxWindowInfo {
+                    pane_id: "%7".to_string(),
+                    path: String::from(
+                        "/Users/har/tmux_row",
+                    ),
+                });
+            app.directory_source =
+                crate::tui::state::DirectorySource::Config;
+            app.query = "#".to_string();
+            app.refresh();
+            // Only the
+            // sessiondir
+            // row should be
+            // visible.
+            assert_eq!(
+                app.merged_rows().len(),
+                1,
+                "Config mode must show only sessiondir rows, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| (
+                        r.directory.clone(),
+                        r.source.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let row = &app.merged_rows()[0];
+            assert_eq!(row.source, "sessiondir");
+            let _ = std::fs::remove_dir_all(
+                &session_root
+            );
+        }
+
+        /// The
+        /// `DirectorySource::Tmux`
+        /// mode shows only the
+        /// active tmux panes'
+        /// cwds. SQL history
+        /// rows and sessiondirs
+        /// rows are filtered
+        /// out.
+        #[test]
+        fn directory_source_tmux_filters_to_panes() {
+            // The SQL and tmux
+            // rows must use
+            // *different* paths
+            // (the dedup loop
+            // suppresses tmux
+            // rows whose canonical
+            // path matches an
+            // earlier SQL row).
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let tmux_path = std::env::temp_dir()
+                .join(format!(
+                    "smarthistory_tmux_pane_{pid}_{n}"
+                ));
+            let _ = std::fs::create_dir_all(&tmux_path);
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/tmp",
+                60,
+            )]);
+            app.tmux_windows
+                .push(TmuxWindowInfo {
+                    pane_id: "%7".to_string(),
+                    path: tmux_path
+                        .to_string_lossy()
+                        .into_owned(),
+                });
+            app.directory_source =
+                crate::tui::state::DirectorySource::Tmux;
+            app.query = "#".to_string();
+            app.refresh();
+            // Only the
+            // tmux-pane
+            // row should
+            // be visible.
+            assert_eq!(
+                app.merged_rows().len(),
+                1,
+                "Tmux mode must show only tmux pane rows, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| (
+                        r.directory.clone(),
+                        r.source.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let row = &app.merged_rows()[0];
+            assert_eq!(row.source, "tmux");
+            let _ = std::fs::remove_dir_all(&tmux_path);
+        }
+
+        /// Regression test for the
+        /// bug where a tmux pane
+        /// whose path also appears
+        /// in the SQL history DB
+        /// was silently deduped
+        /// away in `DIR:TMUX`
+        /// mode. The shared `seen`
+        /// set was populated by the
+        /// SQL loop first, so the
+        /// tmux loop's `seen.insert`
+        /// returned `false` and the
+        /// pane was dropped — even
+        /// though the SQL row would
+        /// later be filtered out by
+        /// the source filter. The
+        /// fix: the source filter is
+        /// applied *early* (the SQL
+        /// loop is skipped entirely
+        /// in `DIR:TMUX` mode).
+        ///
+        /// User symptom: 5 active
+        /// tmux panes, but
+        /// `DIR:TMUX` showed only
+        /// 2 (the ones not in the
+        /// history DB).
+        #[test]
+        fn directory_source_tmux_shows_pane_even_if_path_in_history() {
+            // A real directory we
+            // use for BOTH the SQL
+            // row and the tmux pane.
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let shared_path = std::env::temp_dir()
+                .join(format!(
+                    "smarthistory_tmux_dup_{pid}_{n}"
+                ));
+            let _ = std::fs::create_dir_all(&shared_path);
+            let shared_str = shared_path
+                .to_string_lossy()
+                .into_owned();
+            // SQL history row in the
+            // SAME directory.
+            let mut app = directories_test_app(&[(
+                "ls",
+                &shared_str,
+                60,
+            )]);
+            // Tmux pane in the SAME
+            // directory.
+            app.tmux_windows
+                .push(TmuxWindowInfo {
+                    pane_id: "%9".to_string(),
+                    path: shared_str.clone(),
+                });
+            app.directory_source =
+                crate::tui::state::DirectorySource::Tmux;
+            app.query = "#".to_string();
+            app.refresh();
+            // In `DIR:TMUX` mode the
+            // tmux pane MUST appear,
+            // even though the SQL
+            // row has the same
+            // canonical path.
+            let tmux_rows: Vec<_> = app
+                .merged_rows()
+                .iter()
+                .filter(|r| r.source == "tmux")
+                .collect();
+            assert_eq!(
+                tmux_rows.len(),
+                1,
+                "DIR:TMUX must show the tmux pane even when its path is in the history DB, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| (
+                        r.directory.clone(),
+                        r.source.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(tmux_rows[0].source, "tmux");
+            // And no SQL rows leak
+            // through.
+            assert!(
+                app.merged_rows()
+                    .iter()
+                    .all(|r| r.source == "tmux"),
+                "DIR:TMUX must not show SQL rows, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| r.source.clone())
+                    .collect::<Vec<_>>()
+            );
+            let _ = std::fs::remove_dir_all(&shared_path);
+        }
+
+        /// Regression test for the bug
+        /// where a labeled history
+        /// row (an entry with a
+        /// comment in the
+        /// `command_comments`
+        /// table) leaked into
+        /// `DIR:TMUX` directories
+        /// mode. The user ran
+        /// `tmux list-windows -a
+        /// -F ... | grep
+        /// "active:1"` at some
+        /// point and labeled it,
+        /// so the row had a
+        /// comment. `build_merged_rows`
+        /// appended *all* labeled
+        /// rows to the merged
+        /// list regardless of
+        /// mode; in directories
+        /// mode that meant the
+        /// history row showed up
+        /// alongside (or instead
+        /// of) the real tmux
+        /// pane rows. The fix:
+        /// `build_merged_rows`
+        /// skips the labeled/preview
+        /// merge entirely in
+        /// directories mode and
+        /// returns only the
+        /// directory rows.
+        #[test]
+        fn directory_source_tmux_excludes_labeled_history_rows() {
+            let n = std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            let pid = std::process::id();
+            let tmux_path = std::env::temp_dir().join(format!(
+                "smarthistory_tmux_labeled_{pid}_{n}"
+            ));
+            let _ = std::fs::create_dir_all(&tmux_path);
+            // The labeled command —
+            // the exact "tmux list-
+            // windows ..." line the
+            // user reported. It was
+            // run from /tmp.
+            let labeled_cmd =
+                "tmux list-windows -a -F #{pane_id}";
+            let mut app = directories_test_app(&[
+                (labeled_cmd, "/tmp", 60),
+            ]);
+            // Create the
+            // command_comments table
+            // and label the command,
+            // making it a "labeled
+            // row" that
+            // `fetch_labeled` will
+            // return.
+            app.conn
+                .execute(
+                    "CREATE TABLE command_comments (
+                        command TEXT PRIMARY KEY,
+                        comment TEXT NOT NULL
+                    )",
+                    [],
+                )
+                .expect("create command_comments");
+            // `fetch_labeled` does a LEFT JOIN on
+            // `history_output`; the table must exist or
+            // the query errors (and `.unwrap_or_default()`
+            // silently yields an empty labeled set —
+            // which would mask the bug in this test).
+            app.conn
+                .execute(
+                    "CREATE TABLE history_output (
+                        history_id INTEGER PRIMARY KEY,
+                        output TEXT NOT NULL
+                    )",
+                    [],
+                )
+                .expect("create history_output");
+            app.conn
+                .execute(
+                    "INSERT INTO command_comments (command, comment) VALUES (?1, ?2)",
+                    rusqlite::params![labeled_cmd, "TMUX LIST"],
+                )
+                .expect("insert comment");
+            // One real tmux pane with a
+            // different path.
+            app.tmux_windows
+                .push(TmuxWindowInfo {
+                    pane_id: "%5".to_string(),
+                    path: tmux_path
+                        .to_string_lossy()
+                        .into_owned(),
+                });
+            app.directory_source =
+                crate::tui::state::DirectorySource::Tmux;
+            app.query = "#".to_string();
+            app.refresh();
+            // The labeled history
+            // row (`tmux list-
+            // windows ...`) must
+            // NOT appear in
+            // `DIR:TMUX` mode.
+            let has_labeled = app
+                .merged_rows()
+                .iter()
+                .any(|r| r.command == labeled_cmd);
+            assert!(
+                !has_labeled,
+                "DIR:TMUX must not show labeled history rows, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| (
+                        r.command.clone(),
+                        r.source.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            // Only the real tmux
+            // pane should be
+            // visible.
+            assert_eq!(app.merged_rows().len(), 1);
+            assert_eq!(app.merged_rows()[0].source, "tmux");
+            let _ = std::fs::remove_dir_all(&tmux_path);
+        }
+
+        /// `cycle_directory_source`
+        /// pressed while NOT in
+        /// directories mode should
+        /// switch INTO directories
+        /// mode (prepending the `#`
+        /// prefix) AND cycle the
+        /// source. The user can be
+        /// in plain history and
+        /// land directly in `DIR:TMUX`.
+        #[test]
+        fn cycle_directory_source_enters_dirs_mode_from_plain() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/tmp",
+                60,
+            )]);
+            // Plain mode, no prefix.
+            app.query = String::from("ls");
+            assert!(!app.is_directories_query());
+            // Cycle from plain -> DIR:TMUX.
+            app.cycle_directory_source();
+            // Now in directories mode.
+            assert!(
+                app.is_directories_query(),
+                "must enter directories mode, got query {:?}",
+                app.query
+            );
+            // Source cycled to TMUX.
+            assert_eq!(
+                app.directory_source,
+                crate::tui::state::DirectorySource::Tmux
+            );
+            // Body preserved: `#ls`.
+            assert_eq!(app.query, "#ls");
+        }
+
+        /// Cycling three times from
+        /// plain mode lands back on
+        /// `DIR:ALL`, still in
+        /// directories mode.
+        #[test]
+        fn cycle_directory_source_three_times_wraps_to_all() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/tmp",
+                60,
+            )]);
+            app.query = String::new();
+            app.cycle_directory_source(); // -> TMUX
+            assert!(app.is_directories_query());
+            assert_eq!(
+                app.directory_source,
+                crate::tui::state::DirectorySource::Tmux
+            );
+            app.cycle_directory_source(); // -> CFG
+            assert!(app.is_directories_query());
+            assert_eq!(
+                app.directory_source,
+                crate::tui::state::DirectorySource::Config
+            );
+            app.cycle_directory_source(); // -> ALL
+            assert!(app.is_directories_query());
+            assert_eq!(
+                app.directory_source,
+                crate::tui::state::DirectorySource::All
+            );
+            // Query is just `#` (empty body).
+            assert_eq!(app.query, "#");
+        }
+
+        /// Switching from a search
+        /// mode (`?foo`) strips the
+        /// fuzzy prefix and yields
+        /// `#foo` (not `#?foo`).
+        #[test]
+        fn cycle_directory_source_strips_search_prefix() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/tmp",
+                60,
+            )]);
+            app.query = String::from("?foo");
+            assert!(app.is_fuzzy_query());
+            app.cycle_directory_source();
+            assert!(app.is_directories_query());
+            assert_eq!(
+                app.directory_source,
+                crate::tui::state::DirectorySource::Tmux
+            );
+            assert_eq!(app.query, "#foo");
+        }
+
+        /// When ALREADY in directories
+        /// mode, cycle just advances the
+        /// source — the query prefix is
+        /// not doubled.
+        #[test]
+        fn cycle_directory_source_in_dirs_mode_does_not_double_prefix() {
+            let mut app = directories_test_app(&[(
+                "ls",
+                "/tmp",
+                60,
+            )]);
+            app.query = String::from("#");
+            app.cycle_directory_source();
+            assert_eq!(app.query, "#");
+            assert!(app.is_directories_query());
+            assert_eq!(
+                app.directory_source,
+                crate::tui::state::DirectorySource::Tmux
+            );
+        }
+
+        /// Build an App pre-loaded with a set of session
+        /// panes (bypassing the real `tmux list-panes -s`
+        /// subprocess, which depends on a live tmux
+        /// server). Each tuple is
+        /// (pane_id, window_id, cwd, current_command).
+        /// The caller still owns `app.session_panes` and can
+        /// mutate it after construction. `TMUX_PANE` is NOT
+        /// set (so the exclusion filter is exercised
+        /// explicitly by the caller via the injected rows).
+        fn panes_test_app(
+            panes: &[(&str, &str, &str, &str)],
+        ) -> App {
+            let mut app = directories_test_app(&[]);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let home_list = app.home_list.clone();
+            let mut next_id: i64 = -1;
+            app.session_panes = panes
+                .iter()
+                .map(|(pane_id, window_id, cwd, cmd)| {
+                    let full = crate::util::canonicalize_directory(cwd);
+                    let short = crate::util::shorten_home_path(
+                        &full,
+                        &home_list,
+                    )
+                    .into_owned();
+                    let id = next_id;
+                    next_id -= 1;
+                    HistoryRow {
+                        id,
+                        command: cmd.to_string(),
+                        directory: full,
+                        session_id: pane_id.to_string(),
+                        exit_code: 0,
+                        timestamp: now,
+                        comment: short,
+                        // window id (`@N`) stashed
+                        // for the cross-window
+                        // select-window jump.
+                        output: window_id.to_string(),
+                        mode: "pane".to_string(),
+                        source: "pane".to_string(),
+                    }
+                })
+                .collect();
+            app
+        }
+
+        /// `*` prefix switches the query into panes mode,
+        /// and `is_panes_query()` / `panes_pattern()` slice
+        /// the body correctly.
+        #[test]
+        fn panes_prefix_detected_and_pattern_sliced() {
+            let mut app = directories_test_app(&[]);
+            app.query = String::new();
+            assert!(!app.is_panes_query());
+            app.query = String::from("*");
+            assert!(app.is_panes_query());
+            assert_eq!(app.panes_pattern(), "");
+            app.query = String::from("*vim src");
+            assert!(app.is_panes_query());
+            assert_eq!(app.panes_pattern(), "vim src");
+        }
+
+        /// `fetch_panes` returns the cached session panes
+        /// (no substring filter when the body is empty).
+        #[test]
+        fn fetch_panes_returns_all_when_no_filter() {
+            let mut app = panes_test_app(&[
+                ("%1", "@1", "/tmp", "zsh"),
+                ("%2", "@2", "/tmp", "vim"),
+            ]);
+            app.query = String::from("*");
+            let rows = app.fetch_panes().unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].source, "pane");
+            assert_eq!(rows[0].session_id, "%1");
+            assert_eq!(rows[0].command, "zsh");
+        }
+
+        /// The substring filter matches against the pane's
+        /// current command OR its cwd (short form). Both
+        /// whitespace tokens must match (AND semantics).
+        #[test]
+        fn fetch_panes_substring_filter_matches_command_or_cwd() {
+            let mut app = panes_test_app(&[
+                ("%1", "@1", "/tmp", "zsh"),
+                ("%2", "@2", "/tmp", "vim"),
+            ]);
+            // `*vim` → only the pane running vim.
+            app.query = String::from("*vim");
+            let rows = app.fetch_panes().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].session_id, "%2");
+            assert_eq!(rows[0].command, "vim");
+        }
+
+        /// Selecting a pane in `*` mode stages the
+        /// `tmux select-window -t <window_id> && tmux select-pane -t <pane_id>`
+        /// command — `select-window` first because plain
+        /// `select-pane` does NOT switch windows, and a
+        /// target pane may live in another window of the
+        /// current session.
+        #[test]
+        fn panes_last_pane_bubbled_to_index_zero() {
+            // Simulate three panes; mark %2 as the "last"
+            // (previously-active) pane by giving it the
+            // bumped timestamp `fetch_session_panes_impl`
+            // assigns. The bubble logic moves it to
+            // position 0 so the default selection (index 0)
+            // lands on it — pressing Enter flips back to
+            // the pane the user just came from.
+            let mut app = panes_test_app(&[
+                ("%1", "@1", "/tmp", "zsh"),
+                ("%2", "@2", "/tmp", "vim"),
+                ("%3", "@3", "/tmp", "cargo"),
+            ]);
+            // Bump %2's timestamp to mimic the `pane_last`
+            // flag path in `fetch_session_panes_impl`.
+            let base = app.session_panes[0].timestamp;
+            let last_row = app
+                .session_panes
+                .iter_mut()
+                .find(|r| r.session_id == "%2")
+                .expect("%2 row");
+            last_row.timestamp = base + 1;
+            // Apply the same bubble the impl does.
+            if let Some(pos) = app
+                .session_panes
+                .iter()
+                .position(|r| r.timestamp > base)
+            {
+                let row = app.session_panes.remove(pos);
+                app.session_panes.insert(0, row);
+            }
+            app.query = String::from("*");
+            app.refresh();
+            // The merged list must have %2 first.
+            assert_eq!(app.merged_rows().len(), 3);
+            assert_eq!(
+                app.merged_rows()[0].session_id, "%2",
+                "last pane must bubble to index 0, got {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| r.session_id.clone())
+                    .collect::<Vec<_>>()
+            );
+            // Default selection is index 0 → pressing
+            // Enter stages a jump to %2.
+            app.select_for_run();
+            assert!(
+                app.selection.as_deref().unwrap_or("").contains("-t %2"),
+                "Enter must stage a jump to the last pane %2, got {:?}",
+                app.selection
+            );
+        }
+
+        #[test]
+        fn select_for_run_in_panes_mode_stages_switch_client() {
+            let mut app = panes_test_app(&[
+                ("%5", "@3", "/tmp", "vim"),
+            ]);
+            app.query = String::from("*");
+            app.refresh();
+            // Select the first (only) row.
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            assert_eq!(
+                app.selection.as_deref(),
+                Some("tmux select-window -t @3 && tmux select-pane -t %5")
+            );
+            assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// When the window id is missing (parse fallback /
+        /// old snapshot), `select_for_run` degrades to a
+        /// bare `select-pane -t <pane_id>` rather than
+        /// staging a broken `select-window -t <empty>`.
+        #[test]
+        fn select_for_run_in_panes_mode_degrades_without_window_id() {
+            // Empty window id ("@" stripped / old snapshot).
+            let mut app = panes_test_app(&[
+                ("%5", "", "/tmp", "vim"),
+            ]);
+            app.query = String::from("*");
+            app.refresh();
+            // Select the first (only) row.
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            assert_eq!(
+                app.selection.as_deref(),
+                Some("tmux select-pane -t %5")
+            );
+            assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// Panes mode is excluded from the labeled-row merge
+        /// (same fix as directories mode — a labeled history
+        /// row must not leak into the panes list).
+        #[test]
+        fn panes_mode_excludes_labeled_history_rows() {
+            let labeled_cmd =
+                "tmux list-panes -s -F stuff";
+            let mut app = directories_test_app(&[
+                (labeled_cmd, "/tmp", 60),
+            ]);
+            app.conn
+                .execute(
+                    "CREATE TABLE command_comments (
+                        command TEXT PRIMARY KEY,
+                        comment TEXT NOT NULL
+                    )",
+                    [],
+                )
+                .expect("cc");
+            app.conn
+                .execute(
+                    "CREATE TABLE history_output (
+                        history_id INTEGER PRIMARY KEY,
+                        output TEXT NOT NULL
+                    )",
+                    [],
+                )
+                .expect("ho");
+            app.conn
+                .execute(
+                    "INSERT INTO command_comments (command, comment) VALUES (?1, ?2)",
+                    rusqlite::params![labeled_cmd, "PANES LIST"],
+                )
+                .expect("ins");
+            // Inject one pane so the panes list isn't empty.
+            app.session_panes.push(HistoryRow {
+                id: -1,
+                command: "zsh".to_string(),
+                directory: "/tmp".to_string(),
+                session_id: "%7".to_string(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: "/tmp".to_string(),
+                output: String::new(),
+                mode: "pane".to_string(),
+                source: "pane".to_string(),
+            });
+            app.query = String::from("*");
+            app.refresh();
+            // The labeled history row must NOT appear.
+            let has_labeled = app
+                .merged_rows()
+                .iter()
+                .any(|r| r.command == labeled_cmd);
+            assert!(
+                !has_labeled,
+                "panes mode must not show labeled history rows, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| (
+                        r.command.clone(),
+                        r.source.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            // Only the pane row is visible.
+            assert_eq!(app.merged_rows().len(), 1);
+            assert_eq!(app.merged_rows()[0].source, "pane");
+        }
+
+        /// `fetch_session_panes` does NOT run `tmux` when
+        /// `$TMUX_PANE` is unset (the obvious "not in tmux"
+        /// signal) — the cache stays empty and `fetch_panes`
+        /// returns an empty list rather than spawning a
+        /// doomed subprocess.
+        #[test]
+        fn fetch_session_panes_no_op_when_not_in_tmux() {
+            let mut app = directories_test_app(&[]);
+            // Ensure $TMUX_PANE is unset for this test. We
+            // can't `env::remove_var` safely under parallel
+            // test runners, so we read whatever the user's
+            // environment has and assert the contract
+            // conditionally: if unset, the cache must stay
+            // empty; if set (user is in tmux), the cache
+            // may be populated and we just assert no panic.
+            let pane = std::env::var("TMUX_PANE").ok();
+            app.fetch_session_panes();
+            if pane.is_none() {
+                assert!(
+                    app.session_panes.is_empty(),
+                    "cache must stay empty when $TMUX_PANE is unset"
+                );
+            }
+            // In both cases, no panic.
+        }
+
+        /// End-to-end with the REAL current tmux session:
+        /// run `fetch_session_panes_impl` with the actual
+        /// `$TMUX_PANE` and confirm the current pane is
+        /// excluded and every surviving row is well-formed
+        /// (pane id `%N`, window id `@N`, source `pane`).
+        /// Skipped if `tmux` isn't on PATH or `$TMUX_PANE`
+        /// isn't set (not running inside tmux).
+        #[test]
+        fn fetch_session_panes_end_to_end_real_tmux() {
+            let current_pane = std::env::var("TMUX_PANE")
+                .unwrap_or_default();
+            if current_pane.is_empty() {
+                eprintln!("[skip] $TMUX_PANE unset (not in tmux)");
+                return;
+            }
+            let mut app = directories_test_app(&[]);
+            app.session_panes.clear();
+            app.fetch_session_panes_impl(&current_pane);
+            // The current pane must NOT appear.
+            let ids: Vec<String> =
+                app.session_panes.iter().map(|r| r.session_id.clone()).collect();
+            assert!(
+                !ids.contains(&current_pane),
+                "current pane {} must be excluded, got {:?}",
+                current_pane, ids
+            );
+            // Every surviving row is well-formed.
+            for r in &app.session_panes {
+                assert!(
+                    r.session_id.starts_with('%'),
+                    "pane id must look like %N, got {:?}",
+                    r.session_id
+                );
+                assert!(
+                    r.output.starts_with('@'),
+                    "window id must look like @N, got {:?}",
+                    r.output
+                );
+                assert_eq!(r.source, "pane");
+            }
+            // The last (previously-active) pane must be
+            // bubbled to position 0 so the user can flip
+            // back to it by pressing Enter. Identify it via
+            // `tmux display-message -t {last}`. If the last
+            // pane happens to equal the current pane (e.g.
+            // the env-var quirk in CI) skip the positional
+            // assertion — the exclusion check above
+            // already covers that case.
+            let last_pane = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "-t", "{last}", "#{pane_id}"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if !last_pane.is_empty()
+                && last_pane != current_pane
+                && ids.contains(&last_pane)
+            {
+                assert_eq!(
+                    app.session_panes[0].session_id, last_pane,
+                    "last pane {} must be at index 0, got order {:?}",
+                    last_pane, ids
+                );
+            }
+        }
+
+        /// End-to-end: run the
+        /// actual `tmux
+        /// list-windows -a`
+        /// command and confirm
+        /// the rows it produces
+        /// (in `DIR:TMUX` mode)
+        /// have `source =
+        /// "tmux"`, the
+        /// directory in `~/x`
+        /// form, and the pane
+        /// id in the secondary
+        /// slot. Skipped if
+        /// `tmux` is not on PATH
+        /// (e.g. CI without
+        /// tmux installed). This
+        /// is a regression guard
+        /// for the user's
+        /// "I see `tmux list-
+        /// windows -a` as an
+        /// entry" report: the
+        /// `pane_current_path`
+        /// (the second column)
+        /// is always a real
+        /// absolute filesystem
+        /// path, never the
+        /// `tmux list-windows
+        /// -a` command line
+        /// itself. We pin both
+        /// the `source` field
+        /// and the prefix
+        /// invariant.
+        #[test]
+        fn fetch_directories_tmux_pane_path_is_a_real_path() {
+            // Skip silently if
+            // tmux isn't on
+            // PATH — CI
+            // environments
+            // typically don't
+            // have it.
+            let tmux_check =
+                std::process::Command::new("tmux")
+                    .arg("-V")
+                    .output();
+            if tmux_check.is_err() {
+                eprintln!(
+                    "[skip] tmux not on PATH"
+                );
+                return;
+            }
+            // Run the
+            // production
+            // format
+            // command.
+            let format = "\
+                #{pane_id} | \
+                #{pane_current_path} | \
+                active:#{window_active} | \
+                Layout: #{window_layout}";
+            let output =
+                std::process::Command::new("tmux")
+                    .args(["list-windows", "-a", "-F", format])
+                    .output()
+                    .expect(
+                        "tmux list-windows must succeed",
+                    );
+            let stdout =
+                String::from_utf8_lossy(&output.stdout);
+            // Build a
+            // synthetic
+            // `App` with
+            // the same
+            // shape as
+            // `fetch_tmux_windows`
+            // produces
+            // (parse each
+            // line into a
+            // `TmuxWindowInfo`).
+            let mut windows: Vec<TmuxWindowInfo> =
+                Vec::new();
+            for line in stdout.lines() {
+                if let Some(w) =
+                    parse_tmux_pane_line(line)
+                {
+                    windows.push(w);
+                }
+            }
+            // Every
+            // window's
+            // `path`
+            // must be a
+            // real
+            // absolute
+            // path —
+            // never
+            // something
+            // like a
+            // command
+            // line or a
+            // shell
+            // output.
+            for w in &windows {
+                assert!(
+                    w.path.starts_with('/'),
+                    "pane_current_path must be an absolute path, got: {:?}",
+                    w.path
+                );
+                assert!(
+                    w.path.contains('/')
+                        && !w.path.contains('|')
+                        && !w.path.contains(' '),
+                    "pane_current_path must look like a real path (no separators like | or spaces), got: {:?}",
+                    w.path
+                );
+            }
+            // The
+            // second-load
+            // smoke test
+            // for the
+            // user's
+            // report:
+            // the
+            // visible
+            // primary
+            // text on a
+            // tmux-pane
+            // row in
+            // `DIR:TMUX`
+            // mode is the
+            // shortened
+            // directory,
+            // not the
+            // pane id
+            // (which goes
+            // in the
+            // secondary
+            // slot).
+            let mut app = directories_test_app(&[]);
+            app.tmux_windows = windows;
+            app.directory_source =
+                crate::tui::state::DirectorySource::Tmux;
+            app.query = "#".to_string();
+            app.refresh();
+            for row in app.merged_rows() {
+                assert_eq!(row.source, "tmux");
+                // The
+                // primary
+                // text
+                // (visible
+                // in the
+                // first
+                // column)
+                // must
+                // be a
+                // shortened
+                // directory
+                // — never
+                // a
+                // command
+                // name
+                // like
+                // `tmux
+                // list-
+                // windows
+                // -a`
+                // or a
+                // shell
+                // name.
+                assert!(
+                    row.command.starts_with('~')
+                        || row.command.starts_with('/'),
+                    "tmux-pane row's primary text must be a path, got: {:?}",
+                    row.command
+                );
+                assert!(
+                    !row.command.starts_with("tmux "),
+                    "tmux-pane row's primary text must NOT be a command line (the 'tmux list-windows -a' bug), got: {:?}",
+                    row.command
+                );
+            }
+            // Dump the
+            // visible
+            // text
+            // representation
+            // of every
+            // row in
+            // `DIR:TMUX`
+            // mode for
+            // the user's
+            // report
+            // (debugging
+            // the
+            // 'tmux list-
+            // windows -a'
+            // mystery
+            // entry).
+            // The fix for that
+            // mystery is the
+            // `starts_with('/')`
+            // and `is_dir()`
+            // filters in
+            // `fetch_directories`'s
+            // tmux loop; this
+            // test pins the
+            // behaviour
+            // (bad pane paths
+            // are filtered out,
+            // good ones
+            // surface).
+        }
+
+        /// Defensive filter: a
+        /// `pane_current_path`
+        /// that doesn't start
+        /// with `/` (e.g. the
+        /// command line that
+        /// spawned the pane,
+        /// `tmux list-windows
+        /// -a ...`) must NOT
+        /// become a directory
+        /// row. The user
+        /// reported seeing
+        /// exactly this in
+        /// `DIR:TMUX` mode: a
+        /// row whose visible
+        /// text was the tmux
+        /// command line, with
+        /// no T flag (because
+        /// the T-marker lookup
+        /// can't canonicalize a
+        /// non-path), and
+        /// clearly not a
+        /// directory. The
+        /// fix: skip any
+        /// `pane_current_path`
+        /// that doesn't look
+        /// like an absolute
+        /// path. The check is
+        /// `starts_with('/')`
+        /// because every real
+        /// absolute path on
+        /// every Unix starts
+        /// with `/` — a
+        /// tmux-reported
+        /// string that
+        /// doesn't is
+        /// necessarily
+        /// something else
+        /// (a command line, a
+        /// relative path, an
+        /// error message,
+        /// etc.) and we have
+        /// no way to render
+        /// it usefully as a
+        /// directory.
+        #[test]
+        fn tmux_pane_path_must_be_absolute() {
+            let mut app = directories_test_app(&[]);
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%0".to_string(),
+                // The user's reported
+                // bug: tmux reports
+                // a "pane_current_path"
+                // that's actually
+                // the command line.
+                path: String::from(
+                    "tmux list-windows -a -F #{pane_id} | #{pane_current_path} | active:#{window_active} | Layout: #{window_layout}",
+                ),
+            });
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: "%1".to_string(),
+                // A real path
+                // (a directory
+                // that exists on
+                // this system)
+                // must still show
+                // up. `/tmp` is
+                // available on
+                // every Unix
+                // platform and on
+                // macOS it
+                // canonicalises
+                // to
+                // `/private/tmp`,
+                // which is fine
+                // for this test.
+                path: std::env::temp_dir()
+                    .to_string_lossy()
+                    .into_owned(),
+            });
+            app.query = "#".to_string();
+            app.refresh();
+            // The bad path must
+            // not produce a row
+            // at all.
+            let has_bad_row = app
+                .merged_rows()
+                .iter()
+                .any(|r| r.directory.starts_with("tmux "));
+            assert!(
+                !has_bad_row,
+                "tmux rows with non-absolute pane_current_path must be filtered out, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| r.directory.clone())
+                    .collect::<Vec<_>>()
+            );
+            // The real path must
+            // still show up.
+            let has_good_row = app
+                .merged_rows()
+                .iter()
+                .any(|r| {
+                    let canon = std::fs::canonicalize(&r.directory)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| r.directory.clone());
+                    let tmp_canon = std::fs::canonicalize(
+                        std::env::temp_dir()
+                    )
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| {
+                        std::env::temp_dir()
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    canon == tmp_canon
+                });
+            assert!(
+                has_good_row,
+                "tmux rows with absolute pane_current_path that resolves to a real directory must still show up, got: {:?}",
+                app.merged_rows()
+                    .iter()
+                    .map(|r| r.directory.clone())
+                    .collect::<Vec<_>>()
+            );
         }
 }

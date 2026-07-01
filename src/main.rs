@@ -774,6 +774,20 @@ pub struct QueryPrefixes {
     /// stages a `cd <path>` command and exits
     /// the TUI so the parent shell runs it.
     pub directories: char,
+    /// Prefix for the session-panes view
+    /// (default `*`). Lists every pane in the
+    /// *current* tmux session — excluding the
+    /// pane the TUI is running in (read from
+    /// `$TMUX_PANE`) — with the pane's current
+    /// command as the primary text, the pane's
+    /// cwd (shortened `~/x`) as the secondary
+    /// text, and the pane id (`%N`) staged for
+    /// the `select-pane` / `switch-client`
+    /// action on Enter. Useful as a quick
+    /// "what else is running in this session?"
+    /// overview that lets the user jump to a
+    /// pane without tearing down the TUI.
+    pub panes: char,
 }
 
 impl Default for QueryPrefixes {
@@ -787,6 +801,7 @@ impl Default for QueryPrefixes {
             notes: '@',
             todo: '!',
             directories: '#',
+            panes: '*',
         }
     }
 }
@@ -1525,6 +1540,7 @@ impl Config {
             "notes" => prefixes.notes = c,
             "todo" => prefixes.todo = c,
             "directories" => prefixes.directories = c,
+            "panes" => prefixes.panes = c,
             _ => {}
         }
     }

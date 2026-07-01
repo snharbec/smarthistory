@@ -178,7 +178,7 @@ section below and the full reference in [TECHNICAL.md](TECHNICAL.md).
 
 # Search modes
 
-The TUI's query bar accepts eight different *search modes*,
+The TUI's query bar accepts nine different *search modes*,
 selected by the leading character of the query. Each mode
 answers a different question about the user's history. The
 table below summarises the modes; the paragraphs after it
@@ -195,13 +195,15 @@ describe each in detail.
 | Notes         | `@`    | "Find a note matching this query."               | `note_search` DB     |
 | Todo          | `!`    | "Show me my open todos matching this."           | `note_search` DB     |
 | Directories   | `#`    | "Jump to a directory I've worked in."            | directory column     |
+| Panes         | `*`    | "Jump to another pane in this tmux session."     | pane cwd + command   |
 
 The directory-jump mode (`#...`) and the four "find
 something" modes (plain, regex, fuzzy, output) all search
 the same SQLite history table — they just differ in *how*
-they match. The two LLM modes (`=...` and `%...`) don't
-search the history at all; they go straight to the
-configured ollama instance. The two `note_search` modes
+they match. The panes mode (`*...`) snapshots the current
+tmux session's panes instead. The two LLM modes (`=...` and
+`%...`) don't search the history at all; they go straight to
+the configured ollama instance. The two `note_search` modes
 (`@...` and `!...`) query a separate database (see the
 Configuration section).
 
@@ -422,6 +424,117 @@ DB row stored as `~/x` and a tmux pane reported at
 session and cached; silent failure if `tmux` is not on
 PATH or not running.
 
+#### Active tmux panes as rows
+
+Every active tmux pane's cwd is added to the
+`#`-mode list (in addition to the SQL history
+and the `sessiondirs=...` config). The visible
+primary text is the directory in `~/x` form
+(matching the other rows); the secondary
+slot shows `(pane %N)` so the user can copy
+the pane id for `tmux send-keys -t %N ...`
+directly from the list. This means the
+"every directory I'm currently active in"
+view is always one keystroke away — no
+need to open `tmux list-windows` separately.
+
+**The pane path must be a real absolute path.** The
+TUI filters out any tmux pane whose
+`pane_current_path` does not start with `/`. A
+pane whose cwd is set to a non-path (e.g. a
+command line, an error message, or a relative
+path) is skipped entirely — showing it as a
+"directory" would be confusing, and the T-marker
+lookup would fail because `std::fs::canonicalize`
+can't resolve a non-path. This defensive filter
+keeps the `DIR:TMUX` list clean even when the user's
+tmux setup produces unusual `pane_current_path`
+values.
+
+#### Directory-source filter (`ALL` / `TMUX` / `CFG`)
+
+The `Action::CycleDirectorySource` key
+(default `C-M-g`, configurable via
+`key.cycle-directory-source=...`) cycles
+the directory-source filter in this order:
+
+- `ALL` (default): every row, regardless
+  of where it came from (history, tmux
+  pane cwd, or `sessiondirs=...`).
+- `TMUX`: only the cwds of the active
+  tmux panes.
+- `CFG`: only the directories from
+  `sessiondirs=...`.
+
+The current source is shown in the mode
+strip as a `DIR:ALL` / `DIR:TMUX` /
+`DIR:CFG` chip (only when in directories
+mode and the source is not the default
+`ALL`). The choice persists in the session
+file (`~/.cache/smarthistory/session`) so
+the user lands back on the same view
+across invocations.
+
+**Works from any mode.** Pressing the key
+outside of directories (`#`) mode switches
+INTO directories mode first — the query
+gains the `#` prefix (any existing
+search-mode prefix like `/`, `?`, `+`, `=`,
+`%`, `@`, `!` is stripped, and the body is
+preserved so you can keep narrowing by
+path substring), then the source cycles.
+So you can be in plain history, press
+`C-M-g`, and land directly in `DIR:TMUX`.
+
+#### Pinned directories (`sessiondirs=...`)
+
+## Panes (`*...`)
+
+List every pane in the **current tmux session** — the one the
+TUI is running in — *excluding* the pane the TUI itself is in
+(read from `$TMUX_PANE`). Each row shows the pane's current
+command (`#{pane_current_command}`, e.g. `zsh`, `vim`,
+`cargo`) as the primary text and the pane's cwd (shortened to
+`~/x`) as a secondary hint. The pane id (`%N`) is staged for
+the jump action on `Enter`.
+
+```
+> *
+  * every pane in this session (except this one)
+> *vim
+  * panes whose command or cwd contains `vim`
+```
+
+The body after `*` is a substring filter matched (AND across
+whitespace tokens, case-insensitive) against each pane's
+command **and** cwd, so `*vim` finds panes running vim while
+`*work src` finds panes whose command-or-cwd contains both
+`work` and `src`.
+
+**The last pane is selected by default.** The list is
+ordered so the **previously-active pane** (the one `tmux
+last-pane` would jump to, flagged by tmux's `pane_last`) is
+at position 0 — the default selection. So just pressing
+`Enter` immediately flips you back to the pane you were in
+before the current one, no navigation needed.
+
+**Selecting a pane jumps to it.** Pressing `Enter` stages
+
+```
+tmux select-window -t @<window_id> && tmux select-pane -t %<pane_id>
+```
+
+plain `select-pane` does **not** switch windows, so the
+window-id step is needed first when the target pane lives in
+another window of the session. `&&` chains them so a stale
+snapshot (window gone) doesn't try to select a dead pane. The
+snapshot is fetched once per TUI session (`tmux list-panes -s`)
+and cached; silent failure if not inside tmux (empty list).
+
+This is the "what else is running in this session?" view — a
+quick pane switcher that lives inside the history picker, so
+you never leave the line editor to jump between panes.
+
 #### Pinned directories (`sessiondirs=...`)
 
 Add one or more `sessiondirs=<path>` lines to the
@@ -515,7 +628,8 @@ mode. The mapping is configurable through the
 | Question    | `prefix.question`       | `%`     | blue         |
 | Notes       | `prefix.notes`          | `@`     | cyan         |
 | Todo        | `prefix.todo`           | `!`     | yellow       |
-| Directories | `prefix.directories`    | `#`     | green        |
+| Directories | `prefix.directories`    | `#`     | accent       |
+| Panes       | `prefix.panes`           | `*`     | green        |
 
 (Prompt color comes from the active theme's named slots —
 `tuicolor.regex`, `tuicolor.fuzzy`, `tuicolor.output`,
@@ -632,6 +746,7 @@ defaults are:
 - `prefix.notes = @`
 - `prefix.todo = !`
 - `prefix.directories = #`
+- `prefix.panes = *`
 
 Set any of them to a different character if the default
 conflicts with your workflow.
