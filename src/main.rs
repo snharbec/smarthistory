@@ -1,3 +1,4 @@
+mod jira;
 mod llm;
 mod tui;
 mod util;
@@ -788,6 +789,16 @@ pub struct QueryPrefixes {
     /// overview that lets the user jump to a
     /// pane without tearing down the TUI.
     pub panes: char,
+    /// Prefix for the JIRA issue-search mode (default
+    /// `-`). Lists JIRA issues from a self-hosted
+    /// instance matching the typed query (issue keys,
+    /// `field=value` constraints, or free text matched
+    /// against description/summary). Selecting an issue
+    /// opens its browse URL in the system browser.
+    /// Credentials/config come from the `JIRA_SERVER`,
+    /// `JIRA_API_TOKEN`, `JIRA_URL`, and `JIRA_PROJECT`
+    /// environment variables.
+    pub jira: char,
 }
 
 impl Default for QueryPrefixes {
@@ -802,6 +813,7 @@ impl Default for QueryPrefixes {
             todo: '!',
             directories: '#',
             panes: '*',
+            jira: '-',
         }
     }
 }
@@ -1541,6 +1553,7 @@ impl Config {
             "todo" => prefixes.todo = c,
             "directories" => prefixes.directories = c,
             "panes" => prefixes.panes = c,
+            "jira" => prefixes.jira = c,
             _ => {}
         }
     }

@@ -178,7 +178,7 @@ section below and the full reference in [TECHNICAL.md](TECHNICAL.md).
 
 # Search modes
 
-The TUI's query bar accepts nine different *search modes*,
+The TUI now supports ten different *search modes*,
 selected by the leading character of the query. Each mode
 answers a different question about the user's history. The
 table below summarises the modes; the paragraphs after it
@@ -196,6 +196,8 @@ describe each in detail.
 | Todo          | `!`    | "Show me my open todos matching this."           | `note_search` DB     |
 | Directories   | `#`    | "Jump to a directory I've worked in."            | directory column     |
 | Panes         | `*`    | "Jump to another pane in this tmux session."     | pane cwd + command   |
+| JIRA          | `-`    | "Find a JIRA issue in my self-hosted instance."   | JQL (key/field/text) |
+| JIRA          | `-`    | "Find a JIRA issue in my self-hosted instance."   | JQL (key/field/text) |
 
 The directory-jump mode (`#...`) and the four "find
 something" modes (plain, regex, fuzzy, output) all search
@@ -535,6 +537,125 @@ This is the "what else is running in this session?" view — a
 quick pane switcher that lives inside the history picker, so
 you never leave the line editor to jump between panes.
 
+## JIRA (`-...`)
+
+List JIRA issues from a **self-hosted JIRA instance**, with
+live search-as-you-type against its REST API v2. Credentials
+and endpoints come from environment variables:
+
+| Variable         | Purpose                                                            |
+|------------------|-------------------------------------------------------------------|
+| `JIRA_API_TOKEN` | Bearer token sent as `Authorization: Bearer <token>`.             |
+| `JIRA_SERVER`   | API base URL, e.g. `https://jira.internal` (→ `/rest/api/2/search`).|
+| `JIRA_URL`       | Browse base URL; `{JIRA_URL}/<key>` opens the ticket. Falls back to `JIRA_SERVER`. |
+| `JIRA_PROJECT`   | Default project to scope all searches to (optional). When set, every query — even free-text searches — is scoped to this project via `project = "<proj>" AND ...`. |
+| `JIRA_MAX_RESULTS` | Max results per API request (default: `5`). Increase if your queries routinely return more rows. |
+| `JIRA_HOST_CERTIFICATE` | Path to a PKCS#12 (`.p12`/`.pfx`) client certificate for mutual TLS (optional). |
+| `JIRA_HOST_CERTIFICATE_PASSWORD` | Password for the client certificate file (optional, ignored when `JIRA_HOST_CERTIFICATE` is unset). |
+| `JIRA_CA_CERTIFICATE` | Path to a CA certificate file (PEM or DER format) for verifying the JIRA server's TLS certificate (optional). Needed when the server uses an internal CA not in the system trust store, or when the server's certificate chain is incomplete. |
+
+When the mode starts (empty body) it shows the project's
+last-updated issues: `project = "<JIRA_PROJECT>" ORDER BY
+updated DESC`. If `JIRA_PROJECT` is unset, it shows the
+server-wide recently-updated issues instead.
+
+When `JIRA_PROJECT` is set, **every** query is scoped to that
+project — free-text searches like `-crash` produce
+`project = "<proj>" AND (description ~ "crash" OR summary ~ "crash")`
+so results never leak from other projects. Use an explicit
+`project=OTHER` token in the query to override.
+
+The body after `-` is a mix of three token shapes, all
+AND-joined into a single JQL query:
+
+- **Issue key** — matches `\w+-\d+` (e.g. `PROJ-123`) →
+  `key = PROJ-123`. Multiple keys collapse into
+  `key in (a, b)`.
+- **Field=value** — matches `\w+=\S*` (e.g.
+  `project=PROJ`, `labels=LABEL`) → `<field> = "<value>"`.
+- **Free text** — anything else →
+  `(description ~ "text" OR summary ~ "text")`.
+
+So `-project=PROJ crash` runs
+`project = "PROJ" AND (description ~ "crash" OR summary ~ "crash")
+ORDER BY updated DESC`, and `-PROJ-123` finds that one issue.
+
+```
+> -
+  - last-updated issues of JIRA_PROJECT
+> -PROJ-1
+  - the single issue PROJ-1
+> -project=PROJ crash
+  - PROJ issues whose summary/description mentions "crash"
+```
+
+**Search is debounced** (~400ms after the last keystroke) and
+runs on a background thread — the TUI never blocks on a
+network call. While a search is in flight, `Esc`
+(`key.cancel`) cancels it. Selecting an issue opens its browse
+URL in the system browser (`open` on macOS, `xdg-open` on
+Linux) by staging `open "http…/PROJ-123"` for the parent
+shell. If `JIRA_SERVER`/`JIRA_API_TOKEN` aren't set, the list
+stays empty and a status message tells you JIRA isn't
+configured.
+
+#### TLS setup
+
+If your JIRA server requires a **client certificate** (mutual
+TLS), set:
+
+```bash
+# Path to your PKCS#12 (.p12 / .pfx) file
+export JIRA_HOST_CERTIFICATE=~/.certs/jira-client.p12
+
+# Its password
+export JIRA_HOST_CERTIFICATE_PASSWORD=my-secret
+```
+
+If the certificate was created with an older OpenSSL version
+and you get a "builder error" when parsing it, re-export it
+with modern encryption:
+
+```bash
+# Extract cert and key (using -legacy to read the old format)
+openssl pkcs12 -in ~/.certs/jira-client.p12 \
+  -out /tmp/jira-cert.pem -clcerts -nokeys -legacy \
+  -passin pass:YOUR_PASSWORD
+
+openssl pkcs12 -in ~/.certs/jira-client.p12 \
+  -out /tmp/jira-key.pem -nocerts -nodes -legacy \
+  -passin pass:YOUR_PASSWORD
+
+# Re-package with modern (non-legacy) encryption
+openssl pkcs12 -export \
+  -in /tmp/jira-cert.pem \
+  -inkey /tmp/jira-key.pem \
+  -out ~/.cache/smarthistory/jira-modern.p12 \
+  -passout pass:YOUR_PASSWORD
+
+rm /tmp/jira-cert.pem /tmp/jira-key.pem
+
+# Point to the new file
+export JIRA_HOST_CERTIFICATE=~/.cache/smarthistory/jira-modern.p12
+```
+
+If the JIRA server uses a certificate signed by an **internal
+CA** (or its certificate chain is incomplete), provide the
+missing CA certificate:
+
+```bash
+# Download the missing intermediate CA (example: GeoTrust TLS RSA CA G1)
+curl -s 'https://cacerts.digicert.com/GeoTrustTLSRSACAG1.crt' \
+  -o ~/.cache/smarthistory/jira-ca.crt
+
+# Or point to your company's internal CA PEM/DER file
+export JIRA_CA_CERTIFICATE=~/.cache/smarthistory/jira-ca.crt
+```
+
+The file can be in PEM format (`-----BEGIN CERTIFICATE-----`)
+or raw DER format — the parser tries PEM first and falls back
+to DER automatically.
+
 #### Pinned directories (`sessiondirs=...`)
 
 Add one or more `sessiondirs=<path>` lines to the
@@ -628,8 +749,11 @@ mode. The mapping is configurable through the
 | Question    | `prefix.question`       | `%`     | blue         |
 | Notes       | `prefix.notes`          | `@`     | cyan         |
 | Todo        | `prefix.todo`           | `!`     | yellow       |
+| Notes       | `prefix.notes`           | `@`     | cyan        |
+| Todo        | `prefix.todo`            | `!`     | yellow       |
 | Directories | `prefix.directories`    | `#`     | accent       |
 | Panes       | `prefix.panes`           | `*`     | green        |
+| JIRA        | `prefix.jira`             | `-`     | blue         |
 
 (Prompt color comes from the active theme's named slots —
 `tuicolor.regex`, `tuicolor.fuzzy`, `tuicolor.output`,
@@ -747,6 +871,7 @@ defaults are:
 - `prefix.todo = !`
 - `prefix.directories = #`
 - `prefix.panes = *`
+- `prefix.jira = -`
 
 Set any of them to a different character if the default
 conflicts with your workflow.

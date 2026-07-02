@@ -1415,6 +1415,100 @@ The current pane (`$TMUX_PANE`) is excluded at
 fetch time, so the user never stages a no-op
 jump to themselves.
 
+### JIRA mode (`-...`)
+
+Live JIRA issue search against a self-hosted
+instance's REST API v2 (`/rest/api/2/search`),
+using `reqwest` (the same crate `note_search`
+uses for its JIRA import feature — already a
+transitive dependency, so adding it directly
+costs no binary weight). Credentials come from
+the environment, not the config file:
+
+- `JIRA_API_TOKEN` — bearer token
+  (`Authorization: Bearer <token>`).
+- `JIRA_SERVER` — API base URL.
+- `JIRA_URL` — browse base URL
+  (`{JIRA_URL}/<key>`); falls back to
+  `JIRA_SERVER`.
+- `JIRA_PROJECT` — the default project to scope
+  all searches to. When set, every query — even
+  free-text — is scoped via `project = "<proj>"`.
+- `JIRA_MAX_RESULTS` — max results per API
+  request (default: `5`).
+- `JIRA_HOST_CERTIFICATE` — path to a PKCS#12
+  (`.p12`/`.pfx`) client certificate for mutual
+  TLS.
+- `JIRA_HOST_CERTIFICATE_PASSWORD` — password
+  for the client certificate.
+- `JIRA_CA_CERTIFICATE` — path to a CA
+  certificate file (PEM or DER) for verifying
+  the server's TLS certificate. Needed when the
+  server uses an internal CA or has an incomplete
+  certificate chain.
+
+The body after `-` is parsed into JQL by
+`crate::jira::build_jql`. Tokens are classified:
+issue key (`\w+-\d+` → `key = …`, multiples
+into `key in (...)`), field=value (`\w+=\S*`
+→ `<field> = "<value>"`, JQL-escaped), free
+text → `(description ~ "…" OR summary ~ "…")`.
+Everything is AND-joined and the result ends
+with `ORDER BY updated DESC`. When
+`JIRA_PROJECT` is set, a `project = "<proj>"`
+clause is always prepended — even for
+free-text searches — so results never leak
+from other projects. Empty body with
+a project → `project = "<JIRA_PROJECT>" ORDER
+BY updated DESC`; without → server-wide
+`ORDER BY updated DESC`.
+
+Search is **debounced** (`JIRA_DEBOUNCE` =
+400ms) and runs on a background thread
+(`spawn_jira_request`, same mpsc + cancelled-flag
+shape as `LlmRequest`). The run loop polls
+`App.jira_request` and calls `process_jira_result`,
+which caches `HistoryRow`s on `App.jira_rows` and
+refreshes. `fetch_jira` returns that cache (no
+network on the hot path), so typing is
+responsive. The JQL-last-jql check avoids
+refiring the identical query. `Esc` cancels an
+in-flight search.
+
+Issue → row mapping: `command` = key,
+`comment` = summary, `output` = `Status: … | Type: … |
+…` (for the details/`Ctrl+L` view), `source` =
+`"jira"`, `mode` = `"jira"`, `timestamp` = parsed
+`updated` epoch. Selecting a row stages
+`open "<JIRA_URL>/<key>"` (or `xdg-open` on
+non-macOS) so the parent shell opens the ticket.
+
+Tests use a `FakeJira` `JiraClient` (injected via
+`App::set_jira_client`) so the synchronous
+search-render path runs without a live server;
+`src/jira.rs` also unit-tests the pure JQL
+builder / escaping / timestamp parsing.
+
+#### TLS setup
+
+If the JIRA server requires a **client certificate**
+(mTLS), set `JIRA_HOST_CERTIFICATE` and
+`JIRA_HOST_CERTIFICATE_PASSWORD`. The certificate
+file is read as raw PKCS#12 DER bytes and passed
+to `reqwest::Identity::from_pkcs12_der`. If the
+certificate was created with an older OpenSSL
+version (pre-3.x), re-export it with modern
+encryption using the `-legacy` flag to read and
+`-export` without it to write (see the README for
+the exact `openssl` commands).
+
+If the server's TLS certificate is signed by an
+**internal CA** (or its chain is incomplete),
+set `JIRA_CA_CERTIFICATE` to point to the missing
+CA certificate file. The parser tries PEM first
+(`Certificate::from_pem`), then falls back to DER
+(`Certificate::from_der`), so either format works.
+
 ### Example session
 
 ```bash

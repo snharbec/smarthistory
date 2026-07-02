@@ -11,6 +11,7 @@ pub mod render;
 
 use crate::util::{format_diff, format_time};
 use crate::llm::LlmClient;
+use crate::jira::JiraClient;
 use crate::Config;
 use regex::Regex;
 use std::path::PathBuf;
@@ -1100,6 +1101,42 @@ struct App {
     /// the user a suggestion for a query they no longer
     /// have.
     llm_preview_description: Option<String>,
+    /// Cached JIRA search results for the `-`-prefix mode.
+    /// Populated asynchronously (see `jira_request` /
+    /// `jira_maybe_autocall`): when the user pauses typing
+    /// for `JIRA_DEBOUNCE`, a background thread fires the
+    /// JQL query against the configured JIRA server and
+    /// the run loop stores the result here, then refreshes.
+    /// `fetch_jira` returns this cache (no network on the
+    /// hot path), so typing is responsive and only the
+    /// ~400ms-after-keystroke background fetch hits the
+    /// server.
+    jira_rows: Vec<crate::tui::state::HistoryRow>,
+    /// `Some` when a JIRA search is in flight (background
+    /// thread). Polled by the run loop mirror of the LLM
+    /// poll. Cancelled on the `Cancel` action.
+    jira_request: Option<JiraRequest>,
+    /// Whether a JIRA search is currently in flight.
+    /// Prevents re-firing while a query is pending.
+    jira_in_flight: bool,
+    /// Debounce timer for JIRA search-as-you-type, armed by
+    /// `jira_touch` on every keystroke. Cleared when a
+    /// search fires or the mode is left.
+    jira_debounce_started: Option<std::time::Instant>,
+    /// The JQL string the most-recent JIRA search
+    /// corresponds to. Compared to the live-built JQL to
+    /// avoid re-firing the same query when the user pauses
+    /// without changing anything.
+    jira_last_jql: Option<String>,
+    /// Injectable JIRA client for tests (a fake). When
+    /// `Some`, `spawn_jira_request` runs the search
+    /// synchronously via this client instead of spawning a
+    /// real-`reqwest` background thread, so tests can drive
+    /// the search-and-render path deterministically without
+    /// a live JIRA server or env vars. Production leaves this
+    /// `None` so the real background-thread + `RestJiraClient`
+    /// path runs.
+    jira_client: Option<std::sync::Arc<dyn crate::jira::JiraClient>>,
 }
 
 /// How long the LLM auto-call waits after the last keystroke
@@ -1110,6 +1147,14 @@ struct App {
 /// to the status bar. 1 second is the value the user asked
 /// for in the spec.
 const LLM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long the JIRA search-as-you-type waits after the
+/// last keystroke before firing. Shorter than the LLM
+/// debounce because a JQL search is cheaper than an LLM
+/// generation and the user expects a tighter feedback
+/// loop. 400ms is the conventional "stopped typing"
+/// threshold in search UIs.
+const JIRA_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl App {
     /// True if the current query is a regex (prefixed with configured regex prefix).
@@ -1287,6 +1332,28 @@ impl App {
     fn notes_pattern(&self) -> &str {
         if self.is_notes_query() {
             let p = self.query_prefixes.notes;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
+    /// Whether the query is a JIRA issue-search request:
+    /// the query starts with the jira prefix (`-` by
+    /// default). The body is parsed into a JQL query by
+    /// `crate::jira::build_jql` (issue keys,
+    /// `field=value` constraints, free text).
+    fn is_jira_query(&self) -> bool {
+        let p = self.query_prefixes.jira;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
+    /// The JIRA search body, i.e. everything after the
+    /// leading `-` prefix. Empty string when not in jira
+    /// mode.
+    fn jira_pattern(&self) -> &str {
+        if self.is_jira_query() {
+            let p = self.query_prefixes.jira;
             &self.query[p.len_utf8()..]
         } else {
             ""
@@ -3443,6 +3510,14 @@ fn fetch_recent_notes_with_filter(
             self.llm_preview = None;
             self.llm_preview_description = None;
         }
+        // Arm/clear the JIRA search debounce on the same
+        // edit edges. `jira_touch` is a no-op outside `-`
+        // mode, so co-locating it here means every existing
+        // `llm_touch()` call site (push_char, backspace,
+        // set_search_mode_prefix, etc.) also drives JIRA
+        // search-as-you-type without needing a parallel
+        // pass of edits.
+        self.jira_touch();
     }
 
     /// Construct the virtual preview row used to display the
@@ -3867,6 +3942,15 @@ struct LlmRequest {
     cancelled: Arc<AtomicBool>,
 }
 
+/// An in-flight JIRA search request. Same shape as
+/// `LlmRequest`: a background thread sends the result over
+/// the channel, the run loop polls it, and the cancelled
+/// flag lets the user abort a slow search with `Esc`.
+struct JiraRequest {
+    receiver: mpsc::Receiver<Result<Vec<crate::jira::JiraIssue>, crate::jira::JiraError>>,
+    cancelled: Arc<AtomicBool>,
+}
+
 /// State for the help overlay. Just a scroll offset; the help text
 /// is computed from the live app state on each render so the
 /// "current settings" section is always accurate.
@@ -4059,10 +4143,26 @@ notes_date_filter: NotesDateFilter::All,
             llm_in_flight: false,
             llm_request: None,
             llm_preview_description: None,
+            jira_rows: Vec::new(),
+            jira_request: None,
+            jira_in_flight: false,
+            jira_debounce_started: None,
+            jira_last_jql: None,
+            jira_client: None,
         };
         app.recompile_regex();
         app.refresh();
         app.refresh_labeled();
+        // If the restored query is a JIRA query, arm the
+        // debounce and fire the search immediately so the
+        // user sees results on the first frame rather than
+        // an empty list. This mirrors what happens when the
+        // user types `-` in the run loop (jira_touch arms
+        // the debounce, the next no-input tick fires it).
+        if app.is_jira_query() {
+            app.jira_debounce_started = Some(std::time::Instant::now());
+            app.jira_maybe_autocall();
+        }
         // Rows are ordered newest first; index 0 is the newest entry.
         // Keep the selection on the newest match so it appears at the
         // bottom of the bottom-aligned list.
@@ -4223,7 +4323,7 @@ notes_date_filter: NotesDateFilter::All,
         // row leaking into `DIR:TMUX`; panes mode
         // would have the same leak without this
         // guard).
-        if self.is_directories_query() || self.is_panes_query() {
+        if self.is_directories_query() || self.is_panes_query() || self.is_jira_query() {
             let mut merged = self.rows.clone();
             if self.duplicate_filter
                 || self.sort_order
@@ -4488,6 +4588,9 @@ notes_date_filter: NotesDateFilter::All,
         }
         if self.is_panes_query() {
             return self.fetch_panes();
+        }
+        if self.is_jira_query() {
+            return self.fetch_jira();
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
@@ -5496,6 +5599,45 @@ fn move_selection(&mut self, delta: isize) {
             self.pick_mode = Some(PickMode::Run);
             return;
         }
+        // `-...` queries are JIRA issue-search
+        // requests. Selecting an issue opens its
+        // browse URL (`JIRA_URL/<key>`) in the
+        // system browser: `open` on macOS,
+        // `xdg-open` on other Unixes. The key is
+        // the row's `command` field. If JIRA isn't
+        // configured (no `JIRA_URL`), surface a
+        // status message instead of staging a
+        // malformed command.
+        if self.is_jira_query() {
+            let key: String = match self.selected_row() {
+                Some(r) => r.command.clone(),
+                None => return,
+            };
+            if key.is_empty() {
+                return;
+            }
+            match crate::jira::JiraConfig::from_env() {
+                Some(cfg) => {
+                    let url = cfg.browse_url(&key);
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    };
+                    self.selection = Some(format!(
+                        "{} \"{}\"",
+                        opener, url
+                    ));
+                    self.pick_mode = Some(PickMode::Run);
+                }
+                None => {
+                    self.set_status_message(
+                        crate::jira::JiraError::NotConfigured.to_string(),
+                    );
+                }
+            }
+            return;
+        }
         if let Some(row) = self.selected_row() {
             // Check the mode field to determine the type of entry.
             if row.mode == "llm" && !row.output.is_empty() {
@@ -5722,6 +5864,219 @@ fn move_selection(&mut self, delta: isize) {
         self.selection = Some(generated_command.clone());
         self.pick_mode = Some(PickMode::Run);
         self.set_status_message(format!("LLM: {}", generated_command));
+    }
+
+    // ---- JIRA (`-`-prefix) search-as-you-type ----
+
+    /// Arm the JIRA search debounce. Called from every
+    /// keystroke path when in `-`-mode (push_char,
+    /// backspace, set_search_mode_prefix, etc.) — mirrors
+    /// `llm_touch`. The run loop's tick then fires the
+    /// actual search after `JIRA_DEBOUNCE` of quiet.
+    /// Outside `-`-mode this clears any pending state so a
+    /// stray timer doesn't fire after the user leaves the
+    /// mode.
+    fn jira_touch(&mut self) {
+        if self.is_jira_query() {
+            self.jira_debounce_started = Some(std::time::Instant::now());
+        } else {
+            self.jira_debounce_started = None;
+            self.jira_in_flight = false;
+        }
+    }
+
+    /// Build the JQL string for the current query body,
+    /// using the configured `JIRA_PROJECT` as the default
+    /// when the body is empty. The project is read from
+    /// `JIRA_PROJECT` directly (not the full `JiraConfig`)
+    /// so this works in tests where only a fake client is
+    /// injected and no `JIRA_SERVER`/`JIRA_API_TOKEN` is
+    /// set.
+    fn jira_build_query(&self) -> String {
+        let project = std::env::var("JIRA_PROJECT")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        crate::jira::build_jql(self.jira_pattern(), project.as_deref())
+    }
+
+    /// Drive the JIRA search debounce. Called from the
+    /// run-loop tick on the no-input path (mirrors
+    /// `llm_maybe_autocall`). Fires a single background
+    /// search when: in `-`-mode, debounce elapsed, no
+    /// search in flight, JIRA is configured (env vars OR
+    /// an injected test client), and the live JQL differs
+    /// from the last-fired one.
+    fn jira_maybe_autocall(&mut self) {
+        if !self.is_jira_query() {
+            return;
+        }
+        if self.jira_in_flight {
+            return;
+        }
+        let Some(started) = self.jira_debounce_started else {
+            return;
+        };
+        if started.elapsed() < JIRA_DEBOUNCE {
+            return;
+        }
+        // "Configured" means either real env config OR an
+        // injected test client. If neither, surface a
+        // one-shot status message and disarm.
+        let configured = self.jira_client.is_some()
+            || crate::jira::JiraConfig::from_env().is_some();
+        if !configured {
+            if self.jira_last_jql.is_some() || self.jira_rows.is_empty() {
+                self.set_status_message(
+                    crate::jira::JiraError::NotConfigured.to_string(),
+                );
+            }
+            self.jira_debounce_started = None;
+            return;
+        }
+        let jql = self.jira_build_query();
+        // Skip if we already have results for this exact JQL.
+        if self.jira_last_jql.as_deref() == Some(&jql) {
+            return;
+        }
+        self.spawn_jira_request(jql);
+    }
+
+    /// Spawn the search. When an injected test client is
+    /// present (`set_jira_client`), run synchronously on
+    /// the calling thread (deterministic for tests).
+    /// Otherwise spawn a real `reqwest` background thread
+    /// against the env-configured JIRA server.
+    fn spawn_jira_request(&mut self, jql: String) {
+        if let Some(client) = self.jira_client.clone() {
+            let result = client.search(&jql);
+            let request = JiraRequest {
+                receiver: mpsc::channel().1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            self.jira_in_flight = true;
+            self.jira_last_jql = Some(jql);
+            self.process_jira_result(request, result);
+            return;
+        }
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(
+                crate::jira::JiraError::NotConfigured.to_string(),
+            );
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        let jql_for_thread = jql.clone();
+        std::thread::spawn(move || {
+            let client = crate::jira::RestJiraClient::new(config);
+            let result = client.search(&jql_for_thread);
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+            }
+        });
+        self.jira_in_flight = true;
+        self.jira_request = Some(JiraRequest {
+            receiver: rx,
+            cancelled,
+        });
+        self.jira_last_jql = Some(jql);
+        self.set_status_message("JIRA searching…".to_string());
+    }
+
+    /// Process a JIRA search result that arrived from the
+    /// background thread. Converts issues to `HistoryRow`s,
+    /// caches them, and refreshes so the list repaints.
+    /// Errors surface as a status message (the list keeps
+    /// the previous result).
+    fn process_jira_result(
+        &mut self,
+        request: JiraRequest,
+        result: Result<Vec<crate::jira::JiraIssue>, crate::jira::JiraError>,
+    ) {
+        self.jira_in_flight = false;
+        self.jira_request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            self.set_status_message("JIRA search cancelled".to_string());
+            return;
+        }
+        match result {
+            Ok(issues) => {
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let mut next_id: i64 = -1;
+                let rows = issues
+                    .into_iter()
+                    .map(|issue| {
+                        // Build the details-pane text from the
+                        // status/type/priority/assignee/updated
+                        // metadata so Ctrl+L on a row shows the
+                        // issue's vitals without opening it.
+                        let mut details = Vec::new();
+                        if !issue.status.is_empty() {
+                            details.push(format!("Status: {}", issue.status));
+                        }
+                        if !issue.issuetype.is_empty() {
+                            details.push(format!("Type: {}", issue.issuetype));
+                        }
+                        if !issue.priority.is_empty() {
+                            details.push(format!("Priority: {}", issue.priority));
+                        }
+                        if !issue.assignee.is_empty() {
+                            details.push(format!("Assignee: {}", issue.assignee));
+                        }
+                        if !issue.updated.is_empty() {
+                            details.push(format!("Updated: {}", issue.updated));
+                        }
+                        let ts = crate::jira::updated_to_epoch(&issue.updated);
+                        let id = next_id;
+                        next_id -= 1;
+                        crate::tui::state::HistoryRow {
+                            id,
+                            command: issue.key,
+                            directory: String::new(),
+                            session_id: String::new(),
+                            exit_code: 0,
+                            timestamp: if ts > 0 { ts } else { now_epoch },
+                            comment: issue.summary,
+                            output: details.join(" | "),
+                            mode: "jira".to_string(),
+                            source: "jira".to_string(),
+                        }
+                    })
+                    .collect();
+                self.jira_rows = rows;
+                self.status_message = None;
+                self.refresh();
+            }
+            Err(e) => {
+                self.set_status_message(e.to_string());
+            }
+        }
+    }
+
+    /// Return the cached JIRA rows (no network — the live
+    /// fetch happens in the background via
+    /// `jira_maybe_autocall`). Wired into `fetch()`'s
+    /// dispatch. An empty cache (no result yet / not
+    /// configured) yields an empty list; the status message
+    /// from the fetch path tells the user why.
+    fn fetch_jira(&mut self) -> Result<Vec<crate::tui::state::HistoryRow>> {
+        Ok(self.jira_rows.clone())
+    }
+
+    /// Install a JIRA client for tests (a fake). When set,
+    /// searches run synchronously on the calling thread via
+    /// this client instead of spawning a background HTTP
+    /// thread, so the search-render path is deterministic.
+    #[cfg(test)]
+    fn set_jira_client(
+        &mut self,
+        client: std::sync::Arc<dyn crate::jira::JiraClient>,
+    ) {
+        self.jira_client = Some(client);
     }
 
 
@@ -7147,6 +7502,14 @@ fn run_loop(
                 }
             }
 
+        // Check for JIRA result from background thread
+        // (mirrors the LLM poll above).
+        if let Some(request) = app.jira_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+                && let Some(request) = app.jira_request.take() {
+                    app.process_jira_result(request, result);
+                }
+
         if !crossterm::event::poll(Duration::from_millis(100))? {
             // No input ready. Still a chance to drive the
             // LLM auto-call debounce: if the user is in LLM
@@ -7159,6 +7522,10 @@ fn run_loop(
             // their last character — the worst case is that
             // we wait one extra 100ms tick before firing.
             app.llm_maybe_autocall();
+            // Same debounce drive for JIRA search-as-you-
+            // type: fires the JQL query after
+            // `JIRA_DEBOUNCE` of quiet typing in `-` mode.
+            app.jira_maybe_autocall();
             continue;
         }
         let Event::Key(key) = event::read()? else {
@@ -7176,6 +7543,18 @@ fn run_loop(
                     }
                     app.llm_in_flight = false;
                     app.set_status_message("LLM request cancelled".to_string());
+                    continue;
+                }
+
+        // Same cancel handling for an in-flight JIRA search.
+        if app.jira_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+                && matches!(action, Action::Cancel) {
+                    if let Some(request) = app.jira_request.take() {
+                        request.cancelled.store(true, Ordering::Relaxed);
+                    }
+                    app.jira_in_flight = false;
+                    app.set_status_message("JIRA search cancelled".to_string());
                     continue;
                 }
 
@@ -18361,6 +18740,267 @@ mod tests {
             // surface).
         }
 
+
+        // ---- JIRA (`-`-prefix) mode ----
+
+        /// A fake `JiraClient` that returns a canned set
+        /// of issues, recording the JQL it was called with
+        /// so tests can assert on the generated query.
+        #[derive(Default, Clone)]
+        struct FakeJira {
+            issues: Vec<crate::jira::JiraIssue>,
+            recorded: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        impl crate::jira::JiraClient for FakeJira {
+            fn search(&self, jql: &str) -> Result<Vec<crate::jira::JiraIssue>, crate::jira::JiraError> {
+                self.recorded.lock().unwrap().push(jql.to_string());
+                Ok(self.issues.clone())
+            }
+        }
+
+        /// The `-` prefix is detected and the body sliced.
+        #[test]
+        fn jira_prefix_detected_and_pattern_sliced() {
+            let mut app = directories_test_app(&[]);
+            app.query = String::new();
+            assert!(!app.is_jira_query());
+            app.query = String::from("-");
+            assert!(app.is_jira_query());
+            assert_eq!(app.jira_pattern(), "");
+            app.query = String::from("-PROJ-1 crash");
+            assert_eq!(app.jira_pattern(), "PROJ-1 crash");
+        }
+
+        /// In jira mode, `build_merged_rows` does NOT merge
+        /// labeled history rows (same guard as directories /
+        /// panes modes).
+        #[test]
+        fn jira_mode_excludes_labeled_history_rows() {
+            let labeled_cmd = "grep -c PROJ issues";
+            let mut app = directories_test_app(&[
+                (labeled_cmd, "/tmp", 60),
+            ]);
+            app.conn.execute(
+                "CREATE TABLE command_comments (command TEXT PRIMARY KEY, comment TEXT NOT NULL)", [],
+            ).expect("cc");
+            app.conn.execute(
+                "CREATE TABLE history_output (history_id INTEGER PRIMARY KEY, output TEXT NOT NULL)", [],
+            ).expect("ho");
+            app.conn.execute(
+                "INSERT INTO command_comments (command, comment) VALUES (?1, ?2)",
+                rusqlite::params![labeled_cmd, "JIRA-LIST"],
+            ).expect("ins");
+            app.jira_rows.push(crate::tui::state::HistoryRow {
+                id: -1,
+                command: "PROJ-9".to_string(),
+                directory: String::new(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: "boom".to_string(),
+                output: String::new(),
+                mode: "jira".to_string(),
+                source: "jira".to_string(),
+            });
+            app.query = String::from("-");
+            app.refresh();
+            let has_labeled = app
+                .merged_rows()
+                .iter()
+                .any(|r| r.command == labeled_cmd);
+            assert!(!has_labeled, "jira mode must not show labeled rows, got {:?}",
+                app.merged_rows().iter().map(|r| (r.command.clone(), r.source.clone())).collect::<Vec<_>>());
+            assert_eq!(app.merged_rows().len(), 1);
+            assert_eq!(app.merged_rows()[0].source, "jira");
+        }
+
+        /// `jira_maybe_autocall` fires the search after the
+        /// debounce and caches the result rows. Verifies the
+        /// fake-client synchronous path end-to-end:
+        /// query → JQL → search → rows.
+        #[test]
+        fn jira_autocall_caches_search_results() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![
+                    crate::jira::JiraIssue {
+                        key: "PROJ-1".to_string(),
+                        summary: "login crash".to_string(),
+                        status: "Open".to_string(),
+                        issuetype: "Bug".to_string(),
+                        ..Default::default()
+                    },
+                    crate::jira::JiraIssue {
+                        key: "PROJ-2".to_string(),
+                        summary: "fix tests".to_string(),
+                        updated: "2024-06-30T19:14:39.000+0000".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            };
+            let recorded = fake.recorded.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-project=PROJ crash");
+            app.refresh();
+            // Forcibly arm the debounce in the past so the
+            // autocall fires immediately (the run loop would
+            // normally wait, but here we drive it by hand).
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            // The JQL was built and the search fired.
+            assert_eq!(recorded.lock().unwrap().len(), 1, "search must fire once");
+            let jql = recorded.lock().unwrap()[0].clone();
+            assert!(jql.contains(r#"project = "PROJ""#), "JQL: {}", jql);
+            assert!(jql.contains(r#"description ~ "crash""#), "JQL: {}", jql);
+            // The result rows are cached on the app.
+            assert_eq!(app.jira_rows.len(), 2);
+            assert_eq!(app.jira_rows[0].command, "PROJ-1");
+            assert_eq!(app.jira_rows[0].comment, "login crash");
+            assert_eq!(app.jira_rows[0].source, "jira");
+            assert_eq!(app.jira_rows[0].mode, "jira");
+            assert!(app.jira_rows[0].output.contains("Status: Open"));
+            // PROJ-2 has a real `updated` → parsed epoch.
+            assert!(app.jira_rows[1].timestamp > 1_700_000_000);
+        }
+
+        /// A repeat `jira_maybe_autocall` with the SAME
+        /// query does NOT re-fire the search (the
+        /// `jira_last_jql` cache prevents spamming JIRA).
+        #[test]
+        fn jira_autocall_skips_unchanged_jql() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            };
+            let recorded = fake.recorded.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-PROJ-1");
+            app.refresh();
+            let past = || {
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50)
+            };
+            app.jira_debounce_started = Some(past());
+            app.jira_maybe_autocall();
+            assert_eq!(recorded.lock().unwrap().len(), 1);
+            // Second call with no query change must NOT
+            // re-fire.
+            app.jira_debounce_started = Some(past());
+            app.jira_maybe_autocall();
+            assert_eq!(recorded.lock().unwrap().len(), 1, "must not re-fire for same JQL");
+        }
+
+        /// Selecting a JIRA row stages `open "<URL>"` using
+        /// `JIRA_URL` (falls back to `JIRA_SERVER`).
+        #[test]
+        fn select_for_run_in_jira_mode_stages_open_url() {
+            // Use a unique env-var guard to avoid racing
+            // other tests: set the vars, run, restore.
+            // (The run is synchronous in the test path; no
+            // background thread reads these, so the window
+            // is just this function's body.)
+            use std::sync::Mutex;
+            static ENV_LOCK: Mutex<()> = Mutex::new(());
+            let _g = ENV_LOCK.lock().unwrap();
+            let prev_server = std::env::var("JIRA_SERVER").ok();
+            let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+            let prev_url = std::env::var("JIRA_URL").ok();
+            // SAFETY: no other test in this binary uses these
+            // vars (guarded by ENV_LOCK, and the binary is
+            // single-process per test thread). Other JIRA
+            // tests here don't set these specific vars.
+            unsafe {
+                std::env::set_var("JIRA_SERVER", "https://jira.example.com");
+                std::env::set_var("JIRA_API_TOKEN", "tok");
+                std::env::set_var("JIRA_URL", "https://browse.example.com/browse");
+            }
+            let mut app = directories_test_app(&[]);
+            app.jira_rows.push(crate::tui::state::HistoryRow {
+                id: -1,
+                command: "PROJ-42".to_string(),
+                directory: String::new(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: "summary".to_string(),
+                output: String::new(),
+                mode: "jira".to_string(),
+                source: "jira".to_string(),
+            });
+            app.query = String::from("-");
+            app.refresh();
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            // Restore before asserting so a panic doesn't
+            // leak the env to other tests.
+            let restore = |name: &str, prev: Option<String>| unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            };
+            restore("JIRA_SERVER", prev_server);
+            restore("JIRA_API_TOKEN", prev_token);
+            restore("JIRA_URL", prev_url);
+            assert_eq!(
+                app.selection.as_deref(),
+                Some("open \"https://browse.example.com/browse/PROJ-42\""),
+                "got: {:?}",
+                app.selection
+            );
+            assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// `jira_maybe_autocall` shows a status message
+        /// (and fires nothing) when JIRA isn't configured
+        /// — no env vars and no injected client.
+        #[test]
+        fn jira_not_configured_surfaces_status() {
+            // Clear any JIRA env so the "not configured" path
+            // is deterministically taken (another test sets
+            // these; under parallel execution we'd otherwise
+            // race). Guarded by ENV_LOCK so we don't clobber
+            // the other test's window.
+            use std::sync::Mutex;
+            static ENV_LOCK: Mutex<()> = Mutex::new(());
+            let _g = ENV_LOCK.lock().unwrap();
+            let prev_server = std::env::var("JIRA_SERVER").ok();
+            let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+            unsafe {
+                std::env::remove_var("JIRA_SERVER");
+                std::env::remove_var("JIRA_API_TOKEN");
+            }
+            let mut app = directories_test_app(&[]);
+            app.query = String::from("-PROJ-1");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            // Restore before asserting so a panic doesn't leak.
+            let restore = |name: &str, prev: Option<String>| unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            };
+            restore("JIRA_SERVER", prev_server);
+            restore("JIRA_API_TOKEN", prev_token);
+            // No client, no env → nothing fired, no rows.
+            assert!(app.jira_rows.is_empty());
+        }
         /// Defensive filter: a
         /// `pane_current_path`
         /// that doesn't start

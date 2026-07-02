@@ -2497,6 +2497,13 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 // success (green) tint signals
                 // "live" panes.
                 ("*", " panes ", app.query.as_str())
+            } else if app.is_jira_query() {
+                // JIRA mode: live search of a
+                // self-hosted JIRA instance via
+                // the `-` prefix. The info (blue)
+                // tint signals "external data
+                // source" (like notes/question).
+                ("-", " jira ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
@@ -2537,6 +2544,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::accent_color())
             } else if app.is_panes_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_jira_query() {
+                Style::default().fg(Theme::info_color())
             } else {
                 Theme::accent()
             })
@@ -2569,6 +2578,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::accent_color())
             } else if app.is_panes_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_jira_query() {
+                Style::default().fg(Theme::info_color())
             } else {
                 Theme::dim()
             })

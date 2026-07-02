@@ -23,6 +23,23 @@ serde_json = "1"
 # argument was supplied` at the build of `cookie`.
 time = "=0.3.51"
 note_search = { git = "https://github.com/snharbec/note_search.git", rev = "18c3bd3" }
+# `reqwest` is ALSO a transitive dep of `note_search`
+# (it uses `reqwest` for its JIRA import feature). Adding
+# it directly here reuses the SAME already-compiled
+# crate (cargo unifies features), so it costs no extra
+# binary weight, while letting the TUI do live JIRA
+# search via the `-` prefix. We need `blocking` + `json`
+# + `gzip`: the JIRA REST v2 search endpoint gzips any
+# response larger than a single issue (project-wide
+# queries, multi-page results), and `gzip` is NOT in
+# `reqwest`'s `default` feature set, so we have to enable
+# it explicitly. Without it, the blocking client fails
+# with "error decoding response body" on any gzipped
+# reply — a single-issue `key = X-1` worked only because
+# that one tiny response wasn't gzipped. The union with
+# `note_search`'s feature set is still the same compiled
+# crate; we just turn on one extra feature.
+reqwest = { version = "0.12", features = ["blocking", "json", "gzip", "native-tls"] }
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
