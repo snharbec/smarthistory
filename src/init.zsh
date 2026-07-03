@@ -231,6 +231,37 @@ _smarthistory_prime_cache() {
     _smarthistory_debug_log "prime_cache: got $match_count match(es) (LBUFFER=[$LBUFFER], PWD=[$PWD])"
 }
 
+_smarthistory_unescape() {
+    # The CLI escapes newlines in
+    # multiline commands as the
+    # two-character sequence `\n`
+    # so a single row fits on one
+    # line of CLI output and the
+    # `(f)` record splitter sees
+    # exactly one match per row.
+    # Here we convert the escape
+    # back to a real newline so the
+    # zsh line editor renders the
+    # command as the user originally
+    # typed it: with multiple
+    # physical lines.
+    #
+    # Zsh's `${var//pattern/repl}`
+    # expansion treats the
+    # backslashes in `\\n` as
+    # literal two-character
+    # patterns, and the `$'\n'`
+    # replacement is an ANSI-C
+    # quoted string that yields a
+    # real newline.
+    local out=$1
+    out=${out//\\n/$'\n'}
+    out=${out//\\r/$'\r'}
+    printf %s "$out"
+}
+
+}
+
 _smarthistory_up_history() {
     # Always use smarthistory, even with an empty LBUFFER (an empty
     # query means "give me the oldest command in the current scope").
@@ -252,9 +283,23 @@ _smarthistory_up_history() {
         return
     fi
     _smarthistory_index=$((_smarthistory_index + 1))
-    local match=${_smarthistory_lines[$_smarthistory_index]}
+    # The CLI escapes newlines in
+    # multiline commands; un-escape
+    # so the line editor renders
+    # the command across multiple
+    # physical lines (as the user
+    # originally typed it).
+    local raw_match=${_smarthistory_lines[$_smarthistory_index]}
+    local match
+    match=$(_smarthistory_unescape "$raw_match")
     BUFFER="$match"
     CURSOR=${#BUFFER}
+    # Store the un-escaped version
+    # so the next Up/Down cycle
+    # detection (`BUFFER ==
+    # last_match`) compares apples
+    # to apples — both contain real
+    # newlines, not `\n` escapes.
     _smarthistory_last_match="$match"
     _smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
 }
@@ -283,7 +328,9 @@ _smarthistory_down_history() {
         return
     fi
     _smarthistory_index=$((_smarthistory_index - 1))
-    local match=${_smarthistory_lines[$_smarthistory_index]}
+    local raw_match=${_smarthistory_lines[$_smarthistory_index]}
+    local match
+    match=$(_smarthistory_unescape "$raw_match")
     BUFFER="$match"
     CURSOR=${#BUFFER}
     _smarthistory_last_match="$match"
@@ -319,7 +366,9 @@ _smarthistory_next_history() {
     if [ $_smarthistory_next_index -ge $n ]; then
         _smarthistory_next_index=0
     fi
-    local match=${_smarthistory_candidates[$((_smarthistory_next_index + 1))]}
+    local raw_match=${_smarthistory_candidates[$((_smarthistory_next_index + 1))]}
+    local match
+    match=$(_smarthistory_unescape "$raw_match")
     BUFFER="$match"
     CURSOR=${#BUFFER}
     _smarthistory_next_index=$((_smarthistory_next_index + 1))

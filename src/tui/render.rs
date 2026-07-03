@@ -2286,13 +2286,19 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // on `row.mode ==
     // "directory"`) keep
     // working unchanged.
+    // Multiline commands (containing real newlines) would break the
+    // single-line row layout. Replace each newline with the visible
+    // separator `↵` so the row stays on one line while still showing
+    // where the line breaks are. The full command (with real
+    // newlines) is available in the details pane.
+    let cmd_display: String = row.command.replace('\n', "↵").replace('\r', "");
     if app.is_regex_query() {
         spans.extend(highlight_regex_matches(
-            &row.command,
+            &cmd_display,
             app.query_regex.as_ref(),
         ));
     } else {
-        spans.extend(highlight_matches(&row.command, &app.query));
+        spans.extend(highlight_matches(&cmd_display, &app.query));
     }
 
     spans.push(Span::styled(
@@ -2353,9 +2359,9 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
 /// in `text` with a highlight style. Matching is case-insensitive and
 /// based on Unicode scalar values. Adjacent non-matching characters
 /// are coalesced into a single span.
-fn highlight_regex_matches<'a>(text: &'a str, regex: Option<&Regex>) -> Vec<Span<'a>> {
+fn highlight_regex_matches(text: &str, regex: Option<&Regex>) -> Vec<Span<'static>> {
     let Some(re) = regex else {
-        return vec![Span::raw(text)];
+        return vec![Span::raw(text.to_string())];
     };
     let text_chars: Vec<char> = text.chars().collect();
     let mut spans = Vec::new();
@@ -2383,15 +2389,15 @@ fn highlight_regex_matches<'a>(text: &'a str, regex: Option<&Regex>) -> Vec<Span
         spans.push(Span::raw(tail));
     }
     if spans.is_empty() {
-        spans.push(Span::raw(text));
+        spans.push(Span::raw(text.to_string()));
     }
     spans
 }
 
 /// Return a sequence of spans that wrap every occurrence of `query`
-pub(super) fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>> {
+pub(super) fn highlight_matches(text: &str, query: &str) -> Vec<Span<'static>> {
     if query.is_empty() {
-        return vec![Span::raw(text)];
+        return vec![Span::raw(text.to_string())];
     }
 
     let words: Vec<String> = query
@@ -2401,7 +2407,7 @@ pub(super) fn highlight_matches<'a>(text: &'a str, query: &str) -> Vec<Span<'a>>
         .collect();
 
     if words.is_empty() {
-        return vec![Span::raw(text)];
+        return vec![Span::raw(text.to_string())];
     }
 
     let lower_text = text.to_lowercase();
@@ -2533,16 +2539,19 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     // here would push the rest of the
     // Details rows (Dir / Sess / Time /
     // Stat / Rem) off-screen and break the
-    // fixed 6-row layout. We take just the
-    // first line, and if that line itself
-    // exceeds the available column width
-    // we ellipsize it so the layout still
+    // fixed 6-row layout. We join all
+    // lines with `↵` so multiline
+    // commands are visible in full (the
+    // separator marks where each physical
+    // line break was), and if that exceeds
+    // the available column width we
+    // ellipsize it so the layout still
     // holds. The full text remains
     // available in the Output Preview pane
     // below, where the user can scroll if
     // they need the rest.
-    let cmd_first_line = row.command.lines().next().unwrap_or("").to_string();
-    let cmd_visible = truncate_cmd_for_details_pane(&cmd_first_line, area.width as usize);
+    let cmd_single_line = row.command.replace('\n', "↵").replace('\r', "");
+    let cmd_visible = truncate_cmd_for_details_pane(&cmd_single_line, area.width as usize);
 
     let mut lines = vec![
         Line::from(vec![

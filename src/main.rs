@@ -2021,7 +2021,33 @@ fn project_row(
         if derived.contains(f) {
             out.push(compute_derived(f, row_data));
         } else if let Some((_, v)) = row_data.iter().find(|(k, _)| k.as_str() == f) {
-            let cell = v.clone();
+            // Multi-line fields
+            // (`command` and
+            // `output`) are
+            // escape-encoded so a
+            // single row fits on
+            // one output line. The
+            // CLI prints one row
+            // per line and a
+            // embedded `\n` would
+            // split a single row
+            // into multiple lines
+            // (and break the
+            // zsh-widget's `(f)`
+            // record splitter).
+            // The zsh widget
+            // un-escapes before
+            // assigning to
+            // `BUFFER`; the TUI
+            // queries the DB
+            // directly so it
+            // sees the real
+            // newlines.
+            let cell = if f == "command" || f == "output" {
+                crate::util::escape_field_for_output(v)
+            } else {
+                v.clone()
+            };
             // Highlight the search string only in the `command` field.
             // Other fields (directory, base, etc.) won't contain it because
             // the SQL WHERE filters on `command LIKE ?`.
@@ -2828,7 +2854,7 @@ fn main() -> anyhow::Result<()> {
             })?;
             for r in rows {
                 let (next, freq) = r?;
-                println!("{}\t{}", freq, next);
+                println!("{}\t{}", freq, crate::util::escape_field_for_output(&next));
             }
         }
         Commands::Capture { command } => {
@@ -3797,5 +3823,34 @@ tmuxpaneoutputdir=~/custom-tmux
         // something that
         // *could* exist on
         // disk.
+    }
+
+    #[test]
+    fn project_row_escapes_multiline_command() {
+        // A multiline command must be escaped to a single line so the
+        // CLI output (one row per line) and the zsh widget's `(f)`
+        // record splitter see exactly one match per row.
+        let row_data = vec![
+            ("command".to_string(), "for i in 1 2 3\ndo echo $i\ndone".to_string()),
+        ];
+        let fields = vec!["command".to_string()];
+        let out = project_row(&row_data, &fields, &[], None, true);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].contains('\n'), "escaped command still has a newline: {:?}", out[0]);
+        assert_eq!(out[0], "for i in 1 2 3\\ndo echo $i\\ndone");
+    }
+
+    #[test]
+    fn project_row_escapes_output_field() {
+        // The `output` field is also escaped (it can contain newlines
+        // from captured command output).
+        let row_data = vec![
+            ("output".to_string(), "line1\nline2".to_string()),
+        ];
+        let fields = vec!["output".to_string()];
+        let out = project_row(&row_data, &fields, &[], None, true);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].contains('\n'), "escaped output still has a newline: {:?}", out[0]);
+        assert_eq!(out[0], "line1\\nline2");
     }
 }

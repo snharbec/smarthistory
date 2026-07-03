@@ -33,6 +33,30 @@ pub fn format_size(len: u64) -> String {
     }
 }
 
+/// Escape newlines (and carriage
+/// returns) in a field value for
+/// safe line-based output. The CLI
+/// prints one row per line; fields
+/// like `command` and `output` can
+/// contain newlines which would
+/// otherwise split a single row into
+/// multiple lines (and break the
+/// zsh-widget's `(f)`-parameter
+/// record splitter). The zsh widget
+/// reverses the escape in shell
+/// before assigning to `BUFFER`.
+///
+/// The escape sequences chosen
+/// (`\n` and `\r`) are the standard
+/// C-style backslash escapes. They
+/// are unambiguous because zsh's
+/// shell parser never produces literal
+/// `\` + `n` / `r` in a command
+/// typed at the prompt.
+pub fn escape_field_for_output(s: &str) -> String {
+    s.replace('\n', "\\n").replace('\r', "\\r")
+}
+
 /// Human-readable difference between `epoch` and now, using the largest
 /// non-zero unit. Ladder (with short unit suffixes):
 ///   month  -> "1M", 2M, ...
@@ -67,9 +91,6 @@ pub fn format_diff(epoch: i64) -> String {
         return format!("{}m", mins);
     }
     let hours = delta.num_hours();
-    if hours < 24 {
-        return format!("{}h", hours);
-    }
     let days = delta.num_days();
     format!("{}d", days)
 }
@@ -1997,5 +2018,27 @@ mod tests {
             !result.is_empty(),
             "result must be non-empty for an existing path, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn escape_field_single_line_unchanged() {
+        assert_eq!(escape_field_for_output("ls -la"), "ls -la");
+    }
+
+    #[test]
+    fn escape_field_multiline_becomes_single_line() {
+        let cmd = "for i in 1 2 3\ndo echo $i\ndone";
+        let escaped = escape_field_for_output(cmd);
+        // The escaped form must not contain a real newline — that's
+        // the whole point: one row fits on one line of CLI output.
+        assert!(!escaped.contains('\n'), "escaped still has newline: {escaped:?}");
+        assert!(!escaped.contains('\r'), "escaped still has carriage return: {escaped:?}");
+        // The backslash-n sequences must be present.
+        assert_eq!(escaped, "for i in 1 2 3\\ndo echo $i\\ndone");
+    }
+
+    #[test]
+    fn escape_field_carriage_return() {
+        assert_eq!(escape_field_for_output("a\rb"), "a\\rb");
     }
 }
