@@ -1214,36 +1214,29 @@ struct App {
     /// from queuing a duplicate POST.
     jira_add_comment_in_flight: bool,
 
-    /// In-flight files-mode directory
-    /// walk (background thread). Polled
-    /// by the run loop similarly to the
-    /// JIRA request polls.
-    files_request: Option<FilesRequest>,
-    /// Whether a files-mode walk is
-    /// currently in flight (background
-    /// thread). Prevents queueing a
-    /// second walk on every keystroke.
-    files_in_flight: bool,
-    /// When the user last typed in files
-    /// mode. The debounce window must
-    /// elapse before the background walk
-    /// fires. `None` means the user
-    /// hasn't typed anything in files
-    /// mode yet (first entry).
-    files_debounce_started: Option<std::time::Instant>,
-    /// The last pattern that was walked.
-    /// When the current pattern is the
-    /// same, the walk is not re-triggered
-    /// (the cached rows are still fresh).
-    files_last_pattern: Option<String>,
+    /// Aggregated files-mode state:
+    /// debounce timer, in-flight walk
+    /// request, last walked pattern,
+    /// and cached rows. The full
+    /// state machine lives in
+    /// `src/files.rs::FilesState` so
+    /// the four interrelated fields
+    /// stay in one struct.
+    files_state: crate::files::FilesState,
 
-    /// Cached results of the most recent
-    /// files-mode walk. Populated by
-    /// `process_files_result` when the
-    /// background thread completes.
-    /// Empty on first entry (before the
-    /// first background walk completes).
-    files_rows: Vec<HistoryRow>,
+    /// User-configured additional
+    /// directory basenames to
+    /// skip during the walk
+    /// (combined with
+    /// `files::DEFAULT_IGNORES` at
+    /// walk time). Stored on App
+    /// so the walker has a stable
+    /// copy for the lifetime of
+    /// the TUI session; the user
+    /// can edit the config and
+    /// restart the TUI to pick up
+    /// new patterns.
+    files_ignores: Vec<String>,
 }
 
 /// How long the LLM auto-call waits after the last keystroke
@@ -1256,15 +1249,6 @@ struct App {
 const LLM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 
 
-/// How long the files-mode walk waits
-/// after the last keystroke before
-/// spawning the background thread.
-/// Matches the JIRA search debounce
-/// (400ms) since both are local/cheap
-/// compared to LLM calls. The user
-/// expects fast feedback when typing a
-/// file pattern.
-const FILES_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 /// How long the JIRA search-as-you-type waits after the
 /// last keystroke before firing. Shorter than the LLM
 /// debounce because a JQL search is cheaper than an LLM
@@ -1454,17 +1438,6 @@ impl App {
         !self.query.is_empty() && self.query.starts_with(p)
     }
 
-    /// The files-view filter body, i.e. everything
-    /// after the leading `~` prefix. Empty when not in
-    /// files mode.
-    fn files_pattern(&self) -> &str {
-        if self.is_files_query() {
-            let p = self.query_prefixes.files;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
-    }
 
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
@@ -2974,200 +2947,13 @@ impl App {
         // While the walk is in flight,
         // this returns the stale (or
         // empty) cache so the TUI never
-        // blocks.
-        Ok(self.files_rows.clone())
+        Ok(self.files_state.rows.clone())
     }
 }
 
-/// Recursively walk a directory, adding matching
-/// files and directories to `rows`. Hidden entries
-/// (names starting with `.`) are skipped. Returns
-/// `Ok(())` when the walk completes (even if some
-/// subdirectories are unreadable — those are
-/// silently skipped so permission errors in one
-/// subtree don't abort the whole scan).
-/// Basenames of directories to skip
-/// during the files-mode walk.
-/// These are never useful to open
-/// in an editor and slow down the
-/// search enormously (target/ alone
-/// contributes >50K entries in a
-/// typical Rust project).
-const ARTIFACT_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    ".git",
-    ".codegraph",
-    ".github",
-    ".vscode",
-    ".idea",
-    "build",
-    "dist",
-    "_build",
-    "bazel-out",
-    "bazel-testlogs",
-    "bazel-bin",
-    "__pycache__",
-    ".next",
-    ".cache",
-    ".sass-cache",
-    "coverage",
-    ".nyc_output",
-];
-
-fn walk_dir(
-    root: &std::path::Path,
-    dir: &std::path::Path,
-    tokens: &[String],
-    next_id: &mut i64,
-    rows: &mut Vec<HistoryRow>,
-) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
-        // Skip hidden entries.
-        if name.starts_with('.') {
-            continue;
-        }
-        // Skip common artifact/build
-        // directories that are never
-        // useful to open in an editor.
-        // The check is on `name` (the
-        // basename of the entry, not
-        // the full path), so `target/`
-        // at any depth is skipped.
-        // This is the single largest
-        // performance win — without it
-        // `target/` alone contributes
-        // 99% of the file count in a
-        // Rust project.
-        if ARTIFACT_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-        // Compute display path relative to root.
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
-        let display = if rel.is_empty() {
-            name.clone()
-        } else {
-            rel
-        };
-        // Apply the text filter (AND by token).
-        // Only controls whether THIS entry is
-        // included in the result list — the
-        // directory recursion is unconditional,
-        // so `~main.rs` still finds
-        // `src/main.rs` even though `src/`
-        // itself doesn't match.
-        let matches_filter = tokens.is_empty()
-            || tokens.iter().all(|tok| {
-                display.to_lowercase().contains(tok)
-            });
-        if matches_filter {
-            let id = *next_id;
-            *next_id -= 1;
-            let ft = entry.file_type().ok();
-            let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
-            let mode = if is_dir { "directory" } else { "file" };
-            // Compute a human-readable size for files.
-            let comment = if is_dir {
-                String::new()
-            } else {
-                match entry.metadata() {
-                    Ok(m) => {
-                        let len = m.len();
-                        if len < 1024 {
-                            format!("{} B", len)
-                        } else if len < 1024 * 1024 {
-                            format!("{:.1} KiB", len as f64 / 1024.0)
-                        } else {
-                            format!("{:.1} MiB", len as f64 / (1024.0 * 1024.0))
-                        }
-                    }
-                    Err(_) => String::new(),
-                }
-            };
-            // Read first lines for file preview.
-            let output = if !is_dir {
-                read_file_preview(&path)
-            } else {
-                String::new()
-            };
-            let abs_path = if path.is_absolute() {
-                path.to_string_lossy().to_string()
-            } else {
-                // Shouldn't happen since `read_dir`
-                // returns absolute paths, but be safe.
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(&path)
-                    .to_string_lossy()
-                    .to_string()
-            };
-            rows.push(HistoryRow {
-                id,
-                command: display,
-                directory: abs_path,
-                session_id: String::new(),
-                exit_code: 0,
-                timestamp: 0,
-                comment,
-                output,
-                mode: mode.to_string(),
-                source: String::new(),
-            });
-        }
-        // Always recurse into directories so
-        // deep files are found even when the
-        // ancestor directory doesn't match the
-        // filter pattern.
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            walk_dir(root, &path, tokens, next_id, rows)?;
-        }
-    }
-    Ok(())
-}
-
-/// Read the first few lines of a text file for the
-/// preview pane. Returns up to 1024 bytes, truncated
-/// to complete lines.
-fn read_file_preview(path: &std::path::Path) -> String {
-    const MAX_PREVIEW_BYTES: usize = 1024;
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            if text.len() <= MAX_PREVIEW_BYTES {
-                text
-            } else {
-                let mut result = String::with_capacity(MAX_PREVIEW_BYTES + 1);
-                for line in text.lines() {
-                    if result.len() + line.len() + 1 > MAX_PREVIEW_BYTES {
-                        break;
-                    }
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(line);
-                }
-                result
-            }
-        }
-        Err(_) => String::new(),
-    }
-}
+// File-mode helpers (FilesState, walk_dir, IgnoreSet,
+// read_preview_bytes, spawn_walk) now live in
+// `src/files.rs` and are imported via `crate::files::*`.
 
 impl App {
     /// Look up the cached tmux
@@ -4391,26 +4177,6 @@ struct JiraAddCommentRequest {
     body: String,
 }
 
-/// An in-flight files-mode directory
-/// walk. A background thread does the
-/// walk and sends the result over the
-/// channel; the run loop polls it and
-/// calls `process_files_result`. The
-/// cancelled flag lets the user abort a
-/// slow walk by leaving files mode or by
-/// pressing `Esc`.
-struct FilesRequest {
-    receiver: mpsc::Receiver<Result<Vec<HistoryRow>, anyhow::Error>>,
-    cancelled: Arc<AtomicBool>,
-    /// The pattern that was being
-    /// searched for. Stashed so
-    /// the result-processing step
-    /// can discard stale results
-    /// (the user typed more
-    /// characters while the walk
-    /// was running).
-    pattern: String,
-}
 
 /// Sort a JIRA comments list newest-first by
 /// the `created` timestamp. JIRA's REST v2
@@ -4726,6 +4492,7 @@ impl App {
         notes_dir: Option<std::path::PathBuf>,
         _todo_line_option: String,
         jira_fragments: std::collections::HashMap<String, String>,
+        files_ignores: Vec<String>,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -4827,9 +4594,11 @@ notes_date_filter: NotesDateFilter::All,
             // debounce on the first keystroke in LLM mode.
             llm_debounce_started: None,
             llm_preview: None,
+            llm_preview_description: None,
             llm_in_flight: false,
             llm_request: None,
-            llm_preview_description: None,
+            files_state: crate::files::FilesState::new(),
+            files_ignores,
             jira_rows: Vec::new(),
             jira_request: None,
             jira_in_flight: false,
@@ -4844,11 +4613,6 @@ notes_date_filter: NotesDateFilter::All,
             jira_add_comment_target: None,
             jira_add_comment_request: None,
             jira_add_comment_in_flight: false,
-            files_request: None,
-            files_in_flight: false,
-            files_debounce_started: None,
-            files_last_pattern: None,
-            files_rows: Vec::new(),
         };
         app.recompile_regex();
         app.refresh();
@@ -6624,21 +6388,21 @@ fn move_selection(&mut self, delta: isize) {
     /// state when the user leaves.
     fn files_touch(&mut self) {
         if self.is_files_query() {
-            self.files_debounce_started = Some(std::time::Instant::now());
+            self.files_state.debounce_started = Some(std::time::Instant::now());
             // If there's an in-flight walk,
             // cancel it — the pattern has
-            // changed. The `refresh()` below
-            // returns cached (stale) rows
-            // until the new walk completes.
-            if let Some(request) = self.files_request.take() {
+            // changed. The cached rows
+            // stay visible until the new
+            // walk completes.
+            if let Some(request) = self.files_state.request.take() {
                 request.cancelled.store(true, Ordering::Relaxed);
             }
-            self.files_in_flight = false;
+            self.files_state.in_flight = false;
         } else {
-            self.files_debounce_started = None;
-            self.files_in_flight = false;
-            self.files_request = None;
-            self.files_last_pattern = None;
+            self.files_state.debounce_started = None;
+            self.files_state.in_flight = false;
+            self.files_state.request = None;
+            self.files_state.last_pattern = None;
         }
     }
     
@@ -6657,18 +6421,21 @@ fn move_selection(&mut self, delta: isize) {
         if !self.is_files_query() {
             return;
         }
-        if self.files_in_flight {
+        if self.files_state.in_flight {
             return;
         }
-        let Some(started) = self.files_debounce_started else {
+        let Some(started) = self.files_state.debounce_started else {
             return;
         };
-        if started.elapsed() < FILES_DEBOUNCE {
+        if started.elapsed() < crate::files::FILES_DEBOUNCE {
             return;
         }
-        let pattern = self.files_pattern().trim().to_string();
+        let pattern = crate::files::FilesState::current_pattern(
+            &self.query,
+            self.query_prefixes.files,
+        );
         // Skip if we already have results for this pattern.
-        if self.files_last_pattern.as_deref() == Some(&pattern) {
+        if self.files_state.has_results_for(&pattern) {
             return;
         }
         // First entry into files mode:
@@ -6676,10 +6443,10 @@ fn move_selection(&mut self, delta: isize) {
         // fires on the next tick even
         // if the user never types
         // another character.
-        self.files_last_pattern = Some(pattern.clone());
+        self.files_state.last_pattern = Some(pattern.clone());
         self.spawn_files_walk(pattern);
     }
-    
+
     /// Spawn a background thread that
     /// walks the current directory tree,
     /// filters by `pattern`, and sends
@@ -6689,72 +6456,39 @@ fn move_selection(&mut self, delta: isize) {
     /// `process_files_result` when the
     /// result arrives.
     fn spawn_files_walk(&mut self, pattern: String) {
-        let (tx, rx) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancelled_clone = cancelled.clone();
-        let tokens: Vec<String> = pattern
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_lowercase())
-            .collect();
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-        std::thread::spawn(move || {
-            let mut rows: Vec<HistoryRow> = Vec::new();
-            let mut next_id: i64 = -1;
-            walk_dir(&cwd, &cwd, &tokens, &mut next_id, &mut rows).ok();
-            rows.sort_by(|a, b| {
-                let a_is_dir = a.mode == "directory";
-                let b_is_dir = b.mode == "directory";
-                a_is_dir.cmp(&b_is_dir)
-                    .reverse()
-                    .then(a.command.cmp(&b.command))
-            });
-            rows.truncate(1000);
-            if !cancelled_clone.load(Ordering::Relaxed) {
-                let _ = tx.send(Ok(rows));
-            }
-        });
-        self.files_in_flight = true;
-        self.files_request = Some(FilesRequest {
-            receiver: rx,
-            cancelled,
-            pattern: pattern.clone(),
-        });
+        let ignore = crate::files::IgnoreSet::new(&self.files_ignores);
+        let request = crate::files::spawn_walk(pattern.clone(), ignore);
+        self.files_state.in_flight = true;
+        self.files_state.request = Some(request);
         self.set_status_message("Searching files…".to_string());
     }
-    
+
     /// Process a files-mode walk result
     /// that arrived from the background
     /// thread. Caches the rows in
-    /// `self.files_rows` and refreshes
-    /// the list. Stale results (the
-    /// pattern changed between spawn
+    /// `self.files_state.rows` and
+    /// refreshes the list. Stale results
+    /// (the pattern changed between spawn
     /// and delivery) are discarded.
     fn process_files_result(
         &mut self,
-        request: FilesRequest,
-        result: Result<Vec<HistoryRow>, anyhow::Error>,
+        request: crate::files::FilesRequest,
+        rows: Vec<HistoryRow>,
     ) {
-        self.files_in_flight = false;
-        self.files_request = None;
-        match result {
-            Ok(rows) => {
-                // Only accept if this
-                // result matches the
-                // current pattern (the
-                // user may have typed
-                // more characters while
-                // the walk was running).
-                let current = self.files_pattern().trim().to_string();
-                if current == request.pattern {
-                    self.files_rows = rows;
-                    self.refresh();
-                }
-            }
-            Err(e) => {
-                self.set_status_message(e.to_string());
-            }
+        self.files_state.in_flight = false;
+        self.files_state.request = None;
+        // Only accept if this result
+        // matches the current pattern
+        // (the user may have typed
+        // more characters while the
+        // walk was running).
+        let current = crate::files::FilesState::current_pattern(
+            &self.query,
+            self.query_prefixes.files,
+        );
+        if current == request.pattern {
+            self.files_state.rows = rows;
+            self.refresh();
         }
     }
 
@@ -6970,12 +6704,6 @@ fn move_selection(&mut self, delta: isize) {
                         //
                         // The 4-line preview budget in the
                         // details pane shows the 3 header
-                        // lines + 1 description line. The
-                        // full description is available in
-                        // the show-output overlay (Ctrl+L).
-                        // Internal newlines in the
-                        // description are preserved (the
-                        // ADF extractor renders paragraph
                         // breaks as `\n`), so a
                         // multi-paragraph body produces a
                         // multi-line tail in the output.
@@ -8884,8 +8612,8 @@ pub fn run_tui_to_stdout(
         notes_dir,
         app_cfg.todo_line_option().to_string(),
         app_cfg.jira_fragments().clone(),
+        app_cfg.files_ignores().to_vec(),
     );
-    // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
         app.duplicate_filter = session.duplicate_filter.unwrap_or(true);
@@ -9021,10 +8749,10 @@ fn run_loop(
         // populates `self.files_rows`
         // and `process_files_result`
         // triggers a `refresh()`.
-        if let Some(request) = app.files_request.as_ref()
+        if let Some(request) = app.files_state.request.as_ref()
             && let Ok(result) = request.receiver.try_recv()
         {
-            let request = app.files_request.take().unwrap();
+            let request = app.files_state.request.take().unwrap();
             app.process_files_result(request, result);
         }
 
@@ -9248,16 +8976,18 @@ fn run_loop(
     }
 }
 
-
 /// Returns `true` if the app should exit (selection made or cancelled).
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    // Every keypress is a chance to clear a stale status message
-    // (e.g. the "Yanked 12 chars" feedback that should fade after
-    // a few seconds). Doing this at the top of the input loop
-    // means the message stays visible while the user is reading
-    // it and disappears as soon as they interact again.
+    // The status message is ticked
+    // here (vs. in the run loop
+    // above) so it disappears as
+    // soon as the user interacts
+    // again — the "X" key for
+    // delete, for example, clears
+    // it and disappears as soon as
+    // they interact again.
     app.tick_status_message();
 
     // The command palette sits above the help overlay so it can
@@ -11389,6 +11119,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 app
@@ -11459,6 +11190,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                    Vec::new(),
                 )
         }
 
@@ -11527,6 +11259,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                    Vec::new(),
                 )
         }
 
@@ -11761,6 +11494,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -12409,6 +12143,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -12521,6 +12256,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 unsafe {
@@ -12746,6 +12482,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                    Vec::new(),
                 )
         }
 
@@ -12936,6 +12673,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -13675,6 +13413,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                    Vec::new(),
                 )
         }
 
@@ -15169,6 +14908,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 // Restore env before any `?` can
                 // short-circuit out of the test (so
@@ -15274,6 +15014,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -15391,6 +15132,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -15510,6 +15252,7 @@ mod tests {
                         None,
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
+                Vec::new(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -17433,6 +17176,7 @@ mod tests {
                 // consumer and doesn't need a
                 // formal setter).
                 std::collections::HashMap::new(),
+            Vec::new(),
             );
             // `App::new` calls
             // `build_session_subdirs`

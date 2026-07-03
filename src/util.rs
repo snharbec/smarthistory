@@ -15,6 +15,24 @@ pub fn format_time(epoch: i64) -> String {
     }
 }
 
+/// Human-readable file size. Ladder:
+///   < 1 KiB  -> "N B"
+///   < 1 MiB  -> "N.N KiB"
+///   else     -> "N.N MiB"
+/// Negative or zero returns "0 B". The
+/// caller is expected to have already
+/// handled directories (which have
+/// empty size strings).
+pub fn format_size(len: u64) -> String {
+    if len < 1024 {
+        format!("{} B", len)
+    } else if len < 1024 * 1024 {
+        format!("{:.1} KiB", len as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", len as f64 / (1024.0 * 1024.0))
+    }
+}
+
 /// Human-readable difference between `epoch` and now, using the largest
 /// non-zero unit. Ladder (with short unit suffixes):
 ///   month  -> "1M", 2M, ...

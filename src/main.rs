@@ -1,3 +1,4 @@
+mod files;
 mod jira;
 mod llm;
 mod tui;
@@ -890,6 +891,21 @@ pub struct Config {
     /// loader silently drops them so a typo in the
     /// config can't disable a built-in alias.
     jira_fragments: std::collections::HashMap<String, String>,
+    /// User-customizable additional
+    /// directory basenames to skip
+    /// during the files-mode walk
+    /// (`~...`). Configured via
+    /// `files.ignore=<name>` lines
+    /// in the config file (one
+    /// per line, space-separated).
+    /// Always combined with the
+    /// built-in [`crate::files::DEFAULT_IGNORES`]
+    /// list at walk time, so the
+    /// user only needs to add
+    /// project-specific patterns
+    /// (`.venv/`, `.terraform/`,
+    /// etc.).
+    files_ignores: Vec<String>,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
     /// User-configured additional
@@ -1047,6 +1063,7 @@ impl Config {
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
             jira_fragments: std::collections::HashMap::new(),
+            files_ignores: Vec::new(),
             query_prefixes: QueryPrefixes::default(),
             // `~` expansion: `$HOME` is
             // always in the set (the
@@ -1315,6 +1332,18 @@ impl Config {
                                     name,
                                     value,
                                 );
+                            } else if other == "files.ignore" {
+                                // Allow multiple
+                                // `files.ignore=...`
+                                // lines; each is split
+                                // on whitespace so the
+                                // user can list several
+                                // patterns in one line.
+                                for name in value.split_whitespace() {
+                                    if !name.is_empty() {
+                                        self.files_ignores.push(name.to_string());
+                                    }
+                                }
                             }
                 }
             }
@@ -1545,6 +1574,21 @@ impl Config {
     /// — see `run_tui_to_stdout`).
     pub fn jira_fragments(&self) -> &std::collections::HashMap<String, String> {
         &self.jira_fragments
+    }
+
+    /// User-configured additional
+    /// directory basenames to
+    /// skip during the files-mode
+    /// walk. Configured via
+    /// `files.ignore=<name>`
+    /// lines in the config file
+    /// (multiple lines allowed,
+    /// each space-separated).
+    /// Combined with the built-in
+    /// [`crate::files::DEFAULT_IGNORES`]
+    /// at walk time.
+    pub fn files_ignores(&self) -> &[String] {
+        &self.files_ignores
     }
 
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
