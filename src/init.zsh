@@ -260,7 +260,6 @@ _smarthistory_unescape() {
     printf %s "$out"
 }
 
-}
 
 _smarthistory_up_history() {
     # Always use smarthistory, even with an empty LBUFFER (an empty
