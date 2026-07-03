@@ -798,6 +798,12 @@ pub struct QueryPrefixes {
     /// Credentials/config come from the `JIRA_SERVER`,
     /// `JIRA_API_TOKEN`, `JIRA_URL`, and `JIRA_PROJECT`
     /// environment variables.
+    /// Prefix for the files-view mode (default
+    /// `~`). Lists every file in the current
+    /// directory and subdirectories, filtered by
+    /// the typed pattern. Selecting a row opens
+    /// the file in `$EDITOR`.
+    pub files: char,
     pub jira: char,
 }
 
@@ -813,6 +819,7 @@ impl Default for QueryPrefixes {
             todo: '!',
             directories: '#',
             panes: '*',
+            files: '~',
             jira: '-',
         }
     }
@@ -1587,6 +1594,7 @@ impl Config {
             "todo" => prefixes.todo = c,
             "directories" => prefixes.directories = c,
             "panes" => prefixes.panes = c,
+            "files" => prefixes.files = c,
             "jira" => prefixes.jira = c,
             _ => {}
         }

@@ -1003,9 +1003,9 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     // "F3-cycled" modes (plain / regex /
     // fuzzy / output) are also reachable
     // via `Action::ToggleSearchMode`, but
-    // the remaining seven (LLM / question
-    // / notes / todo / directories / panes
-    // / JIRA) require the user to type the
+                // the remaining eight (LLM / question
+                // / notes / todo / directories / panes
+                // / JIRA / files) require the user to type the
     // prefix character directly. Listing
     // them all in the help is the only way
     // the user discovers the LLM, question,
@@ -1142,6 +1142,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "JIRA",
         qp.jira.to_string(),
         "search JIRA issues (needs JIRA_SERVER + JIRA_API_TOKEN env vars)",
+    );
+    mode_row(
+        &mut lines,
+        "files",
+        qp.files.to_string(),
+        "list every file in the current directory (selecting one opens it in $EDITOR)",
     );
 
     lines.push(Line::from(""));
@@ -3722,12 +3728,21 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 // tint signals "external data
                 // source" (like notes/question).
                 ("-", " jira ", app.query.as_str())
+            } else if app.is_files_query() {
+                // Files mode: browse the file tree
+                // starting at the current directory.
+                // Each row shows a file or
+                // subdirectory path; selecting a
+                // file opens it in $EDITOR. The
+                // success (green) tint signals
+                // "browse filesystem" — matching
+                // the panes mode colour.
+                ("~", " files ", app.query.as_str())
             } else {
                 ("> ", " search ", app.query.as_str())
             }
         }
     };
-
     let input = Paragraph::new(Line::from(vec![
         Span::styled(prompt, Theme::accent()),
         Span::raw(content),
@@ -3764,6 +3779,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::success_color())
             } else if app.is_jira_query() {
                 Style::default().fg(Theme::info_color())
+            } else if app.is_files_query() {
+                Style::default().fg(Theme::success_color())
             } else {
                 Theme::accent()
             })
@@ -3812,6 +3829,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::success_color())
             } else if app.is_jira_query() {
                 Style::default().fg(Theme::info_color())
+            } else if app.is_files_query() {
+                Style::default().fg(Theme::success_color())
             } else {
                 Theme::dim()
             })
