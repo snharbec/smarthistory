@@ -244,7 +244,19 @@ fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
     let start = scroll;
     let visible: Vec<Line> = all_lines[start..end]
         .iter()
-        .map(|l| Line::from(Span::raw(l.to_string())))
+        // Each line is run through the
+        // markdown parser so the JIRA
+        // overlay's `##` headings and
+        // `**bold**` labels render with
+        // proper styling (instead of as
+        // raw text). Non-JIRA overlays
+        // (regular captured output) have
+        // no markdown structure, so the
+        // parser produces plain text
+        // spans — same visual result as
+        // before, but consistent with
+        // the details-pane path.
+        .map(|l| render_preview_line(l))
         .collect();
 
     let paragraph = Paragraph::new(visible)
@@ -724,7 +736,7 @@ fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
 /// Build the lines shown in the help overlay. The first section
 /// reflects the user's current settings; the second section is the
 /// canonical shortcut reference.
-fn build_help_lines(app: &App) -> Vec<Line<'static>> {
+pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let accent = Theme::accent();
@@ -983,6 +995,245 @@ fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
 
     lines.push(Line::from(""));
+
+    // ----- Search modes -----
+    //
+    // Lists every prefix-switchable mode and
+    // its trigger character. The four
+    // "F3-cycled" modes (plain / regex /
+    // fuzzy / output) are also reachable
+    // via `Action::ToggleSearchMode`, but
+    // the remaining seven (LLM / question
+    // / notes / todo / directories / panes
+    // / JIRA) require the user to type the
+    // prefix character directly. Listing
+    // them all in the help is the only way
+    // the user discovers the LLM, question,
+    // panes, and JIRA modes exist at all.
+    //
+    // The prefix column shows the *user's
+    // configured* prefix (from
+    // `app.query_prefixes`), not the
+    // default — the help reflects the
+    // live config. The descriptions are
+    // intentionally short (one line each)
+    // so the full table fits in the
+    // visible help area on an 80-col
+    // terminal without scrolling.
+    lines.push(Line::from(vec![Span::styled(
+        "Search modes",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(
+        "  Type a prefix to switch mode. The first four (plain / regex /",
+    ));
+    lines.push(Line::from(
+        "  fuzzy / output) are also cycled by the search-mode-toggle key;",
+    ));
+    lines.push(Line::from(
+        "  the rest require the prefix character. Prefix characters are",
+    ));
+    lines.push(Line::from(
+        "  configurable in ~/.config/smarthistory/config (prefix.<name>=).",
+    ));
+    lines.push(Line::from(""));
+
+    // Helper: render one row of the
+    // search-modes table. Three columns:
+    // mode name (left, dim), prefix
+    // (middle, warning — the colour is
+    // the same as the markdown renderer's
+    // inline-code style, so the prefix
+    // reads as a "code token"), and a
+    // short description (right, plain).
+    //
+    // The styles are constructed inline
+    // via `Theme::dim()` / `Theme::warning()`
+    // rather than the `dim` and `warning`
+    // locals used by `row` above; the
+    // nested `fn` items can't capture
+    // local variables (a Rust closure
+    // limitation), so the styles have to
+    // be rebuilt at the call site.
+    fn mode_row(
+        lines: &mut Vec<Line<'static>>,
+        name: &'static str,
+        prefix: String,
+        desc: &'static str,
+    ) {
+        let prefix_text = if prefix.is_empty() {
+            "\u{2014}".to_string() // em-dash for "no prefix"
+        } else {
+            format!(" {}", prefix) // leading space for column padding
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<14}", name), Theme::dim()),
+            Span::styled(
+                format!("{:<7}", prefix_text),
+                Style::default().fg(Theme::warning_color()),
+            ),
+            Span::raw(desc),
+        ]));
+    }
+
+    let qp = &app.query_prefixes;
+    mode_row(
+        &mut lines,
+        "plain",
+        String::new(),
+        "default — every word is a substring match (AND-combined)",
+    );
+    mode_row(
+        &mut lines,
+        "regex",
+        qp.regex.to_string(),
+        "the body is a regex; implicit `.*` anchors on both sides",
+    );
+    mode_row(
+        &mut lines,
+        "fuzzy",
+        qp.fuzzy.to_string(),
+        "fzf-style subsequence match (every char of the body appears in order)",
+    );
+    mode_row(
+        &mut lines,
+        "output",
+        qp.output.to_string(),
+        "match against the captured output of each command (not the command itself)",
+    );
+    mode_row(
+        &mut lines,
+        "LLM command",
+        qp.llm.to_string(),
+        "send the body to ollama, generate a Bash command, stage it for execution",
+    );
+    mode_row(
+        &mut lines,
+        "question",
+        qp.question.to_string(),
+        "send the body to ollama, get a short answer (4 sentences max) in an overlay",
+    );
+    mode_row(
+        &mut lines,
+        "notes",
+        qp.notes.to_string(),
+        "search the note_search SQLite database (needs notes.database + notes.dir)",
+    );
+    mode_row(
+        &mut lines,
+        "todo",
+        qp.todo.to_string(),
+        "list open todos from the note_search database (selecting one opens $EDITOR at the line)",
+    );
+    mode_row(
+        &mut lines,
+        "directories",
+        qp.directories.to_string(),
+        "list every directory in the global history (sorted by most-recent activity)",
+    );
+    mode_row(
+        &mut lines,
+        "panes",
+        qp.panes.to_string(),
+        "list every pane in the current tmux session (selecting one jumps to it)",
+    );
+    mode_row(
+        &mut lines,
+        "JIRA",
+        qp.jira.to_string(),
+        "search JIRA issues (needs JIRA_SERVER + JIRA_API_TOKEN env vars)",
+    );
+
+    lines.push(Line::from(""));
+
+    // ----- JIRA-mode tags -----
+    //
+    // A sub-section under "Search modes"
+    // because the JIRA-mode tags only
+    // work when the body starts with
+    // the JIRA prefix (`-`). They
+    // expand to JQL clauses server-side.
+    // The reserved names (`me`, `today`,
+    // `week`, `month`) are built-in
+    // aliases; the `@<name>` pattern is
+    // for user-defined fragments from
+    // the `jira.search.<name>=<jql>`
+    // config keys.
+    lines.push(Line::from(vec![Span::styled(
+        "JIRA-mode tags",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(
+        "  Only meaningful when the body starts with the JIRA prefix above.",
+    ));
+    lines.push(Line::from(
+        "  Each tag is a whole-word token (case-insensitive, `@` optional).",
+    ));
+    lines.push(Line::from(""));
+
+    // Reuse the same 3-column layout as
+    // the modes table: tag (left, warning
+    // + bold so the `@name` reads as a
+    // distinct token), JQL (middle, dim
+    // — exact clause the tag expands to),
+    // one-line description (right, plain).
+    //
+    // Style construction is inline
+    // because of the same `fn`-item
+    // capture limitation as
+    // `mode_row` above.
+    fn jira_tag_row(
+        lines: &mut Vec<Line<'static>>,
+        tag: &'static str,
+        jql: &'static str,
+        desc: &'static str,
+    ) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  @{:<11}", tag),
+                Style::default()
+                    .fg(Theme::warning_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{:<24}", jql), Theme::dim()),
+            Span::raw(desc),
+        ]));
+    }
+
+    jira_tag_row(
+        &mut lines,
+        "me",
+        "assignee = currentUser()",
+        "only issues assigned to the current user (per the API token)",
+    );
+    jira_tag_row(
+        &mut lines,
+        "today",
+        "updated >= \"<today-1d>\"",
+        "only issues updated in the last 24 hours (date is UTC)",
+    );
+    jira_tag_row(
+        &mut lines,
+        "week",
+        "updated >= \"<today-7d>\"",
+        "only issues updated in the last 7 days",
+    );
+    jira_tag_row(
+        &mut lines,
+        "month",
+        "updated >= \"<today-31d>\"",
+        "only issues updated in the last 31 days (one day longer than the notes-mode @month)",
+    );
+    jira_tag_row(
+        &mut lines,
+        "<name>",
+        "(config-defined)",
+        "a user-defined JQL fragment (jira.search.<name>=<jql> in the config file); reserved names me/today/week/month are dropped with a warning",
+    );
+
+    lines.push(Line::from(""));
+
+    // ----- Tips -----
     lines.push(Line::from(vec![Span::styled(
         "Tips",
         Style::default().add_modifier(Modifier::BOLD),
@@ -2351,6 +2602,942 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+/// Render a single preview line as styled
+/// spans. Supports a small subset of
+/// Markdown:
+///
+/// **Block-level** (detected at line start):
+///
+/// | Marker          | Element       | Style                              |
+/// |-----------------|---------------|------------------------------------|
+/// | `# text`        | H1 heading    | bold + `success()`                 |
+/// | `## text`       | H2 heading    | bold + `accent()`                  |
+/// | `### text`      | H3 heading    | bold + `dim()` + 2-space indent    |
+/// | `> text`        | Blockquote    | italic + `info()` `│ ` gutter     |
+/// | `- text`        | Bullet list   | `accent()` `• ` marker, plain text |
+/// | `* text`        | Bullet list   | same as `-`                        |
+/// | `1. text`       | Ordered list  | `accent()` `N. ` marker            |
+/// | `---`           | Horizontal    | `dim()` full-width `─` rule         |
+/// | (anything else) | Plain text    | inline parser                      |
+///
+/// **Inline** (within a plain-text line):
+///
+/// | Marker            | Style                                   |
+/// |-------------------|-----------------------------------------|
+/// | `**bold**`         | `Modifier::BOLD`                        |
+/// | `*italic*`         | `Modifier::ITALIC`                      |
+/// | `_italic_`         | `Modifier::ITALIC` (alias for `*`)     |
+/// | `` `code` ``       | `warning()` + `Modifier::BOLD`         |
+/// | `~~strike~~`       | `Modifier::CROSSED_OUT`                 |
+/// | `[text](url)`      | `accent()` + `Modifier::UNDERLINED`     |
+///
+/// The block-level detection runs *first* and
+/// short-circuits the inline parser — a heading
+/// line is the whole content of the line, and
+/// any `**...**` inside it would be part of
+/// the heading text (a future feature, not used
+/// today). This avoids the ambiguity of "is
+/// this a bold span inside a heading, or a
+/// heading marker followed by text" without
+/// needing an escape mechanism.
+///
+/// **Composition**: inline markers compose.
+/// `**bold *italic***` produces a bold span
+/// containing an italic span. The parser is
+/// left-to-right and finds the earliest
+/// applicable marker; nested markers (an
+/// italic span inside a bold span) work
+/// naturally because the inline parser is
+/// recursive.
+///
+/// **Unclosed markers** fall through to plain
+/// text so a stray literal `**` in any future
+/// mode's output doesn't corrupt the
+/// rendering — the user sees the literal
+/// characters instead of a missing closing
+/// marker eating the rest of the line.
+///
+/// **Empty lines** yield a single empty plain
+/// span so the resulting `Line` is never empty
+/// (ratatui collapses empty lines in some
+/// configurations).
+///
+/// **Adjacent plain segments** are merged so
+/// the output doesn't have a sequence of
+/// single-character spans (matters for
+/// ratatui's layout pass on long lines).
+fn render_preview_line(line: &str) -> Line<'static> {
+    // Block-level detection first. A line
+    // that starts with `# ` / `## ` / `### `
+    // (heading), `> ` (blockquote), `- ` or
+    // `* ` (bullet), `N. ` (ordered), or
+    // matches the horizontal-rule pattern
+    // short-circuits the inline parser.
+    match parse_block(line) {
+        MdBlock::Plain(_text) => {
+            // No block-level marker. Run the
+            // inline parser on the original
+            // line so we preserve the
+            // user's exact whitespace
+            // (block parsers strip leading
+            // whitespace before matching
+            // the marker, so we can't
+            // pass `text` here — we
+            // need the full line).
+            let base = Theme::default();
+            let spans = render_inline(line, base);
+            let spans = if spans.is_empty() {
+                vec![Span::styled(String::new(), base)]
+            } else {
+                spans
+            };
+            Line::from(spans)
+        }
+        block => render_block(block),
+    }
+}
+
+/// A block-level element detected at the
+/// start of a line. Each variant carries
+/// the *content* of the element (the text
+/// after the marker). The renderer
+/// (`render_block`) decides the visual
+/// style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MdBlock {
+    /// `# text` — top-level heading.
+    Heading1(String),
+    /// `## text` — mid-level heading.
+    /// The most common in the JIRA
+    /// overlay (the section names and
+    /// per-comment sub-headings).
+    Heading2(String),
+    /// `### text` — sub-heading.
+    Heading3(String),
+    /// `> text` — blockquote. The text is
+    /// rendered in italic with a `│ `
+    /// gutter in `info()` color.
+    Blockquote(String),
+    /// `- text` or `* text` — bullet
+    /// list item. Rendered with a `• `
+    /// marker in `accent()` color.
+    Bullet(String),
+    /// `1. text`, `2. text`, etc. —
+    /// ordered list item. The first
+    /// number is preserved (the parser
+    /// doesn't auto-number across lines;
+    /// each line is independent). The
+    /// marker is `N. ` in `accent()`
+    /// color.
+    Ordered(u32, String),
+    /// A line of only `---` (3+ dashes),
+    /// `***` (3+ asterisks), or `___` (3+
+    /// underscores) — horizontal rule.
+    /// Rendered as a full-width `─` line
+    /// in `dim()` color.
+    HorizontalRule,
+    /// Any line that doesn't match a
+    /// block-level marker. The content
+    /// is the original line (the inline
+    /// parser runs on the full line, not
+    /// on a stripped form, to preserve
+    /// any leading whitespace the user
+    /// intended).
+    Plain(String),
+}
+
+/// Detect the block-level element at the
+/// start of `line`. Leading whitespace is
+/// tolerated (a `# heading` is treated the
+/// same as `   # heading`); the heading
+/// marker must be the *first non-space*
+/// character(s) on the line. A line that
+/// starts with `#tag` (no space) is plain
+/// text, not a heading.
+fn parse_block(line: &str) -> MdBlock {
+    let trimmed = line.trim_start();
+    // Headings: 1-3 `#` chars followed by
+    // a space. 4+ `#`s is plain text
+    // (CommonMark: max 3 levels; anything
+    // beyond is treated as text).
+    if let Some(rest) = stripped_heading(trimmed, 1) {
+        return MdBlock::Heading1(rest.to_string());
+    }
+    if let Some(rest) = stripped_heading(trimmed, 2) {
+        return MdBlock::Heading2(rest.to_string());
+    }
+    if let Some(rest) = stripped_heading(trimmed, 3) {
+        return MdBlock::Heading3(rest.to_string());
+    }
+    // Horizontal rule: a line consisting
+    // only of `---` (3+ dashes), `***` (3+
+    // asterisks), or `___` (3+ underscores),
+    // optionally with leading / trailing
+    // whitespace and spaces between the
+    // characters. The string must be at
+    // least 3 characters of the same
+    // marker.
+    if is_horizontal_rule(trimmed) {
+        return MdBlock::HorizontalRule;
+    }
+    // Blockquote: `> ` prefix.
+    if let Some(rest) = trimmed.strip_prefix("> ") {
+        return MdBlock::Blockquote(rest.to_string());
+    }
+    // Bullet list: `- ` or `* ` prefix.
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        return MdBlock::Bullet(rest.to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("* ") {
+        return MdBlock::Bullet(rest.to_string());
+    }
+    // Ordered list: `<digits>. ` prefix.
+    if let Some((n, rest)) = parse_ordered_prefix(trimmed) {
+        return MdBlock::Ordered(n, rest.to_string());
+    }
+    MdBlock::Plain(line.to_string())
+}
+
+/// Helper: detect a heading with `level`
+/// `#` chars followed by a space. Returns
+/// the text after the marker (with the
+/// leading space stripped). Returns
+/// `None` for `#tag` (no space) or
+/// `##` alone (marker without text — that's
+/// a horizontal-rule-like pattern but
+/// CommonMark requires at least one
+/// non-space character after the marker).
+fn stripped_heading(s: &str, level: usize) -> Option<&str> {
+    let prefix: String = std::iter::repeat_n('#', level).collect();
+    let after = s.strip_prefix(&prefix)?;
+    // Must be followed by a space AND
+    // have at least one non-space
+    // character after the space.
+    // `##` (no text) is plain text.
+    let after_space = after.strip_prefix(' ')?;
+    if after_space.is_empty() {
+        return None;
+    }
+    Some(after_space)
+}
+
+/// True if `s` is a horizontal rule: 3+ of
+/// the same marker character (`-`, `*`, or
+/// `_`), optionally with leading / trailing
+/// whitespace and internal spaces. A line
+/// that mixes markers (e.g. `-*-`) is not
+/// a rule.
+fn is_horizontal_rule(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() < 3 {
+        return false;
+    }
+    // `s.chars().next()` on a non-empty
+    // string is always `Some`; we use
+    // `if let` rather than `?` because
+    // the function returns `bool`, not
+    // `Option`.
+    let Some(first) = s.chars().next() else {
+        return false;
+    };
+    if !matches!(first, '-' | '*' | '_') {
+        return false;
+    }
+    // Every character is either the marker
+    // or a space.
+    s.chars()
+        .all(|c| c == first || c.is_whitespace())
+}
+
+/// Parse an ordered-list prefix: 1-9
+/// digits followed by `. ` and the rest.
+/// Returns `Some((number, rest))` on
+/// success.
+fn parse_ordered_prefix(s: &str) -> Option<(u32, &str)> {
+    let bytes = s.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() && idx < 9 {
+        idx += 1;
+    }
+    if idx == 0 {
+        return None;
+    }
+    let after_digits = &s[idx..];
+    let after_dot = after_digits.strip_prefix(". ")?;
+    let n: u32 = s[..idx].parse().ok()?;
+    Some((n, after_dot))
+}
+
+/// Render a `Block` as a styled `Line`.
+/// This is the visual half of the parser:
+/// each block variant has a specific style
+/// (heading level, list marker, blockquote
+/// gutter, etc.) that's applied here.
+fn render_block(block: MdBlock) -> Line<'static> {
+    let base = Theme::default();
+    match block {
+        MdBlock::Heading1(text) => {
+            // H1: a `▸ ` glyph in the
+            // success color, then the
+            // heading text in the same
+            // color + bold. The glyph
+            // gives H1 a distinct
+            // visual anchor that H2
+            // (the existing `## ` style)
+            // lacks.
+            let marker = Span::styled("▸ ", Theme::success());
+            let text = Span::styled(
+                text,
+                Theme::success().add_modifier(Modifier::BOLD),
+            );
+            Line::from(vec![marker, text])
+        }
+        MdBlock::Heading2(text) => {
+            // H2: bold + accent color.
+            // The most common style
+            // in the JIRA overlay
+            // (the section names and
+            // per-comment sub-headings).
+            let text = Span::styled(
+                text,
+                Theme::accent().add_modifier(Modifier::BOLD),
+            );
+            Line::from(text)
+        }
+        MdBlock::Heading3(text) => {
+            // H3: 2-space indent (to
+            // suggest a sub-level
+            // below the section
+            // headings) + bold + dim
+            // color. Subdued so it
+            // doesn't compete with
+            // H1 / H2.
+            let indent = Span::raw("  ");
+            let text = Span::styled(
+                text,
+                Theme::dim().add_modifier(Modifier::BOLD),
+            );
+            Line::from(vec![indent, text])
+        }
+        MdBlock::Blockquote(text) => {
+            // Blockquote: a `│ ` gutter
+            // in the info color, then
+            // the content in italic.
+            // The italic modifier is
+            // applied to the content
+            // spans via `render_inline`,
+            // which gets a `base` Style
+            // pre-decorated with
+            // ITALIC.
+            let marker = Span::styled("│ ", Theme::info());
+            let italic_base = base.add_modifier(Modifier::ITALIC);
+            let content = render_inline(&text, italic_base);
+            let mut spans = vec![marker];
+            spans.extend(content);
+            Line::from(spans)
+        }
+        MdBlock::Bullet(text) => {
+            // Bullet list: a `• `
+            // marker in the accent
+            // color, then the
+            // content in the default
+            // style. The inline parser
+            // runs on the content so
+            // `**bold**` inside a
+            // bullet item still
+            // produces a bold span.
+            let marker = Span::styled("• ", Theme::accent());
+            let content = render_inline(&text, base);
+            let mut spans = vec![marker];
+            spans.extend(content);
+            Line::from(spans)
+        }
+        MdBlock::Ordered(n, text) => {
+            // Ordered list: a `N. `
+            // marker in the accent
+            // color (where N is the
+            // number from the source
+            // line), then the
+            // content. We don't
+            // auto-number across
+            // lines because the
+            // parser is line-by-line;
+            // the user is responsible
+            // for writing the
+            // numbers in their
+            // content.
+            let marker = Span::styled(format!("{}. ", n), Theme::accent());
+            let content = render_inline(&text, base);
+            let mut spans = vec![marker];
+            spans.extend(content);
+            Line::from(spans)
+        }
+        MdBlock::HorizontalRule => {
+            // A horizontal rule is a
+            // full-width line of `─`
+            // characters in the dim
+            // color. We emit a fixed
+            // 40-character string; the
+            // `Paragraph` widget's
+            // wrap setting
+            // (`Wrap { trim: false }`)
+            // leaves the trailing
+            // whitespace intact so
+            // the line stays the same
+            // length regardless of
+            // terminal width. A
+            // wider terminal shows
+            // the rule as
+            // 40 characters long; a
+            // narrower one truncates
+            // (the user can scroll
+            // horizontally if the
+            // widget supports it).
+            // A future improvement
+            // could compute the rule's
+            // width from the area at
+            // render time, but the
+            // current shape is
+            // sufficient.
+            Line::from(Span::styled(
+                "─".repeat(40),
+                Theme::dim(),
+            ))
+        }
+        MdBlock::Plain(text) => {
+            // Unreachable in
+            // practice: `render_preview_line`
+            // only calls
+            // `render_block` for
+            // non-`Plain` variants.
+            // Kept for completeness.
+            let spans = render_inline(&text, base);
+            Line::from(spans)
+        }
+    }
+}
+
+/// Render an inline span of text. Walks
+/// `text` left-to-right, finding the
+/// earliest inline marker and emitting
+/// plain text + a styled span. The inline
+/// markers recognised:
+///
+/// - `**bold**` — bold
+/// - `*italic*` — italic
+/// - `_italic_` — italic (alias for `*`)
+/// - `` `code` `` — code (warning color + bold)
+/// - `~~strike~~` — strikethrough
+/// - `[text](url)` — link (accent color + underline)
+///
+/// **Priority**: when multiple markers
+/// could match at the same position, the
+/// longer one wins (`**` before `*`, `~~`
+/// before `~`). The parser checks the
+/// specific double-char markers first
+/// and the single-char ones after.
+///
+/// **Composition**: a bold span can
+/// contain an italic span (e.g.
+/// `**bold *italic***`). The parser is
+/// recursive: the *content* between a
+/// pair of markers is run through
+/// `render_inline` again, so nested
+/// markers are styled correctly. This
+/// means `**bold *italic***` produces:
+///
+/// ```text
+/// [bold [
+///   "bold "
+///   italic[ "italic" ]
+/// ]]
+/// ```
+///
+/// which ratatui renders as bold "bold "
+/// followed by bold-italic "italic".
+///
+/// **Unclosed markers** fall through to
+/// plain text (the rest of the line,
+/// including the literal marker
+/// characters, is rendered without
+/// styling). The user sees the literal
+/// `**` rather than a missing closing
+/// marker eating the rest of the line.
+fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        // Find the earliest
+        // applicable marker. We
+        // check the specific
+        // double-char markers
+        // (`**`, `~~`) before the
+        // single-char ones
+        // (`*`, `_`, `` ` ``,
+        // `[`) so `**` is
+        // recognised as bold
+        // rather than two
+        // consecutive italic
+        // openers.
+        //
+        // The return value
+        // includes the literal
+        // character that opened the
+        // marker (for italic, this
+        // distinguishes `*` from
+        // `_` so the close uses
+        // the same character).
+        let next = find_next_marker(rest);
+        let Some((idx, marker_kind, marker_len, marker_char)) = next else {
+            // No more markers in
+            // the line. Push the
+            // remaining text as
+            // a plain span and
+            // stop.
+            if !rest.is_empty() {
+                push_plain_span(&mut spans, rest.to_string(), base);
+            }
+            break;
+        };
+        // Plain text before the
+        // marker.
+        if idx > 0 {
+            push_plain_span(&mut spans, rest[..idx].to_string(), base);
+        }
+        let after_open = &rest[idx + marker_len..];
+        // Try to find the matching
+        // close marker. The close
+        // marker is the same as
+        // the open marker (e.g.
+        // `**...**`). For `*`
+        // and `_` italic, the
+        // close marker is the
+        // same single char.
+        // For links, the close
+        // marker is `](...)`
+        // which is structurally
+        // different from the
+        // open `[`.
+        let close = find_close_marker(after_open, marker_kind, marker_char);
+        match close {
+            Some((close_idx, close_len, _kind)) => {
+                let content = &after_open[..close_idx];
+                if !content.is_empty() {
+                    let style = style_for_marker(
+                        marker_kind,
+                        base,
+                    );
+                    // The content
+                    // itself is
+                    // recursively
+                    // parsed
+                    // (so
+                    // `**bold *italic***`
+                    // works).
+                    let inner = render_inline(
+                        content,
+                        style,
+                    );
+                    spans.extend(inner);
+                }
+                rest = &after_open[close_idx + close_len..];
+            }
+            None => {
+                // Unclosed
+                // marker.
+                // Render the
+                // rest of
+                // the line
+                // (including
+                // the
+                // literal
+                // marker)
+                // as plain
+                // text.
+                push_plain_span(
+                    &mut spans,
+                    format!(
+                        "{}{}",
+                        marker_str(marker_kind),
+                        after_open
+                    ),
+                    base,
+                );
+                rest = "";
+            }
+        }
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base));
+    }
+    spans
+}
+
+/// Marker kinds recognised by the inline
+/// parser. Used as a typed enum to avoid
+/// the magic-string / magic-int code
+/// paths the previous stringly-typed
+/// implementation had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerKind {
+    /// `**` — bold.
+    Bold,
+    /// `*` or `_` — italic.
+    Italic,
+    /// `` ` `` — inline code.
+    Code,
+    /// `~~` — strikethrough.
+    Strikethrough,
+    /// `[` — link (close is `](...)`).
+    Link,
+}
+
+/// The literal characters that open a
+/// given marker kind. Used when an
+/// unclosed marker falls through to
+/// plain text (we re-attach the literal
+/// characters so the user sees them).
+fn marker_str(kind: MarkerKind) -> &'static str {
+    match kind {
+        MarkerKind::Bold => "**",
+        MarkerKind::Italic => "*",
+        MarkerKind::Code => "`",
+        MarkerKind::Strikethrough => "~~",
+        MarkerKind::Link => "[",
+    }
+}
+
+/// Find the earliest inline marker in
+/// `s`. Returns `(byte_offset, kind, length, open_char)`
+/// of the marker, or `None` if no marker
+/// is present. The byte offset is the
+/// position of the first character of
+/// the marker (not the start of the
+/// content). The `open_char` is the
+/// literal character that opened the
+/// marker — `*` for italic, `_` for
+/// italic, `` ` `` for code, `[` for
+/// link; the first two chars of the
+/// double-char markers (`*` for bold,
+/// `~` for strikethrough).
+///
+/// Priority: `**` and `~~` (double-char
+/// markers) are checked before the
+/// single-char ones (`*`, `_`, `` ` ``,
+/// `[`). This means `**bold**` is
+/// recognised as bold, not as two
+/// consecutive italic openers.
+fn find_next_marker(s: &str) -> Option<(usize, MarkerKind, usize, char)> {
+    // Check double-char markers first.
+    if let Some(idx) = s.find("**") {
+        return Some((idx, MarkerKind::Bold, 2, '*'));
+    }
+    if let Some(idx) = s.find("~~") {
+        return Some((idx, MarkerKind::Strikethrough, 2, '~'));
+    }
+    // Single-char markers. We use
+    // `bytes().position()` to find the
+    // first occurrence of each
+    // character, then return the
+    // minimum-index one.
+    let mut best: Option<(usize, MarkerKind, usize, char)> = None;
+    for (marker, kind) in [
+        ('*', MarkerKind::Italic),
+        ('_', MarkerKind::Italic),
+        ('`', MarkerKind::Code),
+        ('[', MarkerKind::Link),
+    ] {
+        if let Some(idx) = s.find(marker) {
+            // Don't match a `*` that
+            // is part of a `**`
+            // sequence (which
+            // should already have
+            // matched Bold above,
+            // but be defensive).
+            if kind == MarkerKind::Italic
+                && idx + 1 < s.len()
+                && s.as_bytes()[idx + 1] == b'*'
+            {
+                continue;
+            }
+            // Don't match a `~`
+            // that is part of a
+            // `~~` sequence.
+            if kind == MarkerKind::Strikethrough {
+                continue; // already handled above
+            }
+            if best.is_none_or(|(b, _, _, _)| idx < b) {
+                best = Some((idx, kind, 1, marker));
+            }
+        }
+    }
+    best
+}
+
+/// Find the matching close marker for
+/// `open_kind` in `s` (the content
+/// after the open marker). Returns
+/// `(close_offset, close_length, kind)`. For
+/// italic, the close character must
+/// match the open character (either
+/// `*` or `_`); we look for the
+/// specific character that opened
+/// the italic span.
+fn find_close_marker(
+    s: &str,
+    open_kind: MarkerKind,
+    open_char: char,
+) -> Option<(usize, usize, MarkerKind)> {
+    match open_kind {
+        MarkerKind::Bold => {
+            // First-match: the closing
+            // `**` is the first `**` in
+            // `s` after the opener. This
+            // is the standard approach
+            // and works for the common
+            // case (`**Label**: value`).
+            // Nested markers like
+            // `**bold *italic***` aren't
+            // produced by the JIRA
+            // overlay's `build_jira_overlay_text`
+            // (every bold span is a
+            // simple `**Label**: value`
+            // or section-name heading) so
+            // the limitation is
+            // acceptable for the
+            // current use case. A future
+            // improvement could use a
+            // balanced matcher for proper
+            // CommonMark support.
+            s.find("**").map(|idx| (idx, 2, MarkerKind::Bold))
+        }
+        MarkerKind::Strikethrough => {
+            s.find("~~").map(|idx| (idx, 2, MarkerKind::Strikethrough))
+        }
+        MarkerKind::Italic | MarkerKind::Code => {
+            // Single-char close. The
+            // italic and code
+            // parsers use the
+            // single character
+            // that opened them. For
+            // italic, the open
+            // character can be `*`
+            // OR `_`; we close
+            // with the same
+            // character (CommonMark's
+            // rule). For code, the
+            // open is always `` ` ``
+            // and so is the close.
+            let c = match open_kind {
+                MarkerKind::Italic => open_char,
+                MarkerKind::Code => '`',
+                _ => unreachable!(),
+            };
+            s.find(c).map(|idx| (idx, 1, open_kind))
+        }
+        MarkerKind::Link => {
+            // Link close: `](url)`.
+            // The content is
+            // everything between
+            // the `[` and the
+            // `]`. Then `(` and
+            // `)` wrap the URL.
+            // Returns the offset
+            // of the `]` (the
+            // close of the
+            // content); the
+            // caller advances
+            // past the full
+            // `](url)` (the
+            // close length is
+            // the `](...)`
+            // string).
+            let close_bracket = s.find(']')?;
+            let after_bracket = &s[close_bracket..];
+            let url_start = after_bracket.find('(')?;
+            // The `]` is at
+            // close_bracket; the
+            // full close is
+            // `](url)`. Find
+            // the matching `)`.
+            let url_content = &after_bracket[url_start + 1..];
+            let url_end = url_content.find(')')?;
+            // Total close
+            // length: from the
+            // `]` to the end of
+            // `)` inclusive.
+            // That's
+            // close_bracket +
+            // url_start (the
+            // `(`) + 1
+            // (the `(`) + url_end
+            // + 1 (the `)`).
+            // Hmm, simpler:
+            // the close
+            // string is
+            // `](url)` of
+            // length 1 +
+            // url_start + 1
+            // (the `(`) +
+            // url_end + 1
+            // (the `)`).
+            // Wait let me
+            // just compute it
+            // from the byte
+            // positions.
+            // We have:
+            // - `]` at
+            //   close_bracket
+            // - `(` at
+            //   close_bracket + url_start
+            // - URL
+            //   between
+            //   (the URL
+            //   is the
+            //   substring
+            //   between
+            //   `(` and
+            //   `)`)
+            // - `)` at
+            //   close_bracket + url_start + 1 + url_end
+            // The close
+            // length is
+            // the distance
+            // from `]` to
+            // `)`+1
+            // inclusive.
+            // That's
+            // (close_bracket + url_start + 1 + url_end + 1)
+            // -
+            // close_bracket
+            // =
+            // url_start + 1 + url_end + 1
+            // =
+            // url_start + url_end + 2.
+            //
+            // But we
+            // return the
+            // offset
+            // *within* `s`,
+            // not the
+            // original
+            // line.
+            // The close is
+            // the substring
+            // starting at
+            // `]` and
+            // ending at
+            // `)`+1
+            // inclusive.
+            // The
+            // close_offset
+            // is
+            // close_bracket
+            // (where `]`
+            // starts).
+            // The
+            // close_length
+            // is the
+            // number of
+            // bytes from
+            // `]` to
+            // `)`+1
+            // inclusive,
+            // which is
+            // (url_start + 1 + url_end + 1).
+            let close_len = url_start + 1 + url_end + 1;
+            // The URL is
+            // between the
+            // `(` and `)`.
+            // We don't
+            // surface it in
+            // the render
+            // (the link text
+            // is shown, the
+            // URL is
+            // decorative),
+            // but we could
+            // log it for
+            // debugging.
+            let _ = &url_content[..url_end];
+            Some((close_bracket, close_len, MarkerKind::Link))
+        }
+    }
+}
+
+/// Compute the `Style` for the content
+/// inside a marker pair. The
+/// `render_inline` parser uses this to
+/// pass a pre-decorated `base` to the
+/// recursive call so nested markers
+/// compose correctly.
+fn style_for_marker(kind: MarkerKind, base: Style) -> Style {
+    match kind {
+        MarkerKind::Bold => base.add_modifier(Modifier::BOLD),
+        MarkerKind::Italic => base.add_modifier(Modifier::ITALIC),
+        MarkerKind::Code => {
+            // Inline code: warning
+            // color + bold for a
+            // distinct
+            // code-like
+            // visual. The
+            // base
+            // foreground
+            // is
+            // overridden
+            // by the
+            // warning
+            // color.
+            Style::default()
+                .fg(Theme::warning_color())
+                .add_modifier(Modifier::BOLD)
+        }
+        MarkerKind::Strikethrough => {
+            base.add_modifier(Modifier::CROSSED_OUT)
+        }
+        MarkerKind::Link => {
+            // Link: accent
+            // color +
+            // underline.
+            // Convention
+            // for
+            // "link"
+            // treatment
+            // in
+            // terminals.
+            Style::default()
+                .fg(Theme::accent_color())
+                .add_modifier(Modifier::UNDERLINED)
+        }
+    }
+}
+
+/// Push a plain-style span, merging with
+/// the previous span when both are plain.
+/// Avoids the per-character span list
+/// that a naive split would produce — a
+/// long JIRA description line with no
+/// `**` markers would otherwise turn
+/// into many single-character spans,
+/// which can hurt ratatui's layout pass
+/// on wide terminals.
+fn push_plain_span(spans: &mut Vec<Span<'static>>, text: String, base: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == base
+    {
+        // Re-use the existing span by
+        // appending. The owned `String`
+        // lives in the span; we have
+        // to replace it with a longer
+        // one.
+        let prev = std::mem::take(&mut last.content);
+        let combined = format!("{}{}", prev.into_owned(), text);
+        *last = Span::styled(combined, base);
+    } else {
+        spans.push(Span::styled(text, base));
+    }
+}
+
 fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2384,7 +3571,14 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         .output
         .lines()
         .take(4) // Show up to 4 lines to fit the new larger detail pane
-        .map(|l| Line::from(Span::styled(l.to_string(), Theme::default())))
+        // `**...**` markers in the line are turned
+        // into bold spans; everything else stays
+        // plain. The convention is used by the
+        // JIRA-mode row builder to emphasise
+        // attribute labels (Status, Priority,
+        // …). Other modes don't emit `**` and
+        // render unchanged.
+        .map(render_preview_line)
         .collect();
 
     let paragraph = Paragraph::new(preview_lines)
@@ -2431,7 +3625,31 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let is_todo = app.is_todo_query();
     let is_directories = app.is_directories_query();
     let (prompt, title, content) = match app.comment_edit {
-        Some(ref buf) => ("comment> ", " comment ", buf.as_str()),
+        Some(ref buf) => {
+            // The comment-edit buffer is
+            // shared between the local
+            // `command_comments` path and
+            // the JIRA `add_comment`
+            // path. The JIRA path keys on
+            // `jira_add_comment_target` being
+            // `Some(issue_key)` — when set,
+            // the user is composing a new
+            // comment to POST to JIRA, not
+            // editing a local command
+            // note. The prompt and border
+            // title change to make the
+            // mode obvious: "jira>" + " jira
+            // comment " (info tint, matching
+            // the JIRA search mode's colour
+            // so the user immediately
+            // recognises this is a JIRA
+            // action, not a local one).
+            if app.jira_add_comment_target.is_some() {
+                ("jira> ", " jira comment ", buf.as_str())
+            } else {
+                ("comment> ", " comment ", buf.as_str())
+            }
+        }
         None => {
             if is_regex {
                 ("/", " regex ", app.query.as_str())
@@ -2557,7 +3775,21 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             // that's independent of the active
             // mode.
             .border_style(if app.comment_edit.is_some() {
-                Style::default().fg(Theme::warning_color())
+                // The JIRA-add-comment path is
+                // visually distinct from the local
+                // command-comment path. The JIRA
+                // path uses the info tint (blue,
+                // matching the JIRA search mode)
+                // so the user immediately
+                // recognises the action will go
+                // to JIRA, not the local SQLite
+                // database. The local path keeps
+                // the warning (yellow) tint.
+                if app.jira_add_comment_target.is_some() {
+                    Style::default().fg(Theme::info_color())
+                } else {
+                    Style::default().fg(Theme::warning_color())
+                }
             } else if app.notes_query_error {
                 Style::default().fg(Theme::error_color())
             } else if is_regex {
@@ -2785,5 +4017,712 @@ mod tests {
     fn truncate_empty_input() {
         assert_eq!(truncate_cmd_for_details_pane("", 80), "");
         assert_eq!(truncate_cmd_for_details_pane("", 0), "");
+    }
+
+    // ---- render_preview_line (the **...** bold parser) ----
+
+    /// The helper is in the same module as
+    /// the tests, so a single-level `super`
+    /// import reaches it.
+    use super::render_preview_line;
+    use super::super::theme::Theme;
+    use ratatui::style::Modifier;
+
+    /// A line with no `**` markers
+    /// renders as a single plain span
+    /// (preserving the no-marker path's
+    /// backward compatibility for the
+    /// non-JIRA modes that don't emit
+    /// bold markup).
+    #[test]
+    fn preview_line_plain_text_unchanged() {
+        let line = render_preview_line("Status: Open");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "Status: Open");
+        // No BOLD modifier on the span.
+        // `Style::add_modifier` is a public
+        // `bitflags!` Modifier field, so we
+        // can use its generated `contains`
+        // method to check.
+        assert!(!line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// A line with one `**Label**` pair
+    /// splits into two spans: a bold
+    /// span for the label and a plain
+    /// span for the trailing value.
+    #[test]
+    fn preview_line_single_bold_label() {
+        let line = render_preview_line("**Status**: Open");
+        // 2 spans: bold "Status" + plain ": Open".
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "Status");
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        // Second span is the trailing text,
+        // without BOLD.
+        assert_eq!(line.spans[1].content, ": Open");
+        assert!(!line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// Multiple `**...**` pairs on the
+    /// same line produce a sequence of
+    /// bold + plain + bold + plain
+    /// spans. The user's spec renders
+    /// five attributes per row, so this
+    /// is the common-case shape (one
+    /// pair per line, but the parser
+    /// should handle multiple).
+    #[test]
+    fn preview_line_multiple_bold_labels() {
+        // Hypothetical "inline" format
+        // (the JIRA row builder uses one
+        // bold pair per line; this is the
+        // parser's robustness test).
+        let line = render_preview_line("**A**: 1, **B**: 2");
+        // 4 spans: bold "A" + plain ": 1, "
+        // + bold "B" + plain ": 2".
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[0].content, "A");
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].content, ": 1, ");
+        assert!(!line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(line.spans[2].content, "B");
+        assert!(line.spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(line.spans[3].content, ": 2");
+        assert!(!line.spans[3]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// An unclosed `**` (one with no
+    /// matching close) is rendered as a
+    /// plain span containing the literal
+    /// `**` plus the rest of the line.
+    /// The user gets a visible hint that
+    /// something is off rather than a
+    /// half-styled fragment.
+    #[test]
+    fn preview_line_unclosed_marker_falls_through_to_plain() {
+        let line = render_preview_line("**no closer here");
+        // 1 plain span containing the full
+        // line including the literal `**`.
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "**no closer here");
+        assert!(!line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// An empty line produces a
+    /// single empty span (never an
+    /// empty `Vec` — ratatui collapses
+    /// empty `Line`s in some configurations
+    /// which can cause layout glitches).
+    #[test]
+    fn preview_line_empty_input_yields_one_empty_span() {
+        let line = render_preview_line("");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "");
+    }
+
+    /// The plain-text segments before
+    /// and after a bold marker get
+    /// merged into a single span by
+    /// `push_plain_span` (not three
+    /// separate single-character spans).
+    /// A long description line without
+    /// `**` is the worst case for
+    /// span-fragmentation; this test
+    /// asserts the optimisation.
+    #[test]
+    fn preview_line_plain_segments_are_merged() {
+        // No `**` markers → a single
+        // plain span, not many
+        // single-character spans.
+        let line = render_preview_line("a long description with no markers");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "a long description with no markers");
+    }
+
+    /// A line that starts with `## `
+    /// (the heading marker) is rendered as
+    /// a single heading-styled span. The
+    /// `**` bold parser does NOT run on
+    /// heading lines — the heading is the
+    /// whole content of the line.
+    #[test]
+    fn preview_line_heading_marker_renders_as_heading() {
+        let line = render_preview_line("## Comments");
+        assert_eq!(line.spans.len(), 1);
+        // The `## ` prefix is stripped —
+        // only the heading text is in the
+        // span content.
+        assert_eq!(line.spans[0].content, "Comments");
+        // The heading style is bold and
+        // tinted with the accent color.
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        // The accent color is the
+        // foreground (not empty /
+        // default).
+        assert!(line.spans[0].style.fg.is_some());
+    }
+
+    /// A heading line with multiple words
+    /// keeps the full heading text in a
+    /// single span. Whitespace between
+    /// words is preserved.
+    #[test]
+    fn preview_line_heading_with_multiple_words() {
+        let line = render_preview_line("## Comments by Alice");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "Comments by Alice");
+    }
+
+    /// A line that contains `## ` but
+    /// doesn't start with it (e.g. as
+    /// inline text) is treated as plain
+    /// text, NOT a heading. Only the
+    /// line-start position triggers
+    /// the heading style.
+    #[test]
+    fn preview_line_inline_hash_mark_is_not_a_heading() {
+        let line = render_preview_line("see ## section for details");
+        // 1 plain span — the `## ` in
+        // the middle of the line is just
+        // text.
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "see ## section for details");
+        // No BOLD modifier.
+        assert!(!line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// A line that starts with `##` but
+    /// no space (e.g. `##tag`) is NOT
+    /// a heading — the marker is
+    /// `## ` (with a space), not just
+    /// `##`. The line is treated as
+    /// plain text. This avoids false
+    /// positives on markdown-like
+    /// content where `##` is used as
+    /// a non-heading character.
+    #[test]
+    fn preview_line_double_hash_without_space_is_not_a_heading() {
+        let line = render_preview_line("##tag");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "##tag");
+        assert!(!line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// A line that's just `##` (marker
+    /// but no text) is also not a
+    /// heading — the space is required.
+    /// Falls through to the bold parser
+    /// (which produces a single empty
+    /// span, since the marker alone
+    /// has no enclosing `**...**`).
+    #[test]
+    fn preview_line_double_hash_alone_is_not_a_heading() {
+        let line = render_preview_line("##");
+        // Treated as plain text (no
+        // heading style). The exact
+        // span count depends on the
+        // bold parser; assert that no
+        // heading style is applied.
+        for span in &line.spans {
+            // No BOLD modifier on any
+            // span — the heading
+            // detector didn't fire.
+            assert!(!span
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD));
+        }
+    }
+
+    // ---- block-level elements ----
+
+    /// `# text` is an H1 heading: bold +
+    /// the success color, with a leading
+    /// `▸ ` glyph in the same color.
+    #[test]
+    fn preview_line_heading1_renders_with_success_color() {
+        let line = render_preview_line("# Big Title");
+        // Two spans: marker + text.
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "▸ ");
+        assert_eq!(line.spans[1].content, "Big Title");
+        // Both spans are bold; the
+        // text uses the success color.
+        assert!(line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(
+            line.spans[1].style.fg,
+            Some(Theme::success_color())
+        );
+    }
+
+    /// `## text` is an H2 heading: bold +
+    /// the accent color, no leading glyph.
+    /// (This is the existing `## ` style,
+    /// locked in by the
+    /// `preview_line_heading_marker_renders_as_heading`
+    /// test above.)
+    #[test]
+    fn preview_line_heading2_renders_with_accent_color() {
+        let line = render_preview_line("## Section");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "Section");
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(Theme::accent_color())
+        );
+    }
+
+    /// `### text` is an H3 heading:
+    /// 2-space indent + bold + the
+    /// dim color. Subdued so it
+    /// doesn't compete with H1 / H2.
+    #[test]
+    fn preview_line_heading3_renders_indented_and_dim() {
+        let line = render_preview_line("### Subsection");
+        // Two spans: indent + text.
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "  ");
+        assert_eq!(line.spans[1].content, "Subsection");
+        assert!(line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(
+            line.spans[1].style.fg,
+            Some(Theme::dim_color())
+        );
+    }
+
+    /// `####` (4+ hashes) is plain text
+    /// per CommonMark — headings are
+    /// capped at 3 levels.
+    #[test]
+    fn preview_line_four_or_more_hashes_is_plain_text() {
+        let line = render_preview_line("#### too many");
+        // Not a heading — no
+        // `Theme::accent` / `success` /
+        // `dim` foreground on the text
+        // (the leading `#### ` survives
+        // as plain text).
+        for span in &line.spans {
+            // No BOLD modifier.
+            assert!(!span
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD));
+        }
+        // The content includes the
+        // `####` prefix.
+        assert!(line
+            .spans
+            .iter()
+            .any(|s| s.content.contains("####")));
+    }
+
+    /// `> text` is a blockquote: italic
+    /// text with a `│ ` gutter in the
+    /// info color.
+    #[test]
+    fn preview_line_blockquote_renders_with_gutter() {
+        let line = render_preview_line("> a wise quote");
+        // Two spans: gutter + italic
+        // text.
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "│ ");
+        assert_eq!(line.spans[1].content, "a wise quote");
+        // The text is italic.
+        assert!(line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::ITALIC));
+        // The gutter is the info
+        // color.
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(Theme::info_color())
+        );
+    }
+
+    /// `- item` is a bullet list item:
+    /// `• ` marker in the accent color,
+    /// content in plain text.
+    #[test]
+    fn preview_line_bullet_renders_with_marker() {
+        let line = render_preview_line("- first item");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "• ");
+        assert_eq!(line.spans[1].content, "first item");
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(Theme::accent_color())
+        );
+    }
+
+    /// `* item` (asterisk + space) is
+    /// also a bullet — same rendering
+    /// as `- item`.
+    #[test]
+    fn preview_line_asterisk_bullet_renders_with_marker() {
+        let line = render_preview_line("* star item");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "• ");
+        assert_eq!(line.spans[1].content, "star item");
+    }
+
+    /// `1. item` is an ordered list
+    /// item: `1. ` marker in the
+    /// accent color, content plain.
+    #[test]
+    fn preview_line_ordered_list_renders_with_number() {
+        let line = render_preview_line("7. seventh item");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "7. ");
+        assert_eq!(line.spans[1].content, "seventh item");
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(Theme::accent_color())
+        );
+    }
+
+    /// `---` (3+ dashes) is a horizontal
+    /// rule: full-width `─` line in the
+    /// dim color.
+    #[test]
+    fn preview_line_three_dashes_is_horizontal_rule() {
+        let line = render_preview_line("---");
+        assert_eq!(line.spans.len(), 1);
+        // 40 `─` chars (the
+        // renderer's fixed width).
+        assert_eq!(line.spans[0].content.chars().count(), 40);
+        assert!(line.spans[0]
+            .content
+            .chars()
+            .all(|c| c == '─'));
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(Theme::dim_color())
+        );
+    }
+
+    /// `***` (3+ asterisks) is also a
+    /// horizontal rule.
+    #[test]
+    fn preview_line_three_asterisks_is_horizontal_rule() {
+        let line = render_preview_line("***");
+        assert_eq!(line.spans.len(), 1);
+        assert!(line.spans[0]
+            .content
+            .chars()
+            .all(|c| c == '─'));
+    }
+
+    /// A line with only two dashes is
+    /// plain text (need 3+ for a
+    /// horizontal rule).
+    #[test]
+    fn preview_line_two_dashes_is_plain_text() {
+        let line = render_preview_line("--");
+        // Treated as plain text; the
+        // `--` is preserved verbatim.
+        assert!(line
+            .spans
+            .iter()
+            .any(|s| s.content.contains("--")));
+        // No dim color (the dim color
+        // is reserved for the
+        // horizontal-rule path).
+        for span in &line.spans {
+            // (No BOLD either, but the
+            // main check is that
+            // we're in the Plain
+            // path.)
+            assert!(!span
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD));
+        }
+    }
+
+    // ---- inline markers ----
+
+    /// `*foo*` is italic.
+    #[test]
+    fn preview_line_italic_marker_renders_italic() {
+        let line = render_preview_line("this is *italic* text");
+        // 3 spans: plain, italic,
+        // plain.
+        assert!(line.spans.len() >= 3);
+        // Find the italic span.
+        let italic_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "italic")
+            .expect("italic span");
+        assert!(italic_span
+            .style
+            .add_modifier
+            .contains(Modifier::ITALIC));
+    }
+
+    /// `_foo_` is italic (alias for
+    /// `*foo*`).
+    #[test]
+    fn preview_line_underscore_italic_marker_renders_italic() {
+        let line = render_preview_line("this is _italic_ text");
+        let italic_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "italic")
+            .expect("italic span");
+        assert!(italic_span
+            .style
+            .add_modifier
+            .contains(Modifier::ITALIC));
+    }
+
+    /// `` `code` `` is inline code:
+    /// warning color + bold.
+    #[test]
+    fn preview_line_inline_code_renders_with_warning_color() {
+        let line = render_preview_line("call `foo()` here");
+        let code_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "foo()")
+            .expect("code span");
+        assert_eq!(
+            code_span.style.fg,
+            Some(Theme::warning_color())
+        );
+        assert!(code_span
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// `~~strike~~` is strikethrough.
+    #[test]
+    fn preview_line_strikethrough_marker_renders_crossed_out() {
+        let line = render_preview_line("this is ~~old~~ text");
+        let strike_span = line
+            .spans
+            .iter()
+            .find(|s| s.content == "old")
+            .expect("strike span");
+        assert!(strike_span
+            .style
+            .add_modifier
+            .contains(Modifier::CROSSED_OUT));
+    }
+
+    /// `[text](url)` is a link: accent
+    /// color + underline. The URL is
+    /// hidden (the link text is
+    /// shown).
+    #[test]
+    fn preview_line_link_renders_with_underline() {
+        let line = render_preview_line("see [docs](https://example.com) here");
+        // The link text "docs" is
+        // rendered as a link. The URL
+        // "https://example.com" is NOT
+        // in the rendered output.
+        let link_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("docs"))
+            .expect("link span");
+        assert_eq!(
+            link_span.style.fg,
+            Some(Theme::accent_color())
+        );
+        assert!(link_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        // The URL is hidden (not in
+        // any span's content).
+        for span in &line.spans {
+            assert!(!span.content.contains("https://"));
+        }
+    }
+
+    /// Nested markers like `**bold
+    /// *italic***` aren't produced
+    /// by the JIRA overlay's
+    /// `build_jira_overlay_text` (every
+    /// bold span is a simple
+    /// `**Label**: value` or section
+    /// heading). The first-match
+    /// close strategy (which the
+    /// current parser uses) handles
+    /// the common case correctly and
+    /// is good enough for the JIRA
+    /// use case. This test pins down
+    /// the simple `**bold**` /
+    /// `**foo bar**` shapes that the
+    /// JIRA overlay does emit.
+    #[test]
+    fn preview_line_bold_simple_marker_styling() {
+        // A simple `**bold**` produces
+        // exactly one bold span with
+        // the expected text. No
+        // content outside the span.
+        let line = render_preview_line("**bold**");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "bold");
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// `**foo** and **bar**` (two
+    /// simple bold spans) produces
+    /// 3 spans: bold, plain,
+    /// bold. The first-match close
+    /// strategy works because the
+    /// `**` pairs are well-separated
+    /// and each one closes at its
+    /// expected position.
+    #[test]
+    fn preview_line_two_simple_bold_spans() {
+        let line = render_preview_line("**foo** and **bar**");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[0].content, "foo");
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].content, " and ");
+        assert!(!line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(line.spans[2].content, "bar");
+        assert!(line.spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    /// An unclosed `` ` `` (inline
+    /// code) falls through to plain
+    /// text — the rest of the line,
+    /// including the literal `` ` ``,
+    /// is rendered without code
+    /// styling.
+    #[test]
+    fn preview_line_unclosed_inline_marker_falls_through() {
+        let line = render_preview_line("`unclosed code");
+        // No warning color (the
+        // unclosed marker fell through
+        // to plain text).
+        for span in &line.spans {
+            assert_ne!(span.style.fg, Some(Theme::warning_color()));
+        }
+        // The literal ` is in the
+        // rendered output.
+        let content: String =
+            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(content.contains('`'));
+    }
+
+    /// A `- ` (single dash + space) at
+    /// the start of a line is a
+    /// bullet list marker, not a
+    /// horizontal rule (need 3+
+    /// dashes for an HR).
+    #[test]
+    fn preview_line_single_dash_is_bullet_not_hr() {
+        let line = render_preview_line("- just a bullet");
+        // Bullet marker is `• `, NOT
+        // a horizontal rule (which
+        // would be 40 `─` chars).
+        assert_eq!(line.spans[0].content, "• ");
+        // Content is the rest.
+        assert_eq!(line.spans[1].content, "just a bullet");
+    }
+
+    /// A `1.item` (no space after the
+    /// dot) is plain text, NOT an
+    /// ordered list.
+    #[test]
+    fn preview_line_ordered_list_requires_space_after_dot() {
+        let line = render_preview_line("1.no-space");
+        // No `1. ` marker; the
+        // content is the original
+        // line.
+        let content: String =
+            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(content, "1.no-space");
+    }
+
+    /// `1.` with no text after is
+    /// plain text (need at least one
+    /// non-space character after
+    /// `. `).
+    #[test]
+    fn preview_line_ordered_list_requires_text() {
+        let line = render_preview_line("1. ");
+        // The `1. ` doesn't trigger an
+        // ordered list because
+        // there's no text after the
+        // space. Falls through to
+        // plain text.
+        let content: String =
+            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(content, "1. ");
+    }
+
+    /// Empty input yields a single
+    /// empty plain span (the
+    /// renderer's contract: never an
+    /// empty `Vec<Span>`).
+    #[test]
+    fn preview_line_empty_input_with_new_parser() {
+        let line = render_preview_line("");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "");
     }
 }

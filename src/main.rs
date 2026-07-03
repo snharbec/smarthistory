@@ -872,6 +872,17 @@ pub struct Config {
     /// Configurable via `todo.line_option=...`
     /// in the config file.
     todo_line_option: String,
+    /// User-defined JQL fragments for the `-`-mode
+    /// TUI search, loaded from
+    /// `jira.search.<name>=<jql>` entries in the
+    /// config file. A fragment named `foo` is
+    /// invoked in the search body as `@foo`; the
+    /// fragment's JQL is spliced verbatim into the
+    /// generated JQL. Reserved names (`me`, `today`,
+    /// `week`, `month`) cannot be overridden — the
+    /// loader silently drops them so a typo in the
+    /// config can't disable a built-in alias.
+    jira_fragments: std::collections::HashMap<String, String>,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
     /// User-configured additional
@@ -1028,6 +1039,7 @@ impl Config {
             notes_database: None,
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
+            jira_fragments: std::collections::HashMap::new(),
             query_prefixes: QueryPrefixes::default(),
             // `~` expansion: `$HOME` is
             // always in the set (the
@@ -1289,6 +1301,13 @@ impl Config {
                                 key_entries.insert(action.to_string(), value.to_string());
                             } else if let Some(prefix) = other.strip_prefix("prefix.") {
                                 Self::assign_prefix(&mut self.query_prefixes, prefix, value);
+                            } else if let Some(name) = other.strip_prefix("jira.search.")
+                                && !name.is_empty() {
+                                Self::assign_jira_fragment(
+                                    &mut self.jira_fragments,
+                                    name,
+                                    value,
+                                );
                             }
                 }
             }
@@ -1506,6 +1525,21 @@ impl Config {
         &self.todo_line_option
     }
 
+    /// The user-defined JQL fragments loaded from
+    /// `jira.search.<name>=<jql>` entries in the
+    /// config file. Each entry maps a name to a
+    /// snippet of JQL that the user can invoke in the
+    /// `-`-mode TUI search as `@<name>`. Empty when
+    /// no fragments are configured. Fragment names
+    /// are stored lowercased; lookups in
+    /// `jira::build_jql` are case-insensitive. The
+    /// returned reference is borrowed from the
+    /// `Config` (a `Clone` happens at the TUI boundary
+    /// — see `run_tui_to_stdout`).
+    pub fn jira_fragments(&self) -> &std::collections::HashMap<String, String> {
+        &self.jira_fragments
+    }
+
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
     /// fields are silently ignored so a typo doesn't break the rest
     /// of the config.
@@ -1556,6 +1590,67 @@ impl Config {
             "jira" => prefixes.jira = c,
             _ => {}
         }
+    }
+
+    /// Apply a single `jira.search.<name>=<jql>` override.
+    /// The name is stored lowercased (the parser in
+    /// `jira::build_jql` is case-insensitive on the
+    /// lookup). Reserved names (`me`, `today`, `week`,
+    /// `month`) are silently dropped so a typo in the
+    /// config can't disable a built-in alias — the
+    /// alternative (treating them as fragments) would
+    /// silently shadow the built-in and confuse the
+    /// user. Names must be a non-empty `\w+` identifier;
+    /// anything else is ignored. Empty values are
+    /// ignored (a fragment with no JQL is worse than no
+    /// fragment at all — it would always match nothing).
+    fn assign_jira_fragment(
+        fragments: &mut std::collections::HashMap<String, String>,
+        name: &str,
+        value: &str,
+    ) {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return;
+        }
+        // Reject names that aren't a simple identifier.
+        // The parser's lookup key is the lowercased bare
+        // token after the `@` is stripped; we store
+        // lowercased names so the lookup is a direct
+        // map access without further normalisation.
+        if !trimmed_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return;
+        }
+        let key = trimmed_name.to_ascii_lowercase();
+        // Reserved-name check: don't let the config
+        // shadow the four built-in aliases. This
+        // mirrors how `prefix.<reserved>=...` is
+        // handled (the assignment is silently ignored)
+        // and how `key.<unknown>=...` is handled (the
+        // entry is dropped at apply time). A user who
+        // *does* want to override `@today` should
+        // rename their config key — not papercut the
+        // built-in.
+        if matches!(
+            key.as_str(),
+            "me" | "today" | "week" | "month"
+        ) {
+            eprintln!(
+                "warning: jira.search.{} is a reserved alias name; \
+                 fragment is ignored. Rename the fragment to use it \
+                 (e.g. jira.search.{}_custom=...).",
+                key, key
+            );
+            return;
+        }
+        let trimmed_value = value.trim();
+        if trimmed_value.is_empty() {
+            return;
+        }
+        fragments.insert(key, trimmed_value.to_string());
     }
 }
 
@@ -3476,6 +3571,73 @@ tmuxpaneoutputdir=~/custom-tmux
         let expected = dir.join("custom-tmux");
         assert_eq!(cfg.tmux_pane_output_dir, expected);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `jira.search.<name>=<jql>` entries in the
+    /// config file populate `Config::jira_fragments`.
+    /// The user's example: `jira.search.label1=labels =
+    /// "test"` should be addressable from the
+    /// `-`-mode TUI search as `@label1`. Reserved
+    /// names (`me`, `today`, `week`, `month`) are
+    /// silently dropped to avoid shadowing the
+    /// built-in aliases.
+    #[test]
+    fn config_parses_jira_search_fragments() {
+        // We exercise `Config::parse` directly with
+        // a string instead of round-tripping through
+        // `Config::load`. The load path reads `$HOME`
+        // to find the config file, and any test that
+        // mutates `HOME` is racy against every other
+        // test that reads it (cargo runs tests in
+        // parallel; `std::env::set_var` is `unsafe`
+        // in modern Rust precisely because of this).
+        // Bypassing the env makes the test
+        // self-contained without needing a mutex
+        // that would have to be held by every
+        // HOME-reading test in the binary.
+        let mut cfg = Config::default();
+        cfg.parse(
+            "jira.search.label1=labels = \"test\"\n\
+             jira.search.SPRINT=sprint = \"Sprint 42\"\n\
+             jira.search.complex=priority = High AND labels = \"security\"\n\
+             jira.search.me=assignee = \"alice\"\n\
+             jira.search.=empty name is ignored\n\
+             jira.search.bad name=spaces in name are ignored\n\
+             jira.search.emptyvalue=\n",
+        );
+        let frags = cfg.jira_fragments();
+        // The three valid fragments made it in
+        // (lowercased keys — the loader
+        // normalises the name to lowercase so
+        // the parser lookup is a direct map
+        // access).
+        assert_eq!(
+            frags.get("label1").map(String::as_str),
+            Some(r#"labels = "test""#),
+        );
+        assert_eq!(
+            frags.get("sprint").map(String::as_str),
+            Some(r#"sprint = "Sprint 42""#),
+        );
+        assert_eq!(
+            frags.get("complex").map(String::as_str),
+            Some(r#"priority = High AND labels = "security""#),
+        );
+        // The reserved-name `me` was silently
+        // dropped. The user can't shadow the
+        // built-in `@me` alias.
+        assert!(!frags.contains_key("me"));
+        // Empty name (just the prefix, nothing
+        // after the dot) was ignored.
+        assert!(!frags.contains_key(""));
+        // Name with a space isn't a valid
+        // identifier (\w+ only) so it's dropped
+        // silently.
+        assert!(!frags.contains_key("bad name"));
+        // Empty value: silently dropped. A
+        // fragment with no JQL is worse than no
+        // fragment at all.
+        assert!(!frags.contains_key("emptyvalue"));
     }
 
     #[test]

@@ -210,6 +210,7 @@ Supported keys:
 | `prefix.notes=@` | Prefix character for note search mode. Change this if `@` conflicts with other key bindings. | `@` |
 | `prefix.todo=!` | Prefix character for the todo-search mode. Change this if `!` conflicts with other key bindings. | `!` |
 | `todo.line_option=+$LINE` | Template for the line-number option appended to the editor command when a todo line is selected. The literal `$LINE` is substituted with the 1-based line number. Default `+$LINE` works with `vim`, `nano`, `emacs -nw`, and most POSIX editors. Examples: `+LINE:$LINE`, `:$LINE`. | `+$LINE` |
+| `jira.search.<name>=<jql>` | Define a named JQL fragment for the `-`-mode TUI search. `<name>` is a `\w+` identifier (reserved names `me`, `today`, `week`, `month` are dropped with a warning). The fragment is invoked in the body as `@<name>` and spliced verbatim into the generated JQL, wrapped in parens to preserve any internal `AND`/`OR`. See the "User-defined JQL fragments" section under JIRA mode below. | (no fragments) |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -288,6 +289,20 @@ key.yank-selection=C-y,F2
 # "not configured" on `=...`).
 ollama.url=http://localhost:11434
 ollama.model=llama3.2
+
+# User-defined JQL fragments for the `-`-mode JIRA
+# search. A fragment named `foo` is invoked in the
+# body as `@foo`. The fragment is spliced verbatim
+# into the generated JQL, wrapped in parens to
+# preserve any internal `AND` / `OR`. Reserved
+# names (`me`, `today`, `week`, `month`) are
+# silently dropped so a typo can't shadow the
+# built-in aliases. See "User-defined JQL
+# fragments" in the JIRA mode section for the
+# full mechanics.
+jira.search.review=status = "In Review" AND assignee = currentUser()
+jira.search.urgent=priority in (Highest, High) AND status != Closed
+jira.search.sprint=sprint in openSprints()
 ```
 
 To inspect the resolved value of a single setting, use:
@@ -757,6 +772,61 @@ combined with the existing session/directory/exit-code
 filters. There is no post-filter step (unlike regex
 and fuzzy), so the round-trip is one query and the
 results match the user's mental model exactly.
+
+#### Other search modes (prefix-only)
+
+In addition to the four `F3`-cycled modes
+above, six more modes are reachable by
+typing the prefix character directly. These
+modes are NOT cycled by `F3` (the cycle
+covers plain / regex / fuzzy / output only).
+Typing the prefix character while the
+input box is empty switches the TUI into
+the corresponding mode; typing it at the
+start of a body prepends the prefix to the
+existing body. The full list (default
+prefixes shown; rebindable in
+`~/.config/smarthistory/config` via
+`prefix.<name>=...`):
+
+| Mode          | Prefix | What it does |
+| ------------- | ------ | ------------ |
+| LLM command   | `=`    | Send the body to ollama, generate a Bash command, stage it for execution. The new command is also written to the history table with the original description as the comment. |
+| Question      | `%`    | Send the body to ollama, get a short answer (4 sentences max) in a full-screen overlay. The question is saved to history with the answer as output. |
+| Notes         | `@`    | Search the [note_search](https://github.com/snharbec/note_search) SQLite database. Results show the note's filename, title, and age (sorted newest-first). Selecting a note opens it in `$EDITOR`. Needs `notes.database` + `notes.dir` configured. |
+| Todo          | `!`    | List open todos from the note_search database (one per line, not one per file). Selecting a todo opens `$EDITOR <file> +<line>` at the right line. |
+| Directories   | `#`    | List every directory in the global history (sorted by most-recent activity). Selecting a row stages `cd <path>` and exits the TUI. |
+| Panes         | `*`    | List every pane in the current tmux session (excluding the pane the TUI is running in, read from `$TMUX_PANE`). Selecting a pane stages a `select-window` + `select-pane` jump. |
+| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). |
+
+The `F3` cycle preserves the body of your
+query and only changes the leading prefix
+character, so `git status` -> `/git
+status` -> `?git status` -> `+git status`
+-> `git status` keeps the same text the
+whole time. The other modes use the same
+prefix-as-trigger convention but are not
+on the `F3` cycle (the cycle is a UI
+affordance for the four "search shape"
+modes — plain, regex, fuzzy, output —
+that differ only in *how* the body is
+matched; the other six are *different
+data sources* that need an explicit
+switch).
+
+The full list of modes and prefixes is
+also shown in the help overlay (Ctrl-H):
+the "Search modes" section lists every
+mode and its current prefix character,
+read live from `app.query_prefixes` so
+the help reflects the user's config
+rather than the defaults. The "JIRA-mode
+tags" sub-section (under the JIRA mode)
+documents the special `@me` / `@today` /
+`@week` / `@month` aliases and the
+`@<name>` fragment syntax; those are
+JIRA-mode-only and don't apply to the
+other modes.
 
 ### TUI sort order
 
@@ -1463,6 +1533,140 @@ a project → `project = "<JIRA_PROJECT>" ORDER
 BY updated DESC`; without → server-wide
 `ORDER BY updated DESC`.
 
+#### Alias shortcuts
+
+In addition to the structural tokens above,
+the `-` body recognises four `@`-prefixed
+**aliases** that expand into JQL clauses
+server-side (not as free text):
+
+| Alias      | JQL it produces |
+| ---------- | --------------- |
+| `@me`      | `assignee = currentUser()` |
+| `@today`   | `updated >= "<yesterday>"` (last 24 h) |
+| `@week`    | `updated >= "<today − 7d>"` |
+| `@month`   | `updated >= "<today − 31d>"` |
+
+The aliases are stripped from the body before
+key / `field=value` / free-text classification
+and AND-joined with the rest of the query, in
+the order: `project` (if `JIRA_PROJECT` set) →
+`@me` → date filter → keys → `field=value` →
+free text. Aliases are case-insensitive and
+the leading `@` is optional, so `me` and
+`@ME` work the same as `@me`. They are matched
+as whole whitespace-separated tokens, so
+`email@today` and `@todayfile` are NOT
+treated as the alias and fall through to free
+text verbatim. Multiple date aliases resolve
+"last one wins" (`@today @week` → `@week`),
+matching the notes-mode convention.
+
+The cutoffs are computed from the caller's
+`now_epoch` (the TUI passes
+`App::now_epoch()`; tests pass a fixed value
+for determinism) and emitted in UTC
+`YYYY-MM-DD` form. JQL's date-only literal is
+interpreted as midnight UTC, so a JIRA server
+configured for a non-UTC timezone may show a
+one-day boundary mismatch at the window edges
+— the alias semantics ("updated in the last N
+days") remain close enough for practical use.
+`@month` is **31 days**, the value the spec
+called out (one day longer than the notes-mode
+`@month`, which is 30 days); the constant
+`JIRA_ALIAS_MONTH_DAYS` in `src/jira.rs` owns
+the policy and is the place to change it.
+
+#### User-defined JQL fragments
+
+For project-specific search shapes the four
+built-in aliases can't cover, the user can
+declare named JQL fragments in
+`~/.config/smarthistory/config` and invoke
+them in the `-` body:
+
+```ini
+# Pre-defined "ready-for-review" filter
+jira.search.review = status = "In Review" AND \
+    assignee in (currentUser(), EMPTY)
+
+# Pre-defined "high-priority backlog" filter
+jira.search.urgent = priority in (Highest, High) AND \
+    status != Closed
+
+# A common JQL clause for sprint work
+jira.search.sprint = sprint in openSprints()
+```
+
+A fragment named `foo` is invoked as `@foo`
+in the `-` body:
+
+```
+> -@review
+# Splice: (status = "In Review" AND assignee
+# in (currentUser(), EMPTY))
+
+> -@review crash
+# Splice + free text: (status = "In Review" AND
+# assignee in (currentUser(), EMPTY))
+# AND (description ~ "crash" OR summary ~ "crash")
+
+> -@review @urgent
+# Multiple fragments in one query, AND-joined,
+# in the order the user typed them.
+```
+
+**Mechanics**:
+
+- The fragment value is spliced **verbatim**
+  into the generated JQL, wrapped in
+  parentheses so the fragment's own internal
+  `AND` / `OR` operators don't break the
+  top-level AND-join. The user is trusted to
+  write valid JQL inside the value (the
+  loader does NOT JQL-quote the fragment).
+- Fragment names are matched case-insensitively
+  (`@Review` and `@REVIEW` resolve to the same
+  fragment). Lookup is on the lowercased name
+  stored by the config loader; the bare
+  keyword after the leading `@` is stripped
+  the same way the four built-in aliases are.
+- Fragment clauses are spliced into the JQL
+  in the position: `project` (if
+  `JIRA_PROJECT` set) → `@me` → date filter →
+  **fragments (in user-typed order)** → keys →
+  `field=value` → free text. Multiple
+  fragments in the same query appear in the
+  order the user typed them.
+- Reserved names (`me`, `today`, `week`,
+  `month`) cannot be redefined as fragments;
+  the config loader silently drops
+  `jira.search.me=...` and similar with a
+  warning on stderr, so a typo in the config
+  can't disable a built-in alias.
+- Names must be a non-empty `\w+` identifier
+  (letters, digits, underscore). Names with
+  spaces or other non-identifier characters
+  are silently dropped, as are empty values.
+- When a query references an undefined
+  fragment (e.g. `@nosuch` with no
+  `jira.search.nosuch=` entry), the search is
+  **not** fired. Instead, the status bar
+  surfaces a message like
+  `JIRA fragment @nosuch not configured.
+  Define via jira.search.<name>=... in
+  ~/.config/smarthistory/config.` and the
+  underlying HTTP request is suppressed. This
+  prevents the user from getting a
+  *wrong-result* search (the unknown token
+  would otherwise fall through to free text
+  and return noise). The status message
+  re-fires only when the undefined list
+  changes, so the user doesn't get a stale
+  message re-surfacing on every keystroke
+  while they correct a typo.
+
 Search is **debounced** (`JIRA_DEBOUNCE` =
 400ms) and runs on a background thread
 (`spawn_jira_request`, same mpsc + cancelled-flag
@@ -1476,18 +1680,321 @@ refiring the identical query. `Esc` cancels an
 in-flight search.
 
 Issue → row mapping: `command` = key,
-`comment` = summary, `output` = `Status: … | Type: … |
-…` (for the details/`Ctrl+L` view), `source` =
-`"jira"`, `mode` = `"jira"`, `timestamp` = parsed
-`updated` epoch. Selecting a row stages
+`comment` = summary, `output` = the
+**details-pane preview** (3-line header +
+description body, see below), `source` =
+`"jira"`, `mode` = `"jira"`, `timestamp` =
+parsed `updated` epoch.
+Selecting a row stages
 `open "<JIRA_URL>/<key>"` (or `xdg-open` on
 non-macOS) so the parent shell opens the ticket.
 
+#### Details-pane preview
+
+The `output` field on a JIRA row is the
+details pane the user sees when a JIRA row
+is selected. The user spec calls for a
+3-line header followed by the description
+body:
+
+```
+**Status**: Open  **Priority**: High
+**Due**: 2024-07-15  **Assignee**: Alice
+**Description**
+The login button is broken on Safari.
+The fix is to add a click handler.
+```
+
+The first line combines `Status` and
+`Priority`, the second line combines `Due`
+and `Assignee`, the third line is just the
+`Description` label (no value on the same
+line), and lines 4+ are the description
+body — paragraph breaks in the body are
+preserved (the ADF extractor renders them
+as `\n` so a multi-paragraph body produces
+a multi-line tail).
+
+Empty values render with `<none>` as a
+readable placeholder (`**Status**: <none>`)
+so the 3-line header layout stays
+consistent across issues regardless of
+which fields are populated. The full
+description body is also stored verbatim —
+no character cap — and the preview renderer
+caps the visible portion to the 4-line
+preview budget. The full text is always
+available in the show-output overlay (see
+the next subsection).
+
+The rendering is produced by an
+inline-DSL mini markdown parser
+(`render_preview_line` in
+`src/tui/render.rs`). The details pane
+and the show-output overlay both feed
+their text through this parser, so a
+JIRA overlay with `##` headings and
+`**bold**` labels renders with proper
+styling instead of as raw text.
+
+The parser supports a small subset of
+Markdown (the elements the JIRA overlay
+actually emits):
+
+**Block-level** (detected at line
+start):
+
+| Marker          | Element       | Style                          |
+|-----------------|---------------|--------------------------------|
+| `# text`        | H1 heading    | bold + `success()`             |
+| `## text`       | H2 heading    | bold + `accent()`              |
+| `### text`      | H3 heading    | bold + `dim()` + indent        |
+| `> text`        | Blockquote    | italic + `info()` `│` gutter |
+| `- text`        | Bullet list   | `accent()` `•` marker         |
+| `* text`        | Bullet list   | same as `- text`               |
+| `1. text`       | Ordered list  | `accent()` `N.` marker        |
+| `---`           | Horizontal    | `dim()` full-width `─` line    |
+| (anything else) | Plain text    | inline parser                  |
+
+**Inline** (within a plain-text line):
+
+| Marker            | Style                                  |
+|-------------------|----------------------------------------|
+| `**bold**`         | `Modifier::BOLD`                       |
+| `*italic*`         | `Modifier::ITALIC`                     |
+| `_italic_`         | `Modifier::ITALIC` (alias for `*`)    |
+| `` `code` ``       | `warning()` + `Modifier::BOLD`        |
+| `~~strike~~`       | `Modifier::CROSSED_OUT`                |
+| `[text](url)`      | `accent()` + `Modifier::UNDERLINED`    |
+
+**Composition**: a bold span can
+contain an italic span (e.g.
+`**bold *italic***`) via the recursive
+inline parser. The first-match close
+strategy means a bold span ends at the
+first `**` after the opener, which
+handles the common case (the JIRA
+overlay's bold spans are simple
+`**Label**: value` and section-name
+headings, not deeply nested) but can
+over-eat on adversarial inputs like
+`**bold *italic***`. The other markers
+use a balanced close (italic closes with
+the same character that opened it:
+`*...*` vs `_..._`).
+
+**Unclosed markers** fall through to
+plain text — the rest of the line,
+including the literal marker
+characters, is rendered without
+styling. The user sees the literal
+`**` rather than a missing closing
+marker eating the rest of the line.
+
+The overlay title is the same regardless
+of the row's mode (the `ShowOutput` action
+is shared by regular history and JIRA
+rows). The content tells the user what
+they're looking at (the `## Header` /
+`## Description` / `## Comments`
+headings) so the title is generic.
+
+**Description** is fetched from JIRA's REST
+v2 `description` field, which returns an
+[Atlassian Document Format][adf] JSON tree
+rather than a flat string. The extractor
+(`extract_adf_text` in `src/jira.rs`) walks
+the tree and concatenates the readable text
+— paragraph breaks become real newlines,
+mentions render as `@username`, links
+render their child text (or the href as a
+fallback), emoji render as their
+`:shortname:` form. The full text is
+preserved in `JiraIssue::description`; the
+preview-pane and overlay line budgets
+handle the visual truncation.
+
+[adf]: https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/
+
+#### Show-output overlay (Ctrl+L on a JIRA row)
+
+When the user presses `Ctrl+L` (the
+`show-output` action, default key) on a
+JIRA row, the TUI does NOT immediately open
+the captured-output overlay. Instead, it
+fires a background fetch for the issue's
+comments (`GET /rest/api/2/issue/{key}/comment`
+with the bearer token, mirroring the
+search-time TLS setup), shows a
+`JIRA loading comments…` status, and
+builds the full overlay text when the fetch
+returns.
+
+The full overlay is a markdown-like view
+with three top-level sections and one
+sub-section per comment:
+
+```
+## Header
+**Status**: Open  **Priority**: High
+**Due**: 2024-07-15  **Assignee**: Alice
+**Description**
+
+## Description
+The login button is broken on Safari.
+The fix is to add a click handler.
+
+## Comments
+## Alice · 2024-06-30 19:14 UTC
+Confirmed, fixing now.
+
+## Bob · 2024-06-29 10:00 UTC
+Looking into this.
+```
+
+The `## Header` section shows **only the
+metadata block** — the 3 lines the
+preview pane shows (Status/Priority on
+line 1, Due/Assignee on line 2, the
+`Description` label on line 3). The
+description body is NOT included in the
+header section; it lives in its own
+`## Description` section below, so the
+description appears **exactly once** in
+the overlay. (An earlier implementation
+copied the full `row.output` into
+`## Header`, which caused the
+description to appear twice — once as
+part of the preview-window content in
+`## Header` and once in its own
+`## Description` section. The user
+reported this as redundant, and the fix
+is to keep the header section metadata-
+only.)
+
+Sections are preceded by `##` markers
+which the renderer (`render_preview_line`)
+turns into heading-styled spans (bold + the
+accent color). Per-comment sub-headings use
+the same `## <author> · <date>` format with
+a U+00B7 MIDDLE DOT as the separator and
+the date in the compact `YYYY-MM-DD HH:MM
+UTC` form (`format_jira_date`). Comments
+are sorted newest-first by `created`
+(`sort_comments_newest_first`), with the
+`id` field as a tie-breaker for the rare
+batch-imported case.
+
+`Esc` cancels an in-flight comments fetch
+(mirrors the search-time cancel handler).
+A failed fetch (network error, JIRA 4xx/5xx,
+parse error) surfaces a status message and
+does NOT open the overlay — the user can
+retry by pressing `Ctrl+L` again. An issue
+with no comments shows `(no comments)` in
+the `# Comments` section; an issue with no
+description shows `(no description)` in
+the `# Description` section.
+
+The comments fetch is rate-limited to
+`maxResults=100` per request; issues with
+more than 100 comments would currently
+miss the older ones. A future improvement
+could paginate via JIRA's `startAt`
+parameter, but the TUI doesn't paginate
+today.
+
+#### Adding a comment (Ctrl-E on a JIRA row)
+
+The `edit-comment` action (`Ctrl-E`,
+rebindable via `key.edit-comment=...`)
+is overloaded based on the selected
+row's `mode`:
+
+- **Non-JIRA rows** (the original
+  behaviour): open the comment-edit
+  buffer, prefilled with the existing
+  `command_comments` row (or empty when
+  the row has no comment yet). On
+  `Enter`, INSERT/UPDATE the local
+  SQLite `command_comments` table. The
+  post is a single SQL statement; no
+  network calls.
+- **JIRA rows**: open the
+  comment-edit buffer in **JIRA
+  add-comment** mode. The buffer is
+  empty (the user is composing a *new*
+  comment, not editing the issue's
+  summary or any existing comment —
+  the description and comments are
+  already shown in the show-output
+  overlay). On `Enter`, the TUI fires
+  a background POST to JIRA's REST v2
+  `add-comment` endpoint
+  (`/rest/api/2/issue/{key}/comment`)
+  with the user's text wrapped in a
+  minimal Atlassian Document Format
+  envelope (`{"type":"doc",...}`).
+  While the POST is in flight, the
+  status bar shows `Posting comment to
+  PROJ-1…`; on success, the buffer
+  clears and the status shows
+  `Comment posted to PROJ-1`; on
+  failure, the buffer stays so the
+  user can fix any issue and retry.
+
+The renderer distinguishes the two
+modes visually: the JIRA-add-comment
+buffer uses the prompt `jira>` and
+the border title ` jira comment ` in
+the info (blue) tint (matching the
+JIRA search mode's colour); the
+local buffer keeps the original
+`comment>` prompt and ` comment ` title
+in the warning (yellow) tint. The
+user immediately recognises the next
+`Enter` will go to JIRA, not the
+local SQLite database.
+
+`Esc` (the `Cancel` action) cancels
+an in-flight JIRA add-comment POST
+(mirrors the JIRA-search and
+JIRA-comments-fetch cancel
+handlers). A second `Esc` exits the
+comment-edit buffer entirely
+(triggers `cancel_comment_edit`,
+which clears both the buffer and
+the `jira_add_comment_target`
+field — so the next `Ctrl-E` on a
+non-JIRA row starts a fresh
+local-comment edit, not a stale
+JIRA-add POST).
+
+The POST is debounced: a second
+`Enter` on the buffer while a POST
+is already in flight is silently
+dropped (the status message is
+already `Posting comment…`; the
+in-flight latch `jira_add_comment_in_flight`
+prevents a duplicate background
+thread). An empty buffer is also
+dropped (the user sees a `JIRA
+add-comment: body is empty` status
+message and the buffer stays so
+they can type something). These
+checks prevent the user from firing
+empty or duplicate comments.
+
 Tests use a `FakeJira` `JiraClient` (injected via
 `App::set_jira_client`) so the synchronous
-search-render path runs without a live server;
-`src/jira.rs` also unit-tests the pure JQL
-builder / escaping / timestamp parsing.
+search-render and comments-fetch paths run
+without a live server. The fake records
+both the JQL strings (searches) and the
+issue keys (comments) so tests can assert
+on the generated queries and the right
+target. `src/jira.rs` also unit-tests the
+pure JQL builder / ADF extractor / comment
+parser / timestamp parsing.
 
 #### TLS setup
 

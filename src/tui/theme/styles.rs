@@ -37,9 +37,18 @@ impl Theme {
         Style::default().fg(PALETTE.with(|c| c.borrow().highlight))
     }
 
-    #[allow(dead_code)]
     pub fn warning() -> Style {
         Style::default().fg(PALETTE.with(|c| c.borrow().warning))
+    }
+
+    /// Foreground for the "info" / muted-blue
+    /// accent (used by output-search mode tint
+    /// and, in the markdown overlay, the
+    /// blockquote gutter). Kept in lock-step
+    /// with `info_color()` above.
+    #[allow(dead_code)]
+    pub fn info() -> Style {
+        Style::default().fg(PALETTE.with(|c| c.borrow().info))
     }
 
     #[allow(dead_code)]

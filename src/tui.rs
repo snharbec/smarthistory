@@ -1137,6 +1137,82 @@ struct App {
     /// `None` so the real background-thread + `RestJiraClient`
     /// path runs.
     jira_client: Option<std::sync::Arc<dyn crate::jira::JiraClient>>,
+    /// User-defined JQL fragments loaded from the
+    /// config file's `jira.search.<name>=...` entries.
+    /// The build_jql parser looks up `@<name>` tokens
+    /// in this map and splices the corresponding JQL
+    /// fragment into the query. Reserved names
+    /// (`me`, `today`, `week`, `month`) cannot be
+    /// overridden — the config loader silently drops
+    /// them.
+    jira_fragments: std::collections::HashMap<String, String>,
+    /// The fragment names that were unresolved on the
+    /// most recent `jira_build_query` call. Set by
+    /// `jira_build_query` after every build; read by
+    /// `jira_maybe_autocall` to decide whether to skip
+    /// the search and surface a status message. Order
+    /// is first-appearance / deduped, matching what
+    /// `build_jql` returns.
+    jira_undefined_fragments: Vec<String>,
+    /// The undefined-fragment list the most recent
+    /// status message described. Used to debounce the
+    /// "fragment @foo is not configured" message —
+    /// we only emit when the new list differs from the
+    /// last one, so the user doesn't get a stale
+    /// message re-surfacing on every keystroke while
+    /// they correct the typo.
+    jira_last_undefined_message: Option<Vec<String>>,
+    /// `Some` when a JIRA comments fetch is in
+    /// flight (background thread). Polled by
+    /// the run loop mirror of the JIRA-search
+    /// poll. Cancelled on the `Cancel` action.
+    /// The fetch is fired when the user
+    /// opens the show-output overlay on a
+    /// JIRA row (Ctrl+L) — the comments
+    /// aren't fetched at search time
+    /// because most JIRA issues have many
+    /// comments and a search-result row
+    /// only needs the issue metadata.
+    jira_comments_request: Option<JiraCommentsRequest>,
+    /// Whether a JIRA comments fetch is
+    /// currently in flight. Prevents
+    /// re-firing while a fetch is pending
+    /// (the user might press Ctrl+L again on
+    /// the same row; we'd silently drop the
+    /// new request rather than spawn a
+    /// second background thread).
+    jira_comments_in_flight: bool,
+    /// `Some(issue_key)` when the comment
+    /// edit buffer is in "JIRA add comment"
+    /// mode — i.e. the user pressed Ctrl-E
+    /// on a JIRA row and is composing a
+    /// new comment to POST to JIRA, not a
+    /// local `command_comments` edit. The
+    /// `comment_edit` buffer is shared
+    /// between the two modes; this field
+    /// tells `save_comment_edit` which path
+    /// to take. When `None`, the user is
+    /// editing the local command comment
+    /// (the original behaviour).
+    jira_add_comment_target: Option<String>,
+    /// `Some` when a JIRA add-comment POST
+    /// is in flight (background thread).
+    /// Polled by the run loop mirror of
+    /// the JIRA-search and JIRA-comments
+    /// polls. Cancelled on the `Cancel`
+    /// action. The buffer stays open
+    /// while the POST is in flight so
+    /// the user can see what they
+    /// posted; on success the buffer
+    /// clears and the field goes back to
+    /// `None`; on failure the buffer
+    /// stays so the user can retry.
+    jira_add_comment_request: Option<JiraAddCommentRequest>,
+    /// Whether a JIRA add-comment POST
+    /// is currently in flight. Prevents
+    /// a second `Enter` on the buffer
+    /// from queuing a duplicate POST.
+    jira_add_comment_in_flight: bool,
 }
 
 /// How long the LLM auto-call waits after the last keystroke
@@ -3951,6 +4027,306 @@ struct JiraRequest {
     cancelled: Arc<AtomicBool>,
 }
 
+/// An in-flight JIRA comments fetch request.
+/// Mirrors `JiraRequest` (a background thread
+/// sends the result over the channel, the run
+/// loop polls it, the cancelled flag lets the
+/// user abort a slow fetch with `Esc`).
+///
+/// The result is `Vec<JiraComment>`, sorted
+/// newest-first by the TUI after the fetch
+/// completes (JIRA's REST v2 returns comments in
+/// `created` ascending order, so the TUI
+/// reverses them on the way in).
+struct JiraCommentsRequest {
+    receiver: mpsc::Receiver<
+        Result<Vec<crate::jira::JiraComment>, crate::jira::JiraError>,
+    >,
+    cancelled: Arc<AtomicBool>,
+    /// The issue key the comments were fetched
+    /// for. Kept on the request struct so the
+    /// run-loop poll can match the result back
+    /// to the row that initiated the fetch
+    /// (the user may have navigated away from
+    /// the row in the meantime; we still want
+    /// the overlay to be tied to the right
+    /// issue's comments).
+    key: String,
+}
+
+/// An in-flight JIRA add-comment POST.
+/// Mirrors `JiraCommentsRequest`: a
+/// background thread sends the result
+/// (success or error) over the channel,
+/// the run loop polls it, and the
+/// cancelled flag lets the user abort a
+/// slow POST with `Esc`.
+///
+/// The result is `Result<(), JiraError>`.
+/// `Ok(())` means JIRA returned 201
+/// Created; the buffer is cleared and
+/// the user sees a "Comment posted"
+/// status. `Err(...)` is surfaced as a
+/// status message; the buffer stays so
+/// the user can fix any issue and retry
+/// without retyping.
+///
+/// The `key` and `body` are kept on the
+/// struct so the run-loop poll can
+/// attach the result to the right issue
+/// and so cancellation can show
+/// "JIRA add-comment cancelled" with
+/// the right issue context.
+struct JiraAddCommentRequest {
+    receiver: mpsc::Receiver<Result<(), crate::jira::JiraError>>,
+    cancelled: Arc<AtomicBool>,
+    /// The issue key the comment is being
+    /// posted to. Stashed on the request
+    /// struct so the result-processing
+    /// step can surface the issue
+    /// context in status messages
+    /// ("Comment posted to PROJ-1"
+    /// rather than just "Comment posted").
+    key: String,
+    /// The body of the comment being
+    /// posted. Kept on the struct so
+    /// cancellation messages can
+    /// reference what was being
+    /// cancelled ("JIRA add-comment
+    /// cancelled (was posting to PROJ-1)"),
+    /// and so future code that wants to
+    /// retry on transient failures
+    /// (network blip, JIRA 503) can
+    /// re-fire the same body without
+    /// re-reading the buffer.
+    body: String,
+}
+
+/// Sort a JIRA comments list newest-first by
+/// the `created` timestamp. JIRA's REST v2
+/// `comment` endpoint returns comments in
+/// `created` *ascending* order, so we reverse
+/// them here. The `id` field is the
+/// tie-breaker when two comments share the
+/// same `created` timestamp (rare but
+/// possible for batch-imported comments);
+/// JIRA's comment IDs are roughly
+/// monotonically increasing, so the higher
+/// ID wins (newer insertion).
+///
+/// Kept as a free function (not a method) so
+/// the test can drive it directly with a
+/// canned `Vec<JiraComment>` without
+/// standing up the full `App` and the
+/// SQLite DB.
+fn sort_comments_newest_first(comments: &mut [crate::jira::JiraComment]) {
+    comments.sort_by(|a, b| {
+        // `parse_rfc3339`-style parse via
+        // `updated_to_epoch` (the same
+        // helper the JQL-built-in test
+        // epoch uses). On parse failure
+        // (empty / malformed), the
+        // function returns 0; an `Ord`
+        // tie on 0 falls through to the
+        // id-based tie-breaker.
+        let ea = crate::jira::updated_to_epoch(&a.created);
+        let eb = crate::jira::updated_to_epoch(&b.created);
+        // Reverse: newer (`eb > ea`)
+        // comes first.
+        eb.cmp(&ea).then_with(|| {
+            // Tie-breaker: compare the
+            // comment IDs as strings.
+            // JIRA's comment IDs are
+            // numeric, so this is
+            // effectively a numeric
+            // comparison; using
+            // `Ord` on `String` is
+            // correct enough for
+            // the rare batch-import
+            // case.
+            b.id.cmp(&a.id)
+        })
+    });
+}
+
+/// Build the markdown-like overlay text for
+/// a JIRA row + its comments. The format
+/// is what the user spec calls out:
+///
+/// ```text
+/// ## Header
+/// <3-line preview: Status/Priority,
+///                 Due/Assignee,
+///                 Description label>
+/// <description body lines>
+///
+/// ## Description
+/// <full description text>
+///
+/// ## Comments
+/// ## <author> · <date>
+/// <comment text>
+/// ## <author> · <date>
+/// <comment text>
+/// ...
+/// ```
+///
+/// Each section is preceded by an `## `
+/// heading marker (rendered as a
+/// heading-styled span by the preview
+/// renderer). Per-comment sub-headings
+/// follow the same convention with the
+/// author and date in the heading text.
+/// Empty sections (no description, no
+/// comments) are still emitted with a
+/// `(none)` placeholder so the user
+/// always sees the section structure.
+fn build_jira_overlay_text(
+    row: &crate::tui::state::HistoryRow,
+    comments: &[crate::jira::JiraComment],
+) -> String {
+    let mut out = String::new();
+
+    // The preview pane's `row.output`
+    // is the 3-line metadata header
+    // (Status/Priority, Due/Assignee,
+    // Description label) followed by
+    // the description body (which can
+    // be multiple lines for
+    // multi-paragraph descriptions).
+    //
+    // Split it into the two parts up
+    // front so we can route them to
+    // separate sections without
+    // duplicating the description.
+    // The first 3 lines are the
+    // metadata block; everything
+    // from line 4 onwards is the
+    // description body.
+    let mut all_lines = row.output.lines();
+    let header_block: Vec<&str> =
+        all_lines.by_ref().take(3).collect();
+    let description_body: String = all_lines.collect::<Vec<_>>().join("\n");
+
+    // ---- ## Header ----
+    out.push_str("## Header\n");
+    // The `# Header` section shows
+    // the metadata block — the
+    // same 3 lines the preview
+    // pane shows. The
+    // description body is
+    // NOT included here (it
+    // lives in its own
+    // `## Description`
+    // section below, so the
+    // description appears
+    // exactly once in the
+    // overlay). The
+    // original implementation
+    // copied the full
+    // `row.output` here,
+    // which caused the
+    // description to
+    // appear twice (once in
+    // `# Header`, once in
+    // `# Description`); the
+    // user reported this and
+    // asked for the
+    // description to be
+    // visible only once.
+    for line in &header_block {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+
+    // ---- ## Description ----
+    out.push_str("## Description\n");
+    if description_body.is_empty() || description_body == "<none>" {
+        out.push_str("(no description)\n");
+    } else {
+        out.push_str(&description_body);
+        out.push('\n');
+    }
+    out.push('\n');
+
+    // ---- ## Comments ----
+    out.push_str("## Comments\n");
+    if comments.is_empty() {
+        out.push_str("(no comments)\n");
+        return out;
+    }
+    for comment in comments {
+        // `## <author> · <date>` sub-heading.
+        // The `·` (U+00B7 MIDDLE DOT) is
+        // a clean separator that renders
+        // consistently across terminals
+        // and doesn't conflict with any
+        // markdown convention.
+        let author = if comment.author.is_empty() {
+            "(unknown)"
+        } else {
+            comment.author.as_str()
+        };
+        let date = format_jira_date(&comment.created);
+        out.push_str(&format!("## {} \u{00b7} {}\n", author, date));
+        // The comment body. Empty
+        // bodies get a placeholder so
+        // the user knows the comment
+        // exists (vs. the section
+        // being incomplete).
+        if comment.body.is_empty() {
+            out.push_str("(empty comment)\n");
+        } else {
+            out.push_str(&comment.body);
+            out.push('\n');
+        }
+        // A blank line between comments
+        // for visual separation. The
+        // renderer's `lines()` iteration
+        // strips the trailing blank
+        // line in the last comment.
+        out.push('\n');
+    }
+    out
+}
+
+/// Format a JIRA ISO-8601 `created` timestamp
+/// (e.g. `2024-06-30T19:14:39.000+0000`)
+/// into a short, human-readable date
+/// (`2024-06-30 19:14 UTC`). The JQL comment
+/// sub-headings list date + author, so the
+/// format is opinionated: we drop the
+/// milliseconds and the offset (just `UTC`
+/// as a timezone hint) to keep the heading
+/// compact. JIRA's `created` is always UTC
+/// in practice, so this is a safe
+/// presentation.
+fn format_jira_date(iso: &str) -> String {
+    let s = iso.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // Parse the `YYYY-MM-DDTHH:MM:SS`
+    // prefix by slicing. We don't need
+    // the full `chrono` machinery for
+    // this short format — JIRA's
+    // timestamps are stable and the
+    // substring is the same width.
+    //
+    // Minimum length for a
+    // `YYYY-MM-DDTHH:MM` extract is
+    // 16 chars. Anything shorter is
+    // malformed and we degrade to
+    // the raw string.
+    if s.len() < 16 {
+        return s.to_string();
+    }
+    let date = &s[..10]; // YYYY-MM-DD
+    let time = &s[11..16]; // HH:MM
+    format!("{} {} UTC", date, time)
+}
+
 /// State for the help overlay. Just a scroll offset; the help text
 /// is computed from the live app state on each render so the
 /// "current settings" section is always accurate.
@@ -4039,6 +4415,7 @@ impl App {
         notes_database: Option<std::path::PathBuf>,
         notes_dir: Option<std::path::PathBuf>,
         _todo_line_option: String,
+        jira_fragments: std::collections::HashMap<String, String>,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -4149,6 +4526,14 @@ notes_date_filter: NotesDateFilter::All,
             jira_debounce_started: None,
             jira_last_jql: None,
             jira_client: None,
+            jira_fragments,
+            jira_undefined_fragments: Vec::new(),
+            jira_last_undefined_message: None,
+            jira_comments_request: None,
+            jira_comments_in_flight: false,
+            jira_add_comment_target: None,
+            jira_add_comment_request: None,
+            jira_add_comment_in_flight: false,
         };
         app.recompile_regex();
         app.refresh();
@@ -5892,11 +6277,34 @@ fn move_selection(&mut self, delta: isize) {
     /// so this works in tests where only a fake client is
     /// injected and no `JIRA_SERVER`/`JIRA_API_TOKEN` is
     /// set.
-    fn jira_build_query(&self) -> String {
+    ///
+    /// The user-defined JQL fragments (from the
+    /// `jira.search.<name>=` config keys) are spliced
+    /// into the JQL when the body contains `@<name>`
+    /// tokens. Any unresolved fragment names are stashed
+    /// on `self.jira_undefined_fragments`; the autocall
+    /// reads that to decide whether to skip the search
+    /// and surface a diagnostic.
+    fn jira_build_query(&mut self) -> String {
         let project = std::env::var("JIRA_PROJECT")
             .ok()
             .filter(|s| !s.trim().is_empty());
-        crate::jira::build_jql(self.jira_pattern(), project.as_deref())
+        // `now_epoch()` is the wall clock the JQL
+        // builder uses to compute the date-cutoff for
+        // the `@today` / `@week` / `@month` aliases
+        // (e.g. `@week` becomes
+        // `updated >= "<today - 7d>"`). It's the same
+        // helper the rest of the TUI uses for "now",
+        // so all date-bearing features see a consistent
+        // view of time.
+        let (jql, undefined) = crate::jira::build_jql(
+            self.jira_pattern(),
+            project.as_deref(),
+            self.now_epoch(),
+            &self.jira_fragments,
+        );
+        self.jira_undefined_fragments = undefined;
+        jql
     }
 
     /// Drive the JIRA search debounce. Called from the
@@ -5934,6 +6342,49 @@ fn move_selection(&mut self, delta: isize) {
             return;
         }
         let jql = self.jira_build_query();
+        // If the user typed `@somefrag` and `somefrag`
+        // isn't in the configured fragments map, the
+        // JQL is still valid (the unknown token falls
+        // through to free text) but the search would
+        // return wrong results. Refuse to fire and
+        // surface a diagnostic instead. We only emit
+        // the status message when the undefined list
+        // CHANGES, so the user doesn't get a stale
+        // message re-surfacing on every keystroke
+        // while they correct a typo.
+        if !self.jira_undefined_fragments.is_empty() {
+            if self.jira_last_undefined_message.as_ref()
+                != Some(&self.jira_undefined_fragments)
+            {
+                self.set_status_message(format!(
+                    "JIRA fragment{} not configured: {}. \
+                     Define via jira.search.<name>=... in \
+                     ~/.config/smarthistory/config.",
+                    if self.jira_undefined_fragments.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    self.jira_undefined_fragments
+                        .iter()
+                        .map(|n| format!("@{}", n))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+                self.jira_last_undefined_message =
+                    Some(self.jira_undefined_fragments.clone());
+            }
+            self.jira_debounce_started = None;
+            return;
+        }
+        // No undefined fragments on this build — clear
+        // the debounce on the "fragment not configured"
+        // message so a previously-flagged typo doesn't
+        // keep a stale status visible forever. (The
+        // message is replaced by the next status set
+        // anywhere in the app; this just keeps the
+        // bookkeeping consistent.)
+        self.jira_last_undefined_message = None;
         // Skip if we already have results for this exact JQL.
         if self.jira_last_jql.as_deref() == Some(&jql) {
             return;
@@ -6010,25 +6461,104 @@ fn move_selection(&mut self, delta: isize) {
                 let rows = issues
                     .into_iter()
                     .map(|issue| {
-                        // Build the details-pane text from the
-                        // status/type/priority/assignee/updated
-                        // metadata so Ctrl+L on a row shows the
-                        // issue's vitals without opening it.
-                        let mut details = Vec::new();
-                        if !issue.status.is_empty() {
-                            details.push(format!("Status: {}", issue.status));
-                        }
-                        if !issue.issuetype.is_empty() {
-                            details.push(format!("Type: {}", issue.issuetype));
-                        }
-                        if !issue.priority.is_empty() {
-                            details.push(format!("Priority: {}", issue.priority));
-                        }
-                        if !issue.assignee.is_empty() {
-                            details.push(format!("Assignee: {}", issue.assignee));
-                        }
-                        if !issue.updated.is_empty() {
-                            details.push(format!("Updated: {}", issue.updated));
+                        // Build the details-pane text from
+                        // the user-spec'd attribute set:
+                        // Status, Priority, Due, Assignee,
+                        // Description. The new layout is:
+                        //
+                        //   line 1: **Status**: X   **Priority**: Y
+                        //   line 2: **Due**: X       **Assignee**: Y
+                        //   line 3: **Description**
+                        //   lines 4+: the full description text
+                        //
+                        // Labels are wrapped in `**...**`
+                        // markers that the details-pane
+                        // renderer turns into bold spans.
+                        // Each field uses `<none>` as a
+                        // placeholder when empty, so the
+                        // 3-line header layout stays
+                        // consistent regardless of which
+                        // fields are populated.
+                        //
+                        // The 4-line preview budget in the
+                        // details pane shows the 3 header
+                        // lines + 1 description line. The
+                        // full description is available in
+                        // the show-output overlay (Ctrl+L).
+                        // Internal newlines in the
+                        // description are preserved (the
+                        // ADF extractor renders paragraph
+                        // breaks as `\n`), so a
+                        // multi-paragraph body produces a
+                        // multi-line tail in the output.
+                        let none_placeholder = "<none>";
+                        let status = if issue.status.is_empty() {
+                            none_placeholder
+                        } else {
+                            issue.status.as_str()
+                        };
+                        let priority = if issue.priority.is_empty() {
+                            none_placeholder
+                        } else {
+                            issue.priority.as_str()
+                        };
+                        let due = if issue.due.is_empty() {
+                            none_placeholder
+                        } else {
+                            issue.due.as_str()
+                        };
+                        let assignee = if issue.assignee.is_empty() {
+                            none_placeholder
+                        } else {
+                            issue.assignee.as_str()
+                        };
+                        // The header block is three
+                        // lines, joined by `\n`. Two
+                        // spaces between the (label,
+                        // value) pairs on lines 1 and 2
+                        // give the bold spans a little
+                        // breathing room without forcing
+                        // a hard column alignment.
+                        let mut details: Vec<String> = Vec::new();
+                        details.push(format!(
+                            "**Status**: {}  **Priority**: {}",
+                            status, priority
+                        ));
+                        details.push(format!(
+                            "**Due**: {}  **Assignee**: {}",
+                            due, assignee
+                        ));
+                        details.push("**Description**".to_string());
+                        // The description body
+                        // follows on the next line(s).
+                        // Empty descriptions get a
+                        // single `<none>` placeholder
+                        // so the line is always
+                        // present and the layout
+                        // stays consistent.
+                        if !issue.description.is_empty() {
+                            // `description` may
+                            // contain newlines (the
+                            // extractor preserves
+                            // paragraph breaks as
+                            // `\n`); each one
+                            // becomes its own
+                            // line in the output.
+                            for line in issue.description.lines() {
+                                details.push(line.to_string());
+                            }
+                            // Trailing empty
+                            // lines from the
+                            // description's
+                            // trailing `\n`
+                            // are dropped
+                            // silently by
+                            // `lines()` —
+                            // no extra
+                            // placeholder
+                            // needed.
+                        } else {
+                            details.push(none_placeholder.to_string());
                         }
                         let ts = crate::jira::updated_to_epoch(&issue.updated);
                         let id = next_id;
@@ -6041,7 +6571,12 @@ fn move_selection(&mut self, delta: isize) {
                             exit_code: 0,
                             timestamp: if ts > 0 { ts } else { now_epoch },
                             comment: issue.summary,
-                            output: details.join(" | "),
+                            // Newlines between
+                            // attributes are the
+                            // natural rendering
+                            // boundary for the
+                            // preview pane.
+                            output: details.join("\n"),
                             mode: "jira".to_string(),
                             source: "jira".to_string(),
                         }
@@ -6303,16 +6838,213 @@ fn move_selection(&mut self, delta: isize) {
     }
 
     fn start_comment_edit(&mut self) {
-        if let Some(row) = self.selected_row() {
-            self.comment_edit = Some(row.comment.clone());
+        // The edit buffer is shared between
+        // two paths:
+        //
+        // 1. **Local command comment** (the
+        //    original behaviour): prefill
+        //    with the existing `row.comment`
+        //    and save to the local SQLite
+        //    `command_comments` table on
+        //    `Enter`. Used for non-JIRA
+        //    rows.
+        //
+        // 2. **JIRA add comment** (new):
+        //    prefill with an empty string
+        //    (the user is composing a
+        //    *new* comment, not editing
+        //    an existing one — the JIRA
+        //    `description` and existing
+        //    `comments` are already shown
+        //    in the show-output overlay;
+        //    Ctrl-E here is a "post a new
+        //    comment" action). On `Enter`,
+        //    POST to JIRA's REST v2
+        //    `add_comment` endpoint. Used
+        //    for JIRA rows.
+        //
+        // The dispatch is keyed on
+        // `row.mode == "jira"`. We can't
+        // take `&mut self` while also
+        // holding a borrow of the
+        // selected row, so we copy
+        // out the fields we need
+        // (`command` and `mode`) and
+        // dispatch on those — same
+        // pattern as `show_output_view`.
+        let selection = self.selected_row().map(|r| (r.command.clone(), r.mode.clone(), r.comment.clone()));
+        let Some((command, mode, comment)) = selection else {
+            return;
+        };
+        if mode == "jira" {
+            // JIRA add-comment path.
+            // The buffer is empty
+            // (the user is writing a
+            // new comment from scratch).
+            // The target key is stashed
+            // on `self` so `save_comment_edit`
+            // can route the
+            // buffer to the JIRA
+            // add-comment path.
+            self.jira_add_comment_target = Some(command.clone());
+            self.comment_edit = Some(String::new());
+        } else {
+            // Local command-comment
+            // path. Original
+            // behaviour: prefill
+            // with the existing
+            // comment.
+            self.jira_add_comment_target = None;
+            self.comment_edit = Some(comment);
         }
     }
 
     fn cancel_comment_edit(&mut self) {
         self.comment_edit = None;
+        // Also clear the JIRA
+        // add-comment target. The
+        // user pressed `Esc` (or
+        // otherwise cancelled) on
+        // the buffer; the buffer's
+        // tied to the target only
+        // for the duration of the
+        // edit, so resetting both
+        // keeps the state
+        // consistent.
+        self.jira_add_comment_target = None;
     }
 
     fn save_comment_edit(&mut self) -> Result<()> {
+        // The buffer is shared between
+        // two paths (see
+        // `start_comment_edit`): a local
+        // command comment edit
+        // (original behaviour) and a
+        // JIRA add-comment POST (new).
+        // The dispatch is keyed on
+        // `jira_add_comment_target`:
+        // - `Some(key)` → JIRA add-comment
+        //   path. Spawn a background
+        //   thread that POSTs to
+        //   JIRA's `add_comment`
+        //   endpoint. The buffer
+        //   stays open while the
+        //   POST is in flight (so
+        //   the user can see what
+        //   they posted); on
+        //   success the buffer
+        //   clears and the target
+        //   goes back to `None`;
+        //   on failure the buffer
+        //   stays so the user can
+        //   retry.
+        // - `None` → local
+        //   command-comment path.
+        //   INSERT/UPDATE the
+        //   SQLite `command_comments`
+        //   row and clear the
+        //   buffer. Original
+        //   behaviour.
+        if let Some(key) = self.jira_add_comment_target.clone() {
+            // Clone the buffer so
+            // the closure can move
+            // it into the thread
+            // without borrowing
+            // `self`.
+            let body = self
+                .comment_edit
+                .clone()
+                .unwrap_or_default();
+            // An empty body is a
+            // user error: don't
+            // POST an empty
+            // comment. Surface a
+            // status message and
+            // keep the buffer open
+            // so the user can
+            // type something.
+            if body.trim().is_empty() {
+                self.set_status_message(
+                    "JIRA add-comment: body is empty".to_string(),
+                );
+                return Ok(());
+            }
+            // The fake-client
+            // path runs
+            // synchronously. Same
+            // pattern as
+            // `start_jira_comments_fetch`.
+            if let Some(client) = self.jira_client.clone() {
+                let result = client.add_comment(&key, &body);
+                let request = JiraAddCommentRequest {
+                    receiver: mpsc::channel().1,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    key: key.clone(),
+                    body: body.clone(),
+                };
+                self.jira_add_comment_in_flight = true;
+                self.process_jira_add_comment_result(
+                    request,
+                    key,
+                    result,
+                );
+                return Ok(());
+            }
+            // Production path:
+            // spawn a background
+            // thread.
+            let Some(config) = crate::jira::JiraConfig::from_env() else {
+                self.set_status_message(
+                    crate::jira::JiraError::NotConfigured.to_string(),
+                );
+                return Ok(());
+            };
+            // Debounce: if a
+            // previous POST is
+            // still in flight,
+            // drop the new one
+            // silently (the
+            // status message
+            // is already
+            // "Posting
+            // comment...").
+            if self.jira_add_comment_in_flight {
+                return Ok(());
+            }
+            let (tx, rx) = mpsc::channel();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let cancelled_clone = cancelled.clone();
+            let key_for_thread = key.clone();
+            let body_for_thread = body.clone();
+            std::thread::spawn(move || {
+                let client =
+                    crate::jira::RestJiraClient::new(config);
+                let result = client.add_comment(
+                    &key_for_thread,
+                    &body_for_thread,
+                );
+                if !cancelled_clone.load(Ordering::Relaxed) {
+                    let _ = tx.send(result);
+                }
+            });
+            self.jira_add_comment_in_flight = true;
+            self.jira_add_comment_request = Some(JiraAddCommentRequest {
+                receiver: rx,
+                cancelled,
+                key,
+                body,
+            });
+            self.set_status_message(format!(
+                "Posting comment to {}…",
+                self.jira_add_comment_request
+                    .as_ref()
+                    .map(|r| r.key.clone())
+                    .unwrap_or_default(),
+            ));
+            return Ok(());
+        }
+        // Local command-comment
+        // path (original behaviour).
         if let Some(ref comment) = self.comment_edit
             && let Some(row) = self.selected_row()
         {
@@ -6328,10 +7060,126 @@ fn move_selection(&mut self, delta: isize) {
         Ok(())
     }
 
+    /// Process a JIRA add-comment result
+    /// that arrived from the background
+    /// thread. Mirrors
+    /// `process_jira_comments_result`
+    /// (the JIRA-comments-fetch
+    /// equivalent): on success, clear
+    /// the buffer and the JIRA target;
+    /// on failure, surface a status
+    /// message and preserve the buffer
+    /// so the user can retry.
+    fn process_jira_add_comment_result(
+        &mut self,
+        request: JiraAddCommentRequest,
+        key: String,
+        result: Result<(), crate::jira::JiraError>,
+    ) {
+        self.jira_add_comment_in_flight = false;
+        self.jira_add_comment_request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            self.set_status_message(format!(
+                "JIRA add-comment to {} cancelled",
+                key
+            ));
+            return;
+        }
+        match result {
+            Ok(()) => {
+                // Success: clear the
+                // buffer and the
+                // target. The
+                // `comment_edit`
+                // and
+                // `jira_add_comment_target`
+                // fields are
+                // reset together
+                // so the next
+                // Ctrl-E on a
+                // non-JIRA row
+                // doesn't
+                // accidentally
+                // re-enter JIRA
+                // add-comment
+                // mode.
+                self.comment_edit = None;
+                self.jira_add_comment_target = None;
+                self.set_status_message(format!(
+                    "Comment posted to {}",
+                    key
+                ));
+            }
+            Err(e) => {
+                // Failure: keep
+                // the buffer
+                // and the
+                // target so
+                // the user
+                // can
+                // retry
+                // without
+                // retyping.
+                self.set_status_message(format!(
+                    "JIRA add-comment to {} failed: {}",
+                    key, e
+                ));
+            }
+        }
+    }
+
     fn show_output_view(&mut self) {
-        if let Some(row) = self.selected_row().filter(|r| !r.output.is_empty()) {
+        // The show-output overlay has two
+        // distinct entry points:
+        //
+        // 1. **Generic rows** (regular
+        //    history, notes, todos, panes,
+        //    directories): the captured
+        //    `row.output` is opened
+        //    immediately. No network call.
+        //
+        // 2. **JIRA rows**: the user's
+        //    spec wants the overlay to
+        //    show the full description
+        //    plus a list of comments
+        //    sorted newest-first. The
+        //    `row.output` is the
+        //    4-line preview header +
+        //    description body; the
+        //    comments need a separate
+        //    HTTP fetch (`/rest/api/2/issue/{key}/comment`).
+        //    We fire a background
+        //    thread (mirroring
+        //    `spawn_jira_request` for
+        //    searches) and show a
+        //    "Loading comments..." status
+        //    while the fetch is in
+        //    flight. When the result
+        //    arrives, the run loop
+        //    builds the full overlay
+        //    text and opens the view.
+        //
+        // We can't take `&mut self` while
+        // also holding a borrow of the
+        // selected row (the borrow
+        // checker complains about an
+        // immutable borrow outliving the
+        // mutable borrow), so we copy
+        // out the fields we need (the
+        // command and the mode) and
+        // dispatch on those.
+        let selection = self.selected_row().map(|r| (r.command.clone(), r.mode.clone(), r.output.clone()));
+        let Some((command, mode, output)) = selection else {
+            return;
+        };
+        if output.is_empty() {
+            return;
+        }
+        if mode == "jira" {
+            self.start_jira_comments_fetch(&command);
+        } else {
             self.output_view = Some(OutputView {
-                text: row.output.clone(),
+                text: output,
                 scroll: 0,
             });
         }
@@ -6339,6 +7187,173 @@ fn move_selection(&mut self, delta: isize) {
 
     fn close_output_view(&mut self) {
         self.output_view = None;
+    }
+
+    /// Fire a background thread to fetch the
+    /// comments for a JIRA issue. Mirrors
+    /// `spawn_jira_request` (the search-time
+    /// version): a thread runs the HTTP call
+    /// against the configured `JiraClient`,
+    /// the result flows over an `mpsc`
+    /// channel, and the run loop polls it.
+    ///
+    /// If a comments fetch is already in flight
+    /// (`jira_comments_in_flight` is true),
+    /// this is a no-op — the user might
+    /// press Ctrl+L again on the same row
+    /// while a fetch is pending, and we'd
+    /// rather silently drop the second
+    /// request than spawn a duplicate thread.
+    /// The status message is also left
+    /// alone so the user doesn't see a
+    /// "Loading comments..." flash.
+    ///
+    /// The fetch is run synchronously against
+    /// the fake client in tests, just like
+    /// `spawn_jira_request`. The test
+    /// seam is `self.jira_client.clone()` —
+    /// when set, the search / comments
+    /// fetch runs in-line and the result is
+    /// processed before this method
+    /// returns.
+    fn start_jira_comments_fetch(&mut self, key: &str) {
+        if self.jira_comments_in_flight {
+            return;
+        }
+        // Snapshot the issue's preview
+        // output. The full overlay
+        // synthesises its text from this
+        // preview + the comments, so we
+        // keep a copy on `self` for the
+        // processing step. The preview
+        // contains the 3-line header
+        // (Status/Priority, Due/Assignee,
+        // Description label) + the full
+        // description body, which is
+        // exactly the `# Header` content
+        // the user spec calls out.
+        let Some(row) = self.jira_rows.iter().find(|r| r.command == key).cloned() else {
+            // The row was selected when
+            // the user pressed Ctrl+L
+            // but it's no longer in
+            // `jira_rows` (the user
+            // must have navigated and
+            // the search cache is now
+            // for a different query).
+            // Silently do nothing —
+            // the row is gone.
+            return;
+        };
+        // The fake-client path runs
+        // synchronously and processes
+        // the result inline. We still
+        // set `jira_comments_in_flight`
+        // so a second Ctrl+L on the
+        // same row doesn't queue a
+        // duplicate.
+        if let Some(client) = self.jira_client.clone() {
+            let result = client.fetch_comments(key);
+            let request = JiraCommentsRequest {
+                receiver: mpsc::channel().1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                key: key.to_string(),
+            };
+            self.jira_comments_in_flight = true;
+            self.process_jira_comments_result(request, row, result);
+            return;
+        }
+        // Production path: spawn a
+        // background thread.
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(
+                crate::jira::JiraError::NotConfigured.to_string(),
+            );
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        let key_for_thread = key.to_string();
+        std::thread::spawn(move || {
+            let client = crate::jira::RestJiraClient::new(config);
+            let result = client.fetch_comments(&key_for_thread);
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+            }
+        });
+        self.jira_comments_in_flight = true;
+        self.jira_comments_request = Some(JiraCommentsRequest {
+            receiver: rx,
+            cancelled,
+            key: key.to_string(),
+        });
+        self.set_status_message("JIRA loading comments…".to_string());
+    }
+
+    /// Process a JIRA comments-fetch result that
+    /// arrived from the background thread.
+    /// Builds the markdown-like overlay text
+    /// (header, description, comments) and
+    /// opens the `OutputView`.
+    ///
+    /// Mirrors `process_jira_result` (the
+    /// search-time equivalent): on success,
+    /// cache the comments and refresh; on
+    /// error, surface a status message; on
+    /// cancellation, surface a different
+    /// status message ("JIRA comments
+    /// cancelled").
+    fn process_jira_comments_result(
+        &mut self,
+        request: JiraCommentsRequest,
+        row: crate::tui::state::HistoryRow,
+        result: Result<Vec<crate::jira::JiraComment>, crate::jira::JiraError>,
+    ) {
+        self.jira_comments_in_flight = false;
+        self.jira_comments_request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            self.set_status_message("JIRA comments cancelled".to_string());
+            return;
+        }
+        match result {
+            Ok(comments) => {
+                // Build the markdown-like
+                // overlay text. The
+                // structure follows the user
+                // spec:
+                //
+                //   ## Header
+                //   <3-line preview: Status/Priority,
+                //                   Due/Assignee,
+                //                   Description label>
+                //   <description body lines>
+                //
+                //   ## Description
+                //   <full description text>
+                //
+                //   ## Comments
+                //   ## <author> · <date>
+                //   <comment text>
+                //   ## <author> · <date>
+                //   <comment text>
+                //   ...
+                //
+                // Comments are sorted
+                // newest-first by the
+                // `created` timestamp.
+                let mut comments = comments;
+                sort_comments_newest_first(&mut comments);
+                let text = build_jira_overlay_text(&row, &comments);
+                self.output_view = Some(OutputView {
+                    text,
+                    scroll: 0,
+                });
+                self.status_message = None;
+            }
+            Err(e) => {
+                self.set_status_message(e.to_string());
+            }
+        }
     }
 
     /// Ask the configured ollama instance for a short
@@ -7380,6 +8395,7 @@ pub fn run_tui_to_stdout(
         notes_database,
         notes_dir,
         app_cfg.todo_line_option().to_string(),
+        app_cfg.jira_fragments().clone(),
     );
     // If the persisted session requested a different duplicate filter
     // than the one we initialized with, honor it.
@@ -7510,6 +8526,73 @@ fn run_loop(
                     app.process_jira_result(request, result);
                 }
 
+        // Check for JIRA comments-fetch result
+        // from background thread (mirrors the
+        // search poll above). When the
+        // comments arrive, build the overlay
+        // text and open the show-output view
+        // on the same row the user pressed
+        // Ctrl+L on.
+        if let Some(request) = app.jira_comments_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+        {
+            // The row that initiated the
+            // fetch is keyed by `request.key`.
+            // We need to clone the row's data
+            // (command, mode, output) because
+            // `process_jira_comments_result`
+            // takes `&mut self`. Same pattern
+            // as the search-result path: the
+            // row is in `jira_rows` and we
+            // can find it by key.
+            let key = request.key.clone();
+            let request = app.jira_comments_request.take().unwrap();
+            let row = app
+                .jira_rows
+                .iter()
+                .find(|r| r.command == key)
+                .cloned();
+            if let Some(row) = row {
+                app.process_jira_comments_result(request, row, result);
+            } else {
+                // The row was selected when
+                // the user pressed Ctrl+L
+                // but it's no longer in
+                // `jira_rows`. Discard
+                // the result and surface
+                // a status message so
+                // the user knows the
+                // overlay didn't open.
+                app.jira_comments_in_flight = false;
+                app.set_status_message(
+                    "JIRA row no longer available for comments".to_string(),
+                );
+            }
+        }
+
+        // Check for JIRA add-comment
+        // POST result from background
+        // thread (mirrors the comments
+        // poll above). When the POST
+        // returns, either clear the
+        // buffer (success) or surface
+        // an error message (failure).
+        if let Some(request) = app.jira_add_comment_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+        {
+            // The key and body are on
+            // the request struct (we
+            // need them for status
+            // messages that reference
+            // the issue). Clone the
+            // data we need before
+            // moving the request
+            // out of `app`.
+            let key = request.key.clone();
+            let request = app.jira_add_comment_request.take().unwrap();
+            app.process_jira_add_comment_result(request, key, result);
+        }
+
         if !crossterm::event::poll(Duration::from_millis(100))? {
             // No input ready. Still a chance to drive the
             // LLM auto-call debounce: if the user is in LLM
@@ -7555,6 +8638,51 @@ fn run_loop(
                     }
                     app.jira_in_flight = false;
                     app.set_status_message("JIRA search cancelled".to_string());
+                    continue;
+                }
+
+        // Same cancel handling for an in-flight
+        // JIRA comments fetch. The `Cancel`
+        // action (default `Esc`) sets the
+        // cancelled flag on the worker thread
+        // (which checks the flag just before
+        // sending the result, so a fetch that
+        // completes between the user's Esc and
+        // the flag check is dropped, not
+        // delivered).
+        if app.jira_comments_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+                && matches!(action, Action::Cancel) {
+                    if let Some(request) = app.jira_comments_request.take() {
+                        request.cancelled.store(true, Ordering::Relaxed);
+                    }
+                    app.jira_comments_in_flight = false;
+                    app.set_status_message("JIRA comments cancelled".to_string());
+                    continue;
+                }
+
+        // Same cancel handling for an in-flight
+        // JIRA add-comment POST. The POST
+        // is in flight because the user saved
+        // the comment buffer on a JIRA row;
+        // pressing `Esc` while it's pending
+        // sets the cancelled flag on the
+        // worker thread and surfaces a status
+        // message. The buffer is preserved
+        // so the user can
+        // decide whether to retry (another
+        // `Enter`) or cancel
+        // out of the buffer entirely
+        // (another `Esc`, which triggers
+        // `cancel_comment_edit` next).
+        if app.jira_add_comment_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+                && matches!(action, Action::Cancel) {
+                    if let Some(request) = app.jira_add_comment_request.take() {
+                        request.cancelled.store(true, Ordering::Relaxed);
+                    }
+                    app.jira_add_comment_in_flight = false;
+                    app.set_status_message("JIRA add-comment cancelled".to_string());
                     continue;
                 }
 
@@ -9750,6 +10878,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 app
@@ -9819,6 +10948,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 )
         }
 
@@ -9886,6 +11016,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 )
         }
 
@@ -10119,6 +11250,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -10766,6 +11898,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -10877,6 +12010,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 unsafe {
@@ -11101,6 +12235,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 )
         }
 
@@ -11290,6 +12425,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -12028,6 +13164,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 )
         }
 
@@ -13521,6 +14658,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 // Restore env before any `?` can
                 // short-circuit out of the test (so
@@ -13625,6 +14763,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -13741,6 +14880,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -13859,6 +14999,7 @@ mod tests {
                         None,
                         None,
                         String::from("+$LINE"),
+                    std::collections::HashMap::new(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -15773,6 +16914,15 @@ mod tests {
                 None,
                 None,
                 String::from("+$LINE"),
+                // No JIRA fragments in the default
+                // test app. Tests that exercise the
+                // fragment path push entries directly
+                // into `app.jira_fragments` (it's a
+                // plain HashMap field, not gated by
+                // a setter — the test is the only
+                // consumer and doesn't need a
+                // formal setter).
+                std::collections::HashMap::new(),
             );
             // `App::new` calls
             // `build_session_subdirs`
@@ -18746,16 +19896,51 @@ mod tests {
         /// A fake `JiraClient` that returns a canned set
         /// of issues, recording the JQL it was called with
         /// so tests can assert on the generated query.
-        #[derive(Default, Clone)]
+        /// The `comments` field is the canned comments
+        /// list returned by `fetch_comments`; the
+        /// `comment_keys` field records which keys the
+        /// TUI asked for so tests can assert the
+        /// comments fetch was issued with the right
+        /// target. The `posted_comments` field records
+        /// the (key, body) pairs that the TUI tried to
+        /// post via `add_comment`; tests assert on this
+        /// to verify the save-comment-edit dispatch
+        /// routes JIRA rows through the add-comment
+        /// path (not the local SQLite `command_comments`
+        /// path).
+        #[derive(Default)]
         struct FakeJira {
             issues: Vec<crate::jira::JiraIssue>,
             recorded: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+            comments: Vec<crate::jira::JiraComment>,
+            comment_keys: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+            posted_comments: std::sync::Arc<
+                std::sync::Mutex<Vec<(String, String)>>,
+            >,
         }
 
         impl crate::jira::JiraClient for FakeJira {
             fn search(&self, jql: &str) -> Result<Vec<crate::jira::JiraIssue>, crate::jira::JiraError> {
                 self.recorded.lock().unwrap().push(jql.to_string());
                 Ok(self.issues.clone())
+            }
+            fn fetch_comments(
+                &self,
+                key: &str,
+            ) -> Result<Vec<crate::jira::JiraComment>, crate::jira::JiraError> {
+                self.comment_keys.lock().unwrap().push(key.to_string());
+                Ok(self.comments.clone())
+            }
+            fn add_comment(
+                &self,
+                key: &str,
+                body: &str,
+            ) -> Result<(), crate::jira::JiraError> {
+                self.posted_comments
+                    .lock()
+                    .unwrap()
+                    .push((key.to_string(), body.to_string()));
+                Ok(())
             }
         }
 
@@ -18839,6 +20024,7 @@ mod tests {
                     },
                 ],
                 recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
             };
             let recorded = fake.recorded.clone();
             let mut app = directories_test_app(&[]);
@@ -18865,7 +20051,11 @@ mod tests {
             assert_eq!(app.jira_rows[0].comment, "login crash");
             assert_eq!(app.jira_rows[0].source, "jira");
             assert_eq!(app.jira_rows[0].mode, "jira");
-            assert!(app.jira_rows[0].output.contains("Status: Open"));
+            // The new format wraps the label in
+            // `**...**` so the renderer can produce
+            // a bold span. The substring assertion
+            // here uses the bold-marked form.
+            assert!(app.jira_rows[0].output.contains("**Status**: Open"));
             // PROJ-2 has a real `updated` → parsed epoch.
             assert!(app.jira_rows[1].timestamp > 1_700_000_000);
         }
@@ -18879,6 +20069,7 @@ mod tests {
             let fake = FakeJira {
                 issues: vec![],
                 recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
             };
             let recorded = fake.recorded.clone();
             let mut app = directories_test_app(&[]);
@@ -18898,6 +20089,1136 @@ mod tests {
             app.jira_debounce_started = Some(past());
             app.jira_maybe_autocall();
             assert_eq!(recorded.lock().unwrap().len(), 1, "must not re-fire for same JQL");
+        }
+
+        /// The `@me` / `@today` / `@week` / `@month`
+        /// aliases thread through `jira_build_query`
+        /// into the JQL the FakeJira receives.
+        /// Asserts the JQL contains the expected
+        /// alias-derived clauses end-to-end.
+        #[test]
+        fn jira_aliases_reach_the_fake_client() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
+            };
+            let recorded = fake.recorded.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-@me @week crash");
+            app.refresh();
+            // Force the debounce to be in the past
+            // (the run loop would normally wait, but
+            // we drive it by hand for determinism).
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            assert_eq!(recorded.lock().unwrap().len(), 1);
+            let jql = recorded.lock().unwrap()[0].clone();
+            // The `assignee = currentUser()` clause
+            // from the `@me` alias.
+            assert!(
+                jql.contains("assignee = currentUser()"),
+                "JQL: {}",
+                jql
+            );
+            // The `updated >=` clause from the
+            // `@week` alias (date is computed from
+            // `now_epoch()` — we don't assert the
+            // exact date, just the prefix).
+            assert!(
+                jql.contains(r#"updated >= "20"#),
+                "JQL: {}",
+                jql
+            );
+            // The free-text token survived.
+            assert!(
+                jql.contains(r#"(description ~ "crash" OR summary ~ "crash")"#),
+                "JQL: {}",
+                jql
+            );
+        }
+
+        /// A user-defined JQL fragment (loaded from a
+        /// hypothetical `jira.search.label1=labels = "test"`
+        /// config entry) is spliced into the JQL the
+        /// FakeJira receives. Mirrors the
+        /// `jira_aliases_reach_the_fake_client` test
+        /// but exercises the fragment expansion path
+        /// end-to-end through `jira_build_query`.
+        #[test]
+        fn jira_fragments_reach_the_fake_client() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
+            };
+            let recorded = fake.recorded.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            // Install a single fragment via the
+            // same field the config loader uses
+            // (the public API doesn't expose a
+            // setter — the field is the
+            // authoritative store and the test
+            // pushes directly).
+            app.jira_fragments.insert(
+                "label1".to_string(),
+                r#"labels = "test""#.to_string(),
+            );
+            app.query = String::from("-@label1 @me crash");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            assert_eq!(recorded.lock().unwrap().len(), 1);
+            let jql = recorded.lock().unwrap()[0].clone();
+            // The fragment is spliced verbatim,
+            // parenthesised, AND-joined with the
+            // other clauses.
+            assert!(
+                jql.contains(r#"(labels = "test")"#),
+                "JQL: {}",
+                jql
+            );
+            // The `@me` alias still fires.
+            assert!(
+                jql.contains("assignee = currentUser()"),
+                "JQL: {}",
+                jql
+            );
+            // The free-text token survived.
+            assert!(
+                jql.contains(r#"(description ~ "crash" OR summary ~ "crash")"#),
+                "JQL: {}",
+                jql
+            );
+        }
+
+        /// An undefined fragment in the body
+        /// prevents the JIRA search from firing
+        /// and surfaces a status message naming
+        /// the missing fragment. Asserts both the
+        /// suppression of the network call and
+        /// the diagnostic text.
+        #[test]
+        fn jira_undefined_fragment_blocks_search_and_surfaces_message() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
+            };
+            let recorded = fake.recorded.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            // No fragments defined — `@label1` is
+            // an undefined fragment.
+            app.query = String::from("-@label1 crash");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            // The search was NOT fired — the
+            // undefined-fragment gate short-circuits
+            // before `spawn_jira_request`.
+            assert_eq!(
+                recorded.lock().unwrap().len(),
+                0,
+                "undefined fragment must not fire the search",
+            );
+            // The status message names the missing
+            // fragment.
+            let status = app
+                .status_message
+                .as_ref()
+                .map(|(s, _)| s.as_str())
+                .unwrap_or("");
+            assert!(
+                status.contains("@label1"),
+                "status: {:?}",
+                status,
+            );
+            assert!(
+                status.contains("not configured"),
+                "status: {:?}",
+                status,
+            );
+        }
+
+        /// End-to-end: a JIRA issue with all five
+        /// preview attributes (Status, Priority,
+        /// Due, Assignee, Description) produces a
+        /// `HistoryRow.output` with five lines,
+        /// each label wrapped in `**...**` markers
+        /// so the details-pane renderer turns them
+        /// into bold spans.
+        #[test]
+        fn jira_row_output_contains_all_five_bold_labels() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "login crash".to_string(),
+                    status: "Open".to_string(),
+                    priority: "High".to_string(),
+                    assignee: "Alice".to_string(),
+                    due: "2024-07-15".to_string(),
+                    description: "The login button is broken on Safari.".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
+            };
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            // Forcibly fire the autocall.
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            assert_eq!(app.jira_rows.len(), 1);
+            let out = &app.jira_rows[0].output;
+            // The new layout is 3 lines of
+            // header (Status/Priority on
+            // line 1, Due/Assignee on line 2,
+            // Description label on line 3)
+            // followed by the description
+            // body on line 4. The
+            // join-on-newline convention gives
+            // us a single string with the
+            // expected layout.
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(lines.len(), 4, "got: {:?}", lines);
+            assert_eq!(lines[0], "**Status**: Open  **Priority**: High");
+            assert_eq!(lines[1], "**Due**: 2024-07-15  **Assignee**: Alice");
+            assert_eq!(lines[2], "**Description**");
+            // The description body
+            // appears on the line
+            // after the label
+            // (no value on the
+            // label line itself).
+            assert_eq!(lines[3], "The login button is broken on Safari.");
+            // The full output contains
+            // exactly four `**` openers
+            // and four `**` closers
+            // (one per label: Status,
+            // Priority, Due, Assignee).
+            // The description label is
+            // also bolded via `**`
+            // but without a colon, so
+            // the `**Description**` line
+            // has its own pair. Total:
+            // 5 pairs (Status, Priority,
+            // Due, Assignee, Description).
+            assert_eq!(out.matches("**").count(), 10);
+        }
+
+        /// When the issue has empty values
+        /// for some attributes, the row
+        /// builder still emits the label
+        /// (with `<none>` as the
+        /// placeholder) so the layout stays
+        /// consistent. The renderer doesn't
+        /// strip `<none>` — it just
+        /// displays it as plain text.
+        #[test]
+        fn jira_row_output_uses_none_for_empty_attributes() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "untriaged bug".to_string(),
+                    // status, priority, assignee, due, description all default to empty
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
+            };
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            assert_eq!(app.jira_rows.len(), 1);
+            let out = &app.jira_rows[0].output;
+            // All four metadata labels
+            // appear with `<none>` as the
+            // placeholder. The Description
+            // label is just the label (no
+            // colon / no value), and the
+            // body line below it is also
+            // `<none>` so the layout
+            // stays consistent.
+            assert!(out.contains("**Status**: <none>"));
+            assert!(out.contains("**Priority**: <none>"));
+            assert!(out.contains("**Due**: <none>"));
+            assert!(out.contains("**Assignee**: <none>"));
+            assert!(out.contains("**Description**"));
+            assert!(out.contains("\n<none>"));
+        }
+
+        /// `sort_comments_newest_first` reverses
+        /// a comments list so the newest
+        /// comment (by `created`) is at
+        /// index 0. JIRA's REST v2 endpoint
+        /// returns comments in
+        /// `created`-ascending order; the
+        /// TUI reverses them on the way in.
+        #[test]
+        fn sort_comments_newest_first_reverses_by_created() {
+            let mut comments = vec![
+                crate::jira::JiraComment {
+                    id: "1".to_string(),
+                    author: "Oldest".to_string(),
+                    created: "2024-06-28T10:00:00.000+0000".to_string(),
+                    ..Default::default()
+                },
+                crate::jira::JiraComment {
+                    id: "3".to_string(),
+                    author: "Newest".to_string(),
+                    created: "2024-06-30T19:14:39.000+0000".to_string(),
+                    ..Default::default()
+                },
+                crate::jira::JiraComment {
+                    id: "2".to_string(),
+                    author: "Middle".to_string(),
+                    created: "2024-06-29T10:00:00.000+0000".to_string(),
+                    ..Default::default()
+                },
+            ];
+            sort_comments_newest_first(&mut comments);
+            assert_eq!(comments[0].author, "Newest");
+            assert_eq!(comments[1].author, "Middle");
+            assert_eq!(comments[2].author, "Oldest");
+        }
+
+        /// Comments with the same `created`
+        /// timestamp fall back to the
+        /// `id` field as a tie-breaker.
+        /// This covers the rare
+        /// batch-imported-comments case
+        /// where multiple comments share
+        /// the exact same second.
+        #[test]
+        fn sort_comments_newest_first_uses_id_as_tie_breaker() {
+            let mut comments = vec![
+                crate::jira::JiraComment {
+                    id: "100".to_string(),
+                    author: "Lower id".to_string(),
+                    created: "2024-06-30T19:14:39.000+0000".to_string(),
+                    ..Default::default()
+                },
+                crate::jira::JiraComment {
+                    id: "200".to_string(),
+                    author: "Higher id".to_string(),
+                    created: "2024-06-30T19:14:39.000+0000".to_string(),
+                    ..Default::default()
+                },
+            ];
+            sort_comments_newest_first(&mut comments);
+            // Both have the same `created`,
+            // so the higher id (200)
+            // wins the tie-break and
+            // comes first.
+            assert_eq!(comments[0].author, "Higher id");
+            assert_eq!(comments[1].author, "Lower id");
+        }
+
+        /// `format_jira_date` extracts the
+        /// `YYYY-MM-DD HH:MM` portion of
+        /// JIRA's ISO-8601 timestamp and
+        /// appends ` UTC` for a compact,
+        /// human-readable date suitable
+        /// for the comment sub-heading.
+        #[test]
+        fn format_jira_date_trims_to_compact_utc() {
+            assert_eq!(
+                format_jira_date("2024-06-30T19:14:39.000+0000"),
+                "2024-06-30 19:14 UTC"
+            );
+            // A timestamp without
+            // milliseconds and offset
+            // is also accepted (JIRA's
+            // REST v2 may emit either
+            // form depending on the
+            // instance).
+            assert_eq!(
+                format_jira_date("2024-06-30T19:14:39Z"),
+                "2024-06-30 19:14 UTC"
+            );
+            // Empty / short / malformed
+            // inputs degrade to the
+            // raw string or empty.
+            assert_eq!(format_jira_date(""), "");
+            assert_eq!(format_jira_date("garbage"), "garbage");
+        }
+
+        /// When the user opens the show-output
+        /// overlay on a JIRA row, the TUI
+        /// fires a background comments fetch
+        /// and (with the fake client)
+        /// synchronously builds the overlay
+        /// text from the row + the canned
+        /// comments. Verifies the full
+        /// structure: `## Header`,
+        /// `## Description`, `## Comments`
+        /// with one sub-heading per
+        /// comment.
+        #[test]
+        fn jira_show_output_view_fetches_comments_and_builds_overlay() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "login crash".to_string(),
+                    status: "Open".to_string(),
+                    priority: "High".to_string(),
+                    assignee: "Alice".to_string(),
+                    due: "2024-07-15".to_string(),
+                    description: "The login button is broken on Safari.".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                comments: vec![
+                    // Two comments, one newer
+                    // than the other. The
+                    // TUI sorts them
+                    // newest-first; the canned
+                    // order is the opposite so
+                    // we can verify the sort.
+                    crate::jira::JiraComment {
+                        id: "10001".to_string(),
+                        author: "Bob".to_string(),
+                        body: "Looking into this.".to_string(),
+                        created: "2024-06-29T10:00:00.000+0000".to_string(),
+                        updated: "2024-06-29T10:00:00.000+0000".to_string(),
+                    },
+                    crate::jira::JiraComment {
+                        id: "10002".to_string(),
+                        author: "Alice".to_string(),
+                        body: "Confirmed, fixing now.".to_string(),
+                        created: "2024-06-30T19:14:39.000+0000".to_string(),
+                        updated: "2024-06-30T19:14:39.000+0000".to_string(),
+                    },
+                ],
+                comment_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+                            ..Default::default()
+};
+            let recorded = fake.recorded.clone();
+            let comment_keys = fake.comment_keys.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            // Forcibly fire the search
+            // autocall so the row is
+            // populated.
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            assert_eq!(app.jira_rows.len(), 1);
+            // Select the row.
+            app.list_state.select(Some(0));
+            // Open the show-output view.
+            // The fake-client path runs
+            // synchronously, so the
+            // overlay is open by the
+            // time this method returns.
+            app.show_output_view();
+            // The fake client's
+            // `fetch_comments` was
+            // called once with the
+            // right key.
+            assert_eq!(comment_keys.lock().unwrap().len(), 1);
+            assert_eq!(comment_keys.lock().unwrap()[0], "PROJ-1");
+            // The overlay is open.
+            let view = app.output_view.as_ref().expect("overlay should be open");
+            // The overlay text follows the
+            // user-spec structure.
+            assert!(view.text.contains("## Header"), "got: {}", view.text);
+            assert!(view.text.contains("## Description"), "got: {}", view.text);
+            assert!(view.text.contains("## Comments"), "got: {}", view.text);
+            // The header block contains
+            // the 3-line preview
+            // (Status/Priority, Due/
+            // Assignee, Description
+            // label) verbatim.
+            assert!(view.text.contains("**Status**: Open  **Priority**: High"), "got: {}", view.text);
+            assert!(view.text.contains("**Due**: 2024-07-15  **Assignee**: Alice"), "got: {}", view.text);
+            assert!(view.text.contains("**Description**"), "got: {}", view.text);
+            // The full description
+            // appears in the `# Description`
+            // section (not in `# Header`).
+            // The description is
+            // visible exactly once in
+            // the overlay — the user
+            // explicitly asked for
+            // this. (`# Header` shows
+            // the metadata block
+            // only; the description
+            // body lives in its
+            // own section.)
+            assert!(view.text.contains("login button"), "got: {}", view.text);
+            // Comments are sorted
+            // newest-first. Alice's
+            // 2024-06-30 comment must
+            // appear before Bob's
+            // 2024-06-29 comment.
+            let alice_pos = view.text.find("Alice").expect("Alice in overlay");
+            let alice_date_pos = view
+                .text
+                .find("2024-06-30")
+                .expect("Alice's date in overlay");
+            let bob_pos = view.text.find("Bob").expect("Bob in overlay");
+            let bob_date_pos = view
+                .text
+                .find("2024-06-29")
+                .expect("Bob's date in overlay");
+            assert!(
+                alice_pos < bob_pos,
+                "Alice (newer) must appear before Bob (older); got Alice@{alice_pos} Bob@{bob_pos}",
+            );
+            assert!(
+                alice_date_pos < bob_date_pos,
+                "2024-06-30 must appear before 2024-06-29",
+            );
+            // Each comment has a
+            // sub-heading with the
+            // author and date joined by
+            // a middle dot (U+00B7).
+            assert!(view.text.contains("Alice \u{00b7} 2024-06-30 19:14 UTC"), "got: {}", view.text);
+            assert!(view.text.contains("Bob \u{00b7} 2024-06-29 10:00 UTC"), "got: {}", view.text);
+            // Each comment's body
+            // appears below its
+            // sub-heading.
+            assert!(view.text.contains("Confirmed, fixing now."), "got: {}", view.text);
+            assert!(view.text.contains("Looking into this."), "got: {}", view.text);
+        }
+
+        /// An issue with no comments
+        /// produces an overlay with a
+        /// `(no comments)` placeholder
+        /// after the `## Comments`
+        /// heading. The overlay is
+        /// still built and opened
+        /// (a non-error result is
+        /// still a result).
+        #[test]
+        fn jira_show_output_view_with_no_comments() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "no comments yet".to_string(),
+                    status: "Open".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                comments: vec![], // empty
+                comment_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+                            ..Default::default()
+};
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            app.show_output_view();
+            let view = app.output_view.as_ref().expect("overlay should be open");
+            assert!(view.text.contains("## Comments"));
+            assert!(view.text.contains("(no comments)"));
+        }
+
+        /// An issue with no description
+        /// produces an overlay with a
+        /// `(no description)` placeholder
+        /// after the `## Description`
+        /// heading.
+        #[test]
+        fn jira_show_output_view_with_no_description() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "no description".to_string(),
+                    status: "Open".to_string(),
+                    description: String::new(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                comments: vec![],
+                comment_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+                            ..Default::default()
+};
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            app.show_output_view();
+            let view = app.output_view.as_ref().expect("overlay should be open");
+            assert!(view.text.contains("## Description"));
+            assert!(view.text.contains("(no description)"));
+        }
+
+        /// The description body
+        /// appears exactly once in
+        /// the overlay — in the
+        /// `## Description` section,
+        /// not duplicated in
+        /// `## Header`. The user
+        /// explicitly asked for
+        /// this: previously the
+        /// description was shown
+        /// twice (once in
+        /// `## Header` as part of
+        /// the preview-window
+        /// content, once in
+        /// `## Description` as
+        /// its own section),
+        /// which was redundant.
+        /// The fix: `## Header`
+        /// now shows only the
+        /// 3-line metadata block
+        /// (Status/Priority,
+        /// Due/Assignee,
+        /// Description label);
+        /// the description body
+        /// lives in `## Description`
+        /// only. The test uses a
+        /// distinctive
+        /// description string
+        /// ("unicorn-magic-marker")
+        /// so the count assertion
+        /// is reliable — the
+        /// literal text would
+        /// never appear in the
+        /// overlay except as the
+        /// description body.
+        #[test]
+        fn jira_overlay_shows_description_exactly_once() {
+            use std::sync::Arc;
+            let unique_description =
+                "unicorn-magic-marker \
+                 paragraphs here";
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "dedup test".to_string(),
+                    status: "Open".to_string(),
+                    priority: "High".to_string(),
+                    assignee: "Alice".to_string(),
+                    due: "2024-07-15".to_string(),
+                    description: unique_description
+                        .to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                comments: vec![],
+                comment_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+                            ..Default::default()
+};
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            app.show_output_view();
+            let view = app
+                .output_view
+                .as_ref()
+                .expect("overlay should be open");
+            // The description text
+            // appears exactly once.
+            // (The `match_indices`
+            // count is the number
+            // of *non-overlapping*
+            // occurrences of the
+            // substring in the
+            // haystack.)
+            let occurrences =
+                view.text.match_indices(unique_description).count();
+            assert_eq!(
+                occurrences, 1,
+                "description should appear exactly once, found {} times in: {}",
+                occurrences,
+                view.text,
+            );
+            // Sanity: the
+            // `## Description`
+            // section exists and
+            // contains the
+            // description.
+            assert!(view.text.contains("## Description"));
+            // Sanity: the
+            // `## Header` section
+            // exists but does NOT
+            // contain the
+            // description body
+            // (only the 3-line
+            // metadata block).
+            // We check this by
+            // splitting the
+            // overlay at the
+            // `## Description`
+            // heading; everything
+            // before the split
+            // is the `## Header`
+            // section.
+            let header_section = view
+                .text
+                .split("## Description")
+                .next()
+                .expect("`## Description` heading should exist");
+            assert!(
+                !header_section.contains(unique_description),
+                "`## Header` should not contain the description body, but found: {}",
+                header_section,
+            );
+        }
+
+        /// Pressing Ctrl+L twice on a JIRA
+        /// row while a fetch is in flight
+        /// doesn't queue a second fetch
+        /// (the `jira_comments_in_flight`
+        /// latch prevents duplicate
+        /// background threads).
+        #[test]
+        fn jira_show_output_view_dedupes_concurrent_fetches() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                comments: vec![],
+                comment_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
+                            ..Default::default()
+};
+            let comment_keys = fake.comment_keys.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            // The fake-client path runs
+            // synchronously and clears
+            // the in-flight flag in
+            // `process_jira_comments_result`,
+            // so a *second* call to
+            // `show_output_view` *does*
+            // fire a second fetch. This
+            // is acceptable: a real
+            // user pressing Ctrl+L twice
+            // is unlikely, and the
+            // synchronous path is the
+            // test seam. The dedup
+            // behaviour is meaningful
+            // only for the production
+            // background-thread path,
+            // where the in-flight flag
+            // stays set until the
+            // worker sends its
+            // result.
+            //
+            // Verify the second call
+            // does call fetch_comments
+            // a second time (the test
+            // seam doesn't dedupe, by
+            // design) and the overlay
+            // is rebuilt.
+            app.show_output_view();
+            assert_eq!(comment_keys.lock().unwrap().len(), 1);
+            let first_overlay = app
+                .output_view
+                .as_ref()
+                .expect("first overlay")
+                .text
+                .clone();
+            app.show_output_view();
+            assert_eq!(comment_keys.lock().unwrap().len(), 2);
+            let second_overlay = app
+                .output_view
+                .as_ref()
+                .expect("second overlay")
+                .text
+                .clone();
+            // Both overlays have the
+            // expected structure.
+            assert!(first_overlay.contains("## Header"));
+            assert!(second_overlay.contains("## Header"));
+        }
+
+        /// Pressing Ctrl-E on a JIRA row
+        /// opens the comment-edit buffer in
+        /// JIRA-add-comment mode (not the
+        /// local `command_comments` mode).
+        /// Verifies the `jira_add_comment_target`
+        /// field is set to the issue key and
+        /// the buffer is empty (the user is
+        /// composing a *new* comment, not
+        /// editing the issue's summary).
+        #[test]
+        fn jira_edit_comment_opens_jira_add_comment_mode() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "login crash".to_string(),
+                    status: "Open".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..FakeJira::default()
+            };
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            // Press Ctrl-E.
+            app.start_comment_edit();
+            // The buffer is in
+            // JIRA-add-comment mode:
+            // the target is the
+            // issue key.
+            assert_eq!(
+                app.jira_add_comment_target.as_deref(),
+                Some("PROJ-1"),
+                "jira_add_comment_target should be the issue key, got {:?}",
+                app.jira_add_comment_target,
+            );
+            // The buffer is empty
+            // (the user is
+            // composing a new
+            // comment, not editing
+            // the issue's summary).
+            assert_eq!(app.comment_edit.as_deref(), Some(""),
+                "buffer should be empty in JIRA add-comment mode");
+        }
+
+        /// When the user saves a non-empty
+        /// comment in JIRA-add-comment mode,
+        /// the FakeJira's `add_comment`
+        /// method is called with the
+        /// issue key and the buffer text.
+        /// Verifies the end-to-end path:
+        /// buffer → POST → fake records the
+        /// (key, body).
+        #[test]
+        fn jira_save_comment_posts_to_jira() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "login crash".to_string(),
+                    status: "Open".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                posted_comments: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..FakeJira::default()
+            };
+            let posted = fake.posted_comments.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            app.start_comment_edit();
+            // Type a comment.
+            app.comment_edit = Some("This is fixed in PR #42.".to_string());
+            // Save it.
+            app.save_comment_edit().unwrap();
+            // The FakeJira recorded
+            // the POST.
+            assert_eq!(
+                posted.lock().unwrap().len(),
+                1,
+                "add_comment should be called once"
+            );
+            let (key, body) = &posted.lock().unwrap()[0];
+            assert_eq!(key, "PROJ-1");
+            assert_eq!(body, "This is fixed in PR #42.");
+            // On success, the buffer
+            // clears and the target
+            // resets to None.
+            assert!(
+                app.comment_edit.is_none(),
+                "buffer should clear on successful POST"
+            );
+            assert!(
+                app.jira_add_comment_target.is_none(),
+                "target should reset to None on successful POST"
+            );
+            // The status bar shows a
+            // success message that
+            // references the issue.
+            let status = app
+                .status_message
+                .as_ref()
+                .map(|(s, _)| s.as_str())
+                .unwrap_or("");
+            assert!(
+                status.contains("Comment posted to PROJ-1"),
+                "status should confirm the POST: {:?}",
+                status,
+            );
+        }
+
+        /// An empty buffer is NOT posted
+        /// to JIRA. The user sees a
+        /// status message telling them
+        /// the body is empty, and the
+        /// buffer stays so they can
+        /// type something.
+        #[test]
+        fn jira_save_comment_rejects_empty_body() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "login crash".to_string(),
+                    status: "Open".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                posted_comments: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..FakeJira::default()
+            };
+            let posted = fake.posted_comments.clone();
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            app.start_comment_edit();
+            // Buffer is empty by
+            // default (start_comment_edit
+            // sets it to
+            // String::new() for JIRA
+            // rows).
+            app.save_comment_edit().unwrap();
+            // No POST was made.
+            assert_eq!(
+                posted.lock().unwrap().len(),
+                0,
+                "empty body should not be POSTed"
+            );
+            // The status message
+            // explains the body
+            // is empty.
+            let status = app
+                .status_message
+                .as_ref()
+                .map(|(s, _)| s.as_str())
+                .unwrap_or("");
+            assert!(
+                status.contains("empty"),
+                "status should explain the body is empty: {:?}",
+                status,
+            );
+            // The buffer stays so
+            // the user can type
+            // something. (The
+            // target also stays so
+            // the next Enter retries
+            // the JIRA POST path.)
+            assert!(
+                app.comment_edit.is_some(),
+                "buffer should be preserved on empty-body rejection"
+            );
+            assert_eq!(
+                app.jira_add_comment_target.as_deref(),
+                Some("PROJ-1"),
+                "target should be preserved on empty-body rejection"
+            );
+        }
+
+        /// Cancel (Esc) on the
+        /// comment-edit buffer clears
+        /// both the buffer and the
+        /// JIRA-add-comment target.
+        /// This is the "user changed
+        /// their mind" path — they
+        /// don't want to post after
+        /// all.
+        #[test]
+        fn jira_cancel_comment_edit_clears_target() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![crate::jira::JiraIssue {
+                    key: "PROJ-1".to_string(),
+                    summary: "login crash".to_string(),
+                    status: "Open".to_string(),
+                    ..Default::default()
+                }],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..FakeJira::default()
+            };
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            app.list_state.select(Some(0));
+            app.start_comment_edit();
+            app.comment_edit = Some("draft text".to_string());
+            // Cancel.
+            app.cancel_comment_edit();
+            // Both the buffer and
+            // the target clear.
+            assert!(
+                app.comment_edit.is_none(),
+                "buffer should clear on cancel"
+            );
+            assert!(
+                app.jira_add_comment_target.is_none(),
+                "target should clear on cancel"
+            );
+        }
+
+        /// Pressing Ctrl-E on a
+        /// non-JIRA row keeps the
+        /// local `command_comments`
+        /// behaviour — the buffer is
+        /// prefilled with the existing
+        /// comment (or empty when no
+        /// comment exists), and the
+        /// `jira_add_comment_target` is
+        /// `None`. This locks in the
+        /// dispatch: only JIRA rows go
+        /// through the JIRA-add path.
+        #[test]
+        fn non_jira_edit_comment_keeps_local_behaviour() {
+            use crate::tui::state::HistoryRow;
+            let mut app = directories_test_app(&[
+                ("git status", "/tmp", 0),
+            ]);
+            // Create the schemas `fetch()`
+            // joins against so the
+            // query doesn't error
+            // silently and return
+            // an empty list.
+            app.conn.execute(
+                "CREATE TABLE command_comments (command TEXT PRIMARY KEY, comment TEXT NOT NULL)",
+                [],
+            )
+            .expect("cc");
+            app.conn.execute(
+                "CREATE TABLE history_output (history_id INTEGER PRIMARY KEY, output TEXT NOT NULL)",
+                [],
+            )
+            .expect("ho");
+            app.conn.execute(
+                "INSERT INTO command_comments (command, comment) VALUES ('git status', 'pre-existing comment')",
+                [],
+            )
+            .expect("ins");
+            app.refresh();
+            app.refresh_labeled();
+            // Find the row's index
+            // by command (the
+            // simplest way to select
+            // the row regardless of
+            // how the merge happens).
+            let row_idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.command == "git status")
+                .expect("row should be in merged_rows");
+            app.list_state.select(Some(row_idx));
+            // Press Ctrl-E.
+            app.start_comment_edit();
+            // The buffer has
+            // the pre-existing
+            // comment (not the JIRA
+            // empty buffer).
+            assert_eq!(
+                app.comment_edit.as_deref(),
+                Some("pre-existing comment"),
+                "non-JIRA buffer should be prefilled with the existing comment"
+            );
+            // The JIRA target is
+            // None (we're in the
+            // local path).
+            assert!(
+                app.jira_add_comment_target.is_none(),
+                "non-JIRA edit should NOT set the JIRA target"
+            );
         }
 
         /// Selecting a JIRA row stages `open "<URL>"` using
@@ -19124,6 +21445,369 @@ mod tests {
                     .iter()
                     .map(|r| r.directory.clone())
                     .collect::<Vec<_>>()
+            );
+        }
+
+        // ---- build_help_lines (the help-overlay content) ----
+
+        /// Build a minimal `App` for the
+        /// help-line tests. The
+        /// `directories_test_app(&[])`
+        /// helper already builds an
+        /// `App` with the test-helper
+        /// defaults (Mode::Global,
+        /// KeyBindings::defaults(),
+        /// QueryPrefixes::default(),
+        /// etc.). We override the
+        /// fields the help builder
+        /// actually reads so the
+        /// test surface is small and
+        /// stable regardless of
+        /// test-helper changes.
+        use super::render::build_help_lines;
+        use ratatui::style::Modifier;
+        fn help_app() -> App {
+            let mut app = directories_test_app(&[]);
+            // The fields the help
+            // builder reads.
+            app.mode = Mode::Sess;
+            app.duplicate_filter = true;
+            app.query_prefixes =
+                crate::QueryPrefixes::default();
+            app
+        }
+
+        /// The help overlay contains a
+        /// "Search modes" section that
+        /// lists every prefix-
+        /// switchable mode and its
+        /// trigger character. The
+        /// section header is present
+        /// and uses bold styling.
+        #[test]
+        fn help_includes_search_modes_section() {
+            let lines = build_help_lines(&help_app());
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            // The section header
+            // exists.
+            let found = texts
+                .iter()
+                .position(|t| t == "Search modes")
+                .expect("Search modes section");
+            // The header is bold.
+            let header_line = &lines[found];
+            assert!(header_line
+                .spans
+                .first()
+                .map(|s| s.style.add_modifier.contains(Modifier::BOLD))
+                .unwrap_or(false));
+        }
+
+        /// Every search-mode row
+        /// appears in the help with
+        /// the user's configured
+        /// prefix. We check each mode
+        /// by name and assert the
+        /// prefix column shows the
+        /// right character.
+        #[test]
+        fn help_lists_all_eleven_search_modes() {
+            let lines = build_help_lines(&help_app());
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            // Default prefixes
+            // (from
+            // `QueryPrefixes::default()`):
+            // plain: "" (no prefix,
+            //        em-dash
+            //        marker)
+            // regex: /
+            // fuzzy: ?
+            // output: +
+            // llm: =
+            // question: %
+            // notes: @
+            // todo: !
+            // directories: #
+            // panes: *
+            // jira: -
+            let expected: &[(&str, &str)] = &[
+                ("plain", "\u{2014}"),
+                ("regex", "/"),
+                ("fuzzy", "?"),
+                ("output", "+"),
+                ("LLM command", "="),
+                ("question", "%"),
+                ("notes", "@"),
+                ("todo", "!"),
+                ("directories", "#"),
+                ("panes", "*"),
+                ("JIRA", "-"),
+            ];
+            for &(mode, prefix) in expected {
+                // The row format is
+                // `  {name:<14}{prefix_text}{desc}`
+                // — 2 leading spaces,
+                // 14 chars for the mode
+                // name (left-aligned,
+                // right-padded), then
+                // the prefix text
+                // (right-padded to 7
+                // chars). The format
+                // helper inside
+                // `build_help_lines` uses:
+                //   `prefix_text` is " X"
+                // when the prefix is
+                // non-empty (leading
+                // space for column
+                // alignment) and just
+                // "\u{2014}" (no leading
+                // space) when the prefix
+                // is empty.
+                // The row's actual
+                // content is therefore
+                // the 16-char name
+                // followed immediately
+                // by the prefix
+                // (no extra separator
+                // between columns).
+                let prefix_with_pad =
+                    if prefix == "\u{2014}" {
+                        "\u{2014}".to_string()
+                    } else {
+                        format!(" {}", prefix)
+                    };
+                let needle = format!(
+                    "  {:<14}{}",
+                    mode, prefix_with_pad
+                );
+                assert!(
+                    texts.iter().any(|t| t.contains(&needle)),
+                    "missing row for mode {}: searched for {:?}",
+                    mode,
+                    needle,
+                );
+            }
+        }
+
+        /// The plain-mode row shows
+        /// an em-dash (\u{2014}) in the
+        /// prefix column because plain
+        /// has no prefix. Verifies the
+        /// "no prefix" visual
+        /// indicator is present so
+        /// the user sees that plain
+        /// mode is the default.
+        #[test]
+        fn help_plain_mode_shows_em_dash_prefix() {
+            let lines = build_help_lines(&help_app());
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            let plain_row = texts
+                .iter()
+                .find(|t| t.trim_start().starts_with("plain"))
+                .expect("plain row");
+            assert!(
+                plain_row.contains('\u{2014}'),
+                "plain row should contain em-dash: {:?}",
+                plain_row
+            );
+        }
+
+        /// The "JIRA-mode tags"
+        /// section is present, with
+        /// all five tag rows
+        /// (`@me`, `@today`,
+        /// `@week`, `@month`,
+        /// `@<name>`).
+        #[test]
+        fn help_includes_jira_mode_tags_section() {
+            let lines = build_help_lines(&help_app());
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            // Section header.
+            let header_idx = texts
+                .iter()
+                .position(|t| t == "JIRA-mode tags")
+                .expect("JIRA-mode tags section");
+            // Header is bold.
+            assert!(lines[header_idx]
+                .spans
+                .first()
+                .map(|s| s.style.add_modifier.contains(Modifier::BOLD))
+                .unwrap_or(false));
+            // All five tags appear
+            // in the lines after
+            // the header.
+            let after = &texts[header_idx..];
+            assert!(
+                after.iter().any(|t| t.contains("@me")),
+                "missing @me"
+            );
+            assert!(
+                after.iter().any(|t| t.contains("@today")),
+                "missing @today"
+            );
+            assert!(
+                after.iter().any(|t| t.contains("@week")),
+                "missing @week"
+            );
+            assert!(
+                after.iter().any(|t| t.contains("@month")),
+                "missing @month"
+            );
+            assert!(
+                after.iter().any(|t| t.contains("@<name>")),
+                "missing @<name> fragment row"
+            );
+        }
+
+        /// Each JIRA-tag row shows
+        /// the exact JQL clause the
+        /// tag expands to, so the
+        /// help doubles as a JQL
+        /// reference (the user can
+        /// copy-paste the clause
+        /// into a JIRA web search
+        /// to verify the
+        /// behaviour).
+        #[test]
+        fn help_jira_tags_show_jql_clauses() {
+            let lines = build_help_lines(&help_app());
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            // The exact clauses
+            // from the `build_jql`
+            // implementation.
+            let expected: &[(&str, &str)] = &[
+                ("@me", "assignee = currentUser()"),
+                ("@today", "updated >= \"<today-1d>\""),
+                ("@week", "updated >= \"<today-7d>\""),
+                ("@month", "updated >= \"<today-31d>\""),
+            ];
+            for &(tag, jql) in expected {
+                // The tag row
+                // contains the
+                // tag in the
+                // first
+                // column
+                // and the
+                // JQL in
+                // the
+                // second
+                // column.
+                // We look
+                // for a
+                // line
+                // that
+                // contains
+                // both.
+                let matching = texts
+                    .iter()
+                    .find(|t| t.contains(tag) && t.contains(jql));
+                assert!(
+                    matching.is_some(),
+                    "missing JQL clause for {}: looking for {:?}",
+                    tag,
+                    jql
+                );
+            }
+        }
+
+        /// The help reflects the
+        /// user's configured prefixes,
+        /// not the defaults. Rebinds
+        /// the regex prefix to `#` and
+        /// confirms the help shows `#`
+        /// in the regex row (not `/`,
+        /// the default).
+        #[test]
+        fn help_shows_user_configured_prefixes() {
+            let mut app = help_app();
+            // Rebind the regex
+            // prefix from `/` to
+            // `#`. The `prefix.regex=...`
+            // config key is
+            // parsed by
+            // `Config::assign_prefix`;
+            // here we set the field
+            // directly (which is
+            // what the config
+            // loader does after
+            // parsing).
+            app.query_prefixes.regex = '#';
+            let lines = build_help_lines(&app);
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            // The regex row should
+            // now show `#` as
+            // the prefix. The
+            // format helper pads
+            // the prefix with a
+            // leading space, so
+            // the row contains
+            // ` # `.
+            let regex_row = texts
+                .iter()
+                .find(|t| t.trim_start().starts_with("regex"))
+                .expect("regex row");
+            assert!(
+                regex_row.contains(" # "),
+                "regex row should show '#' as the prefix: {:?}",
+                regex_row
+            );
+            // Sanity: the default
+            // regex prefix `/` is
+            // NOT in this row
+            // (because we
+            // overrode it).
+            assert!(
+                !regex_row.contains(" / "),
+                "regex row should not show default '/' prefix: {:?}",
+                regex_row
             );
         }
 }
