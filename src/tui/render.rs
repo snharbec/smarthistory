@@ -1799,7 +1799,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     let dirsrc_chip = if app.is_directories_query()
         && app.directory_source != crate::tui::state::DirectorySource::All
     {
-        Some(directory_source_badge(app.directory_source))
+        Some(directory_source_badge(
+            app.directory_source,
+            app.multiplexer.name(),
+        ))
     } else {
         None
     };
@@ -1978,8 +1981,77 @@ fn sort_order_badge(order: SortOrder) -> Span<'static> {
     )
 }
 
-fn directory_source_badge(source: crate::tui::state::DirectorySource) -> Span<'static> {
-    let label = source.label();
+fn directory_source_badge(
+    source: crate::tui::state::DirectorySource,
+    backend_name: &'static str,
+) -> Span<'static> {
+    // The `Tmux` source
+    // variant in
+    // `DirectorySource` is
+    // the
+    // "active-context"
+    // filter — it shows
+    // rows whose directory
+    // matches an active
+    // context. The actual
+    // multiplexer
+    // (tmux or herdr) is
+    // reported by the
+    // backend; the chip
+    // reads the backend's
+    // name (e.g.
+    // `DIR:HERDR` when
+    // the user has
+    // `multiplexer=herdr` in
+    // their config) so the
+    // user knows *which*
+    // backend is producing
+    // the marker, not the
+    // (stale) source
+    // enum. The `All` and
+    // `Config` sources
+    // don't depend on the
+    // backend (they show
+    // every row, or only
+    // the `sessiondirs=...`
+    // rows), so they keep
+    // their enum-derived
+    // labels.
+    let label: &'static str = match source {
+        crate::tui::state::DirectorySource::All => "ALL",
+        crate::tui::state::DirectorySource::Tmux => {
+            // `backend_name` is
+            // `&'static str`
+            // (the
+            // `MultiplexerBackend::name`
+            // contract
+            // guarantees a
+            // string
+            // literal),
+            // so this
+            // leak is
+            // safe.
+            match backend_name {
+                "herdr" => "HERDR",
+                // Fall
+                // back
+                // to
+                // the
+                // source
+                // enum's
+                // own
+                // label
+                // for
+                // any
+                // other
+                // backend
+                // (today:
+                // "tmux").
+                _ => source.label(),
+            }
+        }
+        crate::tui::state::DirectorySource::Config => "CFG",
+    };
     Span::styled(
         format!(" DIR:{} ", label),
         Style::default()
@@ -3931,6 +4003,99 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::truncate_cmd_for_details_pane;
+
+    /// The `DIR:HERDR` chip
+    /// rename is the
+    /// user-facing surface
+    /// of the multiplexer
+    /// abstraction: when
+    /// the user has
+    /// `multiplexer=herdr`
+    /// in their config and
+    /// the directory source
+    /// is set to
+    /// `Tmux` (the
+    /// "show me
+    /// active-context
+    /// rows" filter), the
+    /// chip reads
+    /// `DIR:HERDR` rather
+    /// than `DIR:TMUX` so
+    /// the user knows
+    /// *which* backend is
+    /// producing the
+    /// marker. The
+    /// `All` and `Config`
+    /// sources keep their
+    /// enum-derived labels
+    /// (they don't depend
+    /// on the backend).
+    ///
+    /// The `tmux` backend
+    /// is the historical
+    /// behaviour: `DIR:TMUX`
+    /// when the source is
+    /// `Tmux`.
+    #[test]
+    fn directory_source_badge_renames_tmux_to_backend_name() {
+        use crate::tui::state::DirectorySource;
+        use ratatui::text::Span;
+        // herdr backend +
+        // Tmux source =
+        // `DIR:HERDR`.
+        let chip = super::directory_source_badge(
+            DirectorySource::Tmux,
+            "herdr",
+        );
+        let span: &Span = &chip;
+        let text = span.content.to_string();
+        assert_eq!(
+            text, " DIR:HERDR ",
+            "herdr backend must rename the chip to DIR:HERDR, got: {text:?}"
+        );
+        // tmux backend +
+        // Tmux source =
+        // `DIR:TMUX`
+        // (historical
+        // behaviour).
+        let chip = super::directory_source_badge(
+            DirectorySource::Tmux,
+            "tmux",
+        );
+        let text = chip.content.to_string();
+        assert_eq!(
+            text, " DIR:TMUX ",
+            "tmux backend must keep the chip as DIR:TMUX, got: {text:?}"
+        );
+        // `All` source
+        // ignores the
+        // backend (shows
+        // every row).
+        let chip = super::directory_source_badge(
+            DirectorySource::All,
+            "herdr",
+        );
+        let text = chip.content.to_string();
+        assert_eq!(
+            text, " DIR:ALL ",
+            "All source must keep its enum-derived label, got: {text:?}"
+        );
+        // `Config` source
+        // ignores the
+        // backend (shows
+        // only
+        // `sessiondirs=...`
+        // rows).
+        let chip = super::directory_source_badge(
+            DirectorySource::Config,
+            "herdr",
+        );
+        let text = chip.content.to_string();
+        assert_eq!(
+            text, " DIR:CFG ",
+            "Config source must keep its enum-derived label, got: {text:?}"
+        );
+    }
 
     /// A short single-line cmd fits
     /// unchanged inside the pane.

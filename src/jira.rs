@@ -2479,19 +2479,6 @@ mod tests {
         assert_eq!(issues[2].description, "");
     }
 
-    fn parse_search_response_null_fields_dont_fail() {
-        let json = r#"{"issues":[
-            {"key":"PROJ-1","fields":{"summary":null,"updated":null}},
-            {"key":"PROJ-2","fields":{"summary":"ok","updated":"2024-06-30T19:14:39.000+0000","status":{"name":null}}}
-        ]}"#;
-        let parsed: SearchResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.issues.len(), 2);
-        let i1 = JiraIssue::from(parsed.issues.into_iter().next().unwrap());
-        assert_eq!(i1.key, "PROJ-1");
-        assert_eq!(i1.summary, "");
-        assert_eq!(i1.updated, "");
-    }
-
     /// Some JIRA events / webhooks / older versions
     /// return issues with an empty or missing `fields`
     /// object. Must not fail the search.

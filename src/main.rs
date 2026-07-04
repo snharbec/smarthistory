@@ -1,6 +1,7 @@
 mod files;
 mod jira;
 mod llm;
+mod multiplexer;
 mod tui;
 mod util;
 
@@ -719,6 +720,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         if cfg.duplicate_filter { "on" } else { "off" }
     );
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
+    let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
     use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
     for a in ALL_ACTIONS {
@@ -971,6 +973,51 @@ pub struct Config {
     /// back in place picks it
     /// up).
     session_dirs: Vec<std::path::PathBuf>,
+    /// Which terminal
+    /// multiplexer the TUI's
+    /// directory- and
+    /// panes-switching modes
+    /// should target. Defaults
+    /// to `Tmux` (preserves
+    /// the historical
+    /// behaviour). When set
+    /// to `Herdr` the TUI
+    /// shells out to herdr
+    /// (`herdr workspace
+    /// list`, `herdr pane
+    /// list`) and stages
+    /// `herdr workspace
+    /// focus` / `herdr
+    /// workspace create`
+    /// commands instead of
+    /// the tmux equivalents.
+    /// The `herdr` Cargo
+    /// feature must be
+    /// compiled in; on a
+    /// default build the
+    /// herdr path is a
+    /// no-op that surfaces a
+    /// "build with
+    /// `--features herdr`"
+    /// status message.
+    ///
+    /// Configurable via
+    /// `multiplexer=tmux|herdr`
+    /// in the config file, or
+    /// the
+    /// `SMARTHISTORY_MULTIPLEXER`
+    /// environment variable
+    /// (which wins over the
+    /// config file, matching
+    /// the
+    /// `NOTE_SEARCH_*` /
+    /// `JIRA_*` precedence
+    /// pattern). Unrecognised
+    /// values are dropped
+    /// with a stderr warning
+    /// and the default (tmux)
+    /// is used.
+    multiplexer: crate::multiplexer::MultiplexerKind,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -1086,6 +1133,7 @@ impl Config {
             // added to the
             // directories list.
             session_dirs: Vec::new(),
+            multiplexer: crate::multiplexer::MultiplexerKind::default(),
         }
     }
 
@@ -1108,6 +1156,31 @@ impl Config {
             let path = std::path::PathBuf::from(&dir);
             if path.exists() && path.is_dir() {
                 cfg.notes_dir = Some(path);
+            }
+        }
+        // `SMARTHISTORY_MULTIPLEXER`
+        // wins over the config
+        // file, matching the
+        // NOTE_SEARCH_* / JIRA_*
+        // precedence pattern
+        // (env > config > default).
+        // Invalid values are
+        // dropped with a stderr
+        // warning; the existing
+        // (file / default) value
+        // is preserved so a typo
+        // in the env var can't
+        // silently disable
+        // directory switching.
+        if let Ok(raw) = env::var("SMARTHISTORY_MULTIPLEXER") {
+            match crate::multiplexer::MultiplexerKind::parse(&raw) {
+                Some(kind) => cfg.multiplexer = kind,
+                None => eprintln!(
+                    "smarthistory: ignoring invalid \
+                     SMARTHISTORY_MULTIPLEXER={:?} \
+                     (expected `tmux` or `herdr`)",
+                    raw
+                ),
             }
         }
         cfg
@@ -1164,6 +1237,18 @@ impl Config {
                     let upper = value.trim().to_ascii_uppercase();
                     if matches!(upper.as_str(), "SESS" | "SESSION" | "DIR" | "DIRECTORY" | "GLOBAL") {
                         self.initial_mode = upper;
+                    }
+                }
+                "multiplexer" => {
+                    match crate::multiplexer::MultiplexerKind::parse(value) {
+                        Some(kind) => self.multiplexer = kind,
+                        None => eprintln!(
+                            "smarthistory: ignoring invalid \
+                             multiplexer={:?} (expected \
+                             `tmux` or `herdr`); using \
+                             default",
+                            value
+                        ),
                     }
                 }
                 "ollama.url" => {
@@ -1589,6 +1674,16 @@ impl Config {
     /// at walk time.
     pub fn files_ignores(&self) -> &[String] {
         &self.files_ignores
+    }
+
+    /// Which terminal
+    /// multiplexer the TUI's
+    /// directory- and
+    /// panes-switching modes
+    /// should target. See
+    /// [`crate::multiplexer::MultiplexerKind`].
+    pub fn multiplexer(&self) -> crate::multiplexer::MultiplexerKind {
+        self.multiplexer
     }
 
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
@@ -2927,6 +3022,7 @@ fn main() -> anyhow::Result<()> {
                         Some(n) => println!("{}", n),
                         None => println!("ALL"),
                     },
+                    "multiplexer" => println!("{}", cfg.multiplexer().as_str()),
                     other => anyhow::bail!("unknown config key: {other}"),
                 }
             }
@@ -3725,6 +3821,46 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(parse_capture_lines("20"), Some(20));
         assert_eq!(parse_capture_lines("  15  "), Some(15));
         assert_eq!(parse_capture_lines("not a number"), None);
+    }
+
+    /// `multiplexer=tmux` and
+    /// `multiplexer=herdr` are
+    /// the canonical config
+    /// values. The loader is
+    /// case-insensitive and
+    /// unrecognised values are
+    /// silently dropped so a
+    /// typo can't disable
+    /// directory switching.
+    #[test]
+    fn config_parses_multiplexer_key() {
+        let mut cfg = Config::default();
+        cfg.parse("multiplexer=tmux\n");
+        assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Tmux);
+        cfg.parse("multiplexer=herdr\n");
+        assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Herdr);
+        cfg.parse("multiplexer=HERDR\n");
+        assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Herdr);
+        // Unrecognised value:
+        // the previous
+        // value is
+        // preserved (the
+        // parser emits a
+        // warning to
+        // stderr but we
+        // don't assert on
+        // that here).
+        // The default is
+        // `Tmux`, so
+        // starting from a
+        // fresh `Config`
+        // and feeding it
+        // an invalid value
+        // keeps the
+        // default.
+        let mut cfg = Config::default();
+        cfg.parse("multiplexer=screen\n");
+        assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Tmux);
     }
 
     /// Regression test for

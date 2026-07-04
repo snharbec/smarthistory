@@ -90,7 +90,7 @@ pub fn format_diff(epoch: i64) -> String {
     if mins < 60 {
         return format!("{}m", mins);
     }
-    let hours = delta.num_hours();
+    let _hours = delta.num_hours();
     let days = delta.num_days();
     format!("{}d", days)
 }
@@ -958,7 +958,6 @@ pub fn find_command_file(
 #[cfg(test)]
 mod walker_tests {
     use super::*;
-    use std::path::Path;
     use std::sync::atomic::{
         AtomicU64, Ordering,
     };

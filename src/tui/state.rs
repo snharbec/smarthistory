@@ -243,7 +243,22 @@ impl DirectorySource {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "all" => Some(DirectorySource::All),
-            "tmux" => Some(DirectorySource::Tmux),
+            // `Tmux` is the
+            // historical variant
+            // name. The directory
+            // marker semantics are
+            // "an active context
+            // in the configured
+            // multiplexer", so
+            // both `tmux` and
+            // `herdr` parse to
+            // the same variant
+            // (the actual
+            // multiplexer is
+            // resolved at the
+            // snapshot site, not
+            // here).
+            "tmux" | "herdr" => Some(DirectorySource::Tmux),
             "config" | "cfg" | "sessiondirs" => Some(DirectorySource::Config),
             _ => None,
         }

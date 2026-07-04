@@ -39,8 +39,69 @@ note_search = { git = "https://github.com/snharbec/note_search.git", rev = "18c3
 # that one tiny response wasn't gzipped. The union with
 # `note_search`'s feature set is still the same compiled
 # crate; we just turn on one extra feature.
-reqwest = { version = "0.12", features = ["blocking", "json", "gzip", "native-tls"] }
+reqwest = { version = "0.12", features = [
+  "blocking",
+  "json",
+  "gzip",
+  "native-tls",
+] }
 ureq = { version = "2", features = ["json"] }
+
+# Feature flag for the
+# alternative `herdr`
+# multiplexer backend.
+#
+# herdr (https://herdr.dev)
+# is a terminal workspace
+# manager that plays a
+# role similar to tmux
+# for AI-agent workflows.
+# When this feature is
+# enabled, the TUI's
+# directory-switching
+# logic (`#` mode) and
+# panes-switching logic
+# (`*` mode) can target
+# herdr workspaces in
+# addition to tmux
+# sessions. The user
+# selects the active
+# backend at runtime
+# via `multiplexer=tmux|herdr`
+# in
+# `~/.config/smarthistory/config`
+# (or the
+# `SMARTHISTORY_MULTIPLEXER`
+# environment variable).
+#
+# **Enabled by default**
+# so a fresh
+# `cargo build --release`
+# (or `cargo install`)
+# produces a binary that
+# can target either
+# backend without
+# extra flags. The
+# feature exists for
+# users who want to
+# build a smaller
+# tmux-only binary
+# (`cargo build
+# --no-default-features`
+# keeps the binary
+# working but disables
+# the herdr backend
+# entirely; selecting
+# `multiplexer=herdr`
+# on such a build
+# surfaces a clear
+# "build with default
+# features" status
+# message at the
+# staging site).
+[features]
+default = ["herdr"]
+herdr = []
 
 [dev-dependencies]
 filetime = "0.2"

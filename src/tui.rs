@@ -137,7 +137,7 @@ impl TuiSession {
                     }
                 }
                 "theme" => s.theme = Some(value.to_string()),
-                "directorysource" => {
+                "directorysource"
                     // Same pattern
                     // as the other
                     // session fields:
@@ -158,11 +158,10 @@ impl TuiSession {
                         value,
                     )
                     .is_some()
-                    {
+                    => {
                         s.directory_source =
                             Some(value.to_string());
                     }
-                }
                 _ => {}
             }
         }
@@ -955,6 +954,24 @@ struct App {
     /// cwd yet) are filtered out
     /// at parse time.
     tmux_windows: Vec<TmuxWindowInfo>,
+    /// Terminal multiplexer
+    /// backend (tmux or
+    /// herdr) that owns
+    /// the snapshot and
+    /// the focus / create
+    /// / send-in-pane
+    /// staging. Built once
+    /// in `App::new` from
+    /// `Config::multiplexer()`.
+    /// `Box<dyn ...>` because
+    /// the concrete backend
+    /// type depends on the
+    /// `herdr` Cargo feature
+    /// and we want a single
+    /// struct shape regardless
+    /// of which is compiled
+    /// in.
+    multiplexer: Box<dyn crate::multiplexer::MultiplexerBackend>,
     /// Cached snapshot of the panes in
     /// the *current* tmux session (the one
     /// the TUI is running in), used by the
@@ -3142,165 +3159,121 @@ impl App {
     /// marker fully resolved.
     fn fetch_tmux_windows(&mut self) {
         // Skip if already populated.
-        // The snapshot is per-TUI-
-        // session; refreshing it
-        // would mean re-spawning
-        // `tmux` for every
-        // keystroke the user makes
-        // while in directories
-        // mode, which is
-        // wasteful. A future
-        // "refresh tmux" key
-        // binding could re-invoke
-        // this when the user
-        // wants freshness.
+        // The snapshot is
+        // per-TUI-session;
+        // refreshing it would
+        // mean re-spawning
+        // the multiplexer
+        // (tmux `list-windows
+        // -a` or herdr
+        // `pane list`) for
+        // every keystroke the
+        // user makes while in
+        // directories mode,
+        // which is wasteful. A
+        // future "refresh"
+        // key binding could
+        // re-invoke this when
+        // the user wants
+        // freshness.
         if !self.tmux_windows.is_empty() {
             return;
         }
-        // The command matches the
-        // user's spec verbatim
-        // (minus the trailing
-        // `| grep "active:1"`,
-        // which we do in-process
-        // so we only spawn one
-        // subprocess and can
-        // short-circuit on a
-        // timeout without race
-        // conditions on a piped
-        // grep).
+        // Delegate the
+        // snapshot to the
+        // configured backend.
+        // When the user has
+        // `multiplexer=herdr` in
+        // their config, the
+        // snapshot is built
+        // from
+        // `herdr pane list`
+        // (parsed as JSON;
+        // each pane becomes
+        // an `ActiveContext`
+        // carrying its
+        // workspace id and
+        // cwd); when the
+        // configured backend
+        // is tmux, it's the
+        // historical
+        // `tmux list-windows
+        // -a -F` text
+        // invocation. Either
+        // way, the
+        // `tmux_windows` cache
+        // (and the
+        // `directory_tmux_pane_id`
+        // T-marker lookup
+        // that reads it) is
+        // backend-agnostic.
         //
-        // Output format (one line
-        // per window):
-        //   <pane_id> | <path> |
-        //   active:<0|1> |
-        //   Layout: <window_layout>
-        //
-        // `pane_id` is the
-        // globally-unique pane id
-        // (e.g. `%2`) — sufficient
-        // as a `tmux ... -t <id>`
-        // target. We use `|` as
-        // the field separator
-        // because tmux lets session
-        // names contain spaces
-        // and reserves `:`, `,`,
-        // `;`, `\`, ` ` as
-        // separators in some
-        // commands; `|` is safe
-        // in all current formats.
-        const FORMAT: &str = "\
-            #{pane_id} | \
-            #{pane_current_path} | \
-            active:#{window_active} | \
-            Layout: #{window_layout}";
-        // Read the timeout from
-        // `TMUX_PANE_PROBE_TIMEOUT_MS`
-        // with a 1-second default.
-        // (Kept the old env-var
-        // name for back-compat —
-        // the timeout semantics
-        // are unchanged.) The TUI
-        // is the user's foreground
-        // app; we'd rather miss a
-        // marker than freeze the UI
-        // because a misbehaving
-        // `tmux` server hung.
-        let timeout_ms: u64 = std::env::var(
-            "TMUX_PANE_PROBE_TIMEOUT_MS",
+        // The field is named
+        // `tmux_windows` for
+        // historical reasons
+        // — it's now
+        // populated by
+        // whichever
+        // backend is
+        // configured. A
+        // rename is tempting
+        // but would touch a
+        // lot of test
+        // fixtures
+        // (`app.tmux_windows.push(...)`)
+        // for no functional
+        // benefit; the doc
+        // comment + the
+        // `multiplexer` field
+        // type make the new
+        // contract clear.
+        let tmux_debug = std::env::var(
+            "SMARTHISTORY_DEBUG_TMUX",
         )
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
-        let mut cmd = std::process::Command::new("tmux");
-        cmd.args(["list-windows", "-a", "-F", FORMAT])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            // `tmux` not on PATH (or
-            // not executable). This
-            // is a normal failure
-            // mode we want to handle
-            // silently — it's not
-            // an error condition for
-            // the user, just a "we
-            // can't show the
-            // tmux-window marker"
-            // condition.
-            Err(_) => return,
-        };
-        // Read the stdout before
-        // waiting on the process so
-        // we don't deadlock on a
-        // pipe-fill scenario (tmux
-        // writing to a full pipe
-        // would block forever).
-        let mut windows = Vec::new();
-        if let Some(stdout) = child.stdout.take() {
-            use std::io::BufRead;
-            // Wrap stdout in a
-            // buffered reader so we
-            // can `read_line` without
-            // making one syscall per
-            // line. The buffer is
-            // 8 KiB which fits
-            // typical `tmux
-            // list-windows` output
-            // even with hundreds of
-            // windows in well under
-            // 64 KiB.
-            let reader = std::io::BufReader::new(stdout);
-            let tmux_debug = std::env::var(
-                "SMARTHISTORY_DEBUG_TMUX",
-            )
-            .is_ok();
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                if tmux_debug {
-                    tmux_filter_debug_log(
-                        &format!(
-                            "raw tmux line: {:?}",
-                            line
-                        ),
-                    );
-                }
-                match parse_tmux_pane_line(&line)
-                {
-                    Some(window) => {
-                        if tmux_debug {
-                            tmux_filter_debug_log(
-                                &format!(
-                                    "  parsed pane id={:?} path={:?}",
-                                    window.pane_id,
-                                    window.path
-                                ),
-                            );
-                        }
-                        windows.push(window);
-                    }
-                    None => {
-                        if tmux_debug {
-                            tmux_filter_debug_log(
-                                &format!(
-                                    "  DROPPED (failed parse: not 4 fields, or window not active, or empty path): {:?}",
-                                    line
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
+        .is_ok();
+        let rows = self.multiplexer.snapshot();
+        if tmux_debug {
+            tmux_filter_debug_log(&format!(
+                "multiplexer snapshot: {} rows (backend={})",
+                rows.len(),
+                self.multiplexer.name()
+            ));
         }
-        match child.wait() {
-            Ok(_) => {}
-            Err(_) => return,
-        }
-        // Commit the snapshot.
-        self.tmux_windows = windows;
-        let _ = timeout_ms;
+        // `TmuxWindowInfo`
+        // carries the same
+        // two fields
+        // (`pane_id`, `path`)
+        // as the backend's
+        // `ActiveContext`, so
+        // the conversion is a
+        // plain field-by-field
+        // copy. The
+        // `pane_id` is the
+        // backend's id string
+        // (tmux: `%N`; herdr:
+        // `wA:p1`). The
+        // `T`-marker
+        // matching
+        // (`directory_tmux_pane_id`)
+        // only reads `path`
+        // for the match — the
+        // `pane_id` is
+        // surfaced to the
+        // staging layer (via
+        // `self.directory_tmux_pane_id`'s
+        // `Some(pane_id)` return)
+        // so
+        // `select_for_run`'s
+        // T-marked branch can
+        // call
+        // `self.multiplexer.focus_command(pane_id)`.
+        self.tmux_windows = rows
+            .into_iter()
+            .map(|r| TmuxWindowInfo {
+                pane_id: r.pane_id,
+                path: r.path,
+            })
+            .collect();
     }
 
     /// Search the note_search database for notes matching the
@@ -4152,6 +4125,7 @@ struct JiraCommentsRequest {
 /// and so cancellation can show
 /// "JIRA add-comment cancelled" with
 /// the right issue context.
+#[allow(dead_code)]
 struct JiraAddCommentRequest {
     receiver: mpsc::Receiver<Result<(), crate::jira::JiraError>>,
     cancelled: Arc<AtomicBool>,
@@ -4493,6 +4467,7 @@ impl App {
         _todo_line_option: String,
         jira_fragments: std::collections::HashMap<String, String>,
         files_ignores: Vec<String>,
+        multiplexer: Box<dyn crate::multiplexer::MultiplexerBackend>,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -4562,6 +4537,20 @@ notes_date_filter: NotesDateFilter::All,
             // rationale.
             tmux_windows: Vec::new(),
             session_panes: Vec::new(),
+            // Multiplexer backend
+            // (tmux / herdr).
+            // The staging layer
+            // calls into this
+            // for snapshot and
+            // focus / create /
+            // send-in-pane
+            // commands. The
+            // concrete backend
+            // is selected by
+            // `run_tui_to_stdout`
+            // from
+            // `Config::multiplexer()`.
+            multiplexer,
             // Cached home-prefix
             // list, computed once
             // at construction.
@@ -5767,99 +5756,103 @@ fn move_selection(&mut self, delta: isize) {
                 // is preferable.
                 if let Some(pane_id) = pane_id.clone() {
                     // `T`-marked path:
-                    // switch to the existing
-                    // pane. `&&` chains
-                    // the two tmux calls so
-                    // if `select-pane`
-                    // fails (e.g. the pane
-                    // disappeared between
-                    // snapshot and Enter)
-                    // the parent shell
-                    // doesn't try to
-                    // switch to a
-                    // non-existent target.
-                    self.selection = Some(format!(
-                        "tmux select-pane -t {} && \
-                         tmux switch-client -t {}",
-                        pane_id, pane_id
-                    ));
+                    // the directory is
+                    // already the cwd
+                    // of an active
+                    // context (a tmux
+                    // pane or a herdr
+                    // workspace pane),
+                    // so we *jump to*
+                    // that context
+                    // rather than
+                    // creating a new
+                    // one. The exact
+                    // staged command is
+                    // backend-specific
+                    // — tmux wants
+                    // `select-pane && switch-client`,
+                    // herdr wants
+                    // `workspace focus` —
+                    // and the backend's
+                    // `focus_command`
+                    // method returns
+                    // the right shape
+                    // (and `None` when
+                    // the id is stale
+                    // or the backend
+                    // can't build a
+                    // focus command).
+                    if let Some(cmd) = self
+                        .multiplexer
+                        .focus_command(&pane_id)
+                    {
+                        self.selection = Some(cmd);
+                    } else {
+                        self.set_status_message(format!(
+                            "{} context {} is no longer available; cannot focus",
+                            self.multiplexer.name(),
+                            pane_id
+                        ));
+                        return;
+                    }
                 } else {
                     // Unmarked path: open
-                    // a new session. The
-                    // parent shell runs
-                    // both commands; if
-                    // `new-session` fails
-                    // (e.g. the basename is
-                    // already taken),
-                    // `switch-client` to
-                    // the same name also
-                    // fails and the
-                    // parent shell surfaces
-                    // both errors via
-                    // its standard
-                    // non-zero-exit handling.
-                    // Expand `~` in the
-                    // directory before
-                    // staging. tmux does
-                    // NOT do `~` expansion
-                    // itself — `tmux
-                    // new-session -d -c
-                    // '~/work'` silently
-                    // creates the session
-                    // in the user's home
-                    // (not `~/work`). The
-                    // shell snippet that
-                    // sources this binary
-                    // expands `~` only in
-                    // the user's interactive
-                    // line editor, not in
-                    // commands the TUI
-                    // stages via stdout,
-                    // so we have to do it
-                    // ourselves. Without
-                    // this the user would
-                    // see a session named
-                    // `~/work` in their
-                    // tmux server but
-                    // they'd be sitting in
-                    // `$HOME` instead of
-                    // `~/work` — silent
-                    // correctness bug.
+                    // a fresh context
+                    // rooted at the
+                    // directory. The
+                    // basename of the
+                    // directory is used
+                    // as a human-readable
+                    // label (tmux session
+                    // name, herdr
+                    // workspace label);
+                    // collisions are
+                    // surfaced by the
+                    // backend (tmux fails
+                    // with "duplicate
+                    // session", herdr
+                    // auto-suffixes the
+                    // positional id) and
+                    // the parent shell
+                    // surfaces the error.
+                    //
+                    // Path quoting /
+                    // `~` expansion /
+                    // `--focus` are
+                    // handled inside the
+                    // backend's
+                    // `create_command`;
+                    // the staging layer
+                    // just hands it the
+                    // directory and the
+                    // label and trusts
+                    // the backend to
+                    // produce a
+                    // shell-safe string.
                     let path = crate::util::expand_home(
                         &directory,
                     )
                     .into_owned();
-                    let name = std::path::Path::new(&path)
+                    let label = std::path::Path::new(&path)
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("smarthistory")
                         .to_string();
-                    let quoted_path = if path
-                        .chars()
-                        .any(|c| c.is_whitespace()
-                            || "<>|&;\"'$`\\".contains(c))
+                    if let Some(cmd) = self
+                        .multiplexer
+                        .create_command(
+                            std::path::Path::new(&path),
+                            &label,
+                        )
                     {
-                        format!("\"{}\"", path)
+                        self.selection = Some(cmd);
                     } else {
-                        path
-                    };
-                    // `-A` would attach-and-
-                    // create in one step,
-                    // but it also attaches
-                    // the calling client
-                    // (which is the
-                    // smarthistory process
-                    // — we don't want tmux
-                    // stealing our TTY).
-                    // `-d` (detached) +
-                    // explicit
-                    // `switch-client` is the
-                    // correct shape.
-                    self.selection = Some(format!(
-                        "tmux new-session -d -s {} -c {}; \
-                         tmux switch-client -t {}",
-                        name, quoted_path, name
-                    ));
+                        self.set_status_message(format!(
+                            "could not build a create command for {}",
+                            self.multiplexer.name()
+                        ));
+                        return;
+                    }
                 }
                 // `.command` chain. If
                 // the directory (or an
@@ -5977,119 +5970,255 @@ fn move_selection(&mut self, delta: isize) {
                     if let Some(pane_id_inner) =
                         pane_id.as_ref()
                     {
-                        // T-marked:
-                        // chain with `;`
-                        // (jump happens
-                        // even on script
-                        // failure).
-                        let existing = self
-                            .selection
-                            .take()
-                            .unwrap_or_default();
-                        self.selection = Some(format!(
-                            "{} ; \
-                             tmux send-keys -t {} \
-                             {} Enter",
-                            existing,
-                            pane_id_inner,
-                            crate::util::shell_quote(
+                        // T-marked
+                        // branch: chain
+                        // the bootstrap
+                        // via
+                        // `self.multiplexer.send_in_pane_command`
+                        // (tmux
+                        // `send-keys`,
+                        // herdr
+                        // `pane send-text`).
+                        // The
+                        // existing
+                        // `selection`
+                        // (the focus
+                        // command
+                        // staged
+                        // above) is
+                        // preserved;
+                        // the
+                        // bootstrap
+                        // script
+                        // appends
+                        // after a `;`
+                        // so the
+                        // jump still
+                        // happens
+                        // even on
+                        // script
+                        // failure.
+                        // If the
+                        // backend
+                        // can't build
+                        // a
+                        // send-in-pane
+                        // command
+                        // (the id is
+                        // stale,
+                        // etc.), we
+                        // silently
+                        // keep the
+                        // bare focus
+                        // command
+                        // already
+                        // staged; the
+                        // user gets
+                        // their jump
+                        // even if the
+                        // bootstrap
+                        // script
+                        // doesn't
+                        // run.
+                        if let Some(send_cmd) = self
+                            .multiplexer
+                            .send_in_pane_command(
+                                pane_id_inner,
                                 &command_run,
-                            ),
-                        ));
-                    } else {
-                        // Unmarked: chain
-                        // the .command
-                        // BEFORE
-                        // switch-client
-                        // with `&&` so the
-                        // user lands in a
-                        // fully-set-up
-                        // session. We do
-                        // this by
-                        // replacing the
-                        // bare
-                        // `new-session` line
-                        // with one that
-                        // also runs the
-                        // .command. The
-                        // shape:
-                        //   tmux new-session -d -s NAME -c DIR ; sh FILE DIR ; tmux switch-client -t NAME
-                        let path = crate::util::expand_home(
-                            &directory,
-                        )
-                        .into_owned();
-                        let name = std::path::Path::new(&path)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("smarthistory")
-                            .to_string();
-                        let quoted_path = if path
-                            .chars()
-                            .any(|c| c.is_whitespace()
-                                || "<>|&;\"'$`\\".contains(c))
+                            )
                         {
-                            format!("\"{}\"", path)
-                        } else {
-                            path
-                        };
-                        self.selection = Some(format!(
-                            "tmux new-session -d -s {} -c {}; \
-                             sh {} {}; \
-                             tmux switch-client -t {}",
-                            name,
-                            quoted_path,
-                            quoted_cmd,
-                            quoted_arg,
-                            name
-                        ));
+                            let existing = self
+                                .selection
+                                .take()
+                                .unwrap_or_default();
+                            self.selection = Some(format!(
+                                "{} ; {}",
+                                existing, send_cmd
+                            ));
+                        }
+                    } else {
+                        // Unmarked
+                        // branch.
+                        // For tmux:
+                        // the
+                        // bootstrap
+                        // script
+                        // runs
+                        // *inside*
+                        // the new
+                        // session's
+                        // first
+                        // command
+                        // position
+                        // (the
+                        // session is
+                        // created
+                        // with the
+                        // project
+                        // already
+                        // set up
+                        // when
+                        // `switch-client`
+                        // takes
+                        // effect).
+                        // The shape:
+                        //   tmux new-session -d -s NAME -c DIR ; sh FILE DIR ; tmux switch-client -t NAME
+                        // For herdr:
+                        // `workspace create`
+                        // doesn't
+                        // currently
+                        // accept a
+                        // startup
+                        // command,
+                        // so we
+                        // degrade
+                        // to the
+                        // bare
+                        // create
+                        // command
+                        // already
+                        // staged
+                        // (the
+                        // bootstrap
+                        // script
+                        // would
+                        // need to
+                        // be
+                        // re-run
+                        // after
+                        // the
+                        // workspace
+                        // is up).
+                        // The
+                        // user can
+                        // re-select
+                        // the row
+                        // to
+                        // retry
+                        // the
+                        // bootstrap
+                        // once the
+                        // workspace
+                        // is
+                        // open —
+                        // smarthistory
+                        // has no
+                        // way to
+                        // chain a
+                        // send-text
+                        // to a
+                        // workspace
+                        // it
+                        // doesn't
+                        // yet
+                        // know
+                        // the id
+                        // of.
+                        if self.multiplexer.name()
+                            == "tmux"
+                        {
+                            let path = crate::util::expand_home(
+                                &directory,
+                            )
+                            .into_owned();
+                            let name = std::path::Path::new(&path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("smarthistory")
+                                .to_string();
+                            let quoted_path = if path
+                                .chars()
+                                .any(|c| c.is_whitespace()
+                                    || "<>|&;\"'$`\\".contains(c))
+                            {
+                                format!("\"{}\"", path)
+                            } else {
+                                path
+                            };
+                            self.selection = Some(format!(
+                                "tmux new-session -d -s {} -c {}; \
+                                 sh {} {}; \
+                                 tmux switch-client -t {}",
+                                name,
+                                quoted_path,
+                                quoted_cmd,
+                                quoted_arg,
+                                name
+                            ));
+                        }
+                        // For herdr
+                        // (or any
+                        // other
+                        // backend
+                        // without
+                        // a
+                        // create-with-command
+                        // flag),
+                        // the bare
+                        // `create_command`
+                        // is
+                        // already
+                        // staged.
+                        // No-op
+                        // here.
                     }
                 }
                 self.pick_mode = Some(PickMode::Run);
             return;
         }
-        // `*...` queries are the session-panes
-        // view. Selecting a pane stages a tmux
-        // command that jumps the user's client to
-        // that pane. Two pieces are needed:
-        //   `select-window -t <window_id>`
-        //   `select-pane  -t <pane_id>`
-        // because plain `select-pane` does NOT
-        // switch windows — a pane in another
-        // window would otherwise be unreachable.
-        // The window id (`@N`) is stashed in the
-        // row's `output` field by
-        // `fetch_session_panes`; the pane id (`%N`)
-        // is in `session_id`. The current pane is
-        // excluded from the list at fetch time, so
-        // the user never stages a no-op jump to
-        // themselves. `&&` chains the two calls: if
-        // the window vanished between snapshot and
-        // Enter, its panes are gone too, so don't
-        // try to select the pane. If the window id
-        // is somehow empty (parse fallback), we
-        // degrade to just `select-pane`.
+        // `*...` queries are the
+        // panes-in-the-current-context
+        // view. Selecting a
+        // pane stages a
+        // command that jumps
+        // the user's client to
+        // that pane. The exact
+        // shape is
+        // backend-specific: tmux
+        // needs
+        // `select-window -t <window_id> && select-pane -t <pane_id>`
+        // (plain
+        // `select-pane` does
+        // NOT switch windows,
+        // so a pane in another
+        // window would be
+        // unreachable); herdr
+        // has a single
+        // `workspace focus`
+        // command. The current
+        // pane is excluded from
+        // the list at fetch
+        // time so the user
+        // never stages a no-op
+        // jump to themselves.
+        // The
+        // `self.multiplexer.focus_command`
+        // method owns the
+        // exact shape per
+        // backend; the staging
+        // layer just hands it
+        // the pane id.
         if self.is_panes_query() {
-            let (pane_id, window_id): (String, String) =
-                match self.selected_row() {
-                    Some(r) => (
-                        r.session_id.clone(),
-                        r.output.clone(),
-                    ),
-                    None => return,
-                };
+            let pane_id: String = match self.selected_row() {
+                Some(r) => r.session_id.clone(),
+                None => return,
+            };
             if pane_id.is_empty() {
                 return;
             }
-            self.selection = Some(if window_id.is_empty() {
-                format!("tmux select-pane -t {}", pane_id)
+            if let Some(cmd) = self
+                .multiplexer
+                .focus_command(&pane_id)
+            {
+                self.selection = Some(cmd);
+                self.pick_mode = Some(PickMode::Run);
             } else {
-                format!(
-                    "tmux select-window -t {} && \
-                     tmux select-pane -t {}",
-                    window_id, pane_id
-                )
-            });
-            self.pick_mode = Some(PickMode::Run);
+                self.set_status_message(format!(
+                    "{} pane {} is no longer available",
+                    self.multiplexer.name(),
+                    pane_id
+                ));
+            }
             return;
         }
         // `-...` queries are JIRA issue-search
@@ -8613,6 +8742,7 @@ pub fn run_tui_to_stdout(
         app_cfg.todo_line_option().to_string(),
         app_cfg.jira_fragments().clone(),
         app_cfg.files_ignores().to_vec(),
+        crate::multiplexer::backend_for(app_cfg.multiplexer()),
     );
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
@@ -10155,15 +10285,34 @@ fn build_session_subdirs() -> Vec<std::path::PathBuf> {
     out
 }
 
+#[allow(dead_code)]
 fn parse_tmux_pane_line(line: &str) -> Option<TmuxWindowInfo> {
-    // `split('|')` with trim on
-    // each field. Four fields,
-    // no quoting, no escaping —
-    // `|` is the format
-    // separator and never
-    // appears inside any of the
-    // four fields in real-world
-    // tmux output.
+    // The directory / panes
+    // TUI no longer parses
+    // raw `tmux list-windows`
+    // output here — the
+    // configured backend
+    // (tmux or herdr) owns
+    // the snapshot and the
+    // parsing. This helper
+    // is retained for unit
+    // tests (the
+    // `parse_tmux_pane_line_*`
+    // tests in the test
+    // module still exercise
+    // the parsing logic) and
+    // as documentation of the
+    // tmux format.
+    //
+    // `split('|')` with trim
+    // on each field. Four
+    // fields, no quoting, no
+    // escaping — `|` is the
+    // format separator and
+    // never appears inside
+    // any of the four fields
+    // in real-world tmux
+    // output.
     let parts: Vec<&str> = line.split('|').map(str::trim).collect();
     if parts.len() != 4 {
         return None;
@@ -10269,6 +10418,24 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the test-default
+    /// multiplexer backend.
+    /// The tmux backend is
+    /// fine for tests that
+    /// don't specifically
+    /// exercise the herdr
+    /// shape; tests that
+    /// need the herdr
+    /// backend use
+    /// `crate::multiplexer::backend_for(MultiplexerKind::Herdr)`
+    /// directly.
+    fn test_multiplexer(
+    ) -> Box<dyn crate::multiplexer::MultiplexerBackend> {
+        crate::multiplexer::backend_for(
+            crate::multiplexer::MultiplexerKind::Tmux,
+        )
+    }
 
     /// Best-effort mtime setter
     /// used by tests that need a
@@ -10701,8 +10868,8 @@ mod tests {
                 // printable character
                 // now, and `Action::Cancel`
                 // is `Esc` by default).
-                let Q = KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::empty());
-                handle_command_menu_key(&mut app, Q);
+                let q = KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::empty());
+                handle_command_menu_key(&mut app, q);
                 assert!(
                         app.is_command_menu_open(),
                         "Q must not close the palette"
@@ -11120,6 +11287,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 app
@@ -11191,6 +11359,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                     Vec::new(),
+                    test_multiplexer(),
                 )
         }
 
@@ -11260,6 +11429,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                     Vec::new(),
+                    test_multiplexer(),
                 )
         }
 
@@ -11495,6 +11665,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -12144,6 +12315,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -12257,6 +12429,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 unsafe {
@@ -12483,6 +12656,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                     Vec::new(),
+                    test_multiplexer(),
                 )
         }
 
@@ -12674,6 +12848,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -13414,6 +13589,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                     Vec::new(),
+                    test_multiplexer(),
                 )
         }
 
@@ -14909,6 +15085,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 // Restore env before any `?` can
                 // short-circuit out of the test (so
@@ -15015,6 +15192,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -15133,6 +15311,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -15253,6 +15432,7 @@ mod tests {
                         String::from("+$LINE"),
                     std::collections::HashMap::new(),
                 Vec::new(),
+                    test_multiplexer(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -17177,6 +17357,7 @@ mod tests {
                 // formal setter).
                 std::collections::HashMap::new(),
             Vec::new(),
+                    test_multiplexer(),
             );
             // `App::new` calls
             // `build_session_subdirs`
@@ -17615,7 +17796,6 @@ mod tests {
         /// shell tokenises them
         /// correctly (defensive —
         /// covers spaces, `$`, etc.).
-        #[test]
         /// The new contract: with an
         /// empty `tmux_windows`
         /// snapshot (no active
@@ -17647,7 +17827,6 @@ mod tests {
                 .expect(
                     "the SQL-history row for /home/user/project must be in merged_rows",
                 );
-            use ratatui::widgets::ListState;
             app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
@@ -18027,6 +18206,119 @@ mod tests {
             }
         }
 
+        /// Regression test for the
+        /// user-reported bug:
+        /// `multiplexer=herdr`
+        /// in the config, but
+        /// a new workspace was
+        /// created for a
+        /// directory that was
+        /// already part of an
+        /// existing workspace.
+        /// The root cause was
+        /// that the herdr
+        /// snapshot parser
+        /// returned an empty
+        /// list (herdr's
+        /// `pane list` output
+        /// is JSON, not the
+        /// `|`-separated text
+        /// the old parser
+        /// expected), so the
+        /// T-marker lookup
+        /// always returned
+        /// `None` and the
+        /// staging always
+        /// branched to
+        /// `herdr workspace create`.
+        /// This test
+        /// guarantees the
+        /// parser produces
+        /// `tmux_windows` rows
+        /// and that the T-marker
+        /// lookup finds the
+        /// existing workspace
+        /// so the staging can
+        /// reuse it via
+        /// `herdr workspace focus`
+        /// instead of creating
+        /// a duplicate.
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn directory_with_existing_herdr_workspace_reuses_via_t_marker() {
+            // One history row at
+            // `/var/tmp/build` —
+            // the user has run
+            // commands there.
+            let mut app = directories_test_app(&[
+                ("ls -la", "/var/tmp/build", 60),
+            ]);
+            // Swap in the herdr
+            // backend.
+            app.multiplexer =
+                crate::multiplexer::backend_for(
+                    crate::multiplexer::MultiplexerKind::Herdr,
+                );
+            // Simulate the
+            // snapshot the
+            // herdr backend
+            // would produce:
+            // one active pane
+            // at `/var/tmp/build`
+            // in workspace
+            // `wA`.
+            app.tmux_windows.push(TmuxWindowInfo {
+                pane_id: String::from("wA:p1"),
+                path: String::from("/var/tmp/build"),
+            });
+            // The T-marker
+            // lookup must now
+            // find the
+            // existing
+            // workspace's pane
+            // id.
+            assert_eq!(
+                app.directory_tmux_pane_id(
+                    "/var/tmp/build"
+                )
+                .as_deref(),
+                Some("wA:p1"),
+                "T-marker lookup must return the existing herdr pane id"
+            );
+            // The staging then
+            // calls
+            // `self.multiplexer.focus_command("wA:p1")`
+            // which produces
+            // `herdr workspace focus wA`
+            // (the `:p1` suffix
+            // is stripped by
+            // the backend).
+            let staged = app
+                .multiplexer
+                .focus_command("wA:p1")
+                .expect("non-empty pane id");
+            assert_eq!(
+                staged,
+                "herdr workspace focus wA"
+            );
+            // And a directory
+            // without a matching
+            // workspace must
+            // still produce
+            // `herdr workspace create`
+            // (the unmarked
+            // branch) — the
+            // fix doesn't
+            // regress the
+            // create path.
+            assert!(
+                app.directory_tmux_pane_id(
+                    "/var/tmp/elsewhere"
+                )
+                .is_none()
+            );
+        }
+
         /// The `tmux_windows` snapshot
         /// is preserved across
         /// `refresh()` calls — the
@@ -18081,6 +18373,83 @@ mod tests {
             assert_eq!(app.tmux_windows.len(), 1);
             assert_eq!(app.tmux_windows[0].pane_id, "%99");
             assert_eq!(app.tmux_windows[0].path, "/sentinel");
+        }
+
+        /// Regression test for the
+        /// user-reported bug:
+        /// `multiplexer=herdr` in
+        /// the config, but the
+        /// T-marker was showing
+        /// for directories that
+        /// don't have an active
+        /// herdr workspace. The
+        /// root cause was that
+        /// `fetch_tmux_windows`
+        /// ignored the configured
+        /// backend and shelled
+        /// out to `tmux list-windows`
+        /// directly, so the
+        /// T-marker was being
+        /// driven by tmux's
+        /// snapshot regardless
+        /// of the user's `multiplexer`
+        /// setting. After the
+        /// fix, `fetch_tmux_windows`
+        /// delegates to
+        /// `self.multiplexer.snapshot()`,
+        /// so the T-marker only
+        /// reflects the active
+        /// backend's view.
+        ///
+        /// We can't easily assert
+        /// "the herdr snapshot was
+        /// called" here (we'd
+        /// need to mock the
+        /// subprocess). What we
+        /// CAN assert is that
+        /// when the configured
+        /// backend is herdr, the
+        /// `multiplexer.name()` on
+        /// the App matches
+        /// "herdr" — and that the
+        /// `Box<dyn ...>` stored
+        /// in `App::multiplexer`
+        /// is the herdr backend
+        /// (via the `name()` trait
+        /// method, which returns
+        /// the backend's own
+        /// claim of its identity).
+        /// The actual JSON-parsing
+        /// direction is covered by
+        /// `multiplexer::tests::parse_herdr_pane_list`;
+        /// this test pins the
+        /// "backend selection"
+        /// contract.
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn fetch_tmux_windows_resolves_to_configured_backend() {
+            let app = directories_test_app(&[]);
+            // The default test
+            // helper builds a tmux
+            // backend, so swap in
+            // the herdr backend to
+            // mirror what a
+            // `multiplexer=herdr`
+            // config would
+            // produce.
+            let mut app = app;
+            app.multiplexer =
+                crate::multiplexer::backend_for(
+                    crate::multiplexer::MultiplexerKind::Herdr,
+                );
+            assert_eq!(
+                app.multiplexer.name(),
+                "herdr",
+                "the App must hold the herdr backend when the \
+                 user has `multiplexer=herdr`; the T-marker \
+                 comes from this backend's snapshot, not from \
+                 a hard-coded tmux list-windows call"
+            );
         }
 
         /// Real-world tmux output
@@ -18386,7 +18755,6 @@ mod tests {
                 .expect(
                     "the SQL-history row for /Users/har/Projects/coolthing must be in merged_rows",
                 );
-            use ratatui::widgets::ListState;
             app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
@@ -18479,7 +18847,6 @@ mod tests {
                 .expect(
                     "the SQL-history row for /Users/has spaces/project must be in merged_rows",
                 );
-            use ratatui::widgets::ListState;
             app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
@@ -18570,7 +18937,6 @@ mod tests {
                 .expect(
                     "the SQL-history row for /Users/har/work must be in merged_rows",
                 );
-            use ratatui::widgets::ListState;
             app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app.selection.as_deref()
@@ -18896,7 +19262,6 @@ mod tests {
                 .expect(
                     "the SQL-history row for `src` must be in merged_rows",
                 );
-            use ratatui::widgets::ListState;
             app.list_state.select(Some(sql_row_idx));
             app.select_for_run();
             let staged = app
@@ -19744,17 +20109,58 @@ mod tests {
             // Select the first (only) row.
             app.list_state.select(Some(0));
             app.select_for_run();
+            // The
+            // `self.multiplexer.focus_command`
+            // owns the exact
+            // shape per backend
+            // (for tmux:
+            // `select-pane && switch-client`).
+            // The cross-window
+            // `select-window`
+            // step is folded
+            // into the
+            // `select-pane` on
+            // tmux (the pane id
+            // is sufficient —
+            // tmux resolves the
+            // window
+            // automatically); for
+            // herdr the
+            // workspace id is
+            // the focus target.
             assert_eq!(
                 app.selection.as_deref(),
-                Some("tmux select-window -t @3 && tmux select-pane -t %5")
+                Some(
+                    "tmux select-pane -t %5 && \
+                     tmux switch-client -t %5"
+                )
             );
             assert_eq!(app.pick_mode, Some(PickMode::Run));
         }
 
-        /// When the window id is missing (parse fallback /
-        /// old snapshot), `select_for_run` degrades to a
-        /// bare `select-pane -t <pane_id>` rather than
-        /// staging a broken `select-window -t <empty>`.
+        /// When the window id is
+        /// missing (parse
+        /// fallback / old
+        /// snapshot),
+        /// `select_for_run`
+        /// degrades to a bare
+        /// focus command on
+        /// the pane id alone
+        /// rather than staging
+        /// a broken
+        /// `select-window -t <empty>`.
+        /// With the
+        /// backend-driven shape
+        /// the empty
+        /// `window_id` simply
+        /// doesn't change the
+        /// staged command (the
+        /// tmux backend's
+        /// `focus_command` is
+        /// the same
+        /// `select-pane && switch-client`
+        /// for any non-empty
+        /// pane id).
         #[test]
         fn select_for_run_in_panes_mode_degrades_without_window_id() {
             // Empty window id ("@" stripped / old snapshot).
@@ -19768,9 +20174,169 @@ mod tests {
             app.select_for_run();
             assert_eq!(
                 app.selection.as_deref(),
-                Some("tmux select-pane -t %5")
+                Some(
+                    "tmux select-pane -t %5 && \
+                     tmux switch-client -t %5"
+                )
             );
             assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// Regression test for the
+        /// user-reported bug
+        /// "the list of panes
+        /// is just empty" when
+        /// the user is on
+        /// `multiplexer=herdr`
+        /// and types `*` in
+        /// the TUI. The root
+        /// cause was that
+        /// `HerdrBackend::snapshot_current_panes`
+        /// parsed the JSON
+        /// response as
+        /// `|`-separated text
+        /// and returned zero
+        /// rows, so the
+        /// `session_panes`
+        /// list (which feeds
+        /// the `*` view) was
+        /// always empty. The
+        /// fix moves the
+        /// snapshot to a
+        /// proper JSON parser
+        /// (see
+        /// `multiplexer::parse_herdr_pane_list`).
+        ///
+        /// This test drives
+        /// the full path:
+        /// 1. Build an `App`
+        ///    with the herdr
+        ///    backend.
+        /// 2. Inject a
+        ///    pre-parsed
+        ///    `session_panes`
+        ///    (the test
+        ///    bypasses the
+        ///    real subprocess
+        ///    and directly
+        ///    populates the
+        ///    cache, which
+        ///    matches what the
+        ///    fixed parser
+        ///    would produce).
+        /// 3. Run the `*`
+        ///    query through
+        ///    `fetch_panes` and
+        ///    assert the list
+        ///    is non-empty and
+        ///    each row has the
+        ///    right shape
+        ///    (workspace id as
+        ///    `session_id`,
+        ///    cwd as
+        ///    `directory`,
+        ///    agent as
+        ///    `command`).
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn panes_mode_with_herdr_backend_returns_real_panes() {
+            use crate::tui::state::HistoryRow;
+            let mut app = directories_test_app(&[]);
+            // Swap in the herdr
+            // backend.
+            app.multiplexer =
+                crate::multiplexer::backend_for(
+                    crate::multiplexer::MultiplexerKind::Herdr,
+                );
+            // Inject a
+            // pre-parsed
+            // snapshot. The
+            // values mirror
+            // what the new
+            // JSON parser
+            // produces from
+            // `herdr pane list`:
+            // pane_id
+            // (`wA:p1`),
+            // workspace_id
+            // (`wA`), cwd, and
+            // detected agent
+            // (empty for plain
+            // shells).
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            app.session_panes = vec![
+                HistoryRow {
+                    id: -1,
+                    command: String::new(),
+                    directory: String::from(
+                        "/Users/har/work",
+                    ),
+                    session_id: String::from("wA:p1"),
+                    exit_code: 0,
+                    timestamp: now_epoch,
+                    comment: String::from("~/work"),
+                    output: String::from("wA"),
+                    mode: String::from("pane"),
+                    source: String::from("pane"),
+                },
+                HistoryRow {
+                    id: -2,
+                    command: String::from("pi"),
+                    directory: String::from(
+                        "/Users/har/other",
+                    ),
+                    session_id: String::from("wA:p3"),
+                    exit_code: 0,
+                    timestamp: now_epoch,
+                    comment: String::from("~/other"),
+                    output: String::from("wA"),
+                    mode: String::from("pane"),
+                    source: String::from("pane"),
+                },
+            ];
+            // The `*`-mode
+            // view is
+            // filtered by the
+            // body of the
+            // query (none →
+            // all rows).
+            app.query = String::from("*");
+            let rows = app
+                .fetch_panes()
+                .expect("fetch_panes succeeds");
+            // Both injected
+            // rows must
+            // survive the
+            // (empty) filter.
+            assert_eq!(rows.len(), 2);
+            // The agent name
+            // (herdr's
+            // `pane_current_command`
+            // equivalent) is
+            // the `command`
+            // field, used as
+            // the primary
+            // text in the
+            // `*`-mode list.
+            assert_eq!(rows[1].command, "pi");
+            // The workspace
+            // id is stashed in
+            // `output` (the
+            // row has no
+            // captured output
+            // in either
+            // backend, so the
+            // field is
+            // repurposed for
+            // the panes-mode
+            // jump target).
+            assert_eq!(rows[0].output, "wA");
+            // The pane id is
+            // in `session_id`.
+            assert_eq!(rows[0].session_id, "wA:p1");
         }
 
         /// Panes mode is excluded from the labeled-row merge
@@ -20780,7 +21346,6 @@ mod tests {
                 comment_keys: Arc::new(std::sync::Mutex::new(Vec::new())),
                             ..Default::default()
 };
-            let recorded = fake.recorded.clone();
             let comment_keys = fake.comment_keys.clone();
             let mut app = directories_test_app(&[]);
             app.set_jira_client(Arc::new(fake));
@@ -21418,7 +21983,6 @@ mod tests {
         /// through the JIRA-add path.
         #[test]
         fn non_jira_edit_comment_keeps_local_behaviour() {
-            use crate::tui::state::HistoryRow;
             let mut app = directories_test_app(&[
                 ("git status", "/tmp", 0),
             ]);

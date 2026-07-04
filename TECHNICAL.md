@@ -211,6 +211,7 @@ Supported keys:
 | `prefix.todo=!` | Prefix character for the todo-search mode. Change this if `!` conflicts with other key bindings. | `!` |
 | `todo.line_option=+$LINE` | Template for the line-number option appended to the editor command when a todo line is selected. The literal `$LINE` is substituted with the 1-based line number. Default `+$LINE` works with `vim`, `nano`, `emacs -nw`, and most POSIX editors. Examples: `+LINE:$LINE`, `:$LINE`. | `+$LINE` |
 | `jira.search.<name>=<jql>` | Define a named JQL fragment for the `-`-mode TUI search. `<name>` is a `\w+` identifier (reserved names `me`, `today`, `week`, `month` are dropped with a warning). The fragment is invoked in the body as `@<name>` and spliced verbatim into the generated JQL, wrapped in parens to preserve any internal `AND`/`OR`. See the "User-defined JQL fragments" section under JIRA mode below. | (no fragments) |
+| `multiplexer=tmux\|herdr` | Which terminal multiplexer the directory-switching (`#` mode) and panes-switching (`*` mode) flows target. The tmux backend is always available; the herdr backend is compiled in by default and can be excluded with `--no-default-features` at build time. See the "Multiplexer backend" section below. | `tmux` |
 
 `~` and `~/...` in path values are expanded to the user's home
 directory.
@@ -393,6 +394,118 @@ of captured output. The `precmd` hook waits up to 2 seconds (20
 retries of 100 ms each) for the pane log to be flushed before giving
 up; commands that finish quickly are captured without any delay.
 When a tmux pane is killed, `stop_tmux_pane.sh` removes its log file.
+
+## Multiplexer backend
+
+The directory-switching (`#` mode) and panes-switching (`*` mode)
+flows need to talk to a terminal multiplexer to (a) discover which
+directories are currently active and (b) stage a focus / create
+command for the parent shell. By default the TUI targets **tmux**;
+with the `herdr` Cargo feature compiled in, it can also target
+**[herdr](https://herdr.dev)** as an alternative backend.
+
+The user picks the active backend via a single config key:
+
+```ini
+# ~/.config/smarthistory/config
+multiplexer=herdr   # default: tmux
+```
+
+The same key is also accepted from the
+`SMARTHISTORY_MULTIPLEXER` environment variable, which wins over
+the config file (matching the `NOTE_SEARCH_*` / `JIRA_*` precedence
+pattern). Unrecognised values are dropped with a stderr warning;
+the default (`tmux`) is preserved so a typo can't silently disable
+directory switching.
+
+### What the backend does
+
+The TUI's `MultiplexerBackend` trait (in `src/multiplexer.rs`) has
+five methods, and both backends implement them the same way:
+
+| Method | tmux backend | herdr backend |
+| --- | --- | --- |
+| `snapshot()` | `tmux list-windows -a -F` (active panes only) | `herdr workspace list` |
+| `snapshot_current_panes()` | `tmux list-panes -s -F` (current session, current pane excluded) | `herdr pane list` (all panes; current-pane exclusion is best-effort) |
+| `focus_command(id)` | `tmux select-pane -t <id> && tmux switch-client -t <id>` | `herdr workspace focus <id>` |
+| `create_command(dir, label)` | `tmux new-session -d -s <label> -c <dir>; tmux switch-client -t <label>` | `herdr workspace create --cwd <dir> --label <label> --focus` |
+| `send_in_pane_command(id, body)` | `tmux send-keys -t <id> <body> Enter` | `herdr pane send-text <id> <body>` |
+
+Both backends are silent on failure: `tmux` / `herdr` missing from
+PATH, no server running, or a subprocess hanging past
+`TMUX_PANE_PROBE_TIMEOUT_MS` (default 1000 ms) all leave the
+snapshot empty and the marker invisible. The TUI never blocks on
+the multiplexer for more than that.
+
+### Behavioural differences vs tmux
+
+The two backends model the same concept ("an active context with a
+cwd") differently, and a few corners of the UX are backend-aware:
+
+- **Workspace ids**: tmux pane ids are `%N` (globally unique on the
+  local server); herdr workspace ids are compact positional
+  integers (`1`, `2`, …) that renumber on close. The TUI never
+  references a workspace by name (only by id), so duplicate-label
+  collisions don't surface as errors the way they do in tmux.
+- **Cross-pane jumps** (`*` mode): tmux needs
+  `select-window -t @N && select-pane -t %M` because plain
+  `select-pane` doesn't switch windows; herdr's `workspace focus`
+  is a single call. The backend's `focus_command` returns the
+  right shape for each, so the staging layer just calls it.
+- **`.command` file bootstrap**: tmux runs the script *inside* the
+  new session's first command position so the user lands in a
+  fully-set-up project. herdr's `workspace create` doesn't accept a
+  startup command yet, so the bootstrap is best-effort (the bare
+  create command is staged and the user can re-select the row to
+  retry the bootstrap once the workspace is up). The T-marker
+  branch (jumping to an existing pane) works the same on both
+  backends: the script is sent into the pane via
+  `send_in_pane_command`.
+- **Marker chip text**: the directories-mode source chip reads
+  `DIR:tmux` or `DIR:herdr` depending on which backend is
+  active, so the user always knows which one is producing the
+  marker.
+
+### Building with herdr support
+
+**The `herdr` Cargo feature is enabled by default** so a fresh
+`cargo build --release` (or `cargo install`) produces a binary
+that can target either backend without extra flags. The feature
+exists for users who want a smaller tmux-only binary:
+
+```bash
+# Default build (herdr + tmux, both backends)
+cargo build --release
+
+# Smaller tmux-only build
+cargo build --release --no-default-features
+```
+
+If a user has `multiplexer=herdr` in their config but the binary
+was built with `--no-default-features`, the parser accepts the
+value (so the config doesn't silently fail to load) but every
+directory / pane action that needs the backend surfaces a clear
+"build with default features" status message instead of staging
+a broken command. The `multiplexer=herdr` config key is accepted
+in both builds (so a hand-edited config doesn't suddenly
+break a no-herdr binary); the runtime just degrades to a
+status message instead of a tmux-style command.
+
+### What is NOT changed
+
+For clarity, the following features are explicitly **not**
+touched by the herdr backend:
+
+- **Output capture** (the `pipe-pane` precmd hook): the
+  `tmuxpaneoutputdir=` setting and the
+  `log_tmux_pane.sh` / `stop_tmux_pane.sh` scripts are 100%
+  tmux-specific and continue to work exactly as before. A user
+  who picks `multiplexer=herdr` keeps tmux (or just nothing) for
+  per-pane output capture; the `+...` output-search mode in the
+  TUI continues to work because it reads from the captured-output
+  table in the SQLite DB, populated by the precmd hook.
+- **History storage and search** (the `history` /
+  `history_output` tables): backend-agnostic, no change.
 
 ## Usage
 
