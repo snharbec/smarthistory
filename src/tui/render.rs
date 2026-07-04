@@ -5,7 +5,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    symbols,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
@@ -2207,12 +2206,50 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg))),
         )
         .highlight_style(
+            // Make the selected row stand out more
+            // than the original muted gray did, but
+            // lighter than a full-on accent-color
+            // background (which the user found too
+            // bright). The balance: the
+            // accent-tinted `selection_color`
+            // palette slot for the row background
+            // (it's still theme-following and
+            // noticeably color-tinted, but
+            // it's the palette's dedicated
+            // "selection" color so it sits
+            // lighter on the eye than the
+            // saturated accent color). The
+            // FOREGROUND flips to the
+            // highlight color slot so the
+            // command text reads in a brighter
+            // shade than the surrounding rows
+            // (without going all the way to
+            // invert/contrast against an
+            // accent background). Bold +
+            // UNDERLINED text modifiers for
+            // the rest of the visual weight —
+            // those plus thevivid
+            // `▌` left-edge bar in the accent
+            // color (see `highlight_symbol`
+            // below) carry the selection
+            // obviousness without the full row
+            // being a colored slab.
             Style::default()
                 .bg(Theme::selection_color())
-                .fg(PALETTE.with(|p| p.borrow().fg))
-                .add_modifier(Modifier::BOLD),
+                .fg(Theme::highlight_color())
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
         )
-        .highlight_symbol(symbols::line::THICK_VERTICAL_RIGHT)
+        // A solid left-half block character
+        // (▌) repeated across the symbol
+        // area gives a thick colored bar
+        // running the height of the
+        // selected row — like a VSCode
+        // selection marker. Pairs with
+        // the accent-background highlight
+        // style above to make the row
+        // unmissable.
+        .highlight_symbol("▌")
         .repeat_highlight_symbol(true);
 
     f.render_stateful_widget(list, area, &mut render_state);
