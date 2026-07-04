@@ -131,15 +131,11 @@ _smarthistory_update_rprompt() {
         *)      label="[smarthistory: ?]" ;;
     esac
     if [ -n "$_smarthistory_rprompt_save" ]; then
-        RPROMPT="$label $_smarthistory_rprompt_save"
+        MYPROMPT="$label $_smarthistory_rprompt_save"
     else
-        RPROMPT="$label"
+        MYPROMPT="$label"
     fi
-    # Force a redraw only if ZLE is active (i.e. we're in a widget).
-    # During the first precmd (before ZLE is fully initialized),
-    # zle reset-prompt would error; the next prompt will pick up
-    # the new RPROMPT automatically.
-    zle reset-prompt 2>/dev/null
+    echo $MYPROMPT
 }
 
 _smarthistory_cycle_mode() {
