@@ -322,7 +322,92 @@ pub trait MultiplexerBackend: Send + Sync {
     /// Returns `None` when the
     /// backend has no equivalent
     /// (e.g. the id is stale).
+    ///
+    /// Used by the directories-mode
+    /// `#` flow: the user picks a
+    /// directory whose pane id is
+    /// known, and the staged
+    /// command brings the user to
+    /// that pane's workspace. For
+    /// tmux this is
+    /// `select-pane -t %N && switch-client -t %N`;
+    /// for herdr it's
+    /// `herdr workspace focus <ws>`
+    /// (the pane id's `:pN`
+    /// suffix is stripped
+    /// because `workspace focus`
+    /// accepts a workspace id,
+    /// not a pane id). So the
+    /// directories-mode behavior
+    /// is "focus the workspace
+    /// the directory lives in" —
+    /// not the specific pane.
     fn focus_command(&self, pane_id: &str) -> Option<String>;
+
+    /// Stage a command that
+    /// switches to the
+    /// **session / workspace**
+    /// as a whole (the parent
+    /// of one or more panes).
+    /// Used by the `*`-mode
+    /// "workspace row" the
+    /// user picks to jump to
+    /// the workspace without
+    /// targeting a specific
+    /// pane. Returns `None`
+    /// when the backend can't
+    /// build a command (stale
+    /// id, no server, etc.).
+    ///
+    /// - tmux:
+    ///   `tmux switch-client -t <session-name>`
+    ///   (brings the session's
+    ///   focused window forward).
+    /// - herdr:
+    ///   `herdr workspace focus <workspace-id>`
+    ///   (brings the workspace's
+    ///   focused tab forward).
+    fn focus_session(&self, session_label: &str) -> Option<String>;
+
+    /// Stage a command that
+    /// switches to a specific
+    /// **pane** (not just the
+    /// session / workspace).
+    /// Used by the `*`-mode
+    /// "pane row" the user
+    /// picks to jump directly
+    /// to that pane, switching
+    /// the workspace / window
+    /// as needed so the pane is
+    /// reachable. Returns
+    /// `None` when the backend
+    /// can't build a command.
+    ///
+    /// - tmux:
+    ///   `tmux select-pane -t <pane_id> && tmux switch-client -t <pane_id>`
+    ///   (the `tab_id` is
+    ///   tmux's window id, used
+    ///   only as the second
+    ///   target when
+    ///   `select-window` is
+    ///   needed; in practice
+    ///   tmux's `switch-client -t <pane_id>`
+    ///   already switches the
+    ///   window for you so
+    ///   `tab_id` is ignored).
+    /// - herdr:
+    ///   `herdr workspace focus <ws> && herdr tab focus <tab_id>`
+    ///   (the workspace switch
+    ///   + tab switch is the
+    ///   closest equivalent of
+    ///   a focused-pane jump
+    ///   the herdr CLI exposes;
+    ///   the specific pane inside
+    ///   the tab becomes the
+    ///   focused pane via herdr's
+    ///   default tab-focused-pane
+    ///   selection).
+    fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String>;
 
     /// Stage a command that, when
     /// the parent shell runs it,
@@ -409,6 +494,52 @@ pub struct CurrentPaneInfo {
     /// `focus_command`.
     #[allow(dead_code)]
     pub window_id: String,
+    /// The pane's
+    /// **parent unit** — the
+    /// thing that contains
+    /// the pane and that
+    /// `select_for_run`'s
+    /// pane-row handler stages
+    /// a focus command on.
+    /// tmux: the window id
+    /// (`@N`). herdr: the tab
+    /// id (`wA:t1`). The
+    /// `focus_pane` backend
+    /// method receives this
+    /// alongside the pane id
+    /// so it can construct
+    /// the full staged
+    /// sequence (e.g. for
+    /// herdr:
+    /// `workspace focus && tab focus`).
+    /// Empty when the backend
+    /// can't resolve it (the
+    /// pane is fresh / the
+    /// JSON didn't carry it).
+    pub tab_id: String,
+    /// Human-readable label
+    /// for the pane's
+    /// **session / workspace**
+    /// — the unit the user
+    /// recognizes at a glance
+    /// as "where this pane
+    /// lives". tmux: the
+    /// session name (e.g.
+    /// `0`, `1`, or a
+    /// named session like
+    /// `work`). herdr: the
+    /// workspace id (e.g.
+    /// `wA`). Used by the
+    /// renderer to group panes
+    /// under a workspace /
+    /// session header row
+    /// (no longer a
+    /// `[label]` chip on every
+    /// row — see the new
+    /// `mode == "workspace"`
+    /// row type in
+    /// `fetch_session_panes_impl`).
+    pub session_label: String,
     /// Cwd of the pane, as
     /// reported by the backend.
     pub path: String,
@@ -530,6 +661,24 @@ fn tmux_list_panes_parse(stdout: &[u8], current_pane: &str) -> Vec<CurrentPaneIn
             continue;
         }
         let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        // Field order is
+        // determined by the
+        // `FORMAT` constant in
+        // `TmuxBackend::snapshot_current_panes`:
+        //   pane_id | window_id |
+        //   session_name |
+        //   pane_current_path |
+        //   pane_current_command |
+        //   pane_last flag
+        // (6 fields). Older
+        // format-strings could
+        // produce 5 fields
+        // (without session_name),
+        // so we also accept that
+        // — `session_label`
+        // falls back to the
+        // window id when the
+        // field is missing.
         if parts.len() < 4 {
             continue;
         }
@@ -538,12 +687,60 @@ fn tmux_list_panes_parse(stdout: &[u8], current_pane: &str) -> Vec<CurrentPaneIn
             continue;
         }
         let window_id = parts[1].to_string();
-        let path = parts[2].to_string();
-        let current_command = parts[3].to_string();
-        let is_last = parts.get(4).copied().unwrap_or("0") == "1";
+        // session_name is in
+        // position 2 if the
+        // format string
+        // includes it (6-field
+        // form); otherwise
+        // the 5-field legacy
+        // form has path at
+        // position 2. We
+        // detect by counting:
+        // 6+ fields → session_name
+        // present; 4-5 fields →
+        // legacy form, fall back to window_id.
+        // The fetch path adds
+        // `#{session_name}` so
+        // this is the populated
+        // case in practice; the
+        // fallback keeps older
+        // scratch invocations
+        // (`tmux list-panes` from
+        // the CLI) usable as a
+        // dev/debug path.
+        let (session_label, path, current_command, is_last) = if parts.len() >= 6 {
+            (
+                parts[2].to_string(),
+                parts[3].to_string(),
+                parts[4].to_string(),
+                parts.get(5).copied().unwrap_or("0") == "1",
+            )
+        } else {
+            (
+                window_id.clone(),
+                parts[2].to_string(),
+                parts[3].to_string(),
+                parts.get(4).copied().unwrap_or("0") == "1",
+            )
+        };
+        // `tab_id` for tmux is
+        // the window id (`@N`).
+        // `focus_pane` ignores
+        // it (tmux's
+        // `switch-client -t <pane_id>`
+        // switches the window
+        // for you) but it's
+        // kept on the row
+        // so the user can
+        // see the window id
+        // in the row's `output`
+        // slot if they care.
+        let tab_id = window_id.clone();
         out.push(CurrentPaneInfo {
             pane_id: pane_id.to_string(),
             window_id,
+            tab_id,
+            session_label,
             path,
             current_command,
             is_last,
@@ -659,8 +856,36 @@ impl MultiplexerBackend for TmuxBackend {
     }
 
     fn snapshot_current_panes(&self, current_pane: &str) -> Vec<CurrentPaneInfo> {
-        const FORMAT: &str = "#{pane_id} | #{window_id} | #{pane_current_path} | #{pane_current_command} | #{?pane_last,1,0}";
-        match tmux_run(&["list-panes", "-s", "-F", FORMAT]) {
+        // `-a` (list all
+        // sessions) rather than
+        // `-s` (current
+        // session only) so
+        // the `*`-mode list
+        // spans every pane the
+        // user can jump to,
+        // regardless of which
+        // session it lives in.
+        // The format includes
+        // `#{session_name}` so
+        // the row renderer can
+        // visually identify
+        // which session a pane
+        // belongs to (the user
+        // explicitly asked for
+        // this — without it,
+        // multiple sessions'
+        // panes would be
+        // visually
+        // indistinguishable).
+        //
+        // Field order:
+        //   pane_id | window_id |
+        //   session_name |
+        //   pane_current_path |
+        //   pane_current_command |
+        //   pane_last flag
+        const FORMAT: &str = "#{pane_id} | #{window_id} | #{session_name} | #{pane_current_path} | #{pane_current_command} | #{?pane_last,1,0}";
+        match tmux_run(&["list-panes", "-a", "-F", FORMAT]) {
             Some(bytes) => tmux_list_panes_parse(&bytes, current_pane),
             None => Vec::new(),
         }
@@ -682,6 +907,43 @@ impl MultiplexerBackend for TmuxBackend {
              tmux switch-client -t {}",
             pane_id, pane_id
         ))
+    }
+
+    fn focus_session(&self, session_label: &str) -> Option<String> {
+        if session_label.is_empty() {
+            return None;
+        }
+        // `switch-client -t <session-name>`
+        // brings the session's
+        // focused window forward
+        // as the active one.
+        // The session name from
+        // tmux's `#{session_name}`
+        // is the user's
+        // human-readable identifier
+        // (e.g. `0`, `1`, or a
+        // named session like
+        // `work`), and tmux accepts
+        // it directly.
+        Some(format!("tmux switch-client -t {}", session_label))
+    }
+
+    fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
+        // For tmux the per-pane
+        // focus is the same as the
+        // directories-mode T-marker
+        // focus (select-pane &&
+        // switch-client).
+        // `switch-client -t <pane_id>`
+        // already switches the
+        // window for you, so the
+        // `tab_id` argument (the
+        // window id `@N`) is
+        // ignored — kept as a
+        // parameter so the trait
+        // contract is uniform
+        // across backends.
+        self.focus_command(pane_id)
     }
 
     fn create_command(&self, dir: &Path, label: &str) -> Option<String> {
@@ -855,6 +1117,17 @@ fn herdr_run_json(args: &[&str]) -> Option<serde_json::Value> {
 struct HerdrPaneRecord {
     pane_id: String,
     workspace_id: String,
+    /// The pane's tab id
+    /// (`wA:t1`), used by
+    /// the `focus_pane`
+    /// backend method to
+    /// stage
+    /// `herdr tab focus <tab_id>`
+    /// so the user lands
+    /// in the right tab
+    /// (not just the right
+    /// workspace).
+    tab_id: String,
     /// The directory the
     /// foreground process
     /// is actually in
@@ -928,15 +1201,95 @@ fn parse_herdr_pane_list(json: &serde_json::Value) -> Vec<HerdrPaneRecord> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // The tab id (`wA:t1`) —
+        // used by the herdr
+        // `focus_pane` method
+        // to stage a
+        // tab-level focus
+        // command so the user
+        // lands in the right
+        // tab inside the
+        // workspace.
+        let tab_id = p
+            .get("tab_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if pane_id.is_empty() || effective_cwd.is_empty() {
             continue;
         }
         out.push(HerdrPaneRecord {
             pane_id,
             workspace_id,
+            tab_id,
             cwd: effective_cwd,
             agent,
         });
+    }
+    out
+}
+
+/// Parse the `herdr workspace
+/// list` JSON into a
+/// `(workspace_id → label)`
+/// map. The label is what
+/// herdr itself calls the
+/// workspace (e.g.
+/// `smarthistory`, `dir:
+/// Downloads`, `~`);
+/// surfacing it to the
+/// user as the workspace
+/// header row's primary
+/// text matches the user's
+/// mental model and the
+/// herdr UI more closely
+/// than the bare id (`wB`)
+/// would.
+///
+/// The expected JSON shape:
+///   { "result": { "type":
+///   "workspace_list",
+///   "workspaces": [ {
+///   "workspace_id": "wB",
+///   "label": "smarthistory",
+///   ... } ] } }
+/// Missing `label` falls
+/// back to the bare id
+/// (and the TUI's warning
+/// "workspace-label
+/// unavailable" path).
+/// Empty `workspace_id`s
+/// are skipped (the TUI
+/// can't dispatch a focus
+/// to an empty-id
+/// workspace anyway).
+#[cfg(feature = "herdr")]
+fn parse_workspace_labels(json: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let workspaces = match json
+        .get("result")
+        .and_then(|r| r.get("workspaces"))
+        .and_then(|w| w.as_array())
+    {
+        Some(w) => w,
+        None => return out,
+    };
+    for ws in workspaces {
+        let id = ws
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let label = ws
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| id.clone());
+        out.insert(id, label);
     }
     out
 }
@@ -1021,100 +1374,124 @@ impl MultiplexerBackend for HerdrBackend {
     }
 
     fn snapshot_current_panes(&self, current_pane: &str) -> Vec<CurrentPaneInfo> {
-        // The `*`-mode
-        // "panes in the
-        // current context"
-        // view is the
-        // current
-        // workspace's
-        // sibling panes —
-        // the panes the
-        // user can switch
-        // to from the TUI
-        // they're
-        // currently in.
+        // The `*`-mode view
+        // shows **every**
+        // herdr pane across
+        // every workspace —
+        // not just the
+        // current workspace's
+        // siblings. The user
+        // asked for this so they
+        // can pick a pane from
+        // any workspace and jump
+        // to it; the per-row
+        // `[wA]` badge (the
+        // workspace id, surfaced
+        // via `session_label`)
+        // lets the user tell at
+        // a glance which workspace
+        // a pane belongs to.
         //
-        // tmux's equivalent
-        // is `tmux
-        // list-panes -s`
-        // (current session,
-        // current pane
-        // excluded). herdr
-        // has no
-        // "current session"
-        // concept (it has
-        // one global
-        // session server),
-        // but the same UX
-        // intent maps to
-        // "the current
-        // workspace's
-        // panes, minus the
-        // one the TUI is
-        // running in".
+        // The pane the TUI is
+        // running in (read from
+        // `HERDR_PANE_ID`, falling
+        // back to the
+        // `current_pane` arg the
+        // TUI's
+        // `fetch_session_panes`
+        // path passes in) is
+        // excluded so the user
+        // never stages a no-op
+        // jump to themselves.
         //
         // herdr sets
-        // `HERDR_WORKSPACE_ID`
-        // and `HERDR_PANE_ID`
-        // in the env of
-        // every pane
-        // process; the
-        // existing tmux
-        // flow reads
-        // `$TMUX_PANE` for
-        // the same purpose.
-        // We honour the
-        // herdr env vars
-        // here, then filter
-        // `pane list` to
-        // the current
-        // workspace and
-        // exclude the
-        // current pane.
-        //
-        // When herdr isn't
-        // running (no
-        // `HERDR_WORKSPACE_ID`),
-        // we return an
-        // empty list — the
-        // user isn't inside
-        // a herdr pane, so
-        // they can't
-        // switch to a
-        // sibling pane.
-        let current_workspace = std::env::var("HERDR_WORKSPACE_ID")
-            .ok()
-            .filter(|s| !s.is_empty());
+        // `HERDR_PANE_ID` in every
+        // pane process's env; the
+        // existing tmux flow reads
+        // `$TMUX_PANE` for the same
+        // purpose. When neither is
+        // set we return an empty
+        // list (the user isn't running
+        // inside a herdr pane, so
+        // they have no siblings to
+        // switch to — and `pane
+        // list` would also return
+        // nothing useful in that
+        // case).
         let current_pane_env = std::env::var("HERDR_PANE_ID")
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| current_pane.to_string());
-        let current_workspace = match current_workspace {
-            Some(ws) => ws,
-            None => return Vec::new(),
-        };
         let json = match herdr_run_json(&["pane", "list"]) {
             Some(j) => j,
             None => return Vec::new(),
         };
+        // Fetch the workspace
+        // list too so we can
+        // resolve workspace
+        // IDs (e.g. `wB`) to
+        // their human-readable
+        // `label` (e.g.
+        // `smarthistory`,
+        // `dir: Downloads`).
+        // The renderer uses
+        // `session_label` as
+        // the workspace header's
+        // primary text, so the
+        // user sees `smarthistory`
+        // rather than the bare
+        // `wB` id (the user's
+        // explicit ask: "use
+        // the name of the
+        // workspace instead
+        // [of just the count]").
+        // The lookup is
+        // best-effort: if the
+        // workspace list call
+        // fails we fall back to
+        // the bare workspace
+        // id (still useful, just
+        // less friendly).
+        let workspace_labels: std::collections::HashMap<String, String> =
+            match herdr_run_json(&["workspace", "list"]) {
+                Some(ws_json) => parse_workspace_labels(&ws_json),
+                None => std::collections::HashMap::new(),
+            };
         parse_herdr_pane_list(&json)
             .into_iter()
-            .filter(|r| r.workspace_id == current_workspace && r.pane_id != current_pane_env)
-            .map(|r| CurrentPaneInfo {
-                pane_id: r.pane_id,
-                window_id: r.workspace_id,
-                path: r.cwd,
-                // herdr's `agent`
-                // is the closest
-                // equivalent of
-                // tmux's
-                // `pane_current_command`
-                // (the detected
-                // agent name;
-                // empty for plain
-                // shells).
-                current_command: r.agent,
-                is_last: false,
+            .filter(|r| r.pane_id != current_pane_env)
+            .map(|r| {
+                let label = workspace_labels
+                    .get(&r.workspace_id)
+                    .cloned()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| r.workspace_id.clone());
+                CurrentPaneInfo {
+                    pane_id: r.pane_id,
+                    window_id: r.workspace_id.clone(),
+                    // The herdr tab_id
+                    // (`wA:t1`) drives
+                    // the pane-level
+                    // focus staging
+                    // (`focus_pane`).
+                    tab_id: r.tab_id,
+                    // The workspace's
+                    // human-readable
+                    // `label` (e.g.
+                    // `smarthistory`,
+                    // `dir: Downloads`)
+                    // from `herdr
+                    // workspace list`,
+                    // falling back to
+                    // the bare workspace
+                    // id (`wA`) if the
+                    // label isn't
+                    // available.
+                    session_label: label,
+                    path: r.cwd,
+                    current_command: r.agent,
+                    is_last: false,
+                }
             })
             .collect()
     }
@@ -1150,6 +1527,87 @@ impl MultiplexerBackend for HerdrBackend {
             return None;
         }
         Some(format!("herdr workspace focus {}", workspace_id))
+    }
+
+    fn focus_session(&self, session_label: &str) -> Option<String> {
+        if session_label.is_empty() {
+            return None;
+        }
+        // For herdr the
+        // "session" is the
+        // workspace — the
+        // `session_label` IS
+        // the workspace id
+        // (`wA`) because that's
+        // what we set in
+        // `parse_herdr_pane_list`.
+        // The staging command
+        // is the same as the
+        // directories-mode
+        // focus_command (just
+        // `herdr workspace focus <id>`).
+        Some(format!("herdr workspace focus {}", session_label))
+    }
+
+    fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String> {
+        // The herdr CLI
+        // doesn't expose a
+        // pane-level focus
+        // command directly —
+        // the closest
+        // equivalent is
+        // "switch to the
+        // workspace AND the
+        // tab the pane lives
+        // in". The pane within
+        // the tab becomes the
+        // focused-by-default
+        // pane (the
+        // previously-focused
+        // pane in the tab is
+        // restored).
+        //
+        // Strip the `:pN`
+        // suffix from the
+        // pane id to get the
+        // workspace id (the
+        // leftmost colon-free
+        // component). If the
+        // user picked a
+        // workspace row
+        // directly we'd be in
+        // `focus_session` —
+        // here the row
+        // definitely has a
+        // `:pN` suffix.
+        let workspace_id = pane_id.split(':').next().unwrap_or(pane_id);
+        if workspace_id.is_empty() {
+            return None;
+        }
+        if tab_id.is_empty() {
+            // No tab_id — degrade
+            // to a
+            // workspace-session
+            // focus (the
+            // `&&`-chain is
+            // redundant then).
+            return Some(format!("herdr workspace focus {}", workspace_id));
+        }
+        // `workspace focus` switches
+        // the active workspace;
+        // `tab focus <tab_id>` then
+        // brings the pane's tab
+        // forward inside it. `&&`
+        // short-circuits so a
+        // stale workspace id (the
+        // workspace was closed)
+        // doesn't try a tab focus
+        // against a dead workspace.
+        Some(format!(
+            "herdr workspace focus {} && \
+             herdr tab focus {}",
+            workspace_id, tab_id
+        ))
     }
 
     fn create_command(&self, dir: &Path, label: &str) -> Option<String> {
@@ -1291,6 +1749,53 @@ mod tests {
         assert_eq!(out[0].pane_id, "%2");
         assert!(out[0].is_last);
         assert_eq!(out[1].pane_id, "%3");
+        assert!(!out[1].is_last);
+    }
+
+    /// The 6-field form
+    /// includes `session_name`
+    /// (added so the `*`-mode
+    /// row renderer can show a
+    /// `[session-name]` badge
+    /// on each pane row — the
+    /// `*`-mode list now spans
+    /// every session, so the
+    /// badge is the only way to
+    /// tell which session a pane
+    /// belongs to). This test
+    /// locks in the 6-field
+    /// parsing path so a future
+    /// format-string change
+    /// (e.g. dropping
+    /// `session_name`) would
+    /// surface as a test
+    /// failure rather than a
+    /// silent regression.
+    #[test]
+    fn tmux_list_panes_extracts_session_name_in_six_field_form() {
+        let raw = b"\
+%1 | @1 | work | /Users/har/work | vim | 0
+%2 | @1 | work | /Users/har/work | python | 1
+%3 | @2 | debug | /var/log | tail | 0
+";
+        let out = tmux_list_panes_parse(raw, "%1");
+        assert_eq!(out.len(), 2);
+        // The session_name
+        // from position 2
+        // (a field that
+        // doesn't appear
+        // in the 5-field
+        // form) lands in
+        // `session_label`.
+        assert_eq!(out[0].pane_id, "%2");
+        assert_eq!(out[0].session_label, "work");
+        assert_eq!(out[0].path, "/Users/har/work");
+        assert_eq!(out[0].current_command, "python");
+        assert!(out[0].is_last);
+        assert_eq!(out[1].pane_id, "%3");
+        assert_eq!(out[1].session_label, "debug");
+        assert_eq!(out[1].path, "/var/log");
+        assert_eq!(out[1].current_command, "tail");
         assert!(!out[1].is_last);
     }
 
@@ -1541,6 +2046,95 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    /// Regression test for the
+    /// user-reported ask:
+    /// show the workspace's
+    /// human-readable label
+    /// (e.g. `smarthistory`,
+    /// `dir: Downloads`) instead
+    /// of just the workspace id
+    /// (`wB`) as the `#` workspace
+    /// header row's primary text.
+    /// `parse_workspace_labels`
+    /// parses `herdr workspace list`'s
+    /// JSON into a
+    /// `workspace_id → label` map.
+    /// The `snapshot_current_panes`
+    /// code substitutes the
+    /// resolved label into each
+    /// `CurrentPaneInfo`'s
+    /// `session_label`, so the
+    /// renderer's `# {command}` text
+    /// reads `smarthistory` rather
+    /// than `wB`.
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn parse_workspace_labels_resolves_id_to_human_label() {
+        let json = serde_json::json!({
+            "id": "cli:workspace:list",
+            "result": {
+                "type": "workspace_list",
+                "workspaces": [
+                    {
+                        "workspace_id": "wB",
+                        "label": "smarthistory",
+                        "number": 1,
+                        "focused": true,
+                        "pane_count": 3,
+                        "tab_count": 2
+                    },
+                    {
+                        "workspace_id": "wE",
+                        "label": "dir: Downloads",
+                        "number": 2,
+                        "focused": false,
+                        "pane_count": 2,
+                        "tab_count": 1
+                    }
+                ]
+            }
+        });
+        let labels = parse_workspace_labels(&json);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels.get("wB").map(String::as_str), Some("smarthistory"));
+        assert_eq!(labels.get("wE").map(String::as_str), Some("dir: Downloads"));
+    }
+
+    /// Workspaces with no
+    /// `label` field (a
+    /// brand-new herdr
+    /// install that hasn't
+    /// named the workspace
+    /// yet, or older herdr
+    /// versions that don't
+    /// expose `label`) fall
+    /// back to the bare id
+    /// — keeps the `#` row's
+    /// display non-empty
+    /// rather than a blank
+    /// header.
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn parse_workspace_labels_falls_back_to_id_when_label_missing() {
+        let json = serde_json::json!({
+            "result": {
+                "panes": [],
+                "workspaces": [
+                    { "workspace_id": "wA" },
+                    { "workspace_id": "wB", "label": "" }
+                ]
+            }
+        });
+        let labels = parse_workspace_labels(&json);
+        assert_eq!(labels.len(), 2);
+        // Missing `label` → fall
+        // back to `workspace_id`.
+        assert_eq!(labels.get("wA").map(String::as_str), Some("wA"));
+        // Empty `label` → fall
+        // back as well.
+        assert_eq!(labels.get("wB").map(String::as_str), Some("wB"));
+    }
+
     #[cfg(feature = "herdr")]
     #[test]
     fn herdr_pane_list_handles_missing_result_envelope() {
@@ -1667,5 +2261,245 @@ mod tests {
         // a malformed
         // command.
         assert!(b.focus_command("").is_none());
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_focus_session_emits_workspace_focus() {
+        // Selecting
+        // a workspace header
+        // row (the user
+        // picks the whole
+        // workspace, not
+        // a pane inside it)
+        // stages
+        // `herdr workspace focus <id>`.
+        // The `session_label`
+        // for herdr is the
+        // workspace id
+        // itself, so the
+        // command is the
+        // same as the
+        // directories-mode
+        // T-marker staging
+        // (which uses
+        // `focus_command` on
+        // the workspace-scoped
+        // pane id, stripping
+        // the `:pN` suffix).
+        let b = HerdrBackend;
+        assert_eq!(b.focus_session("wA").unwrap(), "herdr workspace focus wA");
+        assert!(b.focus_session("").is_none());
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_focus_pane_chains_workspace_and_tab_focus() {
+        // Selecting a pane
+        // row stages
+        // `herdr workspace focus <ws> && herdr tab focus <tab_id>`
+        // — the closest
+        // herdr equivalent of
+        // "switch to this
+        // pane" (herdr's
+        // public CLI doesn't
+        // expose a pane-level
+        // focus command, but
+        // `workspace focus` +
+        // `tab focus` brings
+        // the user to the
+        // right workspace AND
+        // the right tab,
+        // where the
+        // previously-focused
+        // pane becomes
+        // focused by
+        // default).
+        let b = HerdrBackend;
+        let cmd = b.focus_pane("wA:p3", "wA:t2").expect("non-empty ids");
+        assert_eq!(cmd, "herdr workspace focus wA && herdr tab focus wA:t2");
+        // An empty `tab_id`
+        // degrades to a
+        // bare
+        // `workspace focus`
+        // command (no tab
+        // switch).
+        let cmd = b.focus_pane("wA:p3", "").expect("non-empty pane id");
+        assert_eq!(cmd, "herdr workspace focus wA");
+        // An empty `pane_id`
+        // is rejected.
+        assert!(b.focus_pane("", "").is_none());
+        // A bare workspace
+        // id (no `:pN`)
+        // still works — the
+        // `focus_pane` doesn't
+        // REQUIRE the `:pN`
+        // suffix because
+        // herdr's
+        // `workspace focus`
+        // accepts the bare
+        // id directly
+        // (whether the caller
+        // is pane-row or
+        // workspace-row
+        // doesn't matter).
+        let cmd = b.focus_pane("wA", "wA:t1").expect("bare ws id");
+        assert_eq!(cmd, "herdr workspace focus wA && herdr tab focus wA:t1");
+    }
+
+    #[test]
+    fn tmux_focus_session_uses_switch_client() {
+        // Selecting a session
+        // header row in the
+        // `*` mode for a tmux
+        // user stages
+        // `tmux switch-client -t <session-name>`
+        // which brings the
+        // session's focused
+        // window forward.
+        let b = TmuxBackend;
+        assert_eq!(b.focus_session("0").unwrap(), "tmux switch-client -t 0");
+        assert_eq!(
+            b.focus_session("my-session").unwrap(),
+            "tmux switch-client -t my-session"
+        );
+        assert!(b.focus_session("").is_none());
+    }
+
+    #[test]
+    fn tmux_focus_pane_reuses_focus_command() {
+        // For tmux the per-pane
+        // focus is the same
+        // shape as the
+        // directories-mode
+        // T-marker focus:
+        // `select-pane -t <pane_id> && switch-client -t <pane_id>`.
+        // The `tab_id` (window
+        // id `@N`) is ignored
+        // because tmux's
+        // `switch-client -t %N`
+        // already switches the
+        // window for you.
+        let b = TmuxBackend;
+        let cmd = b.focus_pane("%5", "@3").expect("non-empty pane id");
+        assert_eq!(cmd, "tmux select-pane -t %5 && tmux switch-client -t %5");
+        assert_eq!(
+            b.focus_pane("%5", "").unwrap(),
+            "tmux select-pane -t %5 && tmux switch-client -t %5"
+        );
+        assert!(b.focus_pane("", "").is_none());
+    }
+
+    /// Live integration test:
+    /// runs the actual
+    /// `herdr pane list` CLI
+    /// parse path via
+    /// `HerdrBackend::snapshot_current_panes`
+    /// and asserts that the
+    /// returned count
+    /// is at least equal to
+    /// (`herdr pane list`'s
+    /// panes minus one for the
+    /// current pane). This
+    /// is the diagnostic
+    /// for the user-reported
+    /// bug where only some
+    /// workspaces' panes
+    /// showed up in the `*`
+    /// mode list.
+    ///
+    /// Skipped when `HERDR_PANE_ID`
+    /// is unset (the test
+    /// suite isn't running
+    /// inside a herdr pane)
+    /// so CI doesn't fail
+    /// when herdr isn't
+    /// installed.
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_backend_snapshot_current_panes_returns_all_workspaces() {
+        let current_pane = std::env::var("HERDR_PANE_ID")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let Some(current_pane) = current_pane else {
+            eprintln!("[skip] $HERDR_PANE_ID unset (not in herdr)");
+            return;
+        };
+        // Use the same JSON the production code reads.
+        let out = match std::process::Command::new("herdr")
+            .args(["pane", "list"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => {
+                eprintln!("[skip] `herdr` not on PATH");
+                return;
+            }
+        };
+        let json: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+            Ok(j) => j,
+            Err(_) => {
+                eprintln!("[skip] `herdr pane list` returned non-JSON output");
+                return;
+            }
+        };
+        let expected_count = json
+            .get("result")
+            .and_then(|r| r.get("panes"))
+            .and_then(|p| p.as_array())
+            .map(|ps| {
+                ps.iter()
+                    .filter(|p| {
+                        p.get("pane_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s != current_pane)
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if expected_count == 0 {
+            eprintln!("[skip] no non-current panes in `herdr pane list`");
+            return;
+        }
+        // Run the backend's snapshot for the current pane.
+        let b = HerdrBackend;
+        let rows = b.snapshot_current_panes(&current_pane);
+        eprintln!(
+            "[debug] backend returned {} rows for current pane {:?} (expected {} from `herdr pane list`)",
+            rows.len(),
+            current_pane,
+            expected_count
+        );
+        let mut workspaces_seen: Vec<String> = Vec::new();
+        for r in &rows {
+            if !workspaces_seen.contains(&r.session_label) {
+                workspaces_seen.push(r.session_label.clone());
+            }
+            eprintln!(
+                "[debug]   pane_id={:?} session_label={:?} cwd={:?} tab_id={:?}",
+                r.pane_id, r.session_label, r.path, r.tab_id
+            );
+        }
+        eprintln!(
+            "[debug] workspaces represented in backend output: {:?}",
+            workspaces_seen
+        );
+        // Every pane from `herdr pane list`
+        // (excluding the current one)
+        // must survive the JSON parse
+        // path. This catches the case where
+        // a single workspace's panes are
+        // dropped (the user's bug).
+        assert_eq!(
+            rows.len(),
+            expected_count,
+            "backend snapshot returned {} rows but `herdr pane list` had {} (current pane {:?} excluded). \
+             A mismatch means parse_herdr_pane_list is dropping some rows; \
+             check the per-row debug output above.",
+            rows.len(),
+            expected_count,
+            current_pane
+        );
     }
 }

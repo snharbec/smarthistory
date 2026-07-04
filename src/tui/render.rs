@@ -1135,7 +1135,16 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         "panes",
         qp.panes.to_string(),
-        "list every pane in the current tmux session (selecting one jumps to it)",
+        // The `*`-mode view lists
+        // every pane across every
+        // tmux session / herdr
+        // workspace (selecting one
+        // jumps to it; each row
+        // shows a `[label]` badge
+        // so the user can tell
+        // which session / workspace
+        // the pane belongs to).
+        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; selecting a workspace jumps to the session/workspace, selecting a pane jumps to the pane)",
     );
     mode_row(
         &mut lines,
@@ -2089,41 +2098,90 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // Build the real row items. Rows are stored newest-first; for
     // display we want oldest at the top and newest at the bottom,
     // so reverse the order. Pass `is_selected` based on the data index.
-    let real_items: Vec<ListItem> = merged
-        .iter()
-        .enumerate()
-        .rev()
-        .map(|(data_idx, r)| {
-            let is_selected = app.list_state.selected() == Some(data_idx);
-            ListItem::new(render_row(r, app, is_selected, age_width))
-        })
-        .collect();
+    //
+    // **Panes mode (`*`) is different.** The rows are produced by
+    // `fetch_session_panes_impl` as a tree: `workspace` header row,
+    // then its `pane` child rows, then the next workspace header,
+    // etc. The data order IS the display order — the tree must read
+    // top-to-bottom (header, then the panes it owns). Reversing it
+    // would put a workspace's pane rows ABOVE that workspace's header,
+    // which destroys the visual grouping. So panes mode skips the
+    // `.rev()` and treats the rows as already display-ordered.
+    let is_panes = app.is_panes_query();
+    let real_items: Vec<ListItem> = if is_panes {
+        merged
+            .iter()
+            .enumerate()
+            .map(|(data_idx, r)| {
+                let is_selected = app.list_state.selected() == Some(data_idx);
+                ListItem::new(render_row(r, app, is_selected, age_width))
+            })
+            .collect()
+    } else {
+        merged
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(data_idx, r)| {
+                let is_selected = app.list_state.selected() == Some(data_idx);
+                ListItem::new(render_row(r, app, is_selected, age_width))
+            })
+            .collect()
+    };
 
     // Bottom-align: when there are fewer real rows than the visible
     // height, pad the top with empty items so the real rows sit at
     // the bottom of the widget. `area.height` includes the top and
     // bottom borders; subtract 2 for the content area.
+    //
+    // **Panes mode**: the tree reads top-to-bottom, so we DON'T pad
+    // the top — the rows sit at the top of the widget instead. The
+    // behavior matches the user's mental model of a tree view
+    // (header at the top, indentation underneath).
     let visible_height = area.height.saturating_sub(2) as usize;
     let real_count = real_items.len();
-    let pad = visible_height.saturating_sub(real_count);
+    let pad = if is_panes {
+        0
+    } else {
+        visible_height.saturating_sub(real_count)
+    };
 
-    let mut items: Vec<ListItem> = (0..pad).map(|_| ListItem::new("")).collect();
+    let mut items: Vec<ListItem> = if is_panes {
+        Vec::with_capacity(real_count)
+    } else {
+        (0..pad).map(|_| ListItem::new("")).collect()
+    };
     items.extend(real_items);
 
     // The stored selection is in data coordinates (0 = newest).
     // Map it to the rendered list coordinates where the newest item
     // is the last real item.
-    let rendered_idx = app
-        .list_state
-        .selected()
-        .map(|data_idx| pad + (real_count.saturating_sub(1) - data_idx));
+    //
+    // **Panes mode**: data index IS the rendered index (0 = first
+    // row at the top). No flip.
+    let rendered_idx = if is_panes {
+        app.list_state
+            .selected()
+            .map(|data_idx| data_idx)
+    } else {
+        app.list_state
+            .selected()
+            .map(|data_idx| pad + (real_count.saturating_sub(1) - data_idx))
+    };
 
     // Always start the list from the bottom of the visible window.
     // When the list fits within the visible height we pad with empty
     // items above; when it is taller, we anchor the offset so the
     // last entry sits at the bottom and the user scrolls upward to
     // see older entries.
-    let offset = if real_count >= visible_height {
+    //
+    // **Panes mode**: anchor at the TOP — offset = 0 — so the first
+    // workspace header is the first visible row and the user can
+    // scroll DOWN to see more panes. The bottom-anchor logic for
+    // the reverse-sorted history list doesn't apply here.
+    let offset = if is_panes {
+        0
+    } else if real_count >= visible_height {
         // Anchor at the bottom: offset = real_count - visible_height.
         // This positions the newest entry at the bottom row and leaves
         // older entries visible above as the user scrolls up.
@@ -2318,6 +2376,54 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         Span::raw(" "),
     ];
 
+    // The `*`-mode list now has a
+    // **tree** layout:
+    //   workspace_header
+    //     · pane_row
+    //     · pane_row
+    //   workspace_header
+    //     · pane_row
+    // For `pane` rows,
+    // prepend an indent + a
+    // tree connector (`  · `)
+    // so the pane is visually
+    // grouped under its
+    // workspace header above.
+    // The old `[label]` badge
+    // that identified the
+    // workspace per-row is no
+    // longer needed — the
+    // workspace header row
+    // above already provides
+    // that context, and the
+    // indent makes the
+    // grouping clear.
+    //
+    // For `workspace` rows,
+    // prepend a bold
+    // `# ` marker (same
+    // convention as the
+    // directories-mode
+    // header rows) so the
+    // user can tell at a
+    // glance that this is a
+    // workspace-level row,
+    // not a pane. Selecting
+    // a workspace row stages
+    // `focus_session`;
+    // selecting a pane row
+    // stages `focus_pane`.
+    if row.mode == "pane" {
+        spans.push(Span::raw("  · "));
+    } else if row.mode == "workspace" {
+        spans.push(Span::styled(
+            "# ",
+            Style::default()
+                .fg(Theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Highlight query matches
     // inside `row.command`.
     // When the query is a regex
@@ -2364,7 +2470,24 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // where the line breaks are. The full command (with real
     // newlines) is available in the details pane.
     let cmd_display: String = row.command.replace('\n', "↵").replace('\r', "");
-    if app.is_regex_query() {
+    // For `workspace` rows in
+    // the `*`-mode tree,
+    // render the label (a
+    // workspace id like `wA`
+    // or a tmux session name)
+    // bold + accent so it
+    // visually stands out as a
+    // header above its pane
+    // children. Other rows use
+    // the normal highlight path.
+    if row.mode == "workspace" {
+        spans.push(Span::styled(
+            format!("{} ", cmd_display),
+            Style::default()
+                .fg(Theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if app.is_regex_query() {
         spans.extend(highlight_regex_matches(
             &cmd_display,
             app.query_regex.as_ref(),
