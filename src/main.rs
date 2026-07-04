@@ -154,6 +154,35 @@ enum Commands {
     Tui {
         #[arg(short, long)]
         mode: Option<String>,
+        /// Start the TUI directly in a specific prefix mode
+        /// (e.g. `--prefix '*'` for panes, `--prefix '#'`
+        /// for directories, `--prefix '@'` for notes,
+        /// `--prefix '!'` for todos, `--prefix '-'` for
+        /// JIRA, `--prefix '~'` for files, `--prefix '='`
+        /// for LLM command generation, `--prefix '%'`
+        /// for the question mode, `--prefix '/'` for
+        /// regex search, `--prefix '?'` for fuzzy, `--prefix '+'`
+        /// for output search). The prefix character is
+        /// the user's configured one — see
+        /// `prefix.<mode>=...` in the config file; the
+        /// example values above are the defaults.
+        ///
+        /// When `--prefix` is given, the TUI starts with
+        /// the query set to that prefix character — so
+        /// the first frame already shows the chosen view
+        /// instead of the default history list. The CLI
+        /// `--prefix` value also takes final precedence
+        /// over the persisted `session.query`: the previous
+        /// query is NOT restored, so the user lands in
+        /// exactly the prefix mode they asked for.
+        ///
+        /// Useful for binding keys to jump directly into
+        /// a specific view without typing the prefix each
+        /// time — e.g.
+        /// `bindkey '^P' 'smarthistory tui --prefix "*"'`
+        /// opens the panes view on Ctrl-P.
+        #[arg(long)]
+        prefix: Option<String>,
         #[arg(index = 1)]
         query: Option<String>,
     },
@@ -3040,7 +3069,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", out);
             }
         },
-        Commands::Tui { mode, query } => {
+        Commands::Tui { mode, prefix, query } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -3054,7 +3083,45 @@ fn main() -> anyhow::Result<()> {
                     let cfg = Config::load();
                     cfg.initial_mode
                 });
-            let initial_query = query.unwrap_or_else(|| "".to_string());
+            // `--prefix <char>` starts the TUI directly in a prefix
+            // mode (panes, directories, notes, etc.). It takes final
+            // precedence over both the positional `--query` and the
+            // persisted `session.query`: when set, the TUI starts
+            // with `query = "<prefix-char>"` and the persisted query
+            // is NOT restored (the user explicitly asked for a
+            // particular prefix this launch).
+            //
+            // The prefix string is passed verbatim to the TUI as the
+            // initial query (just the character itself, with no
+            // filter body). `run_tui_to_stdout` receives it as the
+            // initial query and ALSO is told (via the new
+            // `flag_override_session_query` parameter) that it
+            // should ignore `session.query` even if it's `Some`.
+            //
+            // We strip a trailing `=` (`--prefix='*'` is parsed by
+            // clap as `*=*` or similar) defensively so weird shell
+            // quoting in the user's invocation doesn't break the
+            // prefix detection. We also accept multi-character
+            // values and take the first character — the prefix is
+            // always a single character by construction (see
+            // `QueryPrefixes`).
+            let (initial_query, override_session_query) =
+                match (prefix.as_deref(), query.as_deref()) {
+                    (Some(p), _) => {
+                        // Take the first char of the prefix string
+                        // (it's always a single char by construction;
+                        // we accept multi-char input defensively for
+                        // shell-quoted strings).
+                        let first_char = p
+                            .chars()
+                            .next()
+                            .unwrap_or_default()
+                            .to_string();
+                        (first_char, true)
+                    }
+                    (None, Some(q)) => (q.to_string(), false),
+                    (None, None) => (String::new(), false),
+                };
             // Build the LLM client up front so the TUI entry
             // point doesn't need to know about config parsing.
             // The TUI itself only sees `Option<Box<dyn LlmClient>>`
@@ -3072,6 +3139,7 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 llm_client,
                 llm_config,
+                override_session_query,
             )? {
                 Some((command, pick_mode)) => {
                     // Print the chosen command. The pick_mode tells

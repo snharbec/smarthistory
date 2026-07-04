@@ -195,7 +195,7 @@ override the defaults.
 Supported keys:
 
 | Key | Meaning | Default |
-|-----|---------|---------|
+| ----- | --------- | --------- |
 | `tmuxpaneoutputdir=~/path` | Directory containing per-pane tmux logs (used by the TMUX integration) | `~/.cache/tmux-history` |
 | `ignorecapture=cmd1 cmd2 ...` | Space-separated list of commands whose output is never captured (typically interactive TUIs like editors, pagers, and system monitors) | `vi nvim vim top htop emacs more less lazygit` |
 | `capturelines=N` or `capturelines=ALL` | Default number of captured output lines. `ALL` captures every line up to the next shell prompt. | `20` |
@@ -556,7 +556,7 @@ smarthistory list  [--fields f1,f2,...] [--table]
 smarthistory clean [QUERY] [--directory <dir>] [--session] [--exit-code OK|ERROR]
                      [--force]
 smarthistory next  <COMMAND> [--limit N]
-smarthistory tui   [--mode SESS|DIR|GLOBAL]
+smarthistory tui   [--mode SESS|DIR|GLOBAL] [--prefix <char>] [QUERY]
 smarthistory import-atuin
 smarthistory init  zsh
 ```
@@ -579,6 +579,28 @@ smarthistory init  zsh
 - `next <COMMAND>` returns the most probable commands that follow
   `<COMMAND>` in the history, ordered by descending frequency. Each line
   is `freq<TAB>command`. Used internally by the `Ctrl+S` widget.
+- `tui [--prefix <char>] [QUERY]` starts the full-screen
+  TUI picker. The positional `QUERY` is the live search string on
+  startup (useful for `smarthistory tui 'git'` style "jump
+  straight to filtered history"). The `--prefix <char>` flag is the
+  declarative form: pass `--prefix '*'` to start directly in the panes
+  view, `--prefix '#'` for directories, `--prefix '@'` for notes,
+  `--prefix '!'` for todos, `--prefix '-'` for JIRA, `--prefix '~'`
+  for files, `--prefix '='` for LLM command generation,
+  `--prefix '%'` for the question mode, `--prefix '/'` for regex
+  search, `--prefix '?'` for fuzzy, `--prefix '+'` for output search.
+  When `--prefix` is given, the persisted `session.query` is NOT
+  restored — the user's intent takes final precedence. This makes
+  `--prefix` useful for shell keybindings that jump directly into a
+  specific view without typing the prefix each launch:
+
+    ```
+    # zsh: open the panes view on Ctrl-P
+    bindkey '^P' 'smarthistory tui --prefix "*"'
+    ```
+
+  The prefix character is the one in the user's config file (see
+  `prefix.<mode>=...`); the list above shows the defaults.
 
 ### Sample output
 
@@ -1350,7 +1372,7 @@ editors); configure with `todo.line_option=...`. The
 substitution replaces the literal `$LINE` token with the
 1-based line number of the todo entry. Examples:
 
-| Config                    | Result for todo on line 42 |
+| Config | Result for todo on line 42 |
 | ------------------------- | -------------------------- |
 | `todo.line_option=+$LINE` | `vi /path/to/note.md +42` |
 | `todo.line_option=+LINE:$LINE` | `vi /path/to/note.md +LINE:42` |

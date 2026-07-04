@@ -8986,12 +8986,56 @@ fn move_selection(&mut self, delta: isize) {
 /// The TUI renders to **stderr** (so it doesn't pollute the parent
 /// shell's `$(...)` capture, which reads stdout). The selected command
 /// is printed to **stdout** by the caller (`main`).
+///
+/// Resolve the TUI's initial query at startup. The precedences
+/// are:
+///   1. If `override_session_query` is true (the new `--prefix
+///      <char>` CLI flag was given), the persisted `session_query`
+///      is NOT restored — the user explicitly asked to start in a
+///      particular prefix mode this launch. The returned
+///      `effective_query` is the `initial_query` (which `main`
+///      pre-fills with the prefix character when `--prefix` is
+///      present), and `prefilled_query` is `None` (so the TUI's
+///      `query_prefilled` flag is `false`, the user typed fresh
+///      text and the cursor sits at the end).
+///   2. Otherwise, if the session file has a persisted query,
+///      it takes precedence — the user's last query is restored.
+///      `effective_query` is the persisted value, and
+///      `prefilled_query` is the persisted value (so the TUI
+///      treats it as pre-filled text rather than fresh input,
+///      and the first character typed replaces the pre-filled
+///      buffer instead of appending).
+///   3. Otherwise, the CLI-supplied `initial_query` (`--query`) is
+///      used as-is, `prefilled_query` is `None`.
+///
+/// Returns `(prefilled_query, effective_query)` so `run_tui_to_stdout`
+/// can pass both fields into `App::new` (the `query_prefilled` flag is
+/// `prefilled_query.is_some()`).
+///
+/// The helper is extracted out of `run_tui_to_stdout` so its precedence
+/// contract can be unit-tested directly (the surrounding `run_tui_to_stdout`
+/// body is hard to test: it does terminal setup and TTY interaction).
+fn resolve_initial_query(
+    initial_query: &str,
+    session_query: Option<&str>,
+    override_session_query: bool,
+) -> (Option<String>, String) {
+    if override_session_query {
+        return (None, initial_query.to_string());
+    }
+    match session_query {
+        Some(q) => (Some(q.to_string()), q.to_string()),
+        None => (None, initial_query.to_string()),
+    }
+}
+
 pub fn run_tui_to_stdout(
     initial_mode: String,
     initial_query: String,
     conn: Connection,
     llm: Option<Box<dyn crate::llm::LlmClient>>,
     llm_config: Option<crate::llm::LlmConfig>,
+    override_session_query: bool,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -9029,8 +9073,22 @@ pub fn run_tui_to_stdout(
     // The query is considered "prefilled" only when it was loaded
     // from the persisted session file, not when the user supplied
     // a fresh `--query` argument or `$SMARTHISTORY_TUI_QUERY`.
-    let prefilled_query = session.query.clone();
-    let effective_query = prefilled_query.clone().unwrap_or(initial_query);
+    //
+    // `override_session_query` is set by the new `--prefix <char>`
+    // CLI flag — the user explicitly asked to start the TUI in a
+    // particular prefix mode this launch, so the persisted
+    // `session.query` is NOT restored (the user's intent takes
+    // final precedence, exactly as they specified). The CLI flag
+    // resolves to `initial_query = "<prefix-char>"` in `main`, so
+    // setting `prefilled_query = None` here makes the TUI start
+    // with that prefix as the live query — the first frame already
+    // shows the chosen view.
+    let (prefilled_query, effective_query) =
+        resolve_initial_query(
+            &initial_query,
+            session.query.as_deref(),
+            override_session_query,
+        );
     // Honor the persisted exit filter. `None` means "no
     // preference" — fall back to the global default, which is
     // "no filter" (every row shown).
@@ -10745,6 +10803,74 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `--prefix <char>` CLI flag
+    /// is implemented as a `bool`
+    /// gate (`override_session_query`)
+    /// + the prefix char itself as
+    /// the `initial_query`. This test
+    /// pins the contract: when the
+    /// flag is on, `session.query`
+    /// is NOT restored, the live
+    /// query is the prefix char,
+    /// and `prefilled_query` is
+    /// `None` (so the TUI treats the
+    /// prefix as fresh-typed text,
+    /// not pre-filled text — the
+    /// cursor sits at the end so
+    /// the user can immediately
+    /// type the filter body like
+    /// `--prefix '*'vim`).
+    #[test]
+    fn resolve_initial_query_prefix_overrides_session() {
+        // Session has a persisted query — the user's
+        // last invocation. Without --prefix this gets
+        // restored.
+        let session_query = Some("previous query");
+        // Simulate: `smarthistory tui --prefix '*'` →
+        // `main` passes `initial_query = "*"` (the
+        // first char of the prefix string) and
+        // `override_session_query = true`.
+        let (prefilled, effective) =
+            resolve_initial_query("*", session_query, true);
+        // The persisted query is NOT restored.
+        assert_eq!(
+            prefilled,
+            None,
+            "--prefix must override the persisted session.query"
+        );
+        // The effective query is the prefix char.
+        assert_eq!(
+            effective, "*",
+            "--prefix must set the live query to the prefix char"
+        );
+    }
+
+    /// Without `--prefix`, the persisted `session.query`
+    /// is restored as before — the historical behavior
+    /// the user expects when they DIDN'T explicitly
+    /// ask for a prefix mode this launch.
+    #[test]
+    fn resolve_initial_query_session_restored_without_prefix() {
+        let session_query = Some("previous query");
+        let (prefilled, effective) =
+            resolve_initial_query("", session_query, false);
+        assert_eq!(prefilled.as_deref(), Some("previous query"));
+        assert_eq!(effective, "previous query");
+    }
+
+    /// No persisted `session.query` at all — the CLI-supplied
+    /// `initial_query` (the positional `--query` arg) becomes
+    /// the live query, and `prefilled_query` is `None` (so the
+    /// first character typed appends, since the user typed
+    /// fresh — not a pre-filled buffer).
+    #[test]
+    fn resolve_initial_query_falls_back_to_cli_when_no_session() {
+        let (prefilled, effective) =
+            resolve_initial_query("some cli arg", None, false);
+        assert_eq!(prefilled, None, "no session.query → not prefilled");
+        assert_eq!(effective, "some cli arg");
+    }
 
     /// Build the test-default
     /// multiplexer backend.
