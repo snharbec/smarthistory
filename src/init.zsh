@@ -22,12 +22,17 @@ _smarthistory_precmd() {
     local exit_code=$?
     # Skip empty command lines (e.g. bare Enter presses).
     [ -n "$_smarthistory_cmd" ] || return 0
+    # When running inside a herdr workspace pane, read the
+    # pane scrollback via `herdr pane read` and extract
+    # the command line + output automatically.
+    if [ -n "$HERDR_PANE_ID" ]; then
+        smarthistory capture-herdr "$_smarthistory_cmd" --exit-code $exit_code 2>/dev/null
     # When running inside a tmux session, the full pane is mirrored to
     # ~/.cache/tmux-history/output-${TMUX_PANE}.log. If that file
     # exists, use `smarthistory capture-tmux` to grab the command line
     # and the following output (up to 20 lines) automatically. This
     # avoids an explicit `smarthistory capture <cmd>` call.
-    if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
+    elif [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
         # Discover the configured tmux pane output directory. Falls
         # back to the default location if the binary is unavailable
         # or returns nothing.

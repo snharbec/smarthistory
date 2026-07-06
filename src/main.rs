@@ -261,6 +261,17 @@ enum Commands {
         #[arg(short, long)]
         exit_code: i32,
     },
+    /// Read the herdr pane scrollback via `herdr pane read`,
+    /// extract the command line and the following output,
+    /// and store it in the database. Intended to be called
+    /// automatically by the zsh precmd hook when running
+    /// inside a herdr workspace pane.
+    CaptureHerdr {
+        /// The command that was executed (as recorded by zsh preexec).
+        command: String,
+        #[arg(short, long)]
+        exit_code: i32,
+    },
     /// Export history data to a JSON file. The file contains all
     /// history entries, command comments, and captured output so
     /// that a complete import is possible.
@@ -1917,6 +1928,37 @@ fn store_output(conn: &Connection, history_id: i64, output: &str) -> anyhow::Res
 /// over lines that merely contain the command as a substring. This
 /// avoids false matches on output lines that happen to include the
 /// command text (e.g. `echo ls` produces an output line `ls`).
+/// Extract the output of `command` from a pane buffer
+/// (a list of lines). This is the source-agnostic core of
+/// the capture pipeline: it scans the lines for the command
+/// line, strips ANSI, and returns the N lines after it
+/// (or until the next prompt boundary for `ALL`).
+///
+/// Used by both `capture-tmux` (reads from a pipe-pane log
+/// file) and `capture-herdr` (reads from `herdr pane read`).
+fn extract_pane_output(
+    command: &str,
+    lines: &[String],
+    max_lines: Option<usize>,
+) -> anyhow::Result<String> {
+    let start = find_command_line(lines, command);
+    if let Some(start) = start {
+        let end = match max_lines {
+            Some(n) => (start + 1 + n).min(lines.len()),
+            None => next_prompt_boundary(lines, start + 1),
+        };
+        return Ok(lines[start..end].join("\n"));
+    }
+    // The command line isn't in the scrollback. The retry
+    // loop in `extract_tmux_output` depends on this `Err` to
+    // know it should re-read the file. The herdr
+    // `CaptureHerdr` handler catches this `Err` and falls back
+    // to capturing whatever IS in the pane buffer (since herdr
+    // has no retry mechanism — `pane read` is a one-shot
+    // snapshot, not a continuously-updated log file).
+    anyhow::bail!("command not found in pane output")
+}
+
 /// ANSI escape sequences are stripped first so that colourised
 /// prompts do not interfere with the match.
 fn extract_tmux_output(
@@ -1938,16 +1980,8 @@ fn extract_tmux_output(
             // valid line separators) survive the cleaning step.
             let lines: Vec<String> = contents.lines().map(strip_ansi).collect();
 
-            let start = find_command_line(&lines, command);
-
-            if let Some(start) = start {
-                let end = match max_lines {
-                    Some(n) => (start + 1 + n).min(lines.len()),
-                    // Unlimited: capture until the next prompt-like
-                    // line, or end of file.
-                    None => next_prompt_boundary(&lines, start + 1),
-                };
-                return Ok(lines[start..end].join("\n"));
+            if let Ok(output) = extract_pane_output(command, &lines, max_lines) {
+                return Ok(output);
             }
         }
         if attempt < MAX_ATTEMPTS {
@@ -1991,13 +2025,20 @@ fn next_prompt_boundary(lines: &[String], from: usize) -> usize {
         // We require the line to be relatively short and end with
         // one of these markers to avoid mistaking regular output for
         // a prompt.
+        //
+        // We check against the ORIGINAL line (not `trim_end`'d)
+        // because the prompt markers end with a trailing space,
+        // which `trim_end()` would strip — turning `$ ` into `$`,
+        // which would then fail the `ends_with("$ ")` check.
+        // The `trim_end` is used only for the `len()` check so
+        // trailing whitespace doesn't inflate the length.
         if trimmed.len() < 200
-            && (trimmed.ends_with("$ ")
-                || trimmed.ends_with("# ")
-                || trimmed.ends_with("% ")
-                || trimmed.ends_with("> ")
-                || trimmed.ends_with("\u{276f} ")
-                || trimmed.ends_with("] "))
+            && (line.ends_with("$ ")
+                || line.ends_with("# ")
+                || line.ends_with("% ")
+                || line.ends_with("> ")
+                || line.ends_with("\u{276f} ")
+                || line.ends_with("] "))
         {
             return i;
         }
@@ -3022,6 +3063,107 @@ fn main() -> anyhow::Result<()> {
             )?;
             store_output(&conn, history_id, &output)?;
         }
+        Commands::CaptureHerdr {
+            command,
+            exit_code,
+        } => {
+            // Read the herdr pane scrollback via
+            // `herdr pane read <pane_id> --source recent-unwrapped
+            // --lines <N>` and extract the command
+            // line + output using the same pipeline as
+            // `capture-tmux`. The pane id comes from the
+            // `HERDR_PANE_ID` env var (set by herdr in
+            // every pane process).
+            let pane_id =
+                env::var("HERDR_PANE_ID").unwrap_or_default();
+            if pane_id.is_empty() {
+                // Not inside a herdr pane — fall back to
+                // a plain `add` so the history entry is
+                // still recorded.
+                let pwd =
+                    crate::util::current_directory_for_storage();
+                let session_id =
+                    env::var("SMART_HISTORY_SESSION")
+                        .unwrap_or_else(|_| "default".to_string());
+                upsert_history_row(
+                    &conn, &command, &pwd, &session_id, exit_code,
+                )?;
+                return Ok(());
+            }
+            let cfg = Config::load();
+            let output = if cfg.ignore_capture(&command) {
+                String::new()
+            } else {
+                // Determine how many lines to request from
+                // `herdr pane read`. We request more than the
+                // capture limit to give `find_command_line`
+                // enough scrollback to locate the command.
+                let max = cfg.capture_lines_for(&command);
+                let read_lines: usize = match max {
+                    Some(n) => n + 50, // 50 extra lines for prompt+context
+                    None => 500,        // broad request for unlimited capture
+                };
+                let pane_output = std::process::Command::new("herdr")
+                    .args([
+                        "pane", "read",
+                        &pane_id,
+                        "--source", "recent-unwrapped",
+                        "--lines", &read_lines.to_string(),
+                    ])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .output();
+                match pane_output {
+                    Ok(o) if !o.stdout.is_empty() => {
+                        let text = String::from_utf8_lossy(&o.stdout);
+                        let lines: Vec<String> =
+                            text.lines().map(strip_ansi).collect();
+                        extract_pane_output(&command, &lines, max)
+                            .unwrap_or_else(|_| {
+                                // Command line scrolled off the
+                                // top of the pane buffer (common
+                                // for high-output commands like
+                                // `ps -ef`). Capture whatever IS
+                                // in the buffer as the best
+                                // available approximation.
+                                let end = lines.len();
+                                let effective_end = if end > 0 {
+                                    let last = lines[end - 1].trim_end();
+                                    if last.ends_with("$ ")
+                                        || last.ends_with("# ")
+                                        || last.ends_with("% ")
+                                        || last.ends_with("> ")
+                                        || last.is_empty()
+                                    {
+                                        end.saturating_sub(1)
+                                    } else {
+                                        end
+                                    }
+                                } else { end };
+                                let capped = match max {
+                                    Some(n) => effective_end.min(n),
+                                    None => effective_end,
+                                };
+                                if capped > 0 {
+                                    lines[..capped].join("\n")
+                                } else {
+                                    String::new()
+                                }
+                            })
+                    }
+                    _ => String::new(),
+                }
+            };
+            let pwd =
+                crate::util::current_directory_for_storage();
+            let session_id =
+                env::var("SMART_HISTORY_SESSION")
+                    .unwrap_or_else(|_| "default".to_string());
+            let history_id = upsert_history_row(
+                &conn, &command, &pwd, &session_id, exit_code
+            )?;
+            store_output(&conn, history_id, &output)?;
+        }
         Commands::Config { action } => match action {
             ConfigAction::Get { key } => {
                 let cfg = Config::load();
@@ -3729,6 +3871,43 @@ file2
         assert!(out.contains("file1"));
         assert!(!out.contains("\x1b["), "ANSI should be stripped: {out}");
         std::fs::remove_file(&path).ok();
+    }
+
+    /// `extract_pane_output` is the source-agnostic core
+    /// shared by `capture-tmux` (file) and
+    /// `capture-herdr` (scrollback). It receives
+    /// pre-stripped ANSI-clean lines and returns the
+    /// command line + N following lines.
+    #[test]
+    fn extract_pane_output_finds_command_and_captures_output() {
+        let lines: Vec<String> = vec![
+            "some earlier output".to_string(),
+            r#"$ echo hello"#.to_string(),
+            "hello world".to_string(),
+            r#"$ "#.to_string(),
+        ];
+        let out = extract_pane_output("echo hello", &lines, Some(20)).expect("extract");
+        assert!(out.contains("echo hello"));
+        assert!(out.contains("hello world"));
+    }
+
+    /// When `ALL` (None) is requested, the output
+    /// runs until the next prompt boundary.
+    #[test]
+    fn extract_pane_output_unlimited_caps_at_next_prompt() {
+        let lines: Vec<String> = vec![
+            r#"$ ls"#.to_string(),
+            "file1.txt".to_string(),
+            "file2.txt".to_string(),
+            r#"$ "#.to_string(),
+            "next command".to_string(),
+        ];
+        let out = extract_pane_output("ls", &lines, None).expect("extract");
+        assert!(out.contains("file1.txt"));
+        assert!(out.contains("file2.txt"));
+        // The prompt line and the next command
+        // should NOT be included.
+        assert!(!out.contains("next command"));
     }
 
     #[test]

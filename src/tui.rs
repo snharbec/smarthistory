@@ -10191,26 +10191,26 @@ fn handle_output_view_key(
             }
             OutputViewResult::Continue
         }
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') => {
             if let Some(ref mut view) = app.output_view {
                 view.scroll = view.scroll.saturating_sub(1);
             }
             OutputViewResult::Continue
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') => {
             if let Some(ref mut view) = app.output_view {
                 let max = max_scroll(&view.text);
                 view.scroll = (view.scroll + 1).min(max);
             }
             OutputViewResult::Continue
         }
-        KeyCode::PageUp => {
+        KeyCode::PageUp | KeyCode::Char('K') => {
             if let Some(ref mut view) = app.output_view {
                 view.scroll = view.scroll.saturating_sub(page_size.max(1));
             }
             OutputViewResult::Continue
         }
-        KeyCode::PageDown => {
+        KeyCode::PageDown | KeyCode::Char('J') => {
             if let Some(ref mut view) = app.output_view {
                 let max = max_scroll(&view.text);
                 view.scroll = (view.scroll + page_size.max(1)).min(max);
@@ -18747,7 +18747,7 @@ mod tests {
                 .expect("non-empty pane id");
             assert_eq!(
                 staged,
-                "herdr workspace focus wA"
+                "herdr workspace focus wA 2>/dev/null"
             );
             // And a directory
             // without a matching

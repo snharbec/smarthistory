@@ -1526,7 +1526,7 @@ impl MultiplexerBackend for HerdrBackend {
         if workspace_id.is_empty() {
             return None;
         }
-        Some(format!("herdr workspace focus {}", workspace_id))
+        Some(format!("herdr workspace focus {} 2>/dev/null", workspace_id))
     }
 
     fn focus_session(&self, session_label: &str) -> Option<String> {
@@ -1546,7 +1546,7 @@ impl MultiplexerBackend for HerdrBackend {
         // directories-mode
         // focus_command (just
         // `herdr workspace focus <id>`).
-        Some(format!("herdr workspace focus {}", session_label))
+        Some(format!("herdr workspace focus {} 2>/dev/null", session_label))
     }
 
     fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String> {
@@ -1591,7 +1591,7 @@ impl MultiplexerBackend for HerdrBackend {
             // focus (the
             // `&&`-chain is
             // redundant then).
-            return Some(format!("herdr workspace focus {}", workspace_id));
+            return Some(format!("herdr workspace focus {} 2>/dev/null", workspace_id));
         }
         // `workspace focus` switches
         // the active workspace;
@@ -1604,8 +1604,8 @@ impl MultiplexerBackend for HerdrBackend {
         // doesn't try a tab focus
         // against a dead workspace.
         Some(format!(
-            "herdr workspace focus {} && \
-             herdr tab focus {}",
+            "herdr workspace focus {} 2>/dev/null && \
+             herdr tab focus {} 2>/dev/null",
             workspace_id, tab_id
         ))
     }
@@ -1672,7 +1672,7 @@ impl MultiplexerBackend for HerdrBackend {
         // surface as
         // errors.
         Some(format!(
-            "herdr workspace create --cwd {} --label {} --focus",
+            "herdr workspace create --cwd {} --label {} --focus 2>/dev/null",
             quoted_path, label
         ))
     }
@@ -1682,7 +1682,7 @@ impl MultiplexerBackend for HerdrBackend {
             return None;
         }
         Some(format!(
-            "herdr pane send-text {} {}",
+            "herdr pane send-text {} {} 2>/dev/null",
             pane_id,
             crate::util::shell_quote(body)
         ))
@@ -1893,7 +1893,7 @@ mod tests {
         // not a pane id.
         let b = HerdrBackend;
         let cmd = b.focus_command("w1:p1").expect("non-empty pane id");
-        assert_eq!(cmd, "herdr workspace focus w1");
+        assert_eq!(cmd, "herdr workspace focus w1 2>/dev/null");
         assert!(b.focus_command("").is_none());
     }
 
@@ -2220,7 +2220,7 @@ mod tests {
         // before passing
         // to herdr.
         let staged = b.focus_command("wA:p1").expect("non-empty pane id");
-        assert_eq!(staged, "herdr workspace focus wA");
+        assert_eq!(staged, "herdr workspace focus wA 2>/dev/null");
     }
 
     #[cfg(feature = "herdr")]
@@ -2241,18 +2241,18 @@ mod tests {
         let b = HerdrBackend;
         assert_eq!(
             b.focus_command("wA:p1").unwrap(),
-            "herdr workspace focus wA"
+            "herdr workspace focus wA 2>/dev/null"
         );
         assert_eq!(
             b.focus_command("wB:p3").unwrap(),
-            "herdr workspace focus wB"
+            "herdr workspace focus wB 2>/dev/null"
         );
         // A bare workspace
         // id (no `:pN`
         // suffix) is
         // passed through
         // unchanged.
-        assert_eq!(b.focus_command("wA").unwrap(), "herdr workspace focus wA");
+        assert_eq!(b.focus_command("wA").unwrap(), "herdr workspace focus wA 2>/dev/null");
         // Empty / blank
         // inputs are
         // rejected so the
@@ -2288,7 +2288,7 @@ mod tests {
         // pane id, stripping
         // the `:pN` suffix).
         let b = HerdrBackend;
-        assert_eq!(b.focus_session("wA").unwrap(), "herdr workspace focus wA");
+        assert_eq!(b.focus_session("wA").unwrap(), "herdr workspace focus wA 2>/dev/null");
         assert!(b.focus_session("").is_none());
     }
 
@@ -2317,7 +2317,7 @@ mod tests {
         // default).
         let b = HerdrBackend;
         let cmd = b.focus_pane("wA:p3", "wA:t2").expect("non-empty ids");
-        assert_eq!(cmd, "herdr workspace focus wA && herdr tab focus wA:t2");
+        assert_eq!(cmd, "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t2 2>/dev/null");
         // An empty `tab_id`
         // degrades to a
         // bare
@@ -2325,7 +2325,7 @@ mod tests {
         // command (no tab
         // switch).
         let cmd = b.focus_pane("wA:p3", "").expect("non-empty pane id");
-        assert_eq!(cmd, "herdr workspace focus wA");
+        assert_eq!(cmd, "herdr workspace focus wA 2>/dev/null");
         // An empty `pane_id`
         // is rejected.
         assert!(b.focus_pane("", "").is_none());
@@ -2344,7 +2344,7 @@ mod tests {
         // workspace-row
         // doesn't matter).
         let cmd = b.focus_pane("wA", "wA:t1").expect("bare ws id");
-        assert_eq!(cmd, "herdr workspace focus wA && herdr tab focus wA:t1");
+        assert_eq!(cmd, "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t1 2>/dev/null");
     }
 
     #[test]
