@@ -90,7 +90,10 @@ pub fn format_diff(epoch: i64) -> String {
     if mins < 60 {
         return format!("{}m", mins);
     }
-    let _hours = delta.num_hours();
+    let hours = delta.num_hours();
+    if hours < 24 {
+        return format!("{}h", hours);
+    }
     let days = delta.num_days();
     format!("{}d", days)
 }

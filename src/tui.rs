@@ -4134,10 +4134,18 @@ fn build_implicit_regex(pattern: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ConfirmMode {
     DeleteSelected,
     DeleteMatching,
+    /// Delete ALL history entries in the selected
+    /// directory (directory mode only). The count is
+    /// pre-computed when the dialog opens so the
+    /// confirmation message can show it.
+    DeleteDirectory {
+        directory: String,
+        count: usize,
+    },
 }
 
 /// State for the captured-output overlay: the captured text plus a
@@ -8957,6 +8965,20 @@ fn move_selection(&mut self, delta: isize) {
         self.confirm_delete = None;
         Ok(())
     }
+
+    /// Delete ALL history entries whose `directory` column
+    /// matches `dir`. Used by the directory-mode (`#`)
+    /// delete flow: pressing `Ctrl-D` on a directory row
+    /// prompts the user to confirm, then drops every
+    /// command that was ever run in that directory.
+    fn delete_directory(&mut self, dir: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM history WHERE directory = ?1", params![dir])?;
+        self.refresh();
+        self.refresh_labeled();
+        self.confirm_delete = None;
+        Ok(())
+    }
 }
 
 /// Run the TUI.
@@ -9504,8 +9526,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
-    if let Some(mode) = app.confirm_delete {
-        return handle_confirm_delete_key(app, key, mode);
+    if let Some(ref mode) = app.confirm_delete {
+        return handle_confirm_delete_key(app, key, mode.clone());
     }
 
     // When editing a comment, most keys go to the comment buffer.
@@ -9595,7 +9617,28 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::DeleteSelected => {
-            app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+            // In directories mode, deleting a row means
+            // deleting ALL history entries in that directory.
+            // Show a special confirmation dialog with the count.
+            if app.is_directories_query() {
+                if let Some(row) = app.selected_row() {
+                    let dir = row.directory.clone();
+                    let count: usize = app.conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM history WHERE directory = ?1",
+                            params![&dir],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map(|n| n as usize)
+                        .unwrap_or(0);
+                    app.confirm_delete = Some(ConfirmMode::DeleteDirectory {
+                        directory: dir,
+                        count,
+                    });
+                }
+            } else {
+                app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+            }
             false
         }
         Action::DeleteMatching => {
@@ -9742,12 +9785,16 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
         == Some(Action::Cancel);
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            match mode {
+            match &mode {
                 ConfirmMode::DeleteSelected => {
                     let _ = app.delete_selected();
                 }
                 ConfirmMode::DeleteMatching => {
                     let _ = app.delete_matching();
+                }
+                ConfirmMode::DeleteDirectory { directory, .. } => {
+                    let dir = directory.clone();
+                    let _ = app.delete_directory(&dir);
                 }
             }
             false
@@ -21140,10 +21187,43 @@ mod tests {
             );
         }
 
-        /// Regression test for the
-        /// user-reported bug:
-        /// the `*`-mode list was
-        /// rendered bottom-up
+        /// Delete ALL history entries for a
+        /// directory when the user presses
+        /// `Ctrl-D` in directories mode (`#`).
+        /// A confirmation dialog shows the
+        /// count first; on confirm, every
+        /// command that was ever run in
+        /// that directory is dropped.
+        #[test]
+        fn delete_directory_removes_all_entries_for_that_dir() {
+            let mut app = directories_test_app(&[
+                ("ls -la", "/var/tmp/build", 60),
+                ("make", "/var/tmp/build", 30),
+                ("git status", "/var/tmp/other", 10),
+            ]);
+            // Delete /var/tmp/build (2 entries).
+            app.delete_directory("/var/tmp/build")
+                .expect("delete_directory succeeds");
+            // The `other` directory survives.
+            app.query = "#".to_string();
+            app.refresh();
+            let dirs: Vec<&str> = app
+                .merged_rows()
+                .iter()
+                .map(|r| r.directory.as_str())
+                .collect();
+            assert!(
+                dirs.iter().any(|d| *d == "/var/tmp/other"),
+                "entries in other directories must survive, got {:?}",
+                dirs
+            );
+            assert!(
+                !dirs.iter().any(|d| *d == "/var/tmp/build"),
+                "entries in the deleted directory must be gone, got {:?}",
+                dirs
+            );
+        }
+
         /// (the default for the
         /// history list), so a
         /// tree like:

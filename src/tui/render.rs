@@ -69,7 +69,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     draw_input(f, app, chunks[3]);
     draw_status(f, app, chunks[4]);
 
-    if let Some(mode) = app.confirm_delete {
+    if let Some(ref mode) = app.confirm_delete {
         draw_confirm_delete(f, app, mode);
     }
 
@@ -92,7 +92,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     let _ = !app.labeled_rows.is_empty();
 }
 
-fn draw_confirm_delete(f: &mut Frame, app: &App, mode: ConfirmMode) {
+fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
     let area = centered_rect(60, 25, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -106,6 +106,14 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: ConfirmMode) {
             format!(
                 "Are you sure you want to delete all {} matching entries?",
                 app.rows.len()
+            ),
+        ),
+        ConfirmMode::DeleteDirectory { directory, count } => (
+            " Delete directory history ",
+            format!(
+                "This will delete ALL {} history entries in:\n  {}\n\nEvery command ever run in that directory will be removed.",
+                count,
+                crate::util::shorten_home_path(directory, &app.home_list),
             ),
         ),
     };
