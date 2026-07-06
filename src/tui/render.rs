@@ -1024,17 +1024,20 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         Style::default().add_modifier(Modifier::BOLD),
     )]));
     lines.push(Line::from(
-        "  Type a prefix to switch mode. The first four (plain / regex /",
+        "  Type a prefix to switch mode. The match algorithm (SUBSTR/",
     ));
     lines.push(Line::from(
-        "  fuzzy / output) are also cycled by the search-mode-toggle key;",
+        "  FUZZY/REGEX) applies to all modes except JIRA; cycle it with",
     ));
+    lines.push(Line::from(format!(
+        "  {} (the toggle-search-mode key).", format_key_specs(
+            app.bindings.specs(Action::ToggleSearchMode)
+        ),
+    )));
     lines.push(Line::from(
-        "  the rest require the prefix character. Prefix characters are",
+        "  Prefix characters are configurable in ~/.config/smarthistory/",
     ));
-    lines.push(Line::from(
-        "  configurable in ~/.config/smarthistory/config (prefix.<name>=).",
-    ));
+    lines.push(Line::from("  config (prefix.<name>=)."));
     lines.push(Line::from(""));
 
     // Helper: render one row of the
@@ -1078,21 +1081,9 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     let qp = &app.query_prefixes;
     mode_row(
         &mut lines,
-        "plain",
+        "history",
         String::new(),
-        "default — every word is a substring match (AND-combined)",
-    );
-    mode_row(
-        &mut lines,
-        "regex",
-        qp.regex.to_string(),
-        "the body is a regex; implicit `.*` anchors on both sides",
-    );
-    mode_row(
-        &mut lines,
-        "fuzzy",
-        qp.fuzzy.to_string(),
-        "fzf-style subsequence match (every char of the body appears in order)",
+        "search the shell history (match algorithm: SUBSTR → FUZZY → REGEX via C-f)",
     );
     mode_row(
         &mut lines,
@@ -1846,6 +1837,15 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
+    // Match-algorithm chip. Shown only when the
+    // algorithm is NOT the default Substring.
+    // Reminds the user which algorithm
+    // (FUZZY / REGEX) is currently applied to
+    // their search.
+    if let Some(chip) = match_algorithm_badge(app.match_algorithm) {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
     spans.push(Span::styled(
         format!(
             "  {} · {} ",
@@ -1931,6 +1931,36 @@ fn output_mode_badge() -> Span<'static> {
             .bg(Theme::info_color())
             .add_modifier(Modifier::BOLD),
     )
+}
+
+/// Match-algorithm chip. Shown whenever the
+/// algorithm is not the default Substring.
+/// `SUB` (default — hidden), `FUZZY` (green),
+/// `REGEX` (yellow). The chip reminds the user
+/// which algorithm is active so they don't
+/// forget they cycled to regex and are now
+/// confused why their plain text is treated
+/// as a regex pattern.
+fn match_algorithm_badge(algo: crate::tui::state::MatchAlgorithm) -> Option<Span<'static>> {
+    if algo == crate::tui::state::MatchAlgorithm::Substring {
+        return None;
+    }
+    let (label, color) = match algo {
+        crate::tui::state::MatchAlgorithm::Substring => return None,
+        crate::tui::state::MatchAlgorithm::Fuzzy => {
+            ("FUZZY", Theme::success_color())
+        }
+        crate::tui::state::MatchAlgorithm::Regex => {
+            ("REGEX", Theme::warning_color())
+        }
+    };
+    Some(Span::styled(
+        format!(" {} ", label),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(color)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// The notes-mode date-filter chip. Shown only
@@ -3892,100 +3922,57 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             // recognises this is a JIRA
             // action, not a local one).
             if app.jira_add_comment_target.is_some() {
-                ("jira> ", " jira comment ", buf.as_str())
+                ("jira> ".to_string(), " jira comment ".to_string(), buf.as_str())
             } else {
-                ("comment> ", " comment ", buf.as_str())
+                ("comment> ".to_string(), " comment ".to_string(), buf.as_str())
             }
         }
         None => {
-            if is_regex {
-                ("/", " regex ", app.query.as_str())
-            } else if is_fuzzy {
-                ("?", " fuzzy ", app.query.as_str())
-            } else if is_output {
-                ("+", " output ", app.query.as_str())
+            // The prompt and title are determined by
+            // the PREFIX MODE, not the match algorithm.
+            // The algorithm (Substring/Fuzzy/Regex) is a
+            // separate orthogonal toggle (C-f) that
+            // determines HOW the body is matched, not
+            // which view the user is in.
+            //
+            // The algorithm is shown as a `·``algoname`
+            // suffix in the border title so the user
+            // knows which algorithm is active without
+            // looking at the mode strip chip.
+            let algo = match app.match_algorithm {
+                crate::tui::state::MatchAlgorithm::Substring => "",
+                crate::tui::state::MatchAlgorithm::Fuzzy => " · fuzzy",
+                crate::tui::state::MatchAlgorithm::Regex => " · regex",
+            };
+            if is_output {
+                ("+".to_string(), format!(" output{} ", algo), app.query.as_str())
             } else if is_llm {
-                // LLM mode is signalled by both a dedicated
-                // prefix and a dedicated title in the input
-                // border, mirroring the yellow `regex` and
-                // green `fuzzy` tints. The LLM tint uses
-                // the accent colour (magenta by default)
-                // to keep the visual signal distinct from
-                // the search-result modes.
-                ("=", " LLM ", app.query.as_str())
+                ("=".to_string(), " LLM ".to_string(), app.query.as_str())
             } else if is_notes {
-                // Notes mode: searching an external
-                // note_search SQLite database. Accent
-                // (magenta) like the LLM mode — both
-                // modes go "outside" the local shell
-                // history (notes and LLM), so we share
-                // the colour family.
-                ("@", " notes ", app.query.as_str())
+                ("@".to_string(), format!(" notes{} ", algo), app.query.as_str())
             } else if is_question {
-                // Question mode: a short LLM answer is
-                // requested. Uses the info colour
-                // (blue by default) to signal
-                // "information, not a command".
-                ("%", " ? ", app.query.as_str())
+                ("%".to_string(), " ? ".to_string(), app.query.as_str())
             } else if is_todo {
-                // Todo mode: scan every file in
-                // `notes.dir` for todo lines. The
-                // warning colour (yellow) calls
-                // attention — the user is now in a
-                // scan-everything mode that crosses
-                // the boundary between shell history
-                // and external note files.
-                ("!", " todo ", app.query.as_str())
+                ("!".to_string(), format!(" todo{} ", algo), app.query.as_str())
             } else if is_directories {
-                // Directories mode: list every
-                // unique directory that's
-                // been used in the global
-                // history, sorted by recency.
-                // Each row surfaces the
-                // directory's latest
-                // command; selecting the
-                // row stages `cd <path>`.
-                // The accent (cyan) tint
-                // signals "browse"-style —
-                // the user is moving
-                // *between* directories
-                // rather than running a
-                // command.
-                ("#", " directories ", app.query.as_str())
+                ("#".to_string(), format!(" directories{} ", algo), app.query.as_str())
             } else if app.is_panes_query() {
-                // Panes mode: list the panes of
-                // the current tmux session
-                // (excluding this one). Each row
-                // shows the pane's current command
-                // and cwd; selecting it stages a
-                // `tmux switch-client` jump. The
-                // success (green) tint signals
-                // "live" panes.
-                ("*", " panes ", app.query.as_str())
+                ("*".to_string(), format!(" panes{} ", algo), app.query.as_str())
             } else if app.is_jira_query() {
-                // JIRA mode: live search of a
-                // self-hosted JIRA instance via
-                // the `-` prefix. The info (blue)
-                // tint signals "external data
-                // source" (like notes/question).
-                ("-", " jira ", app.query.as_str())
+                ("-".to_string(), " jira ".to_string(), app.query.as_str())
             } else if app.is_files_query() {
-                // Files mode: browse the file tree
-                // starting at the current directory.
-                // Each row shows a file or
-                // subdirectory path; selecting a
-                // file opens it in $EDITOR. The
-                // success (green) tint signals
-                // "browse filesystem" — matching
-                // the panes mode colour.
-                ("~", " files ", app.query.as_str())
+                ("~".to_string(), format!(" files{} ", algo), app.query.as_str())
             } else {
-                ("> ", " search ", app.query.as_str())
+                (
+                    "> ".to_string(),
+                    format!(" history{} ", algo),
+                    app.query.as_str(),
+                )
             }
         }
     };
     let input = Paragraph::new(Line::from(vec![
-        Span::styled(prompt, Theme::accent()),
+        Span::styled(prompt.clone(), Theme::accent()),
         Span::raw(content),
     ]))
     .block(
@@ -4000,11 +3987,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             // character is off-screen (e.g.
             // you've typed more than fits in the
             // input box).
-            .title_style(if is_regex {
-                Style::default().fg(Theme::warning_color())
-            } else if is_fuzzy {
-                Style::default().fg(Theme::success_color())
-            } else if is_output {
+            .title_style(if is_output {
                 Style::default().fg(Theme::info_color())
             } else if is_llm {
                 Style::default().fg(Theme::accent_color())
@@ -4021,6 +4004,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             } else if app.is_jira_query() {
                 Style::default().fg(Theme::info_color())
             } else if app.is_files_query() {
+                Style::default().fg(Theme::success_color())
+            } else if is_regex {
+                Style::default().fg(Theme::warning_color())
+            } else if is_fuzzy {
                 Style::default().fg(Theme::success_color())
             } else {
                 Theme::accent()
@@ -4033,16 +4020,6 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             // that's independent of the active
             // mode.
             .border_style(if app.comment_edit.is_some() {
-                // The JIRA-add-comment path is
-                // visually distinct from the local
-                // command-comment path. The JIRA
-                // path uses the info tint (blue,
-                // matching the JIRA search mode)
-                // so the user immediately
-                // recognises the action will go
-                // to JIRA, not the local SQLite
-                // database. The local path keeps
-                // the warning (yellow) tint.
                 if app.jira_add_comment_target.is_some() {
                     Style::default().fg(Theme::info_color())
                 } else {
@@ -4050,10 +4027,6 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 }
             } else if app.notes_query_error {
                 Style::default().fg(Theme::error_color())
-            } else if is_regex {
-                Style::default().fg(Theme::warning_color())
-            } else if is_fuzzy {
-                Style::default().fg(Theme::success_color())
             } else if is_output {
                 Style::default().fg(Theme::info_color())
             } else if is_llm {
@@ -4071,6 +4044,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             } else if app.is_jira_query() {
                 Style::default().fg(Theme::info_color())
             } else if app.is_files_query() {
+                Style::default().fg(Theme::success_color())
+            } else if is_regex {
+                Style::default().fg(Theme::warning_color())
+            } else if is_fuzzy {
                 Style::default().fg(Theme::success_color())
             } else {
                 Theme::dim()

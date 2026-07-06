@@ -425,6 +425,79 @@ impl SortOrder {
     }
 }
 
+/// The active match algorithm, toggled by
+/// `Action::CycleMatchAlgorithm` (default key `C-f`).
+/// Applies to ALL prefix modes (history, directories,
+/// panes, notes, todos, files, output) — wherever
+/// `query_matches_text` is consulted. JIRA (`-` mode)
+/// is exempt because it parses its own JQL syntax.
+///
+/// Defaults to `Substring` (the historical plain-text
+/// behavior). The cycle is Substring → Fuzzy → Regex
+/// → Substring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchAlgorithm {
+    /// Every whitespace-separated word must appear as
+    /// a case-insensitive substring (the historical
+    /// default — AND-by-word across command and comment
+    /// text).
+    #[default]
+    Substring,
+    /// Fuzzy subsequence match: every character of each
+    /// word must appear in order (case-insensitive).
+    /// Implements the same subsequence match as `fzf`,
+    /// `sk`, `peco`, and similar fuzzy finders.
+    Fuzzy,
+    /// Regular expression match (uses the `regex` crate).
+    /// Implicit `.*` anchors are added at both ends
+    /// unless the user provides explicit `^` / `$`
+    /// anchors.
+    Regex,
+}
+
+impl MatchAlgorithm {
+    /// Cycle to the next value.
+    /// Substring → Fuzzy → Regex → Substring.
+    pub fn next(self) -> Self {
+        match self {
+            MatchAlgorithm::Substring => MatchAlgorithm::Fuzzy,
+            MatchAlgorithm::Fuzzy => MatchAlgorithm::Regex,
+            MatchAlgorithm::Regex => MatchAlgorithm::Substring,
+        }
+    }
+
+    /// Short display label for the mode-strip chip.
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            MatchAlgorithm::Substring => "SUB",
+            MatchAlgorithm::Fuzzy => "FUZZY",
+            MatchAlgorithm::Regex => "REGEX",
+        }
+    }
+
+    /// Short prompt prefix shown in the input box.
+    /// The body of the query is displayed after this.
+    #[allow(dead_code)]
+    pub fn prompt(self) -> &'static str {
+        match self {
+            MatchAlgorithm::Substring => "> ",
+            MatchAlgorithm::Fuzzy => "? ",
+            MatchAlgorithm::Regex => "/ ",
+        }
+    }
+
+    /// Border title shown in the input box.
+    #[allow(dead_code)]
+    pub fn title(self) -> &'static str {
+        match self {
+            MatchAlgorithm::Substring => " history ",
+            MatchAlgorithm::Fuzzy => " fuzzy ",
+            MatchAlgorithm::Regex => " regex ",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::HistoryRow;

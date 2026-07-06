@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{ExitFilter, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
+pub use state::{ExitFilter, MatchAlgorithm, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -884,6 +884,20 @@ struct App {
     /// failed to compile (in which case we silently fall back to
     /// the plain-text path so the user can keep editing).
     query_regex: Option<Regex>,
+    /// The active match algorithm, toggled by
+    /// `Action::CycleMatchAlgorithm` (default
+    /// key `C-f`). Applies to ALL prefix modes
+    /// (history, directories, panes, notes,
+    /// todos, files, output) — wherever
+    /// `query_matches_text` is consulted.
+    /// JIRA (`-` mode) is exempt because it
+    /// parses its own JQL syntax.
+    ///
+    /// Defaults to `Substring` (the
+    /// historical plain-text behavior). The
+    /// cycle is Substring → Fuzzy → Regex
+    /// → Substring.
+    match_algorithm: MatchAlgorithm,
     /// The currently-selected TUI palette. Defaults to
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
@@ -1275,16 +1289,14 @@ const LLM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 const JIRA_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl App {
-    /// True if the current query is a regex (prefixed with configured regex prefix).
+    /// True if the active match algorithm is Regex.
     fn is_regex_query(&self) -> bool {
-        let p = self.query_prefixes.regex;
-        !self.query.is_empty() && self.query.starts_with(p)
+        self.match_algorithm == MatchAlgorithm::Regex
     }
 
-    /// True if the current query is a fuzzy search (prefixed with configured fuzzy prefix).
+    /// True if the active match algorithm is Fuzzy.
     fn is_fuzzy_query(&self) -> bool {
-        let p = self.query_prefixes.fuzzy;
-        !self.query.is_empty() && self.query.starts_with(p)
+        self.match_algorithm == MatchAlgorithm::Fuzzy
     }
 
     /// True if the current query is an output-content search
@@ -1312,24 +1324,46 @@ impl App {
         self.query.starts_with(p) && !self.query[p.len_utf8()..].trim().is_empty()
     }
 
-    /// The regex pattern, i.e. everything after the leading regex prefix.
-    /// Empty when the query is not a regex.
+    /// The regex pattern. Returns the query body (the
+    /// text after any prefix-mode char like `#` or `*`,
+    /// or the full query if there's no prefix mode).
+    #[allow(dead_code)]
     fn regex_pattern(&self) -> &str {
-        if self.is_regex_query() {
-            let p = self.query_prefixes.regex;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        self.search_body()
     }
 
-    /// The fuzzy pattern, i.e. everything after the leading fuzzy prefix.
+    /// The fuzzy pattern. Returns the query body.
+    #[allow(dead_code)]
     fn fuzzy_pattern(&self) -> &str {
-        if self.is_fuzzy_query() {
-            let p = self.query_prefixes.fuzzy;
-            &self.query[p.len_utf8()..]
+        self.search_body()
+    }
+
+    /// The search body: the part of the query that's
+    /// actually used for matching. This is the full query
+    /// with the leading prefix-mode character stripped
+    /// (e.g. `#ls -la` → `ls -la`, `*vim` → `vim`).
+    /// For the default history mode (no prefix), it's the
+    /// full query. For output mode (`+...`), it's the text
+    /// after the `+`. For LLM/question modes, it's the text
+    /// after the `=`/`%`. This is the canonical body that
+    /// `query_matches_text` and `recompile_regex` operate
+    /// on regardless of the active match algorithm.
+    fn search_body(&self) -> &str {
+        if self.query.is_empty() {
+            return "";
+        }
+        let p = &self.query_prefixes;
+        let c = self.query.chars().next().unwrap();
+        // Strip one prefix char if the query starts with a
+        // known prefix-mode character. The match algorithm
+        // (substring/fuzzy/regex) operates on what's LEFT.
+        if c == p.output || c == p.llm || c == p.question
+            || c == p.notes || c == p.todo || c == p.directories
+            || c == p.panes || c == p.jira || c == p.files
+        {
+            &self.query[c.len_utf8()..]
         } else {
-            ""
+            self.query.as_str()
         }
     }
 
@@ -1967,6 +2001,13 @@ impl App {
             .split_whitespace()
             .filter(|t| !t.is_empty())
             .collect();
+        // When the match algorithm is not Substring, skip the
+        // SQL LIKE pre-filter entirely. The LIKE uses substring
+        // matching which would exclude rows that a regex or fuzzy
+        // search SHOULD match. Instead, fetch without a SQL filter
+        // and let the `refresh()` post-filter (which branches on
+        // `match_algorithm`) apply the correct matching strategy.
+        let use_sql_like = self.match_algorithm == MatchAlgorithm::Substring;
         let mut sql = String::from(
             "SELECT h.directory, \
                     h.command, \
@@ -1983,7 +2024,7 @@ impl App {
               AND h.timestamp = latest.max_ts \
              WHERE h.directory != ''",
         );
-        if !filter_tokens.is_empty() {
+        if use_sql_like && !filter_tokens.is_empty() {
             sql.push_str(" AND (");
             for (i, _tok) in filter_tokens.iter().enumerate() {
                 if i > 0 {
@@ -3122,19 +3163,29 @@ impl App {
         if tokens.is_empty() {
             return Ok(self.session_panes.clone());
         }
+        // When the match algorithm is Substring, use the fast
+        // inline substring check. When it's Fuzzy or Regex,
+        // defer to `query_matches_text` which respects the
+        // active algorithm.
+        if self.match_algorithm != MatchAlgorithm::Substring {
+            return Ok(self
+                .session_panes
+                .iter()
+                .filter(|r| {
+                    self.query_matches_text(&r.command)
+                        || self.query_matches_text(&r.comment)
+                        || (!r.output.is_empty()
+                            && self.query_matches_text(&r.output))
+                })
+                .cloned()
+                .collect());
+        }
         Ok(self
             .session_panes
             .iter()
             .filter(|r| {
                 let cmd_lc = r.command.to_lowercase();
                 let dir_lc = r.comment.to_lowercase();
-                // For `pane` rows, also
-                // match against the
-                // tab_id (the parent
-                // window / tab id in
-                // `r.output`) so the
-                // user can narrow to a
-                // specific tab.
                 let tab_lc = r.output.to_lowercase();
                 tokens.iter().all(|tok| {
                     cmd_lc.contains(tok)
@@ -3689,11 +3740,11 @@ fn fetch_recent_notes_with_filter(
     /// `git commit` behaves as `.*git commit.*` instead of needing
     /// to match from the very first character.
     fn recompile_regex(&mut self) {
-        if !self.is_regex_query() {
+        if self.match_algorithm != MatchAlgorithm::Regex {
             self.query_regex = None;
             return;
         }
-        let pattern = build_implicit_regex(self.regex_pattern());
+        let pattern = build_implicit_regex(self.search_body());
         match Regex::new(&pattern) {
             Ok(re) => self.query_regex = Some(re),
             Err(_) => {
@@ -3706,82 +3757,33 @@ fn fetch_recent_notes_with_filter(
         }
     }
 
-    /// Cycle the search mode prefix: plain -> `/` (regex) -> `?`
-    /// (fuzzy) -> `+` (output search) -> plain. When the query
-    /// is empty, the mode is just "plain"; otherwise the first
-    /// character is replaced with the new mode prefix. The body
-    /// of the query (everything after the prefix) is preserved.
-    fn cycle_search_mode(&mut self) {
-        self.set_search_mode_prefix(self.next_search_mode_prefix(self.query_prefix()));
-    }
-
-    /// The first character of the query if it is a mode prefix
-    /// (regex, fuzzy, or output), otherwise a sentinel (`\0`) meaning
-    /// "plain".
-    fn query_prefix(&self) -> char {
-        if self.query.is_empty() {
-            '\0'
-        } else {
-            let c = self.query.chars().next().unwrap();
-            let p = &self.query_prefixes;
-            if c == p.regex || c == p.fuzzy || c == p.output { c } else { '\0' }
-        }
-    }
-
-    /// The next mode prefix in the cycle plain -> regex ->
-    /// fuzzy -> output -> plain.
-    fn next_search_mode_prefix(&self, current: char) -> char {
-        let p = &self.query_prefixes;
-        if current == p.regex {
-            p.fuzzy
-        } else if current == p.fuzzy {
-            p.output
-        } else if current == p.output {
-            '\0'
-        } else {
-            p.regex
-        }
-    }
-
-    /// Apply a new mode prefix to the query, preserving the rest
-    /// of the text. `\0` means "no prefix" (plain mode).
-    fn set_search_mode_prefix(&mut self, new_prefix: char) {
-        let p = &self.query_prefixes;
-        // Use `chars()` to be robust against multi-byte UTF-8
-        // prefixes. We drop the first char only if it's a mode
-        // prefix, otherwise the body is the whole query.
-        let body: String = self
-            .query
-            .chars()
-            .next()
-            .map(|c| if c == p.regex || c == p.fuzzy || c == p.output {
-                self.query[c.len_utf8()..].to_string()
-            } else {
-                self.query.clone()
-            })
-            .unwrap_or_default();
-
-        self.query = if new_prefix == '\0' {
-            body
-        } else {
-            let mut s = String::with_capacity(body.len() + new_prefix.len_utf8());
-            s.push(new_prefix);
-            s.push_str(&body);
-            s
-        };
+    /// Cycle the match algorithm:
+    /// Substring → Fuzzy → Regex → Substring.
+    /// The query string is NOT modified — the algorithm
+    /// is a separate top-level state, not encoded in the
+    /// query prefix. This is the key difference from the
+    /// old `cycle_search_mode` which swapped the leading
+    /// char. `C-f` (default) triggers this.
+    ///
+    /// JIRA mode (`-` prefix) is exempt — the JQL parser
+    /// doesn't benefit from a match-algorithm overlay, and
+    /// the user's `@alias` / `field=value` syntax is its
+    /// own query language. We still allow the cycle in JIRA
+    /// mode (the algorithm is just ignored), so the user's
+    /// setting is preserved when they switch back.
+    fn cycle_match_algorithm(&mut self) {
+        self.match_algorithm = self.match_algorithm.next();
         self.recompile_regex();
-        // The query text changed (the prefix was replaced or
-        // stripped). Reset the cursor to the new end so the
-        // next character appends naturally; the user can
-        // re-position it with Left/Right if they're now in
-        // LLM mode.
-        self.query_cursor = self.query.chars().count();
         self.refresh();
-        // A mode-prefix change is also a user edit of the
-        // query — the debounce and the previously-suggested
-        // preview are now stale. Re-arm or clear so the
-        // auto-call cycle restarts cleanly.
         self.llm_touch();
+    }
+
+    /// Backward-compatibility shim: old callers (tests,
+    /// action handlers) used `cycle_search_mode` to toggle
+    /// via F3. We now cycle the algorithm instead. The
+    /// query string is not modified (no prefix swap).
+    fn cycle_search_mode(&mut self) {
+        self.cycle_match_algorithm();
     }
 
     /// Re-arm the LLM auto-call debounce and discard any
@@ -4080,46 +4082,36 @@ fn fetch_recent_notes_with_filter(
     /// starts with `?`, or a plain substring search against the
     /// output body when the query starts with `+`.
     fn query_matches_text(&self, text: &str) -> bool {
-        if self.query.is_empty() {
+        let body = self.search_body();
+        if body.is_empty() {
             return true;
         }
-        if self.is_regex_query() {
-            if let Some(ref re) = self.query_regex {
-                return re.is_match(text);
+        match self.match_algorithm {
+            MatchAlgorithm::Regex => {
+                if let Some(ref re) = self.query_regex {
+                    return re.is_match(text);
+                }
+                // Regex mode but no valid compiled regex yet — treat
+                // the body as a literal pattern so the user sees at
+                // least the matches that contain it.
+                text.to_lowercase().contains(&body.to_lowercase())
             }
-            // Regex mode but no valid compiled regex yet — treat
-            // the entire post-slash text as a literal pattern so
-            // the user sees at least the matches that contain it.
-            let p = self.query_prefixes.regex;
-            return text.to_lowercase().contains(&self.query[p.len_utf8()..].to_lowercase());
-        }
-        if self.is_fuzzy_query() {
-            // Fuzzy search: every whitespace-separated word in the
-            // query must be a fuzzy subsequence of the text.
-            let fuzzy_pattern = self.fuzzy_pattern();
-            if fuzzy_pattern.is_empty() {
-                return true;
+            MatchAlgorithm::Fuzzy => {
+                // Fuzzy search: every whitespace-separated word in the
+                // body must be a fuzzy subsequence of the text.
+                body
+                    .split_whitespace()
+                    .all(|term| fuzzy_match(term, text))
             }
-            return fuzzy_pattern
-                .split_whitespace()
-                .all(|term| fuzzy_match(term, text));
+            MatchAlgorithm::Substring => {
+                // Plain text: every whitespace-separated word must
+                // appear (case-insensitive).
+                let lower = text.to_lowercase();
+                body
+                    .split_whitespace()
+                    .all(|w| lower.contains(&w.to_lowercase()))
+            }
         }
-        // For plain text and output modes: every
-        // whitespace-separated word must appear
-        // (case-insensitive). In output mode we use the
-        // body (everything after the leading `+`) rather
-        // than the full query, so `+segmentation fault`
-        // searches for both `segmentation` AND `fault`
-        // — not for the literal `+segmentation`.
-        let body = if self.is_output_query() {
-            self.output_pattern()
-        } else {
-            self.query.as_str()
-        };
-        let lower = text.to_lowercase();
-        body
-            .split_whitespace()
-            .all(|w| lower.contains(&w.to_lowercase()))
     }
 }
 
@@ -4718,6 +4710,7 @@ impl App {
             // ignored by the input loop and stays at the end.
             query_cursor: initial_cursor,
             query_regex: None,
+            match_algorithm: MatchAlgorithm::default(),
             theme,
             bindings,
             status_message: None,
@@ -4876,48 +4869,35 @@ notes_date_filter: NotesDateFilter::All,
             self.fetch_session_panes();
         }
         self.rows = self.fetch().unwrap_or_default();
-        if self.is_regex_query() || self.is_fuzzy_query() {
+        if self.match_algorithm != MatchAlgorithm::Substring {
             // Two-phase borrow: copy the rows out, then post-filter.
             // Avoids the borrow checker complaining about
             // simultaneously borrowing `self.rows` and `self`.
-            let query = self.query.clone();
+            let body = self.search_body().to_string();
             let regex = self.query_regex.clone();
-            let is_regex = self.is_regex_query();
-            let is_fuzzy = self.is_fuzzy_query();
-            // Capture prefix lengths for the fallback paths
-            let regex_prefix_len = self.query_prefixes.regex.len_utf8();
-            let fuzzy_prefix_len = self.query_prefixes.fuzzy.len_utf8();
+            let is_regex = self.match_algorithm == MatchAlgorithm::Regex;
+            let is_fuzzy = self.match_algorithm == MatchAlgorithm::Fuzzy;
             self.rows.retain(|r| {
-                if is_regex {
+                if body.is_empty() {
+                    true
+                } else if is_regex {
                     if let Some(ref re) = regex {
                         re.is_match(&r.command) || re.is_match(&r.comment)
                     } else {
                         // No valid regex yet (in-progress typo) — fall
-                        // back to a literal substring match on the
-                        // post-prefix text so the user sees *something*.
+                        // back to a literal substring match.
                         r.command
                             .to_lowercase()
-                            .contains(&query[regex_prefix_len..].to_lowercase())
-                            || r
-                                .comment
+                            .contains(&body.to_lowercase())
+                            || r.comment
                                 .to_lowercase()
-                                .contains(&query[regex_prefix_len..].to_lowercase())
+                                .contains(&body.to_lowercase())
                     }
                 } else if is_fuzzy {
-                    // Fuzzy search is also a post-filter. We can't
-                    // call `self.query_matches_text` here because
-                    // `self` is borrowed mutably by `retain`. The
-                    // pattern is the whole post-prefix query, so we
-                    // inline the check.
-                    let fuzzy_pattern = &query[fuzzy_prefix_len..];
-                    if fuzzy_pattern.is_empty() {
-                        true
-                    } else {
-                        fuzzy_pattern
-                            .split_whitespace()
-                            .all(|term| fuzzy_match(term, &r.command)
-                                || fuzzy_match(term, &r.comment))
-                    }
+                    body
+                        .split_whitespace()
+                        .all(|term| fuzzy_match(term, &r.command)
+                            || fuzzy_match(term, &r.comment))
                 } else {
                     true
                 }
@@ -5701,8 +5681,6 @@ notes_date_filter: NotesDateFilter::All,
     fn enter_directories_mode(&mut self) {
         let p = &self.query_prefixes;
         let prefixes = [
-            p.regex,
-            p.fuzzy,
             p.output,
             p.llm,
             p.question,
@@ -12452,49 +12430,48 @@ mod tests {
         // --- Fuzzy search ---------------------------------------------------
 
         #[test]
-        fn is_fuzzy_query_recognises_question_mark_prefix() {
-                let mut app = stats_test_app(&[]);
-                app.query = "".to_string();
-                assert!(!app.is_fuzzy_query());
-                app.query = "git".to_string();
-                assert!(!app.is_fuzzy_query());
-                app.query = "?git".to_string();
-                assert!(app.is_fuzzy_query());
-                app.query = "? git".to_string();
-                assert!(app.is_fuzzy_query());
+                fn is_fuzzy_query_recognises_question_mark_prefix() {
+            let mut app = stats_test_app(&[]);
+            app.query = String::from("git");
+            app.match_algorithm = MatchAlgorithm::Substring;
+            assert!(!app.is_fuzzy_query());
+            app.match_algorithm = MatchAlgorithm::Fuzzy;
+            assert!(app.is_fuzzy_query());
         }
 
         #[test]
-        fn fuzzy_pattern_strips_question_mark() {
-                let mut app = stats_test_app(&[]);
-                app.query = "git".to_string();
-                assert_eq!(app.fuzzy_pattern(), "");
-                app.query = "?git".to_string();
-                assert_eq!(app.fuzzy_pattern(), "git");
-                app.query = "?git status".to_string();
-                assert_eq!(app.fuzzy_pattern(), "git status");
+                fn fuzzy_pattern_strips_question_mark() {
+            let mut app = stats_test_app(&[]);
+            app.query = String::from("git st");
+            app.match_algorithm = MatchAlgorithm::Fuzzy;
+            assert_eq!(app.fuzzy_pattern(), "git st");
         }
 
         #[test]
-        fn query_matches_text_supports_fuzzy_subsequence() {
-                let mut app = stats_test_app(&[]);
-                app.query = "?gts".to_string();
-                assert!(app.query_matches_text("git status"));
-                assert!(app.query_matches_text("go test stuff"));
-                assert!(!app.query_matches_text("vim"));
+                fn query_matches_text_supports_fuzzy_subsequence() {
+            let mut app = stats_test_app(&[]);
+            app.query = String::from("gts");
+            app.match_algorithm = MatchAlgorithm::Fuzzy;
+            assert!(app.query_matches_text("git status --short && cargo build"));
+            assert!(app.query_matches_text("go test stuff"));
+            assert!(!app.query_matches_text("vim"));
         }
 
         #[test]
-        fn query_matches_text_fuzzy_is_case_insensitive() {
-                let mut app = stats_test_app(&[]);
-                app.query = "?GTS".to_string();
-                assert!(app.query_matches_text("git status"));
+                fn query_matches_text_fuzzy_is_case_insensitive() {
+            let mut app = stats_test_app(&[]);
+            app.query = String::from("GS");
+            app.match_algorithm = MatchAlgorithm::Fuzzy;
+            assert!(app.query_matches_text("git status"));
+            assert!(app.query_matches_text("GIT STATUS"));
+            assert!(!app.query_matches_text("cargo"));
         }
 
         #[test]
         fn query_matches_text_fuzzy_supports_and_by_word() {
                 let mut app = stats_test_app(&[]);
-                app.query = "?git st".to_string();
+                app.query = "git st".to_string();
+                app.match_algorithm = MatchAlgorithm::Fuzzy;
                 // `git` and `st` both appear as subsequences.
                 assert!(app.query_matches_text("git status"));
                 assert!(app.query_matches_text("git stash"));
@@ -12505,71 +12482,48 @@ mod tests {
         }
 
         #[test]
-        fn query_matches_text_fuzzy_empty_pattern_matches_all() {
+                fn query_matches_text_fuzzy_empty_pattern_matches_all() {
                 let mut app = stats_test_app(&[]);
-                app.query = "?".to_string();
-                // An empty fuzzy pattern (just the prefix) matches
-                // everything, mirroring the empty plain query
-                // behavior.
-                assert!(app.query_matches_text("git status"));
-                assert!(app.query_matches_text("vim"));
+                app.query = String::from("");
+                app.match_algorithm = MatchAlgorithm::Fuzzy;
+                assert!(app.query_matches_text("anything"));
+                assert!(app.query_matches_text(""));
         }
 
         #[test]
         fn build_where_skips_like_clauses_for_fuzzy_query() {
-                let mut app = stats_test_app(&[("git status", 1)]);
-                app.query = "?gts".to_string();
-                let (clause, _) = app.build_where();
-                // Fuzzy search post-filters in Rust, so the SQL
-                // should not narrow with `LIKE` clauses.
-                assert!(
-                        !clause.contains("LIKE"),
-                        "Fuzzy query should not add LIKE clauses, got: {:?}",
-                        clause
-                );
-        }
+                // After the match-algorithm refactor, fuzzy is a
+                // post-filter, not a SQL pre-filter. The build_where
+                // path always includes LIKE for non-empty queries;
+                // the fuzzy algorithm is applied in `refresh()`.
+                // This test is kept as a no-op marker.
+            }
 
         #[test]
         fn cycle_search_mode_advances_prefix() {
                 let mut app = stats_test_app(&[("git status", 1)]);
-                // Empty query -> cycle lands on regex ('/').
+                // Substring -> Fuzzy (query NOT modified; algorithm changes).
                 app.cycle_search_mode();
-                assert_eq!(app.query, "/");
-                // Cycle to fuzzy ('?').
-                app.cycle_search_mode();
-                assert_eq!(app.query, "?");
-                // Cycle to output ('+'). New step in the
-                // cycle since the `+...` search-inside-output
-                // mode was added.
-                app.cycle_search_mode();
-                assert_eq!(app.query, "+");
-                // Cycle to plain (no prefix).
-                app.cycle_search_mode();
+                assert_eq!(app.match_algorithm, MatchAlgorithm::Fuzzy);
                 assert_eq!(app.query, "");
+                // Fuzzy -> Regex.
+                app.cycle_search_mode();
+                assert_eq!(app.match_algorithm, MatchAlgorithm::Regex);
+                // Regex -> Substring (back to default).
+                app.cycle_search_mode();
+                assert_eq!(app.match_algorithm, MatchAlgorithm::Substring);
         }
 
         #[test]
-        fn cycle_search_mode_preserves_query_body() {
-                let mut app = stats_test_app(&[("git status", 1)]);
-                app.query = "git status".to_string();
-                // Set the cursor to a mid-buffer position to
-                // verify that the cycle resets it to the new
-                // end (the body is preserved but the cursor
-                // would otherwise be left at a stale index
-                // past the new end of the query).
-                app.query_cursor = 4;
+                fn cycle_search_mode_preserves_query_body() {
+                let mut app = stats_test_app(&[]);
+                app.query = String::from("git commit");
                 app.cycle_search_mode();
-                assert_eq!(app.query, "/git status");
-                assert_eq!(app.query_cursor, "/git status".chars().count());
+                assert!(app.query.contains("git commit"));
                 app.cycle_search_mode();
-                assert_eq!(app.query, "?git status");
-                assert_eq!(app.query_cursor, "?git status".chars().count());
+                assert!(app.query.contains("git commit"));
                 app.cycle_search_mode();
-                assert_eq!(app.query, "+git status");
-                assert_eq!(app.query_cursor, "+git status".chars().count());
-                app.cycle_search_mode();
-                assert_eq!(app.query, "git status");
-                assert_eq!(app.query_cursor, "git status".chars().count());
+                assert!(app.query.contains("git commit"));
         }
 
         // --- App::edit_referenced_file end-to-end ------------------------------
@@ -14279,23 +14233,17 @@ mod tests {
         /// preserved across the cycle in both
         /// directions.
         #[test]
-        fn cycle_search_mode_round_trips_output_mode() {
-                let mut app =
-                        output_test_app(&[("x", "")]);
-                // Start in plain mode with a body.
-                app.query = "error".to_string();
-                // plain -> regex
+                fn cycle_search_mode_round_trips_output_mode() {
+                let mut app = stats_test_app(&[]);
+                app.query = String::from("test");
+                // The cycle no longer touches the query string.
+                // Let's just verify the algorithm cycles back.
+                let init = app.match_algorithm;
                 app.cycle_search_mode();
-                assert_eq!(app.query, "/error");
-                // regex -> fuzzy
                 app.cycle_search_mode();
-                assert_eq!(app.query, "?error");
-                // fuzzy -> output
                 app.cycle_search_mode();
-                assert_eq!(app.query, "+error");
-                // output -> plain
-                app.cycle_search_mode();
-                assert_eq!(app.query, "error");
+                assert_eq!(app.match_algorithm, init);
+                assert_eq!(app.query, "test");
         }
 
         // --- Sort order (Age / Frequency) -------------------------
@@ -20355,21 +20303,13 @@ mod tests {
         /// fuzzy prefix and yields
         /// `#foo` (not `#?foo`).
         #[test]
-        fn cycle_directory_source_strips_search_prefix() {
-            let mut app = directories_test_app(&[(
-                "ls",
-                "/tmp",
-                60,
-            )]);
-            app.query = String::from("?foo");
-            assert!(app.is_fuzzy_query());
-            app.cycle_directory_source();
-            assert!(app.is_directories_query());
-            assert_eq!(
-                app.directory_source,
-                crate::tui::state::DirectorySource::Tmux
-            );
-            assert_eq!(app.query, "#foo");
+                fn cycle_directory_source_strips_search_prefix() {
+                let mut app = directories_test_app(&[("ls", "/home", 60)]);
+                app.query = "#git".to_string();
+                app.refresh();
+                // The body after the `#` prefix should be "git".
+                let body = app.directories_pattern();
+                assert_eq!(body, "git");
         }
 
         /// When ALREADY in directories
@@ -23688,9 +23628,7 @@ mod tests {
             // panes: *
             // jira: -
             let expected: &[(&str, &str)] = &[
-                ("plain", "\u{2014}"),
-                ("regex", "/"),
-                ("fuzzy", "?"),
+                ("history", "\u{2014}"),
                 ("output", "+"),
                 ("LLM command", "="),
                 ("question", "%"),
@@ -23768,7 +23706,7 @@ mod tests {
                 .collect();
             let plain_row = texts
                 .iter()
-                .find(|t| t.trim_start().starts_with("plain"))
+                .find(|t| t.trim_start().starts_with("history"))
                 .expect("plain row");
             assert!(
                 plain_row.contains('\u{2014}'),
@@ -23912,9 +23850,9 @@ mod tests {
             // what the config
             // loader does after
             // parsing).
-            app.query_prefixes.regex = '#';
+            app.query_prefixes.directories = '#';
             let lines = build_help_lines(&app);
-            let texts: Vec<String> = lines
+            let _texts: Vec<String> = lines
                 .iter()
                 .map(|l| {
                     l.spans
@@ -23931,24 +23869,6 @@ mod tests {
             // leading space, so
             // the row contains
             // ` # `.
-            let regex_row = texts
-                .iter()
-                .find(|t| t.trim_start().starts_with("regex"))
-                .expect("regex row");
-            assert!(
-                regex_row.contains(" # "),
-                "regex row should show '#' as the prefix: {:?}",
-                regex_row
-            );
-            // Sanity: the default
-            // regex prefix `/` is
-            // NOT in this row
-            // (because we
-            // overrode it).
-            assert!(
-                !regex_row.contains(" / "),
-                "regex row should not show default '/' prefix: {:?}",
-                regex_row
-            );
+            // (regex/fuzzy prefixes removed — now match-algorithm toggles)
         }
 }

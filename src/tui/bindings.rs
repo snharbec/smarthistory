@@ -199,7 +199,11 @@ pub enum Action {
     /// (manual + built-in) where navigating the list applies the
     /// theme live, Enter commits, Esc reverts to the original.
     ThemePicker,
-    /// Toggle between plain, regex, and fuzzy search modes.
+    /// Toggle between substring, fuzzy, and regex match
+    /// algorithms. Applied to ALL prefix modes (history,
+    /// directories, panes, notes, etc.) except JIRA.
+    /// Default key: `C-f`. Cycle: Substring → Fuzzy →
+    /// Regex → Substring.
     ToggleSearchMode,
     /// Cycle the directory-source
     /// filter for the
@@ -371,7 +375,7 @@ impl Action {
             Action::DeleteWordBackward => "C-w",
             Action::CommandAction => ":",
             Action::ThemePicker => "T",
-            Action::ToggleSearchMode => "F3",
+            Action::ToggleSearchMode => "C-f",
             Action::MarkTodoDone => "C-x",
         }
     }

@@ -160,8 +160,7 @@ enum Commands {
         /// `--prefix '!'` for todos, `--prefix '-'` for
         /// JIRA, `--prefix '~'` for files, `--prefix '='`
         /// for LLM command generation, `--prefix '%'`
-        /// for the question mode, `--prefix '/'` for
-        /// regex search, `--prefix '?'` for fuzzy, `--prefix '+'`
+        /// for the question mode, `--prefix '+'`
         /// for output search). The prefix character is
         /// the user's configured one — see
         /// `prefix.<mode>=...` in the config file; the
@@ -176,11 +175,10 @@ enum Commands {
         /// query is NOT restored, so the user lands in
         /// exactly the prefix mode they asked for.
         ///
-        /// Useful for binding keys to jump directly into
-        /// a specific view without typing the prefix each
-        /// time — e.g.
-        /// `bindkey '^P' 'smarthistory tui --prefix "*"'`
-        /// opens the panes view on Ctrl-P.
+        /// Note: the match algorithm (SUBSTRING / FUZZY /
+        /// REGEX) is toggled separately via `C-f` inside
+        /// the TUI; it applies to all prefix modes
+        /// (except JIRA).
         #[arg(long)]
         prefix: Option<String>,
         #[arg(index = 1)]
@@ -774,10 +772,6 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
 /// Defaults match the original hard-coded values.
 #[derive(Debug, Clone)]
 pub struct QueryPrefixes {
-    /// Prefix for regex search (default `/`).
-    pub regex: char,
-    /// Prefix for fuzzy search (default `?`).
-    pub fuzzy: char,
     /// Prefix for output search (default `+`).
     pub output: char,
     /// Prefix for LLM command generation (default `=`).
@@ -842,8 +836,7 @@ pub struct QueryPrefixes {
 impl Default for QueryPrefixes {
     fn default() -> Self {
         QueryPrefixes {
-            regex: '/',
-            fuzzy: '?',
+
             output: '+',
             llm: '=',
             question: '%',
@@ -1753,8 +1746,6 @@ impl Config {
         }
         let c = trimmed.chars().next().unwrap();
         match name.to_ascii_lowercase().as_str() {
-            "regex" => prefixes.regex = c,
-            "fuzzy" => prefixes.fuzzy = c,
             "output" => prefixes.output = c,
             "llm" => prefixes.llm = c,
             "question" => prefixes.question = c,
