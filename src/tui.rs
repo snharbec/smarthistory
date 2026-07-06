@@ -19067,42 +19067,45 @@ mod tests {
         /// `T` marker.
         #[test]
         fn directory_row_is_marked_after_snapshot_loaded() {
+            // This test verifies the canonicalisation contract:
+            // a DB row stored under one path form must match a
+            // tmux window stored under a different form that
+            // resolves to the same physical directory.
+            //
+            // On macOS, /Users/har/... and
+            // /Volumes/HUGE/har/... can be the same dir
+            // (external volume mount). On Linux CI there's no
+            // such mount, so we use a symlink instead: create
+            // a temp dir, symlink it, and verify the two
+            // forms resolve to the same canonical path.
+            let real = std::env::temp_dir().join("sh_real_dir");
+            let link = std::env::temp_dir().join("sh_link_dir");
+            let _ = std::fs::remove_dir_all(&real);
+            let _ = std::fs::remove_file(&link);
+            std::fs::create_dir_all(&real).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
             let mut app = directories_test_app(&[(
                 "ls",
-                "/Users/har/Sources/markdown-search/note_search",
+                real.to_str().unwrap(),
                 60,
             )]);
-            // Snapshot populated
-            // with the SAME
-            // canonical path tmux
-            // reports (so the
-            // comparison succeeds
-            // without canonicalising
-            // on either side at
-            // parse time — that
-            // part is already
-            // covered by the
-            // canonicalisation test).
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%1".to_string(),
-                path: String::from(
-                    "/Volumes/HUGE/har/Sources/markdown-search/note_search",
-                ),
+                path: link.to_string_lossy().into_owned(),
             });
-            // Direct look-up at the
-            // database-stored form
-            // (the user-side path)
-            // must canonicalise to
-            // match.
             assert_eq!(
                 app.directory_tmux_pane_id(
-                    "/Users/har/Sources/markdown-search/note_search"
+                    real.to_str().unwrap()
                 ).as_deref(),
                 Some("%1"),
-                "the row stored as /Users/... must \
-                 match a window stored as /Volumes/HUGE/... — \
-                 the canonicalisation contract"
+                "the row stored as {:?} must match a window \
+                 stored as {:?} — the canonicalisation contract",
+                real, link
             );
+            let _ = std::fs::remove_dir_all(&real);
+            let _ = std::fs::remove_file(&link);
         }
 
         /// Selecting a `T`-marked
@@ -19119,19 +19122,29 @@ mod tests {
         /// targeted pane.
         #[test]
         fn select_t_marked_directory_stages_select_and_switch() {
+            // Use a symlink to simulate the macOS volume-mount
+            // scenario (two path forms that resolve to the same
+            // physical directory). This makes the test
+            // platform-independent.
+            let real = std::env::temp_dir().join("sh_tmark_real");
+            let link = std::env::temp_dir().join("sh_tmark_link");
+            let _ = std::fs::remove_dir_all(&real);
+            let _ = std::fs::remove_file(&link);
+            std::fs::create_dir_all(&real).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
             let mut app = directories_test_app(&[(
                 "ls",
-                "/Users/har/Sources/markdown-search/note_search",
+                real.to_str().unwrap(),
                 60,
             )]);
-            // Snapshot contains
-            // one active window for
-            // the directory above.
+            // Snapshot contains one active window for
+            // the directory above (via the symlink path,
+            // which canonicalises to the same real path).
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%2".to_string(),
-                path: String::from(
-                    "/Volumes/HUGE/har/Sources/markdown-search/note_search",
-                ),
+                path: link.to_string_lossy().into_owned(),
             });
             app.query = "#".to_string();
             app.refresh();
@@ -23436,7 +23449,10 @@ mod tests {
             restore("JIRA_URL", prev_url);
             assert_eq!(
                 app.selection.as_deref(),
-                Some("open \"https://browse.example.com/browse/PROJ-42\""),
+                Some(format!(
+                    "{} \"https://browse.example.com/browse/PROJ-42\"",
+                    if cfg!(target_os = "macos") { "open" } else { "xdg-open" }
+                ).as_str()),
                 "got: {:?}",
                 app.selection
             );
