@@ -191,6 +191,12 @@ enum Commands {
         /// `eval` the printed command.
         #[arg(long)]
         exec: bool,
+        /// Also list sessions from `~/.config/sesh/sesh.toml`
+        /// in the panes (`*`) view. Each sesh session
+        /// has a `name` and a `path`; selecting one stages
+        /// a `cd <path>` command.
+        #[arg(long)]
+        sesh: bool,
         #[arg(index = 1)]
         query: Option<String>,
     },
@@ -3212,7 +3218,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", out);
             }
         },
-        Commands::Tui { mode, prefix, exec, query } => {
+        Commands::Tui { mode, prefix, exec, sesh, query } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -3283,6 +3289,7 @@ fn main() -> anyhow::Result<()> {
                 llm_client,
                 llm_config,
                 override_session_query,
+                sesh,
             )? {
                 Some((command, pick_mode)) => {
                     if exec {

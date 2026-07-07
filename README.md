@@ -1,12 +1,12 @@
 # Smart History
 
 A fast, SQLite-backed shell history tool for zsh with a full-screen
-picker, multiple search modes, optional LLM integration, and
-context-aware navigation. This README is the high-level overview;
-for the full feature list, configuration reference, and TUI key
-bindings, see [TECHNICAL.md](TECHNICAL.md).
+picker, match-algorithm toggle (substring / fuzzy / regex), optional
+LLM integration, multiplexer support (tmux + herdr), and
+context-aware navigation. For the full feature list, configuration
+reference, and TUI key bindings, see [TECHNICAL.md](TECHNICAL.md).
 
-# Overview
+## Overview
 
 Smart History replaces the shell's native history with a single
 SQLite database and a `ratatui`-based full-screen picker. Each
@@ -15,937 +15,281 @@ its directory, exit code, timestamp, and captured output, and the
 line-editor's Up/Down keys always traverse this database instead
 of falling through to zsh's native history.
 
-Highlights:
+### Key features
 
 - **SQLite-backed history** at
   `~/.local/cache/smarthistory/smarthistory.db` — one row per
   command, with directory, session UUID, exit code, captured
-  output, and timestamp. Search by substring, regex, fuzzy
-  subsequence, captured output, or note/todo content.
-- **Context-aware picker.** A full-screen TUI (`Ctrl+R`) for
-  searching, picking, and editing. The picker supports multiple
-  *modes* (`SESS` → `DIR` → `GLOBAL` → `STATS`), each
-  narrowing the same underlying database to a different slice.
-- **Smart "next command" predictor** (`Ctrl+S`): ranks the entire
+  output, and timestamp.
+- **Match-algorithm toggle** (`C-f`): cycle between
+  SUBSTRING → FUZZY → REGEX for the current search. The
+  algorithm applies to all prefix modes (history, directories,
+  panes, notes, todos, files, output) except JIRA.
+- **Context-aware picker** (`Ctrl+R`): a full-screen TUI for
+  searching, picking, and editing. Supports multiple *scopes*
+  (`SESS` → `DIR` → `GLOBAL` → `STATS`), each narrowing the
+  same underlying database to a different slice.
+- **Multiple prefix modes** in the TUI, each selected by a
+  leading character: history (default, no prefix), output
+  search (`+`), LLM command generation (`=`), general question
+  (`%`), note search (`@`), todo search (`!`), directory jump
+  (`#`), panes (`*`), JIRA (`-`), and files (`~`).
+- **Smart "next command" predictor** (`Ctrl+S`): ranks the
   global history by successor frequency via SQLite's `LEAD()`
-  window function. After running `make build`, the next most-
-  likely command surfaces immediately.
-- **Multiple query modes** in the TUI: plain substring (default),
-  regex (`/...`), fuzzy (`?...`), captured-output search
-  (`+...`), LLM command generation (`=...`), general question
-  (`%...`), note search (`@...`), todo search (`!...`), and
-  directory jump (`#...`).
+  window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`):
   translate natural-language into a runnable command (`=`),
   describe a command in plain prose (`Ctrl+K`), and correct a
   broken command (`Ctrl+T`).
-- **tmux integration:** the `T` marker in directories mode
-  shows which directories are already running in a tmux pane;
-  pressing Enter on a marked row jumps to that pane.
-- **Single Rust binary, no runtime dependencies.** No `fzf`, no
-  `uuidgen`, no `/dev/urandom` access. The init snippet is
-  self-contained.
-
-# Installation
-
-1. Clone the repository and build:
-
-   ```bash
-   cargo build --release
-   ```
-
-2. Add the resulting binary to your `PATH`:
-
-   ```bash
-   ln -s "$(pwd)/target/release/smarthistory" ~/.local/bin/smarthistory
-   ```
-
-   (or copy / move it wherever you keep your executables).
-
-3. Initialize in your `~/.zshrc`:
-
-   ```bash
-   eval "$(smarthistory init zsh)"
-   ```
-
-   The init snippet embeds a freshly-generated session UUID and
-   binds the keyboard shortcuts (`Ctrl+R` for the picker,
-   `Ctrl+G` for scope cycling, `Ctrl+S` for next-command
-   prediction, and a few more). Re-run it once per shell
-   startup; running it twice in the same shell is a no-op.
-
-The first time you press Up in the line editor, the database
-file is created at `~/.local/cache/smarthistory/`.
-
-# Base usage
-
-Once the init snippet is sourced, the line editor is wired up
-and the history starts collecting automatically.
-
-## From the line editor
-
-- **Up / Down** — step through commands (always from the
-  smarthistory DB, never falling through to zsh's native
-  history).
-- **Ctrl+R** — open the full-screen TUI picker for live
-  filtering.
-- **Ctrl+G** — cycle the active *scope* (the search context the
-  picker filters by): `SESS` → `DIR` → `GLOBAL` → `STATS` →
-  `SESS`. The active scope is shown in the RPROMPT.
-- **Ctrl+S** — insert the most-probable next command based on
-  what historically followed the most recent entry. Each
-  subsequent press cycles through the next candidates.
-- **Esc** — clear the line.
-
-## From the CLI
-
-The `smarthistory` binary also exposes a few commands for
-non-interactive use:
-
-- `smarthistory search [flags]` — print the rows matching a
-  filter (substring, regex, fuzzy, output, etc.) without
-  opening the TUI. Useful for scripts and one-liners.
-- `smarthistory next` — print the most-probable next command
-  for a given prefix.
-- `smarthistory clean [flags]` — bulk-delete history rows that
-  match a filter, with a confirmation prompt before any
-  destructive change.
-- `smarthistory update` — rewrite stored directory paths in
-  the SQLite history table to their `~/x` short form. Run
-  this once after upgrading; the operation is idempotent and
-  safe to re-run.
-- `smarthistory import-atuin` — import history from an
-  existing atuin database.
-- `smarthistory init zsh` — emit the zsh init snippet (this
-  is what `eval "$(...)"` calls).
-
-# TUI
-
-The full-screen picker (`Ctrl+R`) is the main work surface. It
-shows a live-filtered list of history rows on the left, a
-details pane with the selected row's metadata (command,
-directory, exit code, captured output preview) on the right,
-and a query bar at the bottom.
-
-The query bar accepts the eight search modes documented in
-the [Search modes](#search-modes) section. The visible
-prompt character (`/`, `?`, `+`, `=`, `%`, `@`, `!`, `#`)
-tells you which mode you're in; the input border is tinted
-in the mode's color (yellow for regex, green for fuzzy, blue
-for output, magenta for LLM, etc.) so the active mode is
-always visible at a glance. The full list of prefix
-characters and their modes is in the [Prefix keys](#prefix-keys)
-section.
-
-The search mode can also be toggled with `F3` (which cycles
-plain → regex → fuzzy → output → plain), independent of the
-typed prefix.
-
-## Key bindings (subset)
-
-- `Enter` — stage the selected row (or invoke the active
-  query mode's primary action: run the command, open the
-  note, jump to the tmux pane, etc.).
-- `Ctrl+K` — LLM "describe" the selected command.
-- `Ctrl+T` — LLM "correct" the selected command.
-- `Ctrl+Y` — yank the selected command (or the captured
-  output if the output view is open) to the system clipboard.
-- `Ctrl+E` — edit the selected row's comment.
-- `Ctrl+L` — open the captured-output view for the selected
-  row (scrolling overlay).
-- `Ctrl+O` — open the file referenced by the selected
-  command in `$EDITOR`.
-- `Ctrl+R` — open the reverse-history search (last 1000
-  commands; the `precmd` hook in `init.zsh` keeps the
-  ring buffer full).
-- `Ctrl+G` — cycle the active scope (SESS / DIR / GLOBAL /
-  STATS).
-- `F3` — cycle the search mode (plain / regex / fuzzy).
-- `F4` — cycle the sort order (age / frequency). The choice
-  persists across TUI invocations.
-- `Ctrl+J` — cycle the exit-code filter (all / success /
-  failure).
-- `Ctrl+X` — mark a todo row as done (only in `!...` mode).
-- `T` — open the theme picker.
-- `?` — open the help overlay (lists every action and its
-  current binding).
-- `:` — open the command palette (search by action name).
-- `Esc` — close any open overlay (or quit the TUI when no
-  overlay is open).
-
-All keybindings are user-configurable. See the Configuration
-section below and the full reference in [TECHNICAL.md](TECHNICAL.md).
-
-# Search modes
-
-The TUI now supports ten different *search modes*,
-selected by the leading character of the query. Each mode
-answers a different question about the user's history. The
-table below summarises the modes; the paragraphs after it
-describe each in detail.
-
-| Mode          | Prefix | Question it answers                              | Filter target        |
-|---------------|--------|--------------------------------------------------|----------------------|
-| Plain         | (none) | "Which command contains these words?"            | `command` + comment  |
-| Regex         | `/`    | "Which command matches this pattern?"            | `command` + comment  |
-| Fuzzy         | `?`    | "Which command approximately contains these letters?" | `command` + comment  |
-| Output        | `+`    | "Which command *produced* this output?"          | captured output      |
-| LLM           | `=`    | "Translate this English description into a shell command." | (LLM call) |
-| Question      | `%`    | "Ask the LLM a short factual question."          | (LLM call)           |
-| Notes         | `@`    | "Find a note matching this query."               | `note_search` DB     |
-| Todo          | `!`    | "Show me my open todos matching this."           | `note_search` DB     |
-| Directories   | `#`    | "Jump to a directory I've worked in."            | directory column     |
-| Panes         | `*`    | "Jump to another pane in this tmux session."     | pane cwd + command   |
-| JIRA          | `-`    | "Find a JIRA issue in my self-hosted instance."   | JQL (key/field/text) |
-| JIRA          | `-`    | "Find a JIRA issue in my self-hosted instance."   | JQL (key/field/text) |
-
-The directory-jump mode (`#...`) and the four "find
-something" modes (plain, regex, fuzzy, output) all search
-the same SQLite history table — they just differ in *how*
-they match. The panes mode (`*...`) snapshots the current
-tmux session's panes instead. The two LLM modes (`=...` and
-`%...`) don't search the history at all; they go straight to
-the configured ollama instance. The two `note_search` modes
-(`@...` and `!...`) query a separate database (see the
-Configuration section).
-
-The default prefix characters are configurable — see
-[Prefix keys](#prefix-keys) below.
-
-## Plain (default, no prefix)
-
-Whitespace-separated, case-insensitive, AND-combined
-substring match against the `command` and `comment` text.
-
-```
-> git commit
-  # every row whose command or comment contains BOTH
-  # `git` AND `commit` (case-insensitive)
-```
-
-The match is broad by design: the user types a couple of
-words and gets a manageable candidate set, which they then
-narrow with the list cursor.
-
-## Regex (`/...`)
-
-Compiled to a Rust `regex::Regex`; the match is applied to
-the same `command` + `comment` columns as plain mode but
-uses regex semantics. Implicit `.*` anchors are added at
-both ends unless you provide your own, so `/git commit/`
-matches *any* row containing `git commit`, while `/^git/`
-only matches rows that *start* with `git`.
-
-```
-> /kubectl (apply|delete)/
-  # rows whose command matches the alternation
-> /^\s*git\s+commit\s+-m/
-  # rows starting with `git commit -m` (and arbitrary
-  # leading whitespace)
-```
-
-If the regex fails to compile (e.g. an unbalanced bracket
-halfway through typing), the TUI keeps the previous valid
-regex in place so the list doesn't flicker empty during a
-transient typo.
-
-## Fuzzy (`?...`)
-
-fzf / `sk` / `peco` style: every character of the query
-must appear in the target text, in order, case-insensitive.
-Whitespace splits the query into AND-matched words, each of
-which is itself a fuzzy subsequence.
-
-```
-> ?gsc
-  # `git status --short && cargo build`
-  # `git stash create`
-  # NOT `git log` (no `s` then `c`)
-> ?git st
-  # `git status`, `git stash`, `git switch trunk`, ...
-  # NOT `cargo test` (no `git` subsequence)
-```
-
-Plain, regex, and fuzzy are all post-filters: the SQL fetch
-returns a broad candidate set and the TUI narrows the
-display in Rust on every keystroke. With a few-thousand-row
-history this feels instant.
-
-## Output (`+...`)
-
-Target the `history_output.output` column rather than
-`command` or `comment`. The mode answers the inverse
-question from the others: "which command *produced* this
-output?" Rows with no captured output are excluded from
-the result set, since the user is asking for a command
-by what it generated, not a command with nothing to say.
-
-```
-> +segmentation fault
-  # every command whose captured output contains BOTH
-  # `segmentation` AND `fault`
-> +
-  # every command that has any captured output at all
-  # (an "output inventory" view)
-```
-
-Output search is a SQL pre-filter (each term becomes a
-`LIKE '%term%'` clause), so the round-trip is one query and
-the result set matches the user's mental model exactly.
-
-## LLM command generation (`=...`)
-
-Translate a natural-language description into a runnable
-command via a local ollama instance. While you compose the
-description, the TUI auto-calls the model after one second
-of inactivity and shows the suggestion as a `[LLM]` preview
-row at the top of the list. The `Left` / `Right` arrow keys
-move the input cursor within the description buffer in
-this mode, so you can edit the prompt mid-string before
-pressing `Enter`.
-
-```
-> =Find all files modified yesterday
-  # debounce 1s → ollama returns:
-  #   find . -type f -mtime -1
-  # shown as a [LLM] preview row; Enter stages and exits
-```
-
-`Enter` reuses the live preview without a second round-trip
-— the generated command is inserted into the history table
-(with the original description as the comment), staged for
-the parent shell, and the TUI exits. Requires `ollama.url`
-and `ollama.model` in the config; otherwise the TUI
-surfaces "not configured" on attempted use.
-
-## General question (`%...`)
-
-Ask a local ollama instance for a short answer (at most
-four sentences, plain prose). The answer opens in a
-full-screen overlay; `Esc` / `Enter` / `q` / the question
-prefix closes it, `↑` / `↓` / `PageUp` / `PageDown` /
-`Home` / `End` scroll.
-
-The question is saved to history with the answer stored as
-*output* (not as a comment), so typing `%` later shows all
-previous questions and selecting one re-displays its
-answer. Same `ollama.url` / `ollama.model` configuration
-as the `=...` mode.
-
-## Notes (`@...`)
-
-Query a separate
-[note_search](https://github.com/snharbec/note_search)
-SQLite database for matching notes. The note's filename
-is shown as the row label, the title as a secondary hint,
-and the body in the details pane. Selecting a row opens the
-file in `$EDITOR`. The match uses the `note_search` query
-language: plain words AND-matched against filename / title /
-body, `#tag` matched against both the note's frontmatter
-tags and inline tags, `[[link]]` matched against outgoing
-links, and `[attr:value]` matched against the note's
-header fields.
-
-The `@today` / `@week` / `@month` / `@year` date-filter
-aliases apply: `@orchard @today` shows notes matching
-"orchard" that were updated in the last 24 hours. Each
-alias is a separate token — `@today` is recognised, but
-`@orchard` is not treated as a date alias (it goes to the
-`note_search` query language as a plain word).
-
-Requires `notes.database` and `notes.dir` in the config
-(or `NOTE_SEARCH_DATABASE` / `NOTE_SEARCH_DIR` env vars).
-
-## Todo (`!...`)
-
-The same `note_search` database, but listing every *open*
-todo as its own row (one row per line, not one row per
-file). Uses the same Obsidian-style query language as
-`@...` and the same date-filter aliases. The list comes
-straight from the indexer's `todo_entries` table, so the
-TUI and `note_search list` always agree on what's open.
-
-```
-> !orchard
-  # every open todo whose text or note header contains
-  # `orchard`
-> !#urgent
-  # open todos in notes tagged `urgent` AND open todos
-  # with an inline `#urgent` on the same line
-> !older @week
-  # open todos mentioning `older` AND updated this week
-```
-
-Press `Ctrl+X` on a todo row to mark it done: the TUI
-rewrites `[ ]` to `[x]` in the source file, re-indexes the
-`note_search` database so the row disappears from the list,
-and refreshes the view. Pressing `Enter` on a todo row
-opens `$EDITOR <file> <line_option>` with the line number
-substituted in (default template `+$LINE`, configurable
-via `todo.line_option=...`).
-
-Requires the same `notes.database` and `notes.dir` config
-keys as the `=...` mode.
-
-## Directories (`#...`)
-
-List every unique directory in the history (one row per
-directory, sorted by most-recently-used first). The visible
-layout is the inverse of normal history rows: the
-**directory** is the primary text (in shell-shortened
-`~/x` form) and the **last command run there** is a
-secondary italic hint — so the user sees the path
-prominently and a peek of *what they were doing there*
-without leaving the row.
-
-```
-> #
-  # every directory in the history
-> #home
-  # directories whose path contains `home`
-```
-
-A bright `T` marker in the capture column means there's at
-least one active tmux pane whose cwd matches this
-directory. Pressing `Enter` on a `T`-marked row stages
-`tmux select-pane -t <pane_id> && tmux switch-client -t
-<pane_id>` to jump to that pane; on an unmarked row it
-stages `tmux new-session -d -s <basename> -c <dir>; tmux
-switch-client -t <basename>` to create a new detached
-session rooted in the directory. Both target paths use
-the `~/x` form (tmux doesn't do `~` expansion itself, so
-the TUI does it before staging).
-
-The matching is homemap-aware: if the user's home is on
-an external volume (e.g. `/Volumes/HUGE/har` on macOS),
-both the DB row and the tmux pane path are normalised
-through `expand_home_with_config` before comparison, so a
-DB row stored as `~/x` and a tmux pane reported at
-`/Volumes/HUGE/har/x` produce the same string and the
-`T` marker appears. The snapshot is fetched once per TUI
-session and cached; silent failure if `tmux` is not on
-PATH or not running.
-
-#### Active tmux panes as rows
-
-Every active tmux pane's cwd is added to the
-`#`-mode list (in addition to the SQL history
-and the `sessiondirs=...` config). The visible
-primary text is the directory in `~/x` form
-(matching the other rows); the secondary
-slot shows `(pane %N)` so the user can copy
-the pane id for `tmux send-keys -t %N ...`
-directly from the list. This means the
-"every directory I'm currently active in"
-view is always one keystroke away — no
-need to open `tmux list-windows` separately.
-
-**The pane path must be a real absolute path.** The
-TUI filters out any tmux pane whose
-`pane_current_path` does not start with `/`. A
-pane whose cwd is set to a non-path (e.g. a
-command line, an error message, or a relative
-path) is skipped entirely — showing it as a
-"directory" would be confusing, and the T-marker
-lookup would fail because `std::fs::canonicalize`
-can't resolve a non-path. This defensive filter
-keeps the `DIR:TMUX` list clean even when the user's
-tmux setup produces unusual `pane_current_path`
-values.
-
-#### Directory-source filter (`ALL` / `TMUX` / `CFG`)
-
-The `Action::CycleDirectorySource` key
-(default `C-M-g`, configurable via
-`key.cycle-directory-source=...`) cycles
-the directory-source filter in this order:
-
-- `ALL` (default): every row, regardless
-  of where it came from (history, tmux
-  pane cwd, or `sessiondirs=...`).
-- `TMUX`: only the cwds of the active
-  tmux panes.
-- `CFG`: only the directories from
-  `sessiondirs=...`.
-
-The current source is shown in the mode
-strip as a `DIR:ALL` / `DIR:TMUX` /
-`DIR:CFG` chip (only when in directories
-mode and the source is not the default
-`ALL`). The choice persists in the session
-file (`~/.cache/smarthistory/session`) so
-the user lands back on the same view
-across invocations.
-
-**Works from any mode.** Pressing the key
-outside of directories (`#`) mode switches
-INTO directories mode first — the query
-gains the `#` prefix (any existing
-search-mode prefix like `/`, `?`, `+`, `=`,
-`%`, `@`, `!` is stripped, and the body is
-preserved so you can keep narrowing by
-path substring), then the source cycles.
-So you can be in plain history, press
-`C-M-g`, and land directly in `DIR:TMUX`.
-
-#### Pinned directories (`sessiondirs=...`)
-
-## Panes (`*...`)
-
-List every pane in the **current tmux session** — the one the
-TUI is running in — *excluding* the pane the TUI itself is in
-(read from `$TMUX_PANE`). Each row shows the pane's current
-command (`#{pane_current_command}`, e.g. `zsh`, `vim`,
-`cargo`) as the primary text and the pane's cwd (shortened to
-`~/x`) as a secondary hint. The pane id (`%N`) is staged for
-the jump action on `Enter`.
-
-```
-> *
-  * every pane in this session (except this one)
-> *vim
-  * panes whose command or cwd contains `vim`
-```
-
-The body after `*` is a substring filter matched (AND across
-whitespace tokens, case-insensitive) against each pane's
-command **and** cwd, so `*vim` finds panes running vim while
-`*work src` finds panes whose command-or-cwd contains both
-`work` and `src`.
-
-**The last pane is selected by default.** The list is
-ordered so the **previously-active pane** (the one `tmux
-last-pane` would jump to, flagged by tmux's `pane_last`) is
-at position 0 — the default selection. So just pressing
-`Enter` immediately flips you back to the pane you were in
-before the current one, no navigation needed.
-
-**Selecting a pane jumps to it.** Pressing `Enter` stages
-
-```
-tmux select-window -t @<window_id> && tmux select-pane -t %<pane_id>
-```
-
-plain `select-pane` does **not** switch windows, so the
-window-id step is needed first when the target pane lives in
-another window of the session. `&&` chains them so a stale
-snapshot (window gone) doesn't try to select a dead pane. The
-snapshot is fetched once per TUI session (`tmux list-panes -s`)
-and cached; silent failure if not inside tmux (empty list).
-
-This is the "what else is running in this session?" view — a
-quick pane switcher that lives inside the history picker, so
-you never leave the line editor to jump between panes.
-
-## JIRA (`-...`)
-
-List JIRA issues from a **self-hosted JIRA instance**, with
-live search-as-you-type against its REST API v2. Credentials
-and endpoints come from environment variables:
-
-| Variable | Purpose |
-| ------------------ | ------------------------------------------------------------------- |
-| `JIRA_API_TOKEN` | Bearer token sent as `Authorization: Bearer <token>`. |
-| `JIRA_SERVER` | API base URL, e.g. `https://jira.internal` (→ `/rest/api/2/search`). |
-| `JIRA_URL` | Browse base URL; `{JIRA_URL}/<key>` opens the ticket. Falls back to `JIRA_SERVER`. |
-| `JIRA_PROJECT` | Default project to scope all searches to (optional). When set, every query — even free-text searches — is scoped to this project via `project = "<proj>" AND ...`. |
-| `JIRA_MAX_RESULTS` | Max results per API request (default: `5`). Increase if your queries routinely return more rows. |
-| `JIRA_HOST_CERTIFICATE` | Path to a PKCS#12 (`.p12`/`.pfx`) client certificate for mutual TLS (optional). |
-| `JIRA_HOST_CERTIFICATE_PASSWORD` | Password for the client certificate file (optional, ignored when `JIRA_HOST_CERTIFICATE` is unset). |
-| `JIRA_CA_CERTIFICATE` | Path to a CA certificate file (PEM or DER format) for verifying the JIRA server's TLS certificate (optional). Needed when the server uses an internal CA not in the system trust store, or when the server's certificate chain is incomplete. |
-
-When the mode starts (empty body) it shows the project's
-last-updated issues: `project = "<JIRA_PROJECT>" ORDER BY
-updated DESC`. If `JIRA_PROJECT` is unset, it shows the
-server-wide recently-updated issues instead.
-
-When `JIRA_PROJECT` is set, **every** query is scoped to that
-project — free-text searches like `-crash` produce
-`project = "<proj>" AND (description ~ "crash" OR summary ~ "crash")`
-so results never leak from other projects. Use an explicit
-`project=OTHER` token in the query to override.
-
-The body after `-` is a mix of three token shapes, all
-AND-joined into a single JQL query:
-
-- **Issue key** — matches `\w+-\d+` (e.g. `PROJ-123`) →
-  `key = PROJ-123`. Multiple keys collapse into
-  `key in (a, b)`.
-- **Field=value** — matches `\w+=\S*` (e.g.
-  `project=PROJ`, `labels=LABEL`) → `<field> = "<value>"`.
-- **Free text** — anything else →
-  `(description ~ "text" OR summary ~ "text")`.
-
-So `-project=PROJ crash` runs
-`project = "PROJ" AND (description ~ "crash" OR summary ~ "crash")
-ORDER BY updated DESC`, and `-PROJ-123` finds that one issue.
-
-```
-> -
-  - last-updated issues of JIRA_PROJECT
-> -PROJ-1
-  - the single issue PROJ-1
-> -project=PROJ crash
-  - PROJ issues whose summary/description mentions "crash"
-```
-
-**Search is debounced** (~400ms after the last keystroke) and
-runs on a background thread — the TUI never blocks on a
-network call. While a search is in flight, `Esc`
-(`key.cancel`) cancels it. Selecting an issue opens its browse
-URL in the system browser (`open` on macOS, `xdg-open` on
-Linux) by staging `open "http…/PROJ-123"` for the parent
-shell. If `JIRA_SERVER`/`JIRA_API_TOKEN` aren't set, the list
-stays empty and a status message tells you JIRA isn't
-configured.
-
-#### TLS setup
-
-If your JIRA server requires a **client certificate** (mutual
-TLS), set:
+- **Multiplexer integration** (tmux and herdr): the `#` mode
+  shows which directories are active in a tmux session or
+  herdr workspace; the `*` mode lists all panes across all
+  sessions/workspaces as a tree; selecting a row switches
+  to that workspace or pane.
+- **Output capture** for both tmux (`pipe-pane` log) and herdr
+  (`herdr pane read`): captured output is searchable via the
+  `+` prefix and viewable via `Ctrl+L`.
+- **Note/todo integration** with
+  [note_search](https://github.com/snharbec/note_search): search
+  notes (`@`), list open todos (`!`), and create new entries
+  (`@new <text>` / `!@new <text>`) directly from the TUI.
+- **Sesh session support** (`--sesh`): list sessions from
+  `~/.config/sesh/sesh.toml` in the panes (`*`) view.
+- **Single Rust binary, no runtime dependencies.** No `fzf`,
+  no `uuidgen`, no `/dev/urandom` access.
+
+## Installation
 
 ```bash
-# Path to your PKCS#12 (.p12 / .pfx) file
-export JIRA_HOST_CERTIFICATE=~/.certs/jira-client.p12
+# Clone and build
+git clone <repo-url> smarthistory
+cd smarthistory
+cargo build --release
 
-# Its password
-export JIRA_HOST_CERTIFICATE_PASSWORD=my-secret
+# Add to PATH
+ln -s "$(pwd)/target/release/smarthistory" ~/.local/bin/smarthistory
+
+# Initialize in ~/.zshrc
+eval "$(smarthistory init zsh)"
 ```
 
-If the certificate was created with an older OpenSSL version
-and you get a "builder error" when parsing it, re-export it
-with modern encryption:
+The init snippet embeds a freshly-generated session UUID and
+binds the keyboard shortcuts. Re-run it once per shell startup;
+running it twice in the same shell is a no-op.
+
+## Usage
+
+### From the line editor
+
+| Key       | Action                                                         |
+| --------- | -------------------------------------------------------------- |
+| `Ctrl+R`  | Open the TUI picker.                                           |
+| `Up`      | Walk back through matches for the current line.                |
+| `Down`    | Walk forward through matches; clear the line at the start.     |
+| `Ctrl+G`  | Cycle scope: SESS → DIR → GLOBAL → STATS → SESS.               |
+| `Ctrl+S`  | Insert the most-probable next command; press again to cycle.  |
+
+### From the CLI
 
 ```bash
-# Extract cert and key (using -legacy to read the old format)
-openssl pkcs12 -in ~/.certs/jira-client.p12 \
-  -out /tmp/jira-cert.pem -clcerts -nokeys -legacy \
-  -passing pass:YOUR_PASSWORD
-
-openssl pkcs12 -in ~/.certs/jira-client.p12 \
-  -out /tmp/jira-key.pem -nocerts -nodes -legacy \
-  -passing pass:YOUR_PASSWORD
-
-# Re-package with modern (non-legacy) encryption
-openssl pkcs12 -export \
-  -in /tmp/jira-cert.pem \
-  -inkey /tmp/jira-key.pem \
-  -out ~/.cache/smarthistory/jira-modern.p12 \
-  -passout pass:YOUR_PASSWORD
-
-rm /tmp/jira-cert.pem /tmp/jira-key.pem
-
-# Point to the new file
-export JIRA_HOST_CERTIFICATE=~/.cache/smarthistory/jira-modern.p12
+smarthistory search [QUERY] [flags]     # print matching rows
+smarthistory next  <COMMAND>             # most-probable next command
+smarthistory clean [QUERY] [flags]       # bulk-delete matching entries
+smarthistory tui   [options]             # launch the TUI
+smarthistory init  zsh                   # emit the zsh init snippet
+smarthistory config get <key>            # print a resolved config value
+smarthistory config list                 # print all config values
+smarthistory config check                # validate the config file
+smarthistory import-atuin                # import from atuin
+smarthistory update                      # normalize stored directory paths
 ```
 
-If the JIRA server uses a certificate signed by an **internal
-CA** (or its certificate chain is incomplete), provide the
-missing CA certificate:
+### TUI subcommand options
 
 ```bash
-# Download the missing intermediate CA (example: GeoTrust TLS RSA CA G1)
-curl -s 'https://cacerts.digicert.com/GeoTrustTLSRSACAG1.crt' \
-  -o ~/.cache/smarthistory/jira-ca.crt
-
-# Or point to your company's internal CA PEM/DER file
-export JIRA_CA_CERTIFICATE=~/.cache/smarthistory/jira-ca.crt
+smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [--sesh] [QUERY]
 ```
 
-The file can be in PEM format (`-----BEGIN CERTIFICATE-----`)
-or raw DER format — the parser tries PEM first and falls back
-to DER automatically.
+- `--mode <scope>` — start in a specific scope (SESS, DIR, GLOBAL).
+- `--prefix <char>` — start directly in a prefix mode (`*` for
+  panes, `#` for directories, `@` for notes, etc.). Overrides the
+  persisted session query.
+- `--exec` — execute the selected command directly via `sh -c`
+  instead of printing it to stdout. Use when launching from outside
+  a shell (e.g. a herdr keybinding or GUI launcher).
+- `--sesh` — also list sessions from `~/.config/sesh/sesh.toml`
+  in the panes (`*`) view. Selecting a sesh session stages
+  `cd <path>`.
 
-#### Pinned directories (`sessiondirs=...`)
+### TUI key bindings (subset)
 
-Add one or more `sessiondirs=<path>` lines to the
-config to pin a directory whose sub-tree is *always*
-shown in the `#` list, even if no command has ever
-been run there. Each entry is recursively walked at
-TUI-startup time and every subdirectory becomes a
-row. This is the "show me my projects even when I
-haven't touched them yet" hook.
+| Key       | Action                                                         |
+| --------- | -------------------------------------------------------------- |
+| `Enter`   | Stage the selected row / invoke the mode's primary action.    |
+| `C-f`     | Cycle match algorithm: SUBSTRING → FUZZY → REGEX → SUBSTRING.  |
+| `F4`      | Cycle sort order: AGE → FREQ → AGE.                            |
+| `Ctrl+K`  | LLM "describe" the selected command.                           |
+| `Ctrl+T`  | LLM "correct" the selected command.                            |
+| `Ctrl+Y`  | Yank to clipboard.                                             |
+| `Ctrl+E`  | Edit the selected row's comment.                               |
+| `Ctrl+L`  | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
+| `Ctrl+S`  | Toggle the duplicate filter (LAST vs ALL).                     |
+| `Ctrl+D`  | Delete the selected entry (with confirmation).                 |
+| `Ctrl+X`  | Mark a todo as done (in `!` mode).                             |
+| `Ctrl+H`  | Open the help overlay.                                         |
+| `:`       | Open the command palette.                                       |
+| `T`       | Open the theme picker.                                          |
+| `Esc`     | Close any overlay / cancel the picker.                         |
 
-```
+All keybindings are user-configurable via `key.<action>=<spec>` in the
+config file. See [TECHNICAL.md](TECHNICAL.md) for the full reference.
+
+## Match algorithm
+
+The match algorithm (`C-f`) determines *how* the query body is
+matched against the history rows. It applies to all prefix modes
+except JIRA (which uses its own JQL syntax).
+
+| Algorithm  | Behavior                                                         |
+| ---------- | ---------------------------------------------------------------- |
+| SUBSTRING  | Every whitespace-separated word must appear as a case-insensitive substring (AND-combined). Default. |
+| FUZZY      | fzf-style subsequence match: every character of each word must appear in order, case-insensitive. |
+| REGEX      | The body is compiled as a Rust regex. Implicit `.*` anchors unless `^`/`$` provided. |
+
+The active algorithm is shown as a chip in the mode strip
+(`FUZZY` in green, `REGEX` in yellow) and as a suffix in the
+input border title (e.g. ` history · fuzzy `, ` notes · regex `).
+
+## Prefix modes
+
+The first character of the query selects the prefix mode. Each mode
+answers a different question about the user's data. The default
+prefix characters are configurable via `prefix.<mode>=<char>`.
+
+| Mode          | Prefix | What it does                                      |
+| ------------- | ------ | ------------------------------------------------- |
+| History       | (none) | Search the shell history (default mode).           |
+| Output        | `+`    | Search the captured output of each command.        |
+| LLM command   | `=`    | Generate a Bash command from natural language.    |
+| Question      | `%`    | Ask the LLM a short factual question.              |
+| Notes         | `@`    | Search the note_search SQLite database.            |
+| Todo          | `!`    | List open todos from the note_search database.     |
+| Directories   | `#`    | List every directory in the global history.        |
+| Panes         | `*`    | List all panes across all tmux sessions / herdr workspaces. |
+| JIRA          | `-`    | Search JIRA issues via REST API.                   |
+| Files         | `~`    | List every file in the current directory tree.     |
+
+### Quick-create from notes/todo mode
+
+- `@new <text>` — append a timestamped line to today's daily note.
+- `!@new <text>` — append a timestamped todo entry (`- [ ] text`)
+  to today's daily note.
+
+Both stage a `note_search create-note` command and require
+`notes.database` to be configured.
+
+### Multiplexer integration (tmux + herdr)
+
+The `#` and `*` modes work with both tmux and herdr. The active
+backend is selected via the `multiplexer=` config key (default
+`tmux`):
+
+```ini
 # ~/.config/smarthistory/config
-sessiondirs=~/work
-sessiondirs=~/Sources/playground
+multiplexer=herdr
 ```
 
-After restart, `#` lists every subdirectory under
-`~/work` and `~/Sources/playground`, in addition to
-the directories the user has actually run commands
-in. Pinned rows get `timestamp = 0` and so sort to
-the bottom of the list (the user's recent history
-surfaces first); the user types a pattern to filter
-to one. Rows that have a `.command` file (see
-below) show `(has .command)` in the secondary slot
-so the user knows the row will run a setup script
-on select.
+- **`#` mode (directories)**: the `T` marker shows which
+  directories have an active pane in the configured multiplexer.
+  Selecting a `T`-marked row jumps to that pane; selecting an
+  unmarked row creates a new tmux session / herdr workspace
+  rooted there.
+- **`*` mode (panes)**: lists every pane across every tmux
+  session / herdr workspace as a tree:
 
-#### Per-directory setup scripts (`.command`)
+  ```
+  #  smarthistory
+    · pi                  ~/smarthistory
+    ·                     ~/smarthistory
+  #  dir: Downloads
+    ·                     ~/Downloads
+    ·                     /private/tmp
+  ```
 
-If the user places a file named `.command` in a
-directory (or in any ancestor), the directory becomes
-a "session" with a setup script. Selecting such a
-directory in the TUI runs
+  The workspace label (e.g. `smarthistory`, `dir: Downloads`)
+  comes from `herdr workspace list`'s `label` field. Selecting
+  a workspace header row stages `herdr workspace focus <id>`;
+  selecting a pane row stages `herdr workspace focus <ws> &&
+  herdr tab focus <tab_id>`.
 
-```
-sh <path-to-.command> <selected-directory>
-```
+### Output capture (tmux + herdr)
 
-The first argument is always the selected directory;
-the script can read it as `$1` (or as the full arg
-list with `$@`). This is the "every project gets
-its own setup" hook — for example, a
-`project/.command` script that exports project-
-specific environment variables, activates a virtual
-environment, etc.
+Captured output is searchable via the `+` prefix and viewable
+via `Ctrl+L`. The capture pipeline works for both multiplexers:
 
-The lookup walks the **ancestor chain** of the
-selected directory: the closest `.command` wins.
-This is the same convention as `.envrc` /
-`.env.local` / similar tools. So a single
-`project/.command` fires for every selection
-under `project/`, and a more specific
-`project/special/.command` overrides it for
-selections under `project/special/`.
+- **tmux**: reads the continuous `pipe-pane` log file
+  (`~/.cache/tmux-history/output-<pane>.log`).
+- **herdr**: reads the pane's scrollback buffer via
+  `herdr pane read <pane_id> --source recent-unwrapped`. If the
+  command line has scrolled off the top (common for high-output
+  commands like `ps -ef`), the entire remaining buffer is
+  captured as the best available approximation.
 
-The form on Enter:
+The `capturelines` config key controls the default number of
+lines captured (default 20). Per-command overrides:
+`capturelines.ps=ALL` captures every line of `ps` output.
 
-- **Unmarked row** (no active tmux pane): the TUI
-  stages
-  `tmux new-session -d -s <basename> -c <dir>; \
-   sh <.command> <dir>; \
-   tmux switch-client -t <basename>`.
-  The `.command` runs *inside* the new session
-  before the user lands there, so the project is
-  already set up when the switch-client fires.
-- **T-marked row** (existing tmux pane matches):
-  the TUI stages the existing
-  `tmux select-pane && tmux switch-client` chain
-  plus
-  `; tmux send-keys -t <pane> "sh <.command> <dir>" Enter`
-  so the setup script runs in the existing pane.
+### Directory-mode cascade deletion
 
-The `.command` is invoked via `sh` so the file
-doesn't need to be executable. A non-zero exit
-from the script surfaces via the parent shell's
-standard error path.
-
-# Prefix keys
-
-The first character of a TUI query selects the search
-mode. The mapping is configurable through the
-`prefix.<mode>=<char>` config keys (see the
-[Configuration](#configuration) section). The defaults:
-
-| Mode        | Config key              | Default | Prompt color |
-|-------------|-------------------------|---------|--------------|
-| Regex       | `prefix.regex`          | `/`     | yellow       |
-| Fuzzy       | `prefix.fuzzy`          | `?`     | green        |
-| Output      | `prefix.output`         | `+`     | blue         |
-| LLM         | `prefix.llm`            | `=`     | magenta      |
-| Question    | `prefix.question`       | `%`     | blue         |
-| Notes       | `prefix.notes`          | `@`     | cyan         |
-| Todo        | `prefix.todo`           | `!`     | yellow       |
-| Notes       | `prefix.notes`           | `@`     | cyan        |
-| Todo        | `prefix.todo`            | `!`     | yellow       |
-| Directories | `prefix.directories`    | `#`     | accent       |
-| Panes       | `prefix.panes`           | `*`     | green        |
-| JIRA        | `prefix.jira`             | `-`     | blue         |
-
-(Prompt color comes from the active theme's named slots —
-`tuicolor.regex`, `tuicolor.fuzzy`, `tuicolor.output`,
-etc. Override any of them in the config.)
-
-## How prefix detection works
-
-The TUI looks at the *first* character of the query bar
-on every refresh. If it matches a configured prefix, the
-TUI switches to that mode. The body of the query is the
-text after the prefix, and the prefix itself is *not*
-part of the search. So `/git status` searches for the
-regex `git status`, not for the literal string
-`/git status`.
-
-Stripping the prefix is invisible to the user in most
-modes: the input border is tinted in the mode's color
-and the prompt character at the left of the input box
-*is* the prefix, so the user always sees what's
-"consumed" by the mode.
-
-A bare prefix (just `/`, `?`, `+`, etc., with no body
-yet) is treated as "show me everything in this mode" —
-plain `/` is a no-op (no body, no filter), `+` shows
-every row that has captured output, `#` shows every
-directory.
-
-## Conflicts with command characters
-
-The defaults are chosen to avoid characters that are
-common in shell commands. If one of them *does* conflict
-with your workflow (for example, you often run commands
-that start with `!` for history expansion, and you don't
-want that to look like a todo query), override it in the
-config:
+Pressing `Ctrl+D` on a directory row in `#` mode shows a
+confirmation dialog:
 
 ```
-prefix.todo=°
-prefix.question=¿
-prefix.regex=§
+This will delete ALL N history entries in:
+  ~/path/to/dir
+
+Every command ever run in that directory will be removed.
 ```
 
-The override takes effect on the next TUI launch. Each
-prefix must be a single character; the parser rejects
-multi-character prefixes with a config-load error.
+Press `y` to confirm or `n` / `Esc` to cancel.
 
-The modes themselves are not coupled to their prefix
-characters: the *behavior* of the LLM command-generation
-mode is the same whether the prefix is `=`, `→`, or
-anything else you configure. The only thing the prefix
-controls is how the user invokes the mode from the
-query bar.
+## Configuration
 
-## How `F3` interacts with the prefix
+Settings live in `~/.config/smarthistory/config` (INI-style
+`key=value`). Lines starting with `#` are comments; blank lines
+are ignored.
 
-Pressing `F3` (default; rebindable via
-`key.toggle-search-mode=...`) cycles the search mode
-through plain → regex → fuzzy → output → plain. The
-cycle preserves the body of the query and only changes
-the leading prefix character, so `git status` →
-`/git status` → `?git status` → `+git status` → `git
-status` keeps the same text the whole time.
+### Key settings
 
-The `=` / `%` / `@` / `!` / `#` modes are *not* part of
-the `F3` cycle (they're LLM and cross-database modes,
-not "different ways of searching the history table").
-To reach them, type the prefix character at the start of
-the query, or open the command palette (`:`) and search
-for the mode's name (e.g. "Directories" for the `#`
-mode).
+| Key | Meaning | Default |
+| ----- | --------- | --------- |
+| `multiplexer=tmux\|herdr` | Which multiplexer backend to use for `#` and `*` modes. | `tmux` |
+| `tmuxpaneoutputdir=~/path` | Directory containing per-pane tmux logs. | `~/.cache/tmux-history` |
+| `ignorecapture=cmd1 cmd2 ...` | Commands whose output is never captured. | `vi nvim vim top htop emacs more less lazygit` |
+| `capturelines=N` or `=ALL` | Default number of captured output lines. | `20` |
+| `capturelines.<cmd>=N` or `=ALL` | Per-command override. | inherits `capturelines` |
+| `initialmode=SESS\|DIR\|GLOBAL` | Initial TUI scope. | `SESS` |
+| `ollama.url=http://host:port` | URL of a local ollama instance for LLM features. | (disabled) |
+| `ollama.model=<name>` | ollama model name. | (disabled) |
+| `notes.database=~/path` | Path to the note_search SQLite database. | (disabled) |
+| `notes.dir=~/path` | Path to the directory containing note files. | (disabled) |
+| `prefix.<mode>=<char>` | Override a prefix character. | (see defaults above) |
+| `key.<action>=<spec>` | Remap a TUI keyboard shortcut. | (see TECHNICAL.md) |
+| `tuicolor.<field>=<color>` | Override a TUI palette color. | (built-in default) |
+| `homemap=/path` | Additional home prefix for path shortening. | `$HOME` only |
+| `sessiondirs=~/path` | Pinned directory whose sub-tree is always shown in `#` mode. | (none) |
+| `jira.search.<name>=<jql>` | User-defined JQL fragment for `-` mode. | (none) |
 
-# Configuration
+### Match algorithm notes
 
-User-specific settings live in
-`~/.config/smarthistory/config`. The file is plain
-INI-style `key=value` lines; lines starting with `#` are
-comments and blank lines are ignored. When the file is
-absent, built-in defaults are used. When present, the keys
-it defines override the defaults and any other keys keep
-their default values.
-
-## Themes
-
-Pick a built-in theme or override individual colors. The
-available themes are listed in `TECHNICAL.md`; switch with
-the in-app `T` key (theme picker) or by setting
-`theme=<name>` in the config.
-
-## TUI overrides
-
-Override the accent color, background, foreground, or any
-named style slot (`accent`, `success`, `error`, `warning`,
-`dim`, `highlight`, `bg`, `fg`, etc.) directly in the
-config.
-
-## Keybindings
-
-Remap any action via `key.<action>=<spec>` lines. The action
-names are documented in the table inside [TECHNICAL.md](TECHNICAL.md)
-and in the in-app help overlay (`?`). Multi-key bindings are
-supported (`C-h,F1` fires on either). Set a binding to
-`none` / `off` / `disable` / `-` to disable a default.
-
-## Query prefix characters
-
-Each query mode has a configurable prefix character. The
-defaults are:
-
-- `prefix.regex = /`
-- `prefix.fuzzy = ?`
-- `prefix.output = +`
-- `prefix.llm = =`
-- `prefix.question = %`
-- `prefix.notes = @`
-- `prefix.todo = !`
-- `prefix.directories = #`
-- `prefix.panes = *`
-- `prefix.jira = -`
-
-Set any of them to a different character if the default
-conflicts with your workflow.
-
-## Home mapping (macOS external-volume users)
-
-The DB stores directory paths. On macOS, the kernel
-canonicalises `/Users/har/...` to `/Volumes/HUGE/har/...`
-when the user's home lives on an external volume. To keep
-the visible form short and consistent, set:
-
-```
-homemap=/Volumes/HUGE/har
-```
-
-The TUI then treats this prefix as a "second home" alongside
-`$HOME` (longest-prefix-wins), and `smarthistory update`
-rewrites stored absolute paths to `~/x` form. The
-subcommand is idempotent — running it twice on the same
-database is a no-op.
-
-## Pinned directories (`sessiondirs`)
-
-Add one or more `sessiondirs=<path>` lines to the
-config to pin a directory whose sub-tree is *always*
-shown in the `#`-mode list, even if no command has
-ever been run there. Each entry is recursively
-walked at TUI startup; every subdirectory becomes a
-row in the directories list. This is the
-"show me my projects even when I haven't touched
-them yet" hook.
-
-```
-# ~/.config/smarthistory/config
-sessiondirs=~/work
-sessiondirs=~/Sources/playground
-```
-
-Each `sessiondirs` entry is independent: two
-different roots can both contribute rows, and a
-subdirectory that lives under two roots appears
-once (dedup is on canonical paths, so a symlink
-and the real path it points to also collapse to
-one entry). A non-existent path is silently
-skipped (the walker returns an empty list for a
-missing root, so the TUI never errors on
-startup). Combine with `.command` files (see the
-Search modes / Directories section) to set up
-project-specific environment on session start.
-
-## LLM configuration
-
-LLM features (`=`, `%`, `Ctrl+K`, `Ctrl+T`) require a local
-ollama instance. Both keys are mandatory; missing either
-disables the feature (the TUI surfaces "not configured" on
-attempted use):
-
-```
-ollama.url=http://localhost:11434
-ollama.model=llama3.2
-```
-
-## Note / todo database
-
-The `@...` and `!...` modes need a `note_search` SQLite
-database. Configure the path and the directory it indexes:
-
-```
-notes.database=/path/to/notes.sqlite
-notes.dir=/path/to/notes
-```
-
-(Or set `NOTE_SEARCH_DATABASE` and `NOTE_SEARCH_DIR` in the
-environment.)
+- The match algorithm does **not** apply to JIRA (`-` mode),
+  which parses its own JQL syntax.
+- In notes (`@`) and todos (`!`) mode, the algorithm is accepted
+  but the `note_search` library's own query parser takes
+  precedence for the SQL-level filtering.
+- In directories (`#`), panes (`*`), and files (`~`) mode, the
+  algorithm is fully applied — fuzzy search in directories,
+  regex in panes, etc.
 
 For the full configuration reference, see
 [TECHNICAL.md](TECHNICAL.md).
