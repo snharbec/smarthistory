@@ -5862,6 +5862,34 @@ fn move_selection(&mut self, delta: isize) {
         // so we recover the line number with
         // `i64::abs() as usize`.
         if self.is_todo_query() {
+            // Special case: `!@new <text>` creates a
+            // new TODO entry in the daily note by calling
+            // `note_search create-note <text>
+            // --type daily --timestamp --todo --database <db>`.
+            // The `--todo` flag makes `create-note` add the
+            // text as a `- [ ] TEXT` todo entry instead of
+            // a plain line.
+            let pattern = self.todo_pattern();
+            if pattern.trim().to_lowercase().starts_with("@new ") {
+                let text = pattern.trim()[5..].trim();
+                if !text.is_empty() {
+                    if let Some(ref db_path) = self.notes_database {
+                        self.selection = Some(format!(
+                            "note_search create-note \"{}\" --type daily --timestamp --todo --database \"{}\"",
+                            text,
+                            db_path.display()
+                        ));
+                        self.pick_mode = Some(PickMode::Run);
+                    } else {
+                        self.set_status_message(
+                            "notes.database not configured; set it to use @new".to_string()
+                        );
+                    }
+                }
+                return;
+            }
+            // Default: open the selected todo in $EDITOR at
+            // the exact line number.
             if let Some(row) = self.selected_row() {
                 let editor = std::env::var("EDITOR")
                     .ok()
@@ -5909,6 +5937,35 @@ fn move_selection(&mut self, delta: isize) {
         // `@...` queries are note search requests.
         // Selecting a note opens it in the editor.
         if self.is_notes_query() {
+            // Special case: `@new <text>` creates a
+            // new daily note entry by calling
+            // `note_search create-note <text>
+            // --type daily --timestamp --database <db>`.
+            // This is the user's "quick add a note
+            // from the TUI" path — they type `@new
+            // remember to buy milk` and press Enter;
+            // the staged command appends a timestamped
+            // line to today's daily note.
+            let pattern = self.notes_pattern();
+            if pattern.trim().to_lowercase().starts_with("new ") {
+                let text = pattern.trim()[4..].trim();
+                if !text.is_empty() {
+                    if let Some(ref db_path) = self.notes_database {
+                        self.selection = Some(format!(
+                            "note_search create-note \"{}\" --type daily --timestamp --database \"{}\"",
+                            text,
+                            db_path.display()
+                        ));
+                        self.pick_mode = Some(PickMode::Run);
+                    } else {
+                        self.set_status_message(
+                            "notes.database not configured; set it to use @new".to_string()
+                        );
+                    }
+                }
+                return;
+            }
+            // Default: open the selected note in $EDITOR.
             if let Some(row) = self.selected_row() {
                 let editor = std::env::var("EDITOR")
                     .ok()
@@ -12963,6 +13020,113 @@ mod tests {
                         .expect("Run on a labeled-only row must stage its command");
                 assert_eq!(staged, "git pull");
                 assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// `@new <text>` in notes mode creates a
+        /// new daily note entry by staging
+        /// `note_search create-note ...`.
+        #[test]
+        fn notes_new_stages_create_note_command() {
+            let mut app = directories_test_app(&[]);
+            app.notes_database =
+                Some(std::path::PathBuf::from("/tmp/test.sqlite"));
+            app.query = "@new remember to buy milk".to_string();
+            app.refresh();
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for @new");
+            assert!(
+                staged.contains("note_search create-note"),
+                "@new must stage note_search create-note, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("remember to buy milk"),
+                "@new must include the text in the command, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("--type daily"),
+                "@new must use --type daily, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("--timestamp"),
+                "@new must include --timestamp, got: {staged:?}"
+            );
+            assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// `!@new <text>` in todo mode creates a
+        /// new TODO entry in the daily note by staging
+        /// `note_search create-note ... --todo`.
+        #[test]
+        fn todo_new_stages_create_note_with_todo_flag() {
+            let mut app = directories_test_app(&[]);
+            app.notes_database =
+                Some(std::path::PathBuf::from("/tmp/test.sqlite"));
+            app.query = "!@new fix the build".to_string();
+            app.refresh();
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for !@new");
+            assert!(
+                staged.contains("note_search create-note"),
+                "!@new must stage note_search create-note, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("fix the build"),
+                "!@new must include the text, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("--type daily"),
+                "!@new must use --type daily, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("--todo"),
+                "!@new must include --todo flag, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("--timestamp"),
+                "!@new must include --timestamp, got: {staged:?}"
+            );
+            assert_eq!(app.pick_mode, Some(PickMode::Run));
+        }
+
+        /// `!@new` with no text is a no-op.
+        #[test]
+        fn todo_new_without_text_is_noop() {
+            let mut app = directories_test_app(&[]);
+            app.notes_database =
+                Some(std::path::PathBuf::from("/tmp/test.sqlite"));
+            app.query = "!@new".to_string();
+            app.refresh();
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            assert!(
+                app.selection.is_none(),
+                "!@new with no text must not stage a command"
+            );
+        }
+
+        /// `@new` with no text after `new` is a no-op
+        /// (status message, no staged command).
+        #[test]
+        fn notes_new_without_text_is_noop() {
+            let mut app = directories_test_app(&[]);
+            app.notes_database =
+                Some(std::path::PathBuf::from("/tmp/test.sqlite"));
+            app.query = "@new".to_string();
+            app.refresh();
+            app.list_state.select(Some(0));
+            app.select_for_run();
+            assert!(
+                app.selection.is_none(),
+                "@new with no text must not stage a command"
+            );
         }
 
         // --- LLM query mode -------------------------------------------------
