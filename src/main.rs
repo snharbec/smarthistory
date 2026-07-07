@@ -182,6 +182,15 @@ enum Commands {
         /// (except JIRA).
         #[arg(long)]
         prefix: Option<String>,
+        /// Execute the selected command directly (via `sh -c`)
+        /// instead of printing it to stdout for the parent
+        /// shell to eval. Use this when launching the TUI
+        /// from outside a shell context (e.g. a herdr
+        /// keybinding, a GUI launcher, or a systemd
+        /// service) where there's no parent shell to
+        /// `eval` the printed command.
+        #[arg(long)]
+        exec: bool,
         #[arg(index = 1)]
         query: Option<String>,
     },
@@ -3203,7 +3212,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", out);
             }
         },
-        Commands::Tui { mode, prefix, query } => {
+        Commands::Tui { mode, prefix, exec, query } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -3276,10 +3285,40 @@ fn main() -> anyhow::Result<()> {
                 override_session_query,
             )? {
                 Some((command, pick_mode)) => {
-                    // Print the chosen command. The pick_mode tells
-                    // the parent what to do with it.
-                    println!("{}", command);
-                    std::process::exit(pick_mode);
+                    if exec {
+                        // `--exec` mode: run the command
+                        // directly via `sh -c` and exit
+                        // with its exit code. This lets
+                        // the user launch the TUI from
+                        // outside a shell context (e.g.
+                        // a herdr keybinding or a GUI
+                        // launcher) and have the
+                        // tmux/herdr switch happen
+                        // without a parent shell to
+                        // `eval` the printed command.
+                        let status = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&command)
+                            .status();
+                        match status {
+                            Ok(s) => std::process::exit(
+                                s.code().unwrap_or(1)
+                            ),
+                            Err(e) => {
+                                eprintln!(
+                                    "smarthistory: failed to exec {:?}: {}",
+                                    command, e
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        // Default: print the command to
+                        // stdout for the parent shell to
+                        // eval (the historical behavior).
+                        println!("{}", command);
+                        std::process::exit(pick_mode);
+                    }
                 }
                 None => std::process::exit(tui::exit_code::CANCEL),
             }
