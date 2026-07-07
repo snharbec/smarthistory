@@ -1,3 +1,5 @@
+# shellcheck shell=zsh
+# shellcheck disable=SC2296,SC2153,SC2086,SC2034
 # Smart History ZSH Init
 # Generate a unique session ID 
 # The UUID is produced by the smarthistory binary itself (no uuidgen,

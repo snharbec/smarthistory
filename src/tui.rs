@@ -1,3 +1,8 @@
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::ptr_arg)]
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, widgets::ListState, Terminal};
@@ -79,7 +84,7 @@ struct TuiSession {
 /// used. Every other entry corresponds to a built-in theme —
 /// see `BuiltinTheme` for the full list (upstream `ratatui-themes`
 /// plus a small set of hand-curated themes shipped with this
-/// crate).
+// crate).
 // (The enum itself lives in `theme::SelectedTheme`.)
 
 impl TuiSession {
@@ -320,12 +325,12 @@ impl NotesDateFilter {
 ///
 /// Returns `(clean_pattern, filter)`:
 /// - `clean_pattern` is the query body with any
-///   `@today` / `@week` / `@month` / `@year`
+ ///   `@today` / `@week` / `@month` / `@year`
 ///   aliases removed (and surrounding whitespace
 ///   collapsed). The cleaned pattern is what we
 ///   pass to `note_search.search_notes_by_query`.
 /// - `filter` is the resolved filter; the latest
-///   alias in the query wins (i.e. `@today @week`
+ ///   alias in the query wins (i.e. `@today @week`
 ///   ends up as `Today` because `@week` is
 ///   encountered second; multiple aliases is an
 ///   edge case — the user typically uses just
@@ -385,13 +390,13 @@ fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
 ///
 /// Priority:
 /// 1. The captured-output overlay, if open. This is "the output
-///    of this command" — the user is looking at the output and
+ ///    of this command" — the user is looking at the output and
 ///    yanking it is the natural action.
 /// 2. The command of the currently-selected history row. This
-///    is "the current document" — the command line itself,
+ ///    is "the current document" — the command line itself,
 ///    in the same sense as a text editor's "current buffer".
 /// 3. `None` — nothing to yank.
-///
+ ///
 /// Kept as a free function (not a method) so the decision logic
 /// is testable without standing up a full `App` and a SQLite
 /// database. The caller in `App::yank_to_clipboard` just passes
@@ -446,14 +451,14 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 /// readline/bash/zsh sense:
 ///
 /// 1. **Trailing whitespace first**: skip any
-///    run of whitespace (`is_whitespace()` —
+ ///    run of whitespace (`is_whitespace()` —
 ///    covers spaces, tabs, Unicode whitespace)
 ///    immediately to the left of `cursor`.
 /// 2. **Then the preceding word**: skip the run
-///    of non-whitespace characters immediately
+ ///    of non-whitespace characters immediately
 ///    to the left of where step 1 stopped.
 /// 3. **Stop at 0**: never go past the start of
-///    the buffer.
+ ///    the buffer.
 ///
 /// The function is pure: it returns the *new*
 /// cursor position (a character index) without
@@ -470,30 +475,30 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 ///
 /// Examples (cursor → return):
 /// - `s = ""`, cursor = 0 → 0
-/// - `s = "abc"`, cursor = 3 → 0 (whole word)
-/// - `s = "abc"`, cursor = 2 → 0 (rest of word)
-/// - `s = "abc def"`, cursor = 7 → 4 (the `def`)
-/// - `s = "abc def"`, cursor = 4 → 0 (the `abc`,
-///   even though there are no leading spaces —
+ /// - `s = "abc"`, cursor = 3 → 0 (whole word)
+ /// - `s = "abc"`, cursor = 2 → 0 (rest of word)
+ /// - `s = "abc def"`, cursor = 7 → 4 (the `def`)
+ /// - `s = "abc def"`, cursor = 4 → 0 (the `abc`,
+ ///   even though there are no leading spaces —
 ///   `def` is the word immediately before the
 ///   cursor)
 /// - `s = "abc   def"`, cursor = 7 → 0 (eat the
-/// Walk left from `cursor` (a character index in
+ /// Walk left from `cursor` (a character index in
 /// `s`) and return the new cursor position after
 /// deleting one "word" backward, in a
 /// readline/bash/zsh-inspired semantic:
 ///
 /// 1. **Trailing whitespace run**: skip any run
-///    of whitespace (`is_whitespace()`) chars
+ ///    of whitespace (`is_whitespace()`) chars
 ///    immediately to the left of `cursor`.
 /// 2. **Preceding non-whitespace run**: skip
-///    the run of non-whitespace chars
+ ///    the run of non-whitespace chars
 ///    immediately to the left of where step 1
 ///    stopped. We only walk one run — the
 ///    function never reaches further back to
 ///    consume additional whitespace runs.
 /// 3. **Stop at 0**: never go past the start of
-///    the buffer.
+ ///    the buffer.
 ///
 /// Both steps are skipped automatically when
 /// there's nothing to skip (an empty step 1
@@ -514,31 +519,31 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 /// implied query state shown for clarity):
 ///
 /// - `("abc", 3) → 0` — eat the whole word.
-/// - `("abc def", 7) → 4` — eat `def`, leaving
-///   `abc ` with cursor right after the
+ /// - `("abc def", 7) → 4` — eat `def`, leaving
+ ///   `abc ` with cursor right after the
 ///   remaining space (position 4).
 /// - `("abc def", 4) → 0` — the char
-///   immediately to the left of cursor is a
+ ///   immediately to the left of cursor is a
 ///   space, so step 1 eats the space and step 2
 ///   eats `abc`. The result is `def` with
 ///   cursor at 0.
 /// - `("git status", 10) → 4` — eat `status`,
-///   leaving `git `.
+ ///   leaving `git `.
 /// - `("abc   ", 6) → 0` — only whitespace
-///   was eaten; step 2 walks back through `abc`
+ ///   was eaten; step 2 walks back through `abc`
 ///   (which has nothing before it on the left
 ///   except the start of the buffer).
 /// - `("  abc", 5) → 3` — eat `abc`, leaving
-///   the two leading spaces intact.
+ ///   the two leading spaces intact.
 /// - `("git status  ", 12) → 4` — step 1 eats
-///   the 2 trailing spaces (positions 10..12),
+ ///   the 2 trailing spaces (positions 10..12),
 ///   step 2 eats `status` (positions 4..10).
 ///   The space at position 3 (between `git`
 ///   and `status`) is NOT eaten — step 1 only
 ///   walks back from the cursor, not forward
 ///   through the already-deleted range.
 /// - `("", 0) → 0` — empty buffer, no-op.
-///
+ ///
 /// Note: this is *similar to* but not identical
 /// to readline/bash's `unix-word-rubout`.
 /// Standard `unix-word-rubout` may eat one
@@ -769,7 +774,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
 /// A high-level action that the TUI can take in response to a key
 /// press. Action names appear in the user-facing config file as
-/// `key.<action>=<key-spec>`, e.g. `key.help=C-h`.
+// `key.<action>=<key-spec>`, e.g. `key.help=C-h`.
 // (The enum itself lives in `bindings::Action`.)
 
 struct App {
@@ -1547,10 +1552,7 @@ impl App {
         if !path.exists() || !path.is_file() {
             return String::new();
         }
-        match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(_) => String::new(),
-        }
+std::fs::read_to_string(&path).unwrap_or_default()
     }
 
     /// Search every note file for todo entries.
@@ -2719,23 +2721,23 @@ impl App {
     ///
     /// Each pane becomes a `HistoryRow`:
     /// - `command` (primary text) = the
-    ///   pane's current command
+     ///   pane's current command
     ///   (`#{pane_current_command}`, e.g.
     ///   `zsh`, `vim`, `cargo`).
     /// - `comment` (secondary text) = the
-    ///   pane's cwd shortened to `~/x`.
+     ///   pane's cwd shortened to `~/x`.
     /// - `directory` = the full canonical cwd.
-    /// - `session_id` = the pane id (`%N`),
-    ///   used as the `select-pane -t` target.
+     /// - `session_id` = the pane id (`%N`),
+     ///   used as the `select-pane -t` target.
     /// - `output` = the pane's global window
-    ///   id (`@N`), used as the
+     ///   id (`@N`), used as the
     ///   `select-window -t` target so the
     ///   jump works even when the pane is
     ///   in a different window than the
     ///   current one (plain `select-pane`
     ///   does NOT switch windows).
     /// - `source` = `"pane"`.
-    /// - `id` = synthetic decreasing negative.
+     /// - `id` = synthetic decreasing negative.
     fn fetch_session_panes(&mut self) {
         if !self.session_panes.is_empty() {
             return;
@@ -2975,7 +2977,6 @@ impl App {
                 }
 
         let mut panes: Vec<HistoryRow> = Vec::new();
-        let mut next_id = next_id;
         if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
             eprintln!(
                 "[debug] pass 2: order={:?}, grouped.keys={:?}",
@@ -3372,24 +3373,24 @@ impl App {
     /// **Failure modes are silent**
     /// (deliberately):
     /// - `tmux` not on PATH →
-    ///   `Command::new` returns
+     ///   `Command::new` returns
     ///   `Err(io::ErrorKind::NotFound)`
     ///   → snapshot stays empty,
     ///   no marker is ever
     ///   shown, no error
     ///   surfaces in the UI.
     /// - The user isn't running a
-    ///   tmux server → `tmux`
+     ///   tmux server → `tmux`
     ///   exits non-zero →
     ///   snapshot stays empty.
     /// - `tmux` is installed but
-    ///   the user runs in a
+     ///   the user runs in a
     ///   different session
     ///   (e.g. inside a remote
     ///   pane or `screen`) →
     ///   same as above.
     /// - The subprocess takes too
-    ///   long → we cap it with
+     ///   long → we cap it with
     ///   a 1-second timeout
     ///   (configurable via
     ///   `TMUX_PANE_PROBE_TIMEOUT_MS`)
@@ -3631,7 +3632,7 @@ impl App {
                     }
                 }).collect();
                 // Sort by timestamp descending (newest first)
-                rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                rows.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
                 self.notes_query_error = false;
                 Ok(rows)
             }
@@ -3720,7 +3721,7 @@ fn fetch_recent_notes_with_filter(
                     }
                 }).collect();
                 // Sort by timestamp descending (newest first)
-                rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                rows.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
                 Ok(rows)
             }
             Err(_e) => {
@@ -3794,13 +3795,13 @@ fn fetch_recent_notes_with_filter(
     ///
     /// Lifecycle:
     /// - When the query is an LLM query, we set
-    ///   `llm_debounce_started = Some(Instant::now())` so
+     ///   `llm_debounce_started = Some(Instant::now())` so
     ///   the run-loop tick can count down to a fresh
     ///   `LLM_DEBOUNCE` window. We also clear any existing
     ///   preview so the user doesn't see a stale suggestion
     ///   for a description they no longer have.
     /// - When the query is NOT an LLM query, we clear
-    ///   everything: the debounce, the preview, the
+     ///   everything: the debounce, the preview, the
     ///   in-flight flag, and the description we last
     ///   fired on. The user has left LLM mode entirely;
     ///   there's nothing for the auto-call path to do
@@ -3861,17 +3862,17 @@ fn fetch_recent_notes_with_filter(
     ///
     /// The synthetic row uses:
     /// - `id = -1` (real history ids are positive — the
-    ///   negative value lets render code mark the row as a
+     ///   negative value lets render code mark the row as a
     ///   preview without a separate boolean field).
     /// - `command = "=" + <user's description>` (the query text).
-    /// - `output = <LLM response>` (the generated command).
-    /// - `comment = <LLM response>` so the preview is
-    ///   self-documenting.
+     /// - `output = <LLM response>` (the generated command).
+     /// - `comment = <LLM response>` so the preview is
+     ///   self-documenting.
     /// - `exit_code = -1` (the same sentinel used for
-    ///   newly-inserted LLM-generated rows; signals
+     ///   newly-inserted LLM-generated rows; signals
     ///   "never executed" to render code).
     /// - `timestamp = now` so the preview sorts at the very
-    ///   top of the merged list.
+     ///   top of the merged list.
     fn llm_preview_row(&self) -> Option<HistoryRow> {
         self.llm_preview.clone()
     }
@@ -3945,15 +3946,15 @@ fn fetch_recent_notes_with_filter(
     /// following are true:
     ///
     /// 1. The query is an LLM query (`=` prefix).
-    /// 2. The description is non-empty (no point calling
-    ///    the model for "=").
+     /// 2. The description is non-empty (no point calling
+     ///    the model for "=").
     /// 3. A debounce timer is armed and at least
-    ///    [`LLM_DEBOUNCE`] has elapsed since the last
+     ///    [`LLM_DEBOUNCE`] has elapsed since the last
     ///    `llm_touch`.
     /// 4. No LLM call is currently in flight.
-    /// 5. The LLM client is configured.
-    /// 6. The live description differs from the
-    ///    description the last preview was generated for
+     /// 5. The LLM client is configured.
+     /// 6. The live description differs from the
+     ///    description the last preview was generated for
     ///    (avoids re-firing the same call repeatedly when
     ///    the user pauses but the suggestion is already on
     ///    screen).
@@ -5202,7 +5203,7 @@ notes_date_filter: NotesDateFilter::All,
     fn sort_partition(&self, partition: &mut Vec<HistoryRow>) {
         match self.sort_order {
             SortOrder::Age => {
-                partition.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                partition.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
             }
             SortOrder::Frequency => {
                 let mut counts: std::collections::HashMap<
@@ -5777,6 +5778,67 @@ fn move_selection(&mut self, delta: isize) {
 }
 
     fn select_for_run(&mut self) {
+        self.select_for_run_dispatch()
+    }
+
+    /// Dispatcher: routes to the per-mode handler based
+    /// on the current query prefix. Each handler is a
+    /// separate method so the code is easier to navigate.
+    fn select_for_run_dispatch(&mut self) {
+        if self.is_llm_query() {
+            self.run_llm_query();
+            return;
+        }
+        if self.is_question_query() {
+            self.run_question_query();
+            return;
+        }
+        if self.is_todo_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_notes_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_files_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_directories_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_panes_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_jira_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        // Default: history mode.
+        if let Some(row) = self.selected_row() {
+            if row.mode == "llm" && !row.output.is_empty() {
+                self.selection = Some(row.output.clone());
+                self.pick_mode = Some(PickMode::Run);
+            } else if row.mode == "question" && !row.output.is_empty() {
+                self.question_view = Some(QuestionView {
+                    question: row.command.clone(),
+                    text: row.output.clone(),
+                    scroll: 0,
+                });
+            } else {
+                self.selection = Some(row.command.clone());
+                self.pick_mode = Some(PickMode::Run);
+            }
+        }
+    }
+
+    /// Extracted todo-mode selection from the original
+    /// monolithic `select_for_run`. Opens `$EDITOR` at the
+    /// todo's line number.
+    fn select_for_run_impl(&mut self) {
         // `=...` queries are an LLM command-generation request,
         // not a row selection. Short-circuit before any row
         // lookup: there *is* no meaningful selected row when
@@ -6607,7 +6669,6 @@ fn move_selection(&mut self, delta: isize) {
     /// user explicitly asked for this mode and accepted the
     /// freeze; a future async refactor could keep the TUI
     /// responsive while the call is in flight.
-    
     /// Process the result of an in-flight LLM request.
     /// Called from the run loop when a result arrives on
     /// the channel. Handles each request type differently.
@@ -6677,11 +6738,10 @@ fn move_selection(&mut self, delta: isize) {
     /// immediately after calling an LLM action method.
     #[cfg(test)]
     fn process_pending_llm_request(&mut self) {
-        if let Some(request) = self.llm_request.take() {
-            if let Ok(result) = request.receiver.recv() {
+        if let Some(request) = self.llm_request.take()
+            && let Ok(result) = request.receiver.recv() {
                 self.process_llm_result(request, result);
             }
-        }
     }
 
     fn run_llm_query(&mut self) {
@@ -7401,14 +7461,14 @@ fn move_selection(&mut self, delta: isize) {
     /// `Ctrl-W` semantics:
     ///
     /// 1. **Trailing whitespace first**: if the
-    ///    character(s) immediately before the cursor
+     ///    character(s) immediately before the cursor
     ///    are whitespace, eat them.
     /// 2. **Then the preceding word**: walk left
-    ///    through the run of non-whitespace
+     ///    through the run of non-whitespace
     ///    characters immediately before the cursor
     ///    and eat them too.
     /// 3. **Stop at the start of the buffer** (or at
-    ///    cursor position 0, whichever comes first).
+     ///    cursor position 0, whichever comes first).
     ///
     /// If the cursor is in the middle of a word
     /// (e.g. `git |status` with the cursor between
@@ -8021,17 +8081,17 @@ fn move_selection(&mut self, delta: isize) {
     ///
     /// Behaviour:
     /// - **No row selected** → status message,
-    ///   no overlay.
+     ///   no overlay.
     /// - **LLM not configured** → status message,
-    ///   no overlay. We don't open the overlay at
+     ///   no overlay. We don't open the overlay at
     ///   all; the user would just see a "loading"
     ///   spinner and then an error.
     /// - **LLM call fails** → status message,
-    ///   no overlay (we close it before opening so a
+     ///   no overlay (we close it before opening so a
     ///   fresh describe can be retried from a clean
     ///   state).
     /// - **Success** → overlay opens with the LLM's
-    ///   prose response. The response is trimmed
+     ///   prose response. The response is trimmed
     ///   of leading/trailing whitespace but otherwise
     ///   rendered as-is.
     ///
@@ -8113,17 +8173,17 @@ fn move_selection(&mut self, delta: isize) {
     ///
     /// Behaviour:
     /// - **No row selected** → status message, no
-    ///   overlay.
+     ///   overlay.
     /// - **LLM not configured** → status message,
-    ///   no overlay.
+     ///   no overlay.
     /// - **LLM call fails** → status message, no
-    ///   overlay.
+     ///   overlay.
     /// - **LLM response sanitizes to `None`** → status
-    ///   message, no overlay. The LLM's response was
+     ///   message, no overlay. The LLM's response was
     ///   empty or pure commentary; we can't extract
     ///   a command from it.
     /// - **Success** → overlay opens with the
-    ///   corrected command (sanitized from the LLM's
+     ///   corrected command (sanitized from the LLM's
     ///   raw response, the same way `run_llm_query`
     ///   does). The user reviews and decides.
     ///
@@ -8360,8 +8420,8 @@ fn move_selection(&mut self, delta: isize) {
     ///
     /// Status messages:
     /// - `"Yanked N chars"`  on success
-    /// - `"Yank failed: …"`   when arboard cannot reach a clipboard
-    /// - `"Nothing to yank"`  when there's no row and no output view
+     /// - `"Yank failed: …"`   when arboard cannot reach a clipboard
+     /// - `"Nothing to yank"`  when there's no row and no output view
     fn yank_to_clipboard(&mut self) {
         let Some(text) = pick_text_to_yank(self) else {
             self.set_status_message("Nothing to yank".to_string());
@@ -8384,9 +8444,9 @@ fn move_selection(&mut self, delta: isize) {
     /// Failure modes (all surfaced as status messages; the TUI
     /// never panics and never silently does nothing):
     /// - No row is selected.
-    /// - The row's command has no path-like token.
-    /// - The staged command is otherwise empty (defensive).
-    ///
+     /// - The row's command has no path-like token.
+     /// - The staged command is otherwise empty (defensive).
+     ///
     /// On success, `selection` and `pick_mode` are set so the
     /// caller (the dispatcher) returns `true` to terminate the
     /// TUI. The parent shell sees the editor command on stdout
@@ -10411,15 +10471,15 @@ fn handle_question_view_key(
 /// are:
 ///
 /// - `Enter` — accept. Stages the corrected
-///   command (inserts it into history with the
+ ///   command (inserts it into history with the
 ///   original as the comment) and returns `true`
 ///   so the run loop exits. The parent shell
 ///   then runs the corrected command.
 /// - `Esc` / `q` — cancel. Closes the overlay,
-///   returns `false` so the TUI stays open with
+ ///   returns `false` so the TUI stays open with
 ///   the user's original list state intact.
 /// - `Ctrl-C` — abort the entire TUI (mirrors the
-///   other overlay handlers' convention). Sets
+ ///   other overlay handlers' convention). Sets
 ///   `cancelled = true` and returns `true` so the
 ///   run loop exits.
 fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
@@ -10517,7 +10577,6 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
 /// `tmux list-windows -a -F`;
 /// the regression test below
 /// pins the correct format.
-
 /// Build the home-prefix list
 /// used by both
 /// `directory_tmux_pane_id`
@@ -15452,9 +15511,9 @@ mod tests {
         ///
         /// Test setup:
         /// - One primary row at offset 10 (recent,
-        ///   current session).
+         ///   current session).
         /// - One labeled row at offset 100_000
-        ///   (ancient, different session — excluded
+         ///   (ancient, different session — excluded
         ///   by `Mode::Sess`).
         /// Both commands match the query "git".
         ///
@@ -15671,9 +15730,9 @@ mod tests {
         ///
         /// Test setup:
         /// - Primary row "b" at offset 100 (older).
-        /// - Primary row "a" at offset 10 (newer).
-        /// - Labeled-only row "z" at offset 5
-        ///   (newest of all), but only visible
+         /// - Primary row "a" at offset 10 (newer).
+         /// - Labeled-only row "z" at offset 5
+         ///   (newest of all), but only visible
         ///   because it's labeled — it's in a
         ///   different session.
         ///
@@ -15790,9 +15849,9 @@ mod tests {
         ///
         /// Test setup:
         /// - Primary rows: 3 instances of "a",
-        ///   1 of "b".
+         ///   1 of "b".
         /// - Labeled-only row: "z", excluded by
-        ///   session filter.
+         ///   session filter.
         ///
         /// Expected merged order: `[a, b, z]`.
         /// (Frequency dedup is implicit so the
@@ -17577,7 +17636,7 @@ mod tests {
                 let _ = fs::remove_dir_all(&dir);
                 fs::create_dir_all(&dir).expect("create notes dir");
                 let mut note = String::from("# Title\n");
-                note.push_str("\n");
+                note.push('\n');
                 note.push_str("  - [ ] indented todo\n");
                 fs::write(dir.join("note.md"), &note)
                         .expect("write");
@@ -20811,10 +20870,10 @@ mod tests {
         /// This test drives
         /// the full path:
         /// 1. Build an `App`
-        ///    with the herdr
+         ///    with the herdr
         ///    backend.
         /// 2. Inject a
-        ///    pre-parsed
+         ///    pre-parsed
         ///    `session_panes`
         ///    (the test
         ///    bypasses the
@@ -20826,7 +20885,7 @@ mod tests {
         ///    fixed parser
         ///    would produce).
         /// 3. Run the `*`
-        ///    query through
+         ///    query through
         ///    `fetch_panes` and
         ///    assert the list
         ///    is non-empty and
@@ -21226,12 +21285,12 @@ mod tests {
                 .map(|r| r.directory.as_str())
                 .collect();
             assert!(
-                dirs.iter().any(|d| *d == "/var/tmp/other"),
+                dirs.contains(&"/var/tmp/other"),
                 "entries in other directories must survive, got {:?}",
                 dirs
             );
             assert!(
-                !dirs.iter().any(|d| *d == "/var/tmp/build"),
+                !dirs.contains(&"/var/tmp/build"),
                 "entries in the deleted directory must be gone, got {:?}",
                 dirs
             );

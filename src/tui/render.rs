@@ -1,3 +1,5 @@
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::map_identity)]
 // Render code: the main `ui` entry point plus all the draw_*
 // helpers (draw_output_view, draw_help_view, draw_command_menu,
 // draw_theme_picker, etc.) and the highlight_matches helpers.
@@ -88,7 +90,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // If a comment exists, draw the labeled entries pane as an overlay
     // so that labeled history elements are always available.
     // (Labeled entries are now merged into the main list instead.)
-    #[allow(clippy::overly_complex_conditional)]
+    #[allow(clippy::overly_complex_bool_expr)]
     let _ = !app.labeled_rows.is_empty();
 }
 
@@ -4082,7 +4084,19 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     // trailing space, so the cursor lands one cell after
     // the prompt and `query_cursor` cells into the buffer.
     let prompt_width = prompt.chars().count() as u16;
-    let cursor_x = area.x + 1 + prompt_width + app.query_cursor as u16;
+    // When the comment-edit buffer is active, the cursor
+    // should follow the comment buffer (which is always at
+    // the end since push_char appends and backspace pops).
+    // Using `query_cursor` here would track the search
+    // query's cursor instead — a bug the user reported as
+    // "the cursor stays at the same position while I
+    // type in the comment field".
+    let cursor_offset = if app.comment_edit.is_some() {
+        content.chars().count() as u16
+    } else {
+        app.query_cursor as u16
+    };
+    let cursor_x = area.x + 1 + prompt_width + cursor_offset;
     let cursor_y = area.y + 1;
     f.set_cursor_position((
         cursor_x.min(area.x.saturating_add(area.width).saturating_sub(2)),

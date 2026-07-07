@@ -543,12 +543,12 @@ List JIRA issues from a **self-hosted JIRA instance**, with
 live search-as-you-type against its REST API v2. Credentials
 and endpoints come from environment variables:
 
-| Variable         | Purpose                                                            |
-|------------------|-------------------------------------------------------------------|
-| `JIRA_API_TOKEN` | Bearer token sent as `Authorization: Bearer <token>`.             |
-| `JIRA_SERVER`   | API base URL, e.g. `https://jira.internal` (→ `/rest/api/2/search`).|
-| `JIRA_URL`       | Browse base URL; `{JIRA_URL}/<key>` opens the ticket. Falls back to `JIRA_SERVER`. |
-| `JIRA_PROJECT`   | Default project to scope all searches to (optional). When set, every query — even free-text searches — is scoped to this project via `project = "<proj>" AND ...`. |
+| Variable | Purpose |
+| ------------------ | ------------------------------------------------------------------- |
+| `JIRA_API_TOKEN` | Bearer token sent as `Authorization: Bearer <token>`. |
+| `JIRA_SERVER` | API base URL, e.g. `https://jira.internal` (→ `/rest/api/2/search`). |
+| `JIRA_URL` | Browse base URL; `{JIRA_URL}/<key>` opens the ticket. Falls back to `JIRA_SERVER`. |
+| `JIRA_PROJECT` | Default project to scope all searches to (optional). When set, every query — even free-text searches — is scoped to this project via `project = "<proj>" AND ...`. |
 | `JIRA_MAX_RESULTS` | Max results per API request (default: `5`). Increase if your queries routinely return more rows. |
 | `JIRA_HOST_CERTIFICATE` | Path to a PKCS#12 (`.p12`/`.pfx`) client certificate for mutual TLS (optional). |
 | `JIRA_HOST_CERTIFICATE_PASSWORD` | Password for the client certificate file (optional, ignored when `JIRA_HOST_CERTIFICATE` is unset). |
@@ -620,11 +620,11 @@ with modern encryption:
 # Extract cert and key (using -legacy to read the old format)
 openssl pkcs12 -in ~/.certs/jira-client.p12 \
   -out /tmp/jira-cert.pem -clcerts -nokeys -legacy \
-  -passin pass:YOUR_PASSWORD
+  -passing pass:YOUR_PASSWORD
 
 openssl pkcs12 -in ~/.certs/jira-client.p12 \
   -out /tmp/jira-key.pem -nocerts -nodes -legacy \
-  -passin pass:YOUR_PASSWORD
+  -passing pass:YOUR_PASSWORD
 
 # Re-package with modern (non-legacy) encryption
 openssl pkcs12 -export \

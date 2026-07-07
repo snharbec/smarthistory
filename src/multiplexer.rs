@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! Multiplexer abstraction.
 //!
 //! smarthistory's directory-switching TUI (the
@@ -360,11 +361,11 @@ pub trait MultiplexerBackend: Send + Sync {
     /// id, no server, etc.).
     ///
     /// - tmux:
-    ///   `tmux switch-client -t <session-name>`
+     ///   `tmux switch-client -t <session-name>`
     ///   (brings the session's
     ///   focused window forward).
     /// - herdr:
-    ///   `herdr workspace focus <workspace-id>`
+     ///   `herdr workspace focus <workspace-id>`
     ///   (brings the workspace's
     ///   focused tab forward).
     fn focus_session(&self, session_label: &str) -> Option<String>;
@@ -384,7 +385,7 @@ pub trait MultiplexerBackend: Send + Sync {
     /// can't build a command.
     ///
     /// - tmux:
-    ///   `tmux select-pane -t <pane_id> && tmux switch-client -t <pane_id>`
+     ///   `tmux select-pane -t <pane_id> && tmux switch-client -t <pane_id>`
     ///   (the `tab_id` is
     ///   tmux's window id, used
     ///   only as the second
@@ -396,7 +397,7 @@ pub trait MultiplexerBackend: Send + Sync {
     ///   window for you so
     ///   `tab_id` is ignored).
     /// - herdr:
-    ///   `herdr workspace focus <ws> && herdr tab focus <tab_id>`
+     ///   `herdr workspace focus <ws> && herdr tab focus <tab_id>`
     ///   (the workspace switch
     ///   + tab switch is the
     ///   closest equivalent of

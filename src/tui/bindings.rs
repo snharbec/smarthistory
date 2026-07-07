@@ -1,3 +1,4 @@
+#![allow(clippy::enum_variant_names)]
 // Bindings subsystem: Action enum, KeySpec parser, KeyBindings
 // table, and the action_for_key lookup.
 

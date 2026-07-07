@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation)]
 // Data model used across the TUI: search scope (Mode), the row
 // representation loaded from SQLite (HistoryRow), the pick mode
 // returned from the line-editor widget (PickMode), the exit-code
@@ -177,14 +178,14 @@ pub enum PickMode {
 /// (default `C-M-g`).
 ///
 /// - `All`: every row,
-///   regardless of where
+ ///   regardless of where
 ///   it came from
 ///   (history-driven,
 ///   tmux pane cwd, or
 ///   `sessiondirs=...`
 ///   config).
 /// - `Tmux`: only the
-///   directories that
+ ///   directories that
 ///   are the cwd of at
 ///   least one active
 ///   tmux pane. Lets
@@ -196,7 +197,7 @@ pub enum PickMode {
 ///   past their pinned
 ///   project list.
 /// - `Config`: only the
-///   directories from
+ ///   directories from
 ///   `sessiondirs=...`
 ///   in the config file
 ///   (recursively
@@ -296,9 +297,9 @@ impl PickMode {
 /// `Ctrl-J` (the `CycleExitFilter` action).
 ///
 /// - `All`     — no filter; every row is shown (the default).
-/// - `Success` — only rows with `exit_code == 0`.
-/// - `Failed`  — only rows with `exit_code != 0`.
-///
+ /// - `Success` — only rows with `exit_code == 0`.
+ /// - `Failed`  — only rows with `exit_code != 0`.
+ ///
 /// `next()` advances through the cycle in this order. The
 /// `as_str()` and `parse()` helpers round-trip the value
 /// through the persisted session file (`~/.cache/smarthistory/
@@ -357,10 +358,10 @@ impl ExitFilter {
 /// list. Cycled with `F4` (the `CycleSortOrder` action).
 ///
 /// - `Age`      — sort by timestamp DESC (the historical
-///   default; newest commands at the bottom of the
+ ///   default; newest commands at the bottom of the
 ///   bottom-aligned list).
 /// - `Frequency` — sort by how many times each command
-///   appears in the currently-filtered set, DESC.
+ ///   appears in the currently-filtered set, DESC.
 ///   Ties are broken by timestamp DESC (newest wins among
 ///   commands with the same count). Commands that appear
 ///   once still appear, just sorted alongside the more

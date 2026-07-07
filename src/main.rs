@@ -1,3 +1,4 @@
+#![allow(clippy::should_implement_trait)]
 mod files;
 mod jira;
 mod llm;
