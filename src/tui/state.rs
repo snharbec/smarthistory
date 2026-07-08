@@ -123,7 +123,7 @@ impl HistoryRow {
 /// can see at a glance which
 /// directories currently have
 /// live tmux windows attached.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TmuxWindowInfo {
     /// Pane id (`#{pane_id}`),
     /// e.g. `%2`. Format is
@@ -157,9 +157,107 @@ pub struct TmuxWindowInfo {
     /// time (a brand-new window
     /// has no cwd yet).
     pub path: String,
+    /// The pane's foreground
+    /// command
+    /// (`#{pane_current_command}`
+    /// on tmux, e.g. `ssh
+    /// root@pve-1`, `vim`,
+    /// `zsh`; empty on herdr —
+    /// herdr's `pane list` JSON
+    /// doesn't expose it).
+    /// Used by the `# hosts`
+    /// matcher to detect
+    /// already-connected SSH
+    /// sessions.
+    #[allow(dead_code)]
+    pub current_command: String,
+    /// The workspace / session
+    /// label (tmux:
+    /// `#{session_name}`;
+    /// herdr: the workspace's
+    /// `label`). Used by the
+    /// `# hosts` matcher on
+    /// herdr to detect
+    /// already-created
+    /// workspaces by label
+    /// match (herdr's
+    /// foreground-command
+    /// field is empty).
+    #[allow(dead_code)]
+    pub workspace_label: String,
 }
 
-/// How the parent shell should treat the chosen command.
+/// A host entry from the config file
+/// (`host.<id> = "Name"`,
+/// `host.<id>.host = "alias"`,
+/// `host.<id>.hostname = "real"`,
+/// `host.<id>.user = "u"`,
+/// `host.<id>.port = 22`,
+/// `host.<id>.identity = "~/.ssh/..."`,
+/// `host.<id>.dir = "~/path"`,
+/// `host.<id>.exec = "cmd"`).
+///
+/// Merged with `~/.ssh/config` after parsing:
+/// explicit fields win, unset fields inherit
+/// from the SSH config block whose `Host`
+/// alias matches `host`.
+///
+/// `host` is the SSH config `Host` alias (not
+/// the real hostname) — it doubles as the
+/// connection target when the SSH config
+/// doesn't override it. For example, with the
+/// SSH config:
+/// ```text
+/// Host proxmox
+///     HostName pve-1.example.com
+///     User root
+/// ```
+/// and the smarthistory config
+/// `host.1.host = "proxmox"`, the resulting
+/// SSH command is `ssh root@pve-1.example.com`.
+#[derive(Debug, Clone, Default)]
+pub struct HostDef {
+    /// Display name shown in the `# hosts`
+    /// section of the `*` panes view. Falls
+    /// back to `host` (the SSH config alias)
+    /// when the user didn't set it.
+    pub name: String,
+    /// The SSH config `Host` alias. Also used
+    /// as the connection target when
+    /// `hostname` is unset.
+    pub host: String,
+    /// The real hostname (`HostName` in SSH
+    /// config). When set, takes precedence
+    /// over `host` in the SSH argv.
+    pub hostname: String,
+    /// The login user. When unset, inherits
+    /// from the matching SSH config block,
+    /// then from the SSH config's `Host *`
+    /// defaults, then from `$USER` at
+    /// connect time.
+    pub user: String,
+    /// The TCP port. `0` means "use the SSH
+    /// config's value, or fall back to 22".
+    pub port: u16,
+    /// Path to the private key. Inherits
+    /// from the SSH config when unset.
+    pub identity: String,
+    /// Display-only cwd. Shown in the row
+    /// but never used as the connection
+    /// target (this is a local-fs
+    /// convention that doesn't apply to
+    /// remote hosts; included for symmetry
+    /// with `SessionDef`).
+    pub dir: String,
+    /// Optional command to run after the SSH
+    /// connection is up (e.g. `tmux a` to
+    /// attach to a remote session). Staged
+    /// via `send_in_pane_command` after the
+    /// `ssh` body, the same way
+    /// `SessionDef::exec` works for local
+    /// sessions.
+    pub exec: String,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickMode {
     /// `Enter` — run the command (parent should submit the line).
@@ -178,14 +276,14 @@ pub enum PickMode {
 /// (default `C-M-g`).
 ///
 /// - `All`: every row,
- ///   regardless of where
+///   regardless of where
 ///   it came from
 ///   (history-driven,
 ///   tmux pane cwd, or
 ///   `sessiondirs=...`
 ///   config).
 /// - `Tmux`: only the
- ///   directories that
+///   directories that
 ///   are the cwd of at
 ///   least one active
 ///   tmux pane. Lets
@@ -197,7 +295,7 @@ pub enum PickMode {
 ///   past their pinned
 ///   project list.
 /// - `Config`: only the
- ///   directories from
+///   directories from
 ///   `sessiondirs=...`
 ///   in the config file
 ///   (recursively
@@ -297,9 +395,9 @@ impl PickMode {
 /// `Ctrl-J` (the `CycleExitFilter` action).
 ///
 /// - `All`     — no filter; every row is shown (the default).
- /// - `Success` — only rows with `exit_code == 0`.
- /// - `Failed`  — only rows with `exit_code != 0`.
- ///
+/// - `Success` — only rows with `exit_code == 0`.
+/// - `Failed`  — only rows with `exit_code != 0`.
+///
 /// `next()` advances through the cycle in this order. The
 /// `as_str()` and `parse()` helpers round-trip the value
 /// through the persisted session file (`~/.cache/smarthistory/
@@ -358,10 +456,10 @@ impl ExitFilter {
 /// list. Cycled with `F4` (the `CycleSortOrder` action).
 ///
 /// - `Age`      — sort by timestamp DESC (the historical
- ///   default; newest commands at the bottom of the
+///   default; newest commands at the bottom of the
 ///   bottom-aligned list).
 /// - `Frequency` — sort by how many times each command
- ///   appears in the currently-filtered set, DESC.
+///   appears in the currently-filtered set, DESC.
 ///   Ties are broken by timestamp DESC (newest wins among
 ///   commands with the same count). Commands that appear
 ///   once still appear, just sorted alongside the more

@@ -4,6 +4,7 @@ mod files;
 mod jira;
 mod llm;
 mod multiplexer;
+mod ssh_config;
 mod tui;
 mod util;
 
@@ -1082,6 +1083,21 @@ pub struct Config {
     /// becomes a row in the panes
     /// (`*`) view.
     sessions: Vec<(usize, SessionDef)>,
+    /// Host entries parsed from
+    /// `host.<id> = "name"` /
+    /// `host.<id>.host = "alias"` /
+    /// `host.<id>.hostname = "real"` /
+    /// `host.<id>.user = "u"` /
+    /// `host.<id>.port = N` /
+    /// `host.<id>.identity = "path"` /
+    /// `host.<id>.dir = "~/path"` /
+    /// `host.<id>.exec = "cmd"`. Each entry
+    /// becomes a row in the `# hosts`
+    /// section of the panes (`*`) view.
+    /// SSH config (`~/.ssh/config`) entries
+    /// without a config-file companion are
+    /// auto-appended by `Config::load`.
+    hosts: Vec<(usize, crate::tui::state::HostDef)>,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -1199,6 +1215,7 @@ impl Config {
             session_dirs: Vec::new(),
             multiplexer: crate::multiplexer::MultiplexerKind::default(),
             sessions: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 
@@ -1539,6 +1556,79 @@ impl Config {
                                         }
                                     }
                                 }
+                            } else if let Some(rest) = other.strip_prefix("host.") {
+                                // Parse `host.<id> = "name"`,
+                                // `host.<id>.host = "alias"`,
+                                // `host.<id>.hostname = "real"`,
+                                // `host.<id>.user = "u"`,
+                                // `host.<id>.port = N`,
+                                // `host.<id>.identity = "path"`,
+                                // `host.<id>.dir = "~/path"`,
+                                // `host.<id>.exec = "cmd"`.
+                                // The `<id>` is a numeric index
+                                // determining display order.
+                                //
+                                // `host` is the SSH config
+                                // `Host` alias (also used as
+                                // the connection target when
+                                // no `hostname` is set);
+                                // `hostname` is the real
+                                // `HostName` to connect to.
+                                let unquoted = value.trim().trim_matches('"').trim();
+                                if let Some((id_str, field)) = rest.split_once('.') {
+                                    if let Ok(id) = id_str.parse::<usize>() {
+                                        let pos = self.hosts.iter().position(|(i, _)| *i == id);
+                                        let set = |host: &mut crate::tui::state::HostDef, field: &str, val: &str| {
+                                            match field {
+                                                "host" => host.host = val.to_string(),
+                                                "hostname" => host.hostname = val.to_string(),
+                                                "user" => host.user = val.to_string(),
+                                                "port" => {
+                                                    if let Ok(n) = val.parse::<u16>() {
+                                                        host.port = n;
+                                                    } else {
+                                                        eprintln!(
+                                                            "warning: host.{}.port = {:?} is not a valid port; ignoring",
+                                                            id, val
+                                                        );
+                                                    }
+                                                }
+                                                "identity" => host.identity = val.to_string(),
+                                                "dir" => host.dir = val.to_string(),
+                                                "exec" => host.exec = val.to_string(),
+                                                _ => {
+                                                    eprintln!(
+                                                        "warning: unknown host field {:?} in host.{}; ignoring",
+                                                        field, id
+                                                    );
+                                                }
+                                            }
+                                        };
+                                        match pos {
+                                            Some(idx) => {
+                                                let (_, host) = &mut self.hosts[idx];
+                                                set(host, field, unquoted);
+                                            }
+                                            None => {
+                                                let mut host = crate::tui::state::HostDef::default();
+                                                set(&mut host, field, unquoted);
+                                                self.hosts.push((id, host));
+                                            }
+                                        }
+                                    }
+                                } else if let Ok(id) = rest.parse::<usize>() {
+                                    // `host.<id> = "name"` (no sub-field).
+                                    if !unquoted.is_empty() {
+                                        let pos = self.hosts.iter().position(|(i, _)| *i == id);
+                                        match pos {
+                                            Some(idx) => self.hosts[idx].1.name = unquoted.to_string(),
+                                            None => self.hosts.push((id, crate::tui::state::HostDef {
+                                                name: unquoted.to_string(),
+                                                ..crate::tui::state::HostDef::default()
+                                            })),
+                                        }
+                                    }
+                                }
                             }
                 }
             }
@@ -1565,6 +1655,111 @@ impl Config {
                     url: ollama_url,
                     model: ollama_model,
                 });
+            }
+        }
+        // Merge `~/.ssh/config` into `self.hosts`.
+        // For every `Host` block in the SSH
+        // config, look up a `host.<id>` entry
+        // whose `host` field matches the
+        // alias. If found, the explicit
+        // entry wins for every set field;
+        // unset fields inherit from the SSH
+        // config. If not found, auto-append
+        // a new entry using the SSH config
+        // block as the source of truth
+        // (display name = the alias, real
+        // hostname = `HostName`, user =
+        // `User`, identity = first
+        // `IdentityFile`, port = `Port`).
+        //
+        // Auto-included entries get a
+        // synthetic id starting from
+        // `usize::MAX` and going down so
+        // they sort after every explicit
+        // `host.<id>` entry (which start
+        // from 1 and go up). The id is
+        // only used for display ordering,
+        // so the choice of magnitude is
+        // arbitrary as long as the two
+        // ranges don't collide.
+        if let Some(home) = env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| env::var_os("USERPROFILE").map(std::path::PathBuf::from))
+        {
+            let ssh_blocks = ssh_config::load_ssh_config(&home);
+            for block in ssh_blocks {
+                // Look up an explicit
+                // `host.<id>` whose
+                // `host` field matches
+                // the SSH config
+                // alias. (Empty `host`
+                // would match every
+                // SSH block, which
+                // isn't what we want;
+                // skip those.)
+                let pos = if block.alias.is_empty() {
+                    None
+                } else {
+                    self.hosts.iter().position(|(_, h)| h.host == block.alias)
+                };
+                match pos {
+                    Some(idx) => {
+                        // Merge: explicit
+                        // wins for every
+                        // set field, SSH
+                        // config fills
+                        // the gaps.
+                        let (_, host) = &mut self.hosts[idx];
+                        if host.hostname.is_empty() {
+                            host.hostname = block.hostname.clone();
+                        }
+                        if host.user.is_empty() {
+                            host.user = block.user.clone();
+                        }
+                        if host.port == 0 {
+                            host.port = block.port;
+                        }
+                        if host.identity.is_empty() {
+                            host.identity = block.identity.clone();
+                        }
+                        // Auto-fill the
+                        // display name
+                        // when the user
+                        // didn't set
+                        // `host.<id> =
+                        // "..."` but did
+                        // set `host.<id>.host
+                        // = "alias"`.
+                        if host.name.is_empty() {
+                            host.name = block.alias.clone();
+                        }
+                    }
+                    None => {
+                        // Auto-append.
+                        // Pick an id
+                        // that doesn't
+                        // collide with
+                        // any existing
+                        // entry.
+                        let next_id = self
+                            .hosts
+                            .iter()
+                            .map(|(i, _)| *i)
+                            .max()
+                            .map(|m| m.saturating_add(1))
+                            .unwrap_or(1);
+                        self.hosts.push((next_id, crate::tui::state::HostDef {
+                            name: block.alias.clone(),
+                            host: block.alias.clone(),
+                            hostname: block.hostname.clone(),
+                            user: block.user.clone(),
+                            port: block.port,
+                            identity: block.identity.clone(),
+                            dir: String::new(),
+                            exec: String::new(),
+                        }));
+                    }
+                }
             }
         }
         // Apply the collected `key.*` entries on top of the
@@ -1829,6 +2024,108 @@ impl Config {
                     source: "sessions".to_string(),
                 }
             })
+            .collect()
+    }
+
+    /// Hosts parsed from the config file
+    /// (`host.<id>=...`, `host.<id>.host=...`,
+    /// `host.<id>.hostname=...`, etc.) merged
+    /// with `~/.ssh/config` entries. Each entry
+    /// becomes a row in the `# hosts` section
+    /// of the panes (`*`) view. Selecting a
+    /// row creates/switches a workspace via
+    /// the configured multiplexer backend and
+    /// stages an `ssh` body inside the new
+    /// pane.
+    ///
+    /// The returned `HistoryRow` carries the
+    /// display name in `command` and a
+    /// `user@host:port` connection string in
+    /// `directory` (used for rendering and
+    /// matching). The matching
+    /// [`HostDef`] is exposed separately via
+    /// [`Config::host_defs`] so the staging
+    /// layer can read the full set of fields
+    /// (real hostname, identity, exec, etc.)
+    /// without re-parsing the row.
+    pub fn hosts(&self) -> Vec<crate::tui::state::HistoryRow> {
+        self.hosts
+            .iter()
+            .map(|(_, def)| {
+                let effective_user = if def.user.is_empty() {
+                    std::env::var("USER").unwrap_or_default()
+                } else {
+                    def.user.clone()
+                };
+                let target = if def.hostname.is_empty() {
+                    def.host.clone()
+                } else {
+                    def.hostname.clone()
+                };
+                let port_suffix = if def.port != 0 && def.port != 22 {
+                    format!(":{}", def.port)
+                } else {
+                    String::new()
+                };
+                let user_prefix = if !effective_user.is_empty() {
+                    format!("{}@", effective_user)
+                } else {
+                    String::new()
+                };
+                let connection_string = format!(
+                    "{}{}{}",
+                    user_prefix, target, port_suffix
+                );
+                crate::tui::state::HistoryRow {
+                    // Placeholder id;
+                    // `fetch_session_panes_impl`
+                    // overwrites this
+                    // with a
+                    // position-based
+                    // id (so the
+                    // staging layer
+                    // can recover
+                    // the `host_defs`
+                    // index). The
+                    // 0 value here
+                    // is a defensive
+                    // default that
+                    // would never
+                    // match a real
+                    // row, in case a
+                    // future
+                    // caller
+                    // forgets to
+                    // re-id.
+                    id: 0,
+                    command: def.name.clone(),
+                    directory: connection_string,
+                    session_id: String::new(),
+                    exit_code: 0,
+                    timestamp: 0,
+                    comment: def.exec.clone(),
+                    output: String::new(),
+                    mode: "host".to_string(),
+                    source: "hosts".to_string(),
+                }
+            })
+            .collect()
+    }
+
+    /// The full [`HostDef`] entries in the
+    /// same order as [`Config::hosts`].
+    /// Position-aligned: the `i`-th
+    /// `HostDef` corresponds to the
+    /// `i`-th `HistoryRow` returned by
+    /// `hosts()`. Used by the staging
+    /// layer to read the real hostname,
+    /// identity, port, and exec — fields
+    /// that the projected `HistoryRow`
+    /// doesn't carry.
+    pub fn host_defs(&self) -> Vec<crate::tui::state::HostDef> {
+        self.hosts
+            .iter()
+            .map(|(_, def)| def.clone())
             .collect()
     }
 

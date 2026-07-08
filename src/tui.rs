@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{ExitFilter, MatchAlgorithm, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
+pub use state::{ExitFilter, HostDef, MatchAlgorithm, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -1026,6 +1026,29 @@ struct App {
     /// appended to the panes view by
     /// `fetch_session_panes_impl`.
     sessions: Vec<HistoryRow>,
+    /// Host entries parsed from the
+    /// config file (`host.<id>=...`,
+    /// `host.<id>.host=...`) merged
+    /// with `~/.ssh/config` entries.
+    /// Each entry has a display name
+    /// and a connection target.
+    /// Populated at construction from
+    /// `Config::hosts()`; appended to
+    /// the panes view by
+    /// `fetch_session_panes_impl` as
+    /// a `# hosts` section after the
+    /// existing `# sessions` section.
+    hosts: Vec<HistoryRow>,
+    /// The full [`HostDef`] entries
+    /// in the same order as
+    /// [`App::hosts`]. Used by the
+    /// staging layer to read the
+    /// real hostname, identity,
+    /// port, and exec — fields
+    /// the projected `HistoryRow`
+    /// doesn't carry. Index-aligned
+    /// with `hosts`.
+    host_defs: Vec<HostDef>,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -3176,6 +3199,76 @@ std::fs::read_to_string(&path).unwrap_or_default()
                 });
             }
         }
+        // Append hosts as additional
+        // rows, grouped under a
+        // `# hosts` header. Each
+        // host row carries the
+        // display name in `command`
+        // and a `user@host:port`
+        // connection string in
+        // `directory` (the staging
+        // layer reads both for the
+        // matcher and the
+        // connection-argv
+        // construction).
+        if !self.hosts.is_empty() {
+            self.session_panes.push(HistoryRow {
+                id: -25_000,
+                command: "hosts".to_string(),
+                directory: String::new(),
+                session_id: "hosts".to_string(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: "configured hosts".to_string(),
+                output: String::new(),
+                mode: "workspace".to_string(),
+                source: "hosts".to_string(),
+            });
+            let mut next_host_id: i64 = -25_000;
+            for h in &self.hosts {
+                next_host_id -= 1;
+                // The synthetic
+                // `id` is
+                // negative
+                // (consistent
+                // with
+                // `# sessions`)
+                // and stable
+                // across
+                // refreshes, so
+                // the staging
+                // layer can
+                // index
+                // `self.hosts`
+                // by
+                // `-(row.id) -
+                // 25_000 - 1`
+                // (the
+                // accessor in
+                // `Config::hosts`
+                // uses the
+                // same
+                // `id - 30_000`
+                // scheme,
+                // shifted by
+                // 5_000 to keep
+                // the two
+                // ranges
+                // disjoint).
+                self.session_panes.push(HistoryRow {
+                    id: next_host_id,
+                    command: h.command.clone(),
+                    directory: h.directory.clone(),
+                    session_id: String::new(),
+                    exit_code: 0,
+                    timestamp: 0,
+                    comment: h.comment.clone(),
+                    output: String::new(),
+                    mode: "host".to_string(),
+                    source: "hosts".to_string(),
+                });
+            }
+        }
         if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
             eprintln!(
                 "[debug] sessions count: {}, session_panes total: {}",
@@ -3579,6 +3672,28 @@ impl App {
             .map(|r| TmuxWindowInfo {
                 pane_id: r.pane_id,
                 path: r.path,
+                // Carry the
+                // foreground
+                // command
+                // (tmux:
+                // `#{pane_current_command}`;
+                // herdr: empty)
+                // and the
+                // workspace /
+                // session label
+                // through to the
+                // staging layer.
+                // The `# hosts`
+                // matcher in
+                // `select_for_run_impl`
+                // reads both: tmux
+                // matches by
+                // `current_command`,
+                // herdr matches
+                // by
+                // `workspace_label`.
+                current_command: r.current_command,
+                workspace_label: r.workspace_label,
             })
             .collect();
     }
@@ -4795,6 +4910,8 @@ notes_date_filter: NotesDateFilter::All,
             tmux_windows: Vec::new(),
             session_panes: Vec::new(),
             sessions: Vec::new(),
+            hosts: Vec::new(),
+            host_defs: Vec::new(),
             // Multiplexer backend
             // (tmux / herdr).
             // The staging layer
@@ -6754,6 +6871,315 @@ fn move_selection(&mut self, delta: isize) {
                         } else {
                             let base = self.multiplexer.create_command(std::path::Path::new(&abs), &name).unwrap_or_default();
                             if exec.is_empty() { base } else { format!("{} ; {}", base, quoted_exec) }
+                        }
+                    };
+                    self.selection = Some(cmd);
+                    self.pick_mode = Some(PickMode::Run);
+                }
+                "host" => {
+                    // The `# hosts` block.
+                    // Each host row has a
+                    // display name in
+                    // `command` and a
+                    // `user@host:port`
+                    // connection string in
+                    // `directory`. The full
+                    // `HostDef` is looked
+                    // up by row position
+                    // (the row's synthetic
+                    // id maps to the
+                    // `host_defs` index
+                    // directly).
+                    let display_name = row.command.clone();
+                    let connection_string = row.directory.clone();
+                    // The synthetic id
+                    // scheme is
+                    // `-25_000 - <position>` (set by
+                    // `fetch_session_panes_impl`),
+                    // so the
+                    // position in
+                    // `self.hosts` /
+                    // `self.host_defs` is
+                    // `-row.id - 25_000 - 1`
+                    // (0-indexed).
+                    let host_pos = (-row.id - 25_000 - 1) as usize;
+                    let host_def = self
+                        .host_defs
+                        .get(host_pos)
+                        .cloned();
+                    let host_def = match host_def {
+                        Some(d) => d,
+                        None => {
+                            // The id
+                            // scheme
+                            // is
+                            // out-of-sync
+                            // with
+                            // `self.hosts`
+                            // (shouldn't
+                            // happen,
+                            // but
+                            // surface
+                            // a
+                            // status
+                            // message
+                            // rather
+                            // than
+                            // panicking).
+                            self.set_status_message(
+                                "host definition not found".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    // Build the `ssh`
+                    // argv from the
+                    // full `HostDef`.
+                    // Only include
+                    // flags that are
+                    // actually set.
+                    let effective_user = if host_def.user.is_empty() {
+                        std::env::var("USER").unwrap_or_default()
+                    } else {
+                        host_def.user.clone()
+                    };
+                    let target = if host_def.hostname.is_empty() {
+                        host_def.host.clone()
+                    } else {
+                        host_def.hostname.clone()
+                    };
+                    let mut ssh_body = String::from("ssh");
+                    if host_def.port != 0 && host_def.port != 22 {
+                        ssh_body.push_str(&format!(" -p {}", host_def.port));
+                    }
+                    if !host_def.identity.is_empty() {
+                        let home_list: Vec<String> = std::iter::once(
+                            std::env::var("HOME").unwrap_or_default(),
+                        )
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                        let id_path = crate::util::expand_home_to_absolute(
+                            &host_def.identity,
+                            &home_list,
+                        );
+                        ssh_body.push_str(&format!(
+                            " -i {}",
+                            crate::util::shell_quote(&id_path),
+                        ));
+                    }
+                    if !effective_user.is_empty() {
+                        ssh_body.push_str(&format!(
+                            " {}@{}",
+                            effective_user,
+                            target,
+                        ));
+                    } else {
+                        ssh_body.push_str(&format!(" {}", target));
+                    }
+                    let quoted_body = crate::util::shell_quote(&ssh_body);
+                    let exec = host_def.exec.clone();
+                    // Match against
+                    // existing
+                    // workspaces. tmux:
+                    // any pane whose
+                    // `current_command`
+                    // starts with
+                    // `ssh` and contains
+                    // the connection
+                    // string. herdr:
+                    // any workspace
+                    // whose
+                    // `workspace_label`
+                    // matches the host's
+                    // display name
+                    // (herdr's
+                    // foreground-command
+                    // field is empty).
+                    let existing_pane_id: Option<String> = if self.multiplexer.name() == "tmux" {
+                        self.tmux_windows
+                            .iter()
+                            .find(|w| {
+                                w.current_command.starts_with("ssh")
+                                    && (w.current_command.contains(&connection_string)
+                                        || w.current_command.contains(&target))
+                            })
+                            .map(|w| w.pane_id.clone())
+                    } else {
+                        // herdr: match by
+                        // workspace
+                        // label. We
+                        // accept the
+                        // host's display
+                        // name OR a
+                        // `host:<name>`
+                        // label (the
+                        // user might
+                        // have manually
+                        // renamed the
+                        // workspace).
+                        self.tmux_windows
+                            .iter()
+                            .find(|w| {
+                                w.workspace_label == display_name
+                                    || w.workspace_label == format!("host:{}", display_name)
+                            })
+                            .map(|w| w.pane_id.clone())
+                    };
+                    let cmd = if let Some(ref pane_id) = existing_pane_id {
+                        // Workspace
+                        // already
+                        // exists —
+                        // focus it
+                        // (and
+                        // optionally
+                        // run the
+                        // post-connect
+                        // command).
+                        if self.multiplexer.name() == "herdr" {
+                            let ws_id = pane_id
+                                .split(':')
+                                .next()
+                                .unwrap_or(pane_id);
+                            if exec.is_empty() {
+                                format!(
+                                    "herdr workspace focus {} 2>/dev/null",
+                                    ws_id,
+                                )
+                            } else {
+                                // Use `pane run` (same as
+                                // the named-session
+                                // technique) — it executes
+                                // the command directly in
+                                // the pane without needing
+                                // a separate
+                                // `pane send-keys Enter`
+                                // to submit it.
+                                format!(
+                                    "herdr workspace focus {} 2>/dev/null && herdr pane run {} {} 2>/dev/null",
+                                    ws_id,
+                                    pane_id,
+                                    crate::util::shell_quote(&exec),
+                                )
+                            }
+                        } else {
+                            // tmux:
+                            // focus the
+                            // pane
+                            // (the
+                            // `ssh`
+                            // body is
+                            // already
+                            // running
+                            // there).
+                            if exec.is_empty() {
+                                format!(
+                                    "tmux select-pane -t {} && tmux switch-client -t {}",
+                                    pane_id, pane_id,
+                                )
+                            } else {
+                                format!(
+                                    "tmux select-pane -t {} && tmux switch-client -t {} && tmux send-keys -t {} {} Enter",
+                                    pane_id, pane_id, pane_id, crate::util::shell_quote(&exec),
+                                )
+                            }
+                        }
+                    } else {
+                        // No
+                        // existing
+                        // workspace
+                        // — create
+                        // one and
+                        // bootstrap
+                        // the `ssh`
+                        // connection
+                        // inside.
+                        if self.multiplexer.name() == "herdr" {
+                            // herdr
+                            // doesn't
+                            // accept a
+                            // startup
+                            // command
+                            // on
+                            // `workspace
+                            // create`,
+                            // so we
+                            // create
+                            // first
+                            // and
+                            // send the
+                            // `ssh`
+                            // body
+                            // into the
+                            // first
+                            // pane
+                            // via
+                            // `pane
+                            // send-text`.
+                            let quoted_label = crate::util::shell_quote(
+                                &display_name,
+                            );
+                            if exec.is_empty() {
+                                // Use `pane run` (same as
+                                // the named-session
+                                // technique) — it executes
+                                // the `ssh` body directly
+                                // in the new workspace's
+                                // first pane. No need for
+                                // `pane send-text` +
+                                // `pane send-keys Enter`.
+                                format!(
+                                    "WS=$(herdr workspace create --label {} 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"result\"][\"workspace\"][\"workspace_id\"])' 2>/dev/null) && herdr pane run \"$WS:p1\" {} && herdr workspace focus \"$WS\"",
+                                    quoted_label, quoted_body,
+                                )
+                            } else {
+                                // Same technique: `pane run`
+                                // for the exec, then focus
+                                // the workspace. The exec
+                                // runs inside the SSH
+                                // session's PTY (sent
+                                // after the SSH body lands
+                                // in the remote shell's
+                                // stdin).
+                                format!(
+                                    "WS=$(herdr workspace create --label {} 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"result\"][\"workspace\"][\"workspace_id\"])' 2>/dev/null) && herdr pane run \"$WS:p1\" {} && herdr pane run \"$WS:p1\" {} && herdr workspace focus \"$WS\"",
+                                    quoted_label, quoted_body, crate::util::shell_quote(&exec),
+                                )
+                            }
+                        } else {
+                            // tmux:
+                            // create a
+                            // new
+                            // session
+                            // (no cwd
+                            // — the
+                            // user
+                            // wants
+                            // the SSH
+                            // connection,
+                            // not a
+                            // local
+                            // dir) and
+                            // send
+                            // the
+                            // `ssh`
+                            // body
+                            // into the
+                            // new
+                            // pane.
+                            let quoted_label = crate::util::shell_quote(
+                                &display_name,
+                            );
+                            if exec.is_empty() {
+                                format!(
+                                    "tmux new-session -d -s {}; tmux switch-client -t {}; tmux send-keys {} Enter",
+                                    quoted_label, quoted_label, quoted_body,
+                                )
+                            } else {
+                                format!(
+                                    "tmux new-session -d -s {}; tmux switch-client -t {}; tmux send-keys {} Enter; tmux send-keys {} Enter",
+                                    quoted_label, quoted_label, quoted_body, crate::util::shell_quote(&exec),
+                                )
+                            }
                         }
                     };
                     self.selection = Some(cmd);
@@ -9382,6 +9808,21 @@ pub fn run_tui_to_stdout(
         app.session_panes.clear();
         app.refresh();
     }
+    // Load hosts from the config file
+    // (`host.<id>=...`, `host.<id>.host=...`, etc.)
+    // merged with `~/.ssh/config` entries.
+    app.hosts = app_cfg.hosts();
+    app.host_defs = app_cfg.host_defs();
+    if !app.hosts.is_empty() {
+        // Same one-shot pattern as `sessions`:
+        // the `*` view's `session_panes` was
+        // populated by `App::new`'s first
+        // `refresh()` before we knew about the
+        // hosts. Clearing and re-refreshing
+        // appends the `# hosts` block.
+        app.session_panes.clear();
+        app.refresh();
+    }
 
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;
@@ -11009,6 +11450,24 @@ fn parse_tmux_pane_line(line: &str) -> Option<TmuxWindowInfo> {
     Some(TmuxWindowInfo {
         pane_id: pane_id.to_string(),
         path,
+        // The legacy 4-field
+        // format doesn't carry
+        // the foreground
+        // command or the
+        // session name, so
+        // both are empty.
+        // Real-world snapshots
+        // (populated by
+        // `fetch_tmux_windows`
+        // via the configured
+        // backend) carry both
+        // — the legacy
+        // helper is only
+        // exercised by
+        // `parse_tmux_pane_line_*`
+        // tests.
+        current_command: String::new(),
+        workspace_label: String::new(),
     })
 }
 
@@ -13396,6 +13855,20 @@ mod tests {
                         pane_id: String::from("wA:p1"),
                         window_id: String::from("wA"),
                         path: String::from("/tmp"),
+                        // Fake
+                        // backend
+                        // doesn't
+                        // expose
+                        // foreground
+                        // commands
+                        // (the
+                        // production
+                        // herdr
+                        // backend
+                        // doesn't
+                        // either).
+                        current_command: String::new(),
+                        workspace_label: String::from("wA"),
                     }]
                 }
                 fn snapshot_current_panes(
@@ -13559,6 +14032,463 @@ mod tests {
             assert!(
                 staged.contains("herdr workspace focus wA"),
                 "must focus workspace wA (the workspace_id portion of pane id wA:p1), got: {staged:?}"
+            );
+        }
+
+        /// Regression test for the
+        /// new `# hosts` block in the
+        /// `*` panes view. Selecting a
+        /// host row must:
+        ///
+        /// 1. Build a single `ssh`
+        ///    argv from the
+        ///    `HostDef` (only
+        ///    including flags that
+        ///    are set).
+        /// 2. Match against
+        ///    existing panes /
+        ///    workspaces and
+        ///    focus them when
+        ///    found.
+        /// 3. Otherwise create a
+        ///    new workspace and
+        ///    bootstrap the `ssh`
+        ///    connection inside.
+        ///
+        /// This test covers the
+        /// "no existing workspace"
+        /// path on herdr: pressing
+        /// Enter on a host row
+        /// stages a
+        /// `herdr workspace create`
+        /// followed by
+        /// `herdr pane send-text`,
+        /// not a `tmux ...`
+        /// command (the configured
+        /// backend is herdr).
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn host_row_in_panes_mode_stages_herdr_create_and_ssh() {
+            use crate::tui::state::{HistoryRow, HostDef};
+            // Fake backend with
+            // NO existing
+            // workspace — the
+            // matcher will miss
+            // and we fall into
+            // the create branch.
+            use crate::multiplexer::{
+                ActiveContext, CurrentPaneInfo, MultiplexerBackend,
+            };
+            struct FakeEmptyHerdrBackend;
+            impl MultiplexerBackend for FakeEmptyHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    Vec::new()
+                }
+                fn snapshot_current_panes(
+                    &self,
+                    _current_pane: &str,
+                ) -> Vec<CurrentPaneInfo> {
+                    Vec::new()
+                }
+                fn focus_command(
+                    &self,
+                    _pane_id: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn focus_session(
+                    &self,
+                    _label: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn focus_pane(
+                    &self,
+                    _pane_id: &str,
+                    _tab_id: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn create_command(
+                    &self,
+                    _dir: &std::path::Path,
+                    _label: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn send_in_pane_command(
+                    &self,
+                    _pane_id: &str,
+                    _body: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
+            }
+            let mut app = directories_test_app(&[]);
+            app.multiplexer =
+                Box::new(FakeEmptyHerdrBackend);
+            // Configure a single
+            // host: Proxmox →
+            // root@pve-1, no
+            // identity, default
+            // port.
+            app.hosts = vec![HistoryRow {
+                id: -25_001, // set by
+                             // `Config::hosts`
+                             // (placeholder;
+                             // `fetch_session_panes_impl`
+                             // re-ids).
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            }];
+            app.host_defs = vec![HostDef {
+                name: String::from("Proxmox"),
+                host: String::from("pve-1"),
+                hostname: String::new(),
+                user: String::from("root"),
+                port: 0,
+                identity: String::new(),
+                dir: String::new(),
+                exec: String::new(),
+            }];
+            // Open the `*` mode.
+            app.query = String::from("*");
+            app.refresh();
+            // Find the host row.
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "host")
+                .expect("host row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for host row");
+            eprintln!("[test] staged host command: {staged}");
+            assert!(
+                staged.contains("herdr workspace create"),
+                "must create a herdr workspace, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("herdr pane run"),
+                "must bootstrap the ssh body via herdr pane run (same technique as named sessions), got: {staged:?}"
+            );
+            assert!(
+                staged.contains("ssh root@pve-1"),
+                "must include the ssh argv (user@host), got: {staged:?}"
+            );
+            // No `-p` flag
+            // (default port 22
+            // is implicit).
+            assert!(
+                !staged.contains(" -p "),
+                "must not include -p flag for default port, got: {staged:?}"
+            );
+            // No `-i` flag
+            // (no identity
+            // configured).
+            assert!(
+                !staged.contains(" -i "),
+                "must not include -i flag when identity is unset, got: {staged:?}"
+            );
+        }
+
+        /// The same as above but
+        /// with a port and
+        /// identity set on
+        /// the `HostDef`. The
+        /// staged `ssh` argv
+        /// must include both
+        /// flags.
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn host_row_in_panes_mode_ssh_argv_includes_port_and_identity() {
+            use crate::tui::state::{HistoryRow, HostDef};
+            use crate::multiplexer::{
+                ActiveContext, CurrentPaneInfo, MultiplexerBackend,
+            };
+            struct FakeEmptyHerdrBackend;
+            impl MultiplexerBackend for FakeEmptyHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    Vec::new()
+                }
+                fn snapshot_current_panes(
+                    &self,
+                    _current_pane: &str,
+                ) -> Vec<CurrentPaneInfo> {
+                    Vec::new()
+                }
+                fn focus_command(
+                    &self,
+                    _pane_id: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn focus_session(
+                    &self,
+                    _label: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn focus_pane(
+                    &self,
+                    _pane_id: &str,
+                    _tab_id: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn create_command(
+                    &self,
+                    _dir: &std::path::Path,
+                    _label: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn send_in_pane_command(
+                    &self,
+                    _pane_id: &str,
+                    _body: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
+            }
+            let mut app = directories_test_app(&[]);
+            app.multiplexer =
+                Box::new(FakeEmptyHerdrBackend);
+            app.hosts = vec![HistoryRow {
+                id: -25_001,
+                command: String::from("custom"),
+                directory: String::from("alice@work:2222"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            }];
+            app.host_defs = vec![HostDef {
+                name: String::from("custom"),
+                host: String::from("work"),
+                hostname: String::new(),
+                user: String::from("alice"),
+                port: 2222,
+                identity: String::from("~/.ssh/work_ed25519"),
+                dir: String::new(),
+                exec: String::new(),
+            }];
+            app.query = String::from("*");
+            app.refresh();
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "host")
+                .expect("host row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for host row");
+            eprintln!("[test] staged host command: {staged}");
+            assert!(
+                staged.contains(" -p 2222"),
+                "must include the -p flag for the non-default port, got: {staged:?}"
+            );
+            // The identity file
+            // path goes through
+            // `expand_home_to_absolute`
+            // — just assert
+            // that a `-i` flag
+            // is present and
+            // points at the
+            // right file. The
+            // `~` is expanded
+            // to `$HOME/.ssh/...`
+            // so we can't
+            // assert the
+            // literal `~` form
+            // here.
+            assert!(
+                staged.contains(" -i "),
+                "must include the -i flag for the identity file, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("alice@work"),
+                "must include the user@host, got: {staged:?}"
+            );
+        }
+
+        /// When a herdr workspace
+        /// is already running
+        /// the host (matched
+        /// by the workspace
+        /// `label`), pressing
+        /// Enter must focus
+        /// the existing
+        /// workspace rather
+        /// than create a
+        /// duplicate.
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn host_row_in_panes_mode_focuses_existing_herdr_workspace() {
+            use crate::tui::state::{HistoryRow, HostDef};
+            use crate::multiplexer::{
+                ActiveContext, CurrentPaneInfo, MultiplexerBackend,
+            };
+            struct FakeHerdrBackend;
+            impl MultiplexerBackend for FakeHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    // One active
+                    // pane in
+                    // workspace
+                    // `wA`, which
+                    // is labeled
+                    // `Proxmox` —
+                    // matching the
+                    // host's
+                    // display name.
+                    vec![ActiveContext {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        path: String::new(),
+                        current_command: String::new(),
+                        workspace_label: String::from("Proxmox"),
+                    }]
+                }
+                fn snapshot_current_panes(
+                    &self,
+                    _current_pane: &str,
+                ) -> Vec<CurrentPaneInfo> {
+                    vec![CurrentPaneInfo {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        tab_id: String::from("wA:t1"),
+                        session_label: String::from("Proxmox"),
+                        path: String::new(),
+                        current_command: String::from("zsh"),
+                        is_last: false,
+                    }]
+                }
+                fn focus_command(
+                    &self,
+                    pane_id: &str,
+                ) -> Option<String> {
+                    let ws = pane_id
+                        .split(':')
+                        .next()
+                        .unwrap_or(pane_id);
+                    Some(format!(
+                        "herdr workspace focus {} 2>/dev/null",
+                        ws
+                    ))
+                }
+                fn focus_session(
+                    &self,
+                    label: &str,
+                ) -> Option<String> {
+                    Some(format!(
+                        "herdr workspace focus {} 2>/dev/null",
+                        label
+                    ))
+                }
+                fn focus_pane(
+                    &self,
+                    pane_id: &str,
+                    _tab_id: &str,
+                ) -> Option<String> {
+                    let ws = pane_id
+                        .split(':')
+                        .next()
+                        .unwrap_or(pane_id);
+                    Some(format!(
+                        "herdr workspace focus {} 2>/dev/null",
+                        ws
+                    ))
+                }
+                fn create_command(
+                    &self,
+                    _dir: &std::path::Path,
+                    _label: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn send_in_pane_command(
+                    &self,
+                    _pane_id: &str,
+                    _body: &str,
+                ) -> Option<String> {
+                    None
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
+            }
+            let mut app = directories_test_app(&[]);
+            app.multiplexer =
+                Box::new(FakeHerdrBackend);
+            app.hosts = vec![HistoryRow {
+                id: -25_001,
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            }];
+            app.host_defs = vec![HostDef {
+                name: String::from("Proxmox"),
+                host: String::from("pve-1"),
+                hostname: String::new(),
+                user: String::from("root"),
+                port: 0,
+                identity: String::new(),
+                dir: String::new(),
+                exec: String::new(),
+            }];
+            app.query = String::from("*");
+            app.refresh();
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "host")
+                .expect("host row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for host row");
+            eprintln!("[test] staged host command: {staged}");
+            assert!(
+                staged.contains("herdr workspace focus wA"),
+                "must focus the existing workspace wA, got: {staged:?}"
+            );
+            assert!(
+                !staged.contains("herdr workspace create"),
+                "must NOT recreate the workspace, got: {staged:?}"
+            );
+            assert!(
+                !staged.contains("herdr pane send-text"),
+                "must NOT bootstrap a new ssh connection, got: {staged:?}"
             );
         }
 
@@ -19065,7 +19995,8 @@ mod tests {
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%0".to_string(),
                 path: String::from("/home/user"),
-            });
+                ..Default::default()
+                });
             assert_eq!(
                 app.directory_tmux_pane_id(
                     "/home/user"
@@ -19131,7 +20062,8 @@ mod tests {
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%42".to_string(),
                 path: canonical_dir.clone(),
-            });
+                ..Default::default()
+                });
             assert_eq!(
                 app.directory_tmux_pane_id(&canonical_dir)
                     .as_deref(),
@@ -19165,7 +20097,8 @@ mod tests {
                 app.tmux_windows.push(TmuxWindowInfo {
                     pane_id: "%7".to_string(),
                     path: var_canonical,
-                });
+                    ..Default::default()
+                    });
                 assert!(
                     app.directory_tmux_pane_id(
                         "/var"
@@ -19273,6 +20206,7 @@ mod tests {
                     .unwrap_or_else(|_| {
                         "/tmp".into()
                     }),
+                    ..Default::default()
                 });
             // The user-facing
             // directory in the
@@ -19374,7 +20308,8 @@ mod tests {
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: String::from("wA:p1"),
                 path: String::from("/var/tmp/build"),
-            });
+                ..Default::default()
+                });
             // The T-marker
             // lookup must now
             // find the
@@ -19466,7 +20401,8 @@ mod tests {
             let sentinel = TmuxWindowInfo {
                 pane_id: "%99".to_string(),
                 path: String::from("/sentinel"),
-            };
+                ..Default::default()
+                };
             app.tmux_windows.push(sentinel.clone());
             // The helper exits
             // early when the snapshot
@@ -19750,7 +20686,8 @@ mod tests {
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%1".to_string(),
                 path: link.to_string_lossy().into_owned(),
-            });
+                ..Default::default()
+                });
             assert_eq!(
                 app.directory_tmux_pane_id(
                     real.to_str().unwrap()
@@ -19801,7 +20738,8 @@ mod tests {
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%2".to_string(),
                 path: link.to_string_lossy().into_owned(),
-            });
+                ..Default::default()
+                });
             app.query = "#".to_string();
             app.refresh();
             // The row is the only
@@ -20459,7 +21397,8 @@ mod tests {
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%42".to_string(),
                 path: String::from("/tmp"),
-            });
+                ..Default::default()
+                });
             app.query = "#".to_string();
             app.refresh();
             // Find the tmux
@@ -20550,7 +21489,8 @@ mod tests {
                 .push(TmuxWindowInfo {
                     pane_id: "%7".to_string(),
                     path: String::from(tmux_dir),
-                });
+                    ..Default::default()
+                    });
             // Default source is
             // `All`, so all
             // three rows are
@@ -20622,7 +21562,8 @@ mod tests {
                     path: String::from(
                         "/Users/har/tmux_row",
                     ),
-                });
+                    ..Default::default()
+                    });
             app.directory_source =
                 crate::tui::state::DirectorySource::Config;
             app.query = "#".to_string();
@@ -20690,7 +21631,8 @@ mod tests {
                     path: tmux_path
                         .to_string_lossy()
                         .into_owned(),
-                });
+                        ..Default::default()
+                        });
             app.directory_source =
                 crate::tui::state::DirectorySource::Tmux;
             app.query = "#".to_string();
@@ -20773,7 +21715,8 @@ mod tests {
                 .push(TmuxWindowInfo {
                     pane_id: "%9".to_string(),
                     path: shared_str.clone(),
-                });
+                    ..Default::default()
+                    });
             app.directory_source =
                 crate::tui::state::DirectorySource::Tmux;
             app.query = "#".to_string();
@@ -20911,7 +21854,8 @@ mod tests {
                     path: tmux_path
                         .to_string_lossy()
                         .into_owned(),
-                });
+                        ..Default::default()
+                        });
             app.directory_source =
                 crate::tui::state::DirectorySource::Tmux;
             app.query = "#".to_string();
@@ -24212,7 +25156,8 @@ mod tests {
                 path: String::from(
                     "tmux list-windows -a -F #{pane_id} | #{pane_current_path} | active:#{window_active} | Layout: #{window_layout}",
                 ),
-            });
+                ..Default::default()
+                });
             app.tmux_windows.push(TmuxWindowInfo {
                 pane_id: "%1".to_string(),
                 // A real path
@@ -24233,7 +25178,8 @@ mod tests {
                 path: std::env::temp_dir()
                     .to_string_lossy()
                     .into_owned(),
-            });
+                    ..Default::default()
+                    });
             app.query = "#".to_string();
             app.refresh();
             // The bad path must

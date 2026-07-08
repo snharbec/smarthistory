@@ -259,6 +259,57 @@ pub struct ActiveContext {
     /// some commands) or an
     /// absolute path.
     pub path: String,
+    /// The pane's foreground
+    /// command, as reported by
+    /// the backend. tmux:
+    /// `#{pane_current_command}`
+    /// (e.g. `ssh root@pve-1`,
+    /// `vim`, `zsh`); herdr:
+    /// empty — herdr's `pane
+    /// list` JSON doesn't
+    /// expose the foreground
+    /// command today, only
+    /// the `agent` name. Used
+    /// by the `# hosts`
+    /// matcher to detect
+    /// already-connected
+    /// hosts (a pane whose
+    /// command starts with
+    /// `ssh` and contains the
+    /// target `user@host`).
+    /// For herdr the matcher
+    /// falls back to
+    /// `workspace_label`.
+    #[allow(dead_code)]
+    pub current_command: String,
+    /// The workspace's human-
+    /// readable label. tmux:
+    /// the session name (e.g.
+    /// `0`, `1`, or a named
+    /// session like `work`).
+    /// herdr: the workspace's
+    /// `label` field (the
+    /// name set by `herdr
+    /// workspace create
+    /// --label <name>` or
+    /// the user's manual
+    /// label). Used by the
+    /// `# hosts` matcher on
+    /// herdr to detect
+    /// already-created
+    /// workspaces: a herdr
+    /// workspace whose label
+    /// matches the host's
+    /// display name is
+    /// treated as "this
+    /// host's workspace".
+    /// For tmux this is
+    /// unused today (the
+    /// `current_command`
+    /// path is sufficient)
+    /// but kept for symmetry.
+    #[allow(dead_code)]
+    pub workspace_label: String,
 }
 
 /// Backend trait. Each
@@ -361,11 +412,11 @@ pub trait MultiplexerBackend: Send + Sync {
     /// id, no server, etc.).
     ///
     /// - tmux:
-     ///   `tmux switch-client -t <session-name>`
+    ///   `tmux switch-client -t <session-name>`
     ///   (brings the session's
     ///   focused window forward).
     /// - herdr:
-     ///   `herdr workspace focus <workspace-id>`
+    ///   `herdr workspace focus <workspace-id>`
     ///   (brings the workspace's
     ///   focused tab forward).
     fn focus_session(&self, session_label: &str) -> Option<String>;
@@ -385,7 +436,7 @@ pub trait MultiplexerBackend: Send + Sync {
     /// can't build a command.
     ///
     /// - tmux:
-     ///   `tmux select-pane -t <pane_id> && tmux switch-client -t <pane_id>`
+    ///   `tmux select-pane -t <pane_id> && tmux switch-client -t <pane_id>`
     ///   (the `tab_id` is
     ///   tmux's window id, used
     ///   only as the second
@@ -397,7 +448,7 @@ pub trait MultiplexerBackend: Send + Sync {
     ///   window for you so
     ///   `tab_id` is ignored).
     /// - herdr:
-     ///   `herdr workspace focus <ws> && herdr tab focus <tab_id>`
+    ///   `herdr workspace focus <ws> && herdr tab focus <tab_id>`
     ///   (the workspace switch
     ///   + tab switch is the
     ///   closest equivalent of
@@ -633,10 +684,23 @@ fn tmux_list_windows_parse(stdout: &[u8]) -> Vec<ActiveContext> {
         if pane_id.is_empty() || path.is_empty() {
             continue;
         }
+        // Optional fields (added
+        // when the snapshot grew
+        // to include
+        // `pane_current_command`
+        // and `session_name` for
+        // the `# hosts` matcher).
+        // Older parsers see a
+        // 3-field row and leave
+        // both empty.
+        let current_command = parts.get(4).map(|s| s.to_string()).unwrap_or_default();
+        let session_name = parts.get(5).map(|s| s.to_string()).unwrap_or_default();
         out.push(ActiveContext {
             pane_id: pane_id.to_string(),
             window_id: String::new(),
             path: path.to_string(),
+            current_command,
+            workspace_label: session_name,
         });
     }
     out
@@ -845,11 +909,33 @@ fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
 
 impl MultiplexerBackend for TmuxBackend {
     fn snapshot(&self) -> Vec<ActiveContext> {
+        // Field order:
+        //   pane_id | pane_current_path |
+        //   active flag | window_layout |
+        //   pane_current_command |
+        //   session_name
+        //
+        // The last two are consumed by
+        // the `# hosts` matcher in
+        // `select_for_run_impl` (the
+        // `host` arm) to detect
+        // already-connected SSH
+        // sessions and to map a pane
+        // back to its session / window
+        // when focusing an existing
+        // workspace. The other consumers
+        // of this snapshot (the `#`
+        // directories-mode T-marker
+        // lookup) only read `path`, so
+        // adding fields is
+        // backward-compatible.
         const FORMAT: &str = "\
             #{pane_id} | \
             #{pane_current_path} | \
             active:#{window_active} | \
-            Layout: #{window_layout}";
+            Layout: #{window_layout} | \
+            #{pane_current_command} | \
+            #{session_name}";
         match tmux_run(&["list-windows", "-a", "-F", FORMAT]) {
             Some(bytes) => tmux_list_windows_parse(&bytes),
             None => Vec::new(),
@@ -950,7 +1036,11 @@ impl MultiplexerBackend for TmuxBackend {
     fn create_command(&self, dir: &Path, label: &str) -> Option<String> {
         // Expand `~` ourselves —
         // tmux doesn't do it.
-        let path = crate::util::expand_home_to_absolute(&dir.to_string_lossy(), &[std::env::var("HOME").unwrap_or_default()]).into_owned();
+        let path = crate::util::expand_home_to_absolute(
+            &dir.to_string_lossy(),
+            &[std::env::var("HOME").unwrap_or_default()],
+        )
+        .into_owned();
         let quoted_path = if path
             .chars()
             .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
@@ -968,7 +1058,9 @@ impl MultiplexerBackend for TmuxBackend {
         Some(format!(
             "tmux new-session -d -s {} -c {}; \
              tmux switch-client -t {}",
-            crate::util::shell_quote(label), quoted_path, crate::util::shell_quote(label)
+            crate::util::shell_quote(label),
+            quoted_path,
+            crate::util::shell_quote(label)
         ))
     }
 
@@ -1364,12 +1456,62 @@ impl MultiplexerBackend for HerdrBackend {
             Some(j) => j,
             None => return Vec::new(),
         };
+        // Fetch the workspace
+        // list too so we can
+        // resolve workspace
+        // ids to their
+        // human-readable labels
+        // (e.g. `wB` →
+        // `smarthistory`).
+        // Used by the `# hosts`
+        // matcher on herdr:
+        // when herdr doesn't
+        // expose a pane's
+        // foreground command
+        // (it doesn't today),
+        // we fall back to
+        // matching the
+        // workspace's `label`
+        // against the host's
+        // display name.
+        // Best-effort: when
+        // the workspace list
+        // call fails we leave
+        // `workspace_label`
+        // empty and the
+        // matcher degrades to
+        // "no match".
+        let workspace_labels: std::collections::HashMap<String, String> =
+            match herdr_run_json(&["workspace", "list"]) {
+                Some(ws_json) => parse_workspace_labels(&ws_json),
+                None => std::collections::HashMap::new(),
+            };
         parse_herdr_pane_list(&json)
             .into_iter()
-            .map(|r| ActiveContext {
-                pane_id: r.pane_id,
-                window_id: r.workspace_id,
-                path: r.cwd,
+            .map(|r| {
+                let label = workspace_labels
+                    .get(&r.workspace_id)
+                    .cloned()
+                    .unwrap_or_default();
+                ActiveContext {
+                    pane_id: r.pane_id,
+                    window_id: r.workspace_id,
+                    path: r.cwd,
+                    // herdr's `pane list`
+                    // JSON doesn't
+                    // expose the
+                    // foreground
+                    // command (only
+                    // the `agent`
+                    // name). Leave
+                    // empty so the
+                    // tmux matcher
+                    // (which keys on
+                    // `current_command`)
+                    // is skipped.
+                    current_command: String::new(),
+                    workspace_label: label,
+                }
             })
             .collect()
     }
@@ -1527,7 +1669,10 @@ impl MultiplexerBackend for HerdrBackend {
         if workspace_id.is_empty() {
             return None;
         }
-        Some(format!("herdr workspace focus {} 2>/dev/null", workspace_id))
+        Some(format!(
+            "herdr workspace focus {} 2>/dev/null",
+            workspace_id
+        ))
     }
 
     fn focus_session(&self, session_label: &str) -> Option<String> {
@@ -1547,7 +1692,10 @@ impl MultiplexerBackend for HerdrBackend {
         // directories-mode
         // focus_command (just
         // `herdr workspace focus <id>`).
-        Some(format!("herdr workspace focus {} 2>/dev/null", session_label))
+        Some(format!(
+            "herdr workspace focus {} 2>/dev/null",
+            session_label
+        ))
     }
 
     fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String> {
@@ -1592,7 +1740,10 @@ impl MultiplexerBackend for HerdrBackend {
             // focus (the
             // `&&`-chain is
             // redundant then).
-            return Some(format!("herdr workspace focus {} 2>/dev/null", workspace_id));
+            return Some(format!(
+                "herdr workspace focus {} 2>/dev/null",
+                workspace_id
+            ));
         }
         // `workspace focus` switches
         // the active workspace;
@@ -1612,7 +1763,11 @@ impl MultiplexerBackend for HerdrBackend {
     }
 
     fn create_command(&self, dir: &Path, label: &str) -> Option<String> {
-        let path = crate::util::expand_home_to_absolute(&dir.to_string_lossy(), &[std::env::var("HOME").unwrap_or_default()]).into_owned();
+        let path = crate::util::expand_home_to_absolute(
+            &dir.to_string_lossy(),
+            &[std::env::var("HOME").unwrap_or_default()],
+        )
+        .into_owned();
         let quoted_path = if path
             .chars()
             .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
@@ -1674,7 +1829,8 @@ impl MultiplexerBackend for HerdrBackend {
         // errors.
         Some(format!(
             "herdr workspace create --cwd {} --label {} --focus 2>/dev/null",
-            quoted_path, crate::util::shell_quote(label)
+            quoted_path,
+            crate::util::shell_quote(label)
         ))
     }
 
@@ -2253,7 +2409,10 @@ mod tests {
         // suffix) is
         // passed through
         // unchanged.
-        assert_eq!(b.focus_command("wA").unwrap(), "herdr workspace focus wA 2>/dev/null");
+        assert_eq!(
+            b.focus_command("wA").unwrap(),
+            "herdr workspace focus wA 2>/dev/null"
+        );
         // Empty / blank
         // inputs are
         // rejected so the
@@ -2289,7 +2448,10 @@ mod tests {
         // pane id, stripping
         // the `:pN` suffix).
         let b = HerdrBackend;
-        assert_eq!(b.focus_session("wA").unwrap(), "herdr workspace focus wA 2>/dev/null");
+        assert_eq!(
+            b.focus_session("wA").unwrap(),
+            "herdr workspace focus wA 2>/dev/null"
+        );
         assert!(b.focus_session("").is_none());
     }
 
@@ -2318,7 +2480,10 @@ mod tests {
         // default).
         let b = HerdrBackend;
         let cmd = b.focus_pane("wA:p3", "wA:t2").expect("non-empty ids");
-        assert_eq!(cmd, "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t2 2>/dev/null");
+        assert_eq!(
+            cmd,
+            "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t2 2>/dev/null"
+        );
         // An empty `tab_id`
         // degrades to a
         // bare
@@ -2345,7 +2510,10 @@ mod tests {
         // workspace-row
         // doesn't matter).
         let cmd = b.focus_pane("wA", "wA:t1").expect("bare ws id");
-        assert_eq!(cmd, "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t1 2>/dev/null");
+        assert_eq!(
+            cmd,
+            "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t1 2>/dev/null"
+        );
     }
 
     #[test]

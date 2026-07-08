@@ -45,7 +45,11 @@ of falling through to zsh's native history.
   shows which directories are active in a tmux session or
   herdr workspace; the `*` mode lists all panes across all
   sessions/workspaces as a tree; selecting a row switches
-  to that workspace or pane.
+  to that workspace or pane. A `# hosts` block in the same
+  view lists every `host.<id>` from the config file (merged
+  with `~/.ssh/config`); selecting a host row creates a
+  new workspace and bootstraps an `ssh` connection inside
+  it, or focuses an already-running one.
 - **Output capture** for both tmux (`pipe-pane` log) and herdr
   (`herdr pane read`): captured output is searchable via the
   `+` prefix and viewable via `Ctrl+L`.
@@ -120,7 +124,6 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 - `--exec` — execute the selected command directly via `sh -c`
   instead of printing it to stdout. Use when launching from outside
   a shell (e.g. a herdr keybinding or GUI launcher).
-
 
 ### TUI key bindings (subset)
 
@@ -222,6 +225,66 @@ multiplexer=herdr
   a workspace header row stages `herdr workspace focus <id>`;
   selecting a pane row stages `herdr workspace focus <ws> &&
   herdr tab focus <tab_id>`.
+
+- **`*` mode (hosts)**: a `# hosts` block at the bottom of the
+  panes view. Each host becomes a row; selecting a row either
+  focuses an existing workspace already running that host's
+  `ssh` connection (or matching the host's display name on
+  herdr), or creates a new workspace and bootstraps the
+  `ssh` body inside the first pane.
+
+### Named hosts (config + `~/.ssh/config` merge)
+
+Hosts are configured in `~/.config/smarthistory/config` with
+`host.<id>` keys. The first field (`host.<id>.host`) is the
+SSH config `Host` alias (also used as the connection target
+when no `.hostname` is set). Every other field is optional
+and inherits from the matching `~/.ssh/config` block when
+unset.
+
+```ini
+# ~/.config/smarthistory/config
+host.1 = "Proxmox"
+host.1.host = "pve-1"
+host.1.user = "root"
+host.1.port = 22
+host.1.identity = "~/.ssh/id_ed25519"
+host.1.exec = "tmux a"
+
+host.2 = "Documents"
+host.2.host = "documents"
+```
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `host.<id>` | Display name. | (alias) |
+| `host.<id>.host` | SSH config `Host` alias / connection target. | (required) |
+| `host.<id>.hostname` | Real `HostName` (overrides SSH config). | (alias) |
+| `host.<id>.user` | Login user. | `$USER` |
+| `host.<id>.port` | TCP port. | `22` |
+| `host.<id>.identity` | Path to private key. | (inherits from SSH config) |
+| `host.<id>.dir` | Display-only cwd. | (none) |
+| `host.<id>.exec` | Command to run after the `ssh` body. | (none) |
+
+`~/.ssh/config` entries without a `host.<id>` companion are
+auto-appended. SSH config `Host *` blocks are treated as
+defaults (matching OpenSSH's own semantics) and contribute
+their `User` / `IdentityFile` / `Port` to subsequent explicit
+blocks but are not themselves listed as host rows.
+
+Selecting a host row:
+
+- **tmux**: matches a pane whose
+  `#{pane_current_command}` starts with `ssh` and contains
+  the host's `user@host`. If found, focuses that pane.
+  Otherwise stages
+  `tmux new-session -d -s <display-name>; tmux switch-client -t <display-name>; tmux send-keys <ssh-argv> Enter`.
+- **herdr**: matches a workspace whose `label` equals the
+  host's display name. If found, focuses that workspace.
+  Otherwise stages
+  `herdr workspace create --label <display-name>` and
+  `herdr pane send-text` to send the `ssh` body into the
+  new workspace's first pane.
 
 ### Output capture (tmux + herdr)
 
