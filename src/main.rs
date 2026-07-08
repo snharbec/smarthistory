@@ -876,11 +876,13 @@ impl Default for QueryPrefixes {
 
 /// A named session from the config file.
 /// Syntax: `session.<id> = "Name"`, `session.<id>.dir = "~/path"`,
-/// `session.<id>.startup_command = "cmd"`.
+/// `session.<id>.exec = "cmd"` (command to run after
+/// creating the workspace).
 #[derive(Debug, Clone)]
 struct SessionDef {
     name: String,
     dir: String,
+    exec: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1504,6 +1506,17 @@ impl Config {
                                                 self.sessions.push((id, SessionDef {
                                                     name: String::new(),
                                                     dir: unquoted.to_string(),
+                                                    exec: String::new(),
+                                                }));
+                                            }
+                                            ("exec", Some(idx)) => {
+                                                self.sessions[idx].1.exec = unquoted.to_string();
+                                            }
+                                            ("exec", None) => {
+                                                self.sessions.push((id, SessionDef {
+                                                    name: String::new(),
+                                                    dir: String::new(),
+                                                    exec: unquoted.to_string(),
                                                 }));
                                             }
                                             ("startup_command", _) => {
@@ -1521,6 +1534,7 @@ impl Config {
                                             None => self.sessions.push((id, SessionDef {
                                                 name: unquoted.to_string(),
                                                 dir: String::new(),
+                                                exec: String::new(),
                                             })),
                                         }
                                     }
@@ -1809,7 +1823,7 @@ impl Config {
                     session_id: String::new(),
                     exit_code: 0,
                     timestamp: 0,
-                    comment: String::new(),
+                    comment: def.exec.clone(),
                     output: String::new(),
                     mode: "session".to_string(),
                     source: "sessions".to_string(),

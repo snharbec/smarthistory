@@ -3169,7 +3169,7 @@ std::fs::read_to_string(&path).unwrap_or_default()
                     session_id: s.command.clone(),
                     exit_code: 0,
                     timestamp: 0,
-                    comment: String::new(),
+                    comment: s.comment.clone(),
                     output: String::new(),
                     mode: "session".to_string(),
                     source: "sessions".to_string(),
@@ -6619,6 +6619,28 @@ fn move_selection(&mut self, delta: isize) {
         // layer just hands it
         // the pane id.
         if self.is_panes_query() {
+            // Populate the tmux-windows
+            // snapshot used by the
+            // session-row matcher below.
+            // `App::refresh` only calls
+            // `fetch_tmux_windows` for
+            // directories mode, so the
+            // `*` view's `tmux_windows`
+            // is otherwise empty when
+            // the user opens the picker
+            // with `*` as the first
+            // character — and the
+            // matcher below would always
+            // fall into the "create"
+            // branch, duplicating an
+            // existing herdr/tmux
+            // workspace on every Enter.
+            // The fetch is idempotent
+            // (returns immediately when
+            // the cache is populated) so
+            // re-Enter doesn't re-spawn
+            // the multiplexer.
+            self.fetch_tmux_windows();
             // The `*` mode now shows
             // a **tree**:
             //   workspace_header
@@ -6691,53 +6713,51 @@ fn move_selection(&mut self, delta: isize) {
                     }
                 }
                 "session" => {
-                    // A named session row. The user expects:
-                    // 1. If a tmux session or herdr workspace
-                    //    with this name already exists, switch
-                    //    to it.
-                    // 2. If not, create a new tmux session / herdr
-                    //    workspace with the named session's name
-                    //    and directory.
-                    //
-                    // The `multiplexer.create_command` method
-                    // handles both backends: tmux stages
-                    // `tmux new-session -d -s <label> -c <dir>; tmux switch-client -t <label>`
-                    // and herdr stages `herdr workspace create --cwd <dir> --label <label> --focus`.
-                    // For a bare name without a path, the label
-                    // IS the command. For a named session the
-                    // name is in `row.command` and the path is
-                    // in `row.directory`.
                     let name = row.command.clone().trim().to_string();
                     let dir = row.directory.clone();
-                    if dir.is_empty() {
-                        return;
-                    }
-                    // Try to create/focus via the
-                    // multiplexer backend. The backend's
-                    // `create_command` stages the
-                    // appropriate command
-                    // (`tmux new-session ...` or
-                    // `herdr workspace create ...`);
-                    // the multiplexer itself handles
-                    // the case where the workspace
-                    // already exists (tmux fails with
-                    // "duplicate session", herdr
-                    // auto-suffixes the positional id).
-                    if let Some(cmd) = self
-                        .multiplexer
-                        .create_command(
-                            std::path::Path::new(&dir),
-                            &name,
-                        )
-                    {
-                        self.selection = Some(cmd);
-                        self.pick_mode = Some(PickMode::Run);
+                    let exec = row.comment.clone();
+                    let quoted_exec = crate::util::shell_quote(&exec);
+                    let home_list: Vec<String> =
+                        std::iter::once(std::env::var("HOME").unwrap_or_default())
+                        .filter(|s| !s.is_empty()).collect();
+                    let abs = crate::util::expand_home_to_absolute(&dir, &home_list).into_owned();
+                    let quoted_dir = if abs.chars().any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c)) {
+                        format!("\"{}\"", abs)
+                    } else { abs.clone() };
+                    let quoted_label = crate::util::shell_quote(&name);
+                    // Check if a workspace with a matching cwd already exists.
+                    let existing = self.tmux_windows.iter().find(|w| {
+                        let w_n = crate::util::normalize_for_compare(&w.path, &self.home_list);
+                        let d_n = crate::util::normalize_for_compare(&abs, &self.home_list);
+                        w_n == d_n
+                    }).map(|w| w.pane_id.clone());
+                    let cmd = if let Some(ref pane_id) = existing {
+                        // Workspace exists — focus it (+ optionally exec).
+                        if self.multiplexer.name() == "herdr" {
+                            let ws_id = pane_id.split(':').next().unwrap_or(pane_id);
+                            if exec.is_empty() {
+                                format!("herdr workspace focus {} 2>/dev/null", ws_id)
+                            } else {
+                                format!("herdr workspace focus {} 2>/dev/null && herdr pane run \"{}\" {}", ws_id, pane_id, quoted_exec)
+                            }
+                        } else {
+                            format!("tmux select-pane -t {} && tmux switch-client -t {}", pane_id, pane_id)
+                        }
                     } else {
-                        self.set_status_message(format!(
-                            "could not build create command for {}",
-                            self.multiplexer.name()
-                        ));
-                    }
+                        // No existing workspace — create one.
+                        if self.multiplexer.name() == "herdr" {
+                            if exec.is_empty() {
+                                format!("herdr workspace create --cwd {} --label {} --focus 2>/dev/null", quoted_dir, quoted_label)
+                            } else {
+                                format!("WS=$(herdr workspace create --cwd {} --label {} 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"result\"][\"workspace\"][\"workspace_id\"])' 2>/dev/null) && herdr pane run \"$WS:p1\" {} && herdr workspace focus \"$WS\"", quoted_dir, quoted_label, quoted_exec)
+                            }
+                        } else {
+                            let base = self.multiplexer.create_command(std::path::Path::new(&abs), &name).unwrap_or_default();
+                            if exec.is_empty() { base } else { format!("{} ; {}", base, quoted_exec) }
+                        }
+                    };
+                    self.selection = Some(cmd);
+                    self.pick_mode = Some(PickMode::Run);
                 }
                 _ => {
                     // Unknown row mode in
@@ -9354,6 +9374,11 @@ pub fn run_tui_to_stdout(
     // (`session.<id>=...`, `session.<id>.dir=...`).
     app.sessions = app_cfg.sessions();
     if !app.sessions.is_empty() {
+        // App::new calls refresh() which populates
+        // session_panes BEFORE we set sessions
+        // (because App::new initializes it to empty).
+        // Clearing forces a re-fetch so the session
+        // entries are appended on the next pass.
         app.session_panes.clear();
         app.refresh();
     }
@@ -13233,6 +13258,307 @@ mod tests {
             assert!(
                 app.selection.is_none(),
                 "@new with no text must not stage a command"
+            );
+        }
+
+        /// Select a session row in panes mode
+        /// and verify the staged command contains
+        /// `herdr workspace create`, the workspace_id
+        /// extraction, `herdr pane run`, and
+        /// `herdr workspace focus`.
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn session_row_in_panes_mode_stages_create_with_exec() {
+            use crate::tui::state::HistoryRow;
+            let mut app = directories_test_app(&[]);
+            app.multiplexer = crate::multiplexer::backend_for(
+                crate::multiplexer::MultiplexerKind::Herdr,
+            );
+            app.query = "*".to_string();
+            app.refresh();
+            // Inject a session row into session_panes
+            app.session_panes.push(HistoryRow {
+                id: -10_001,
+                command: "Herdr config".to_string(),
+                directory: "/Users/har/.config/herdr".to_string(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: "nvim config.toml".to_string(),
+                output: String::new(),
+                mode: "session".to_string(),
+                source: "sessions".to_string(),
+            });
+            // Rebuild merged_rows
+            app.refresh();
+            // Find the session row
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "session")
+                .expect("session row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for session row");
+            eprintln!("[test] staged command: {staged}");
+            assert!(
+                staged.contains("herdr workspace create"),
+                "must contain workspace create, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("herdr pane run"),
+                "must contain pane run, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("herdr workspace focus"),
+                "must contain workspace focus, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("nvim config.toml"),
+                "must contain the exec command, got: {staged:?}"
+            );
+        }
+
+        /// Regression test for the
+        /// "selecting an existing
+        /// session row duplicates the
+        /// workspace" bug: when the
+        /// user is in `*` mode and the
+        /// configured session already
+        /// has a herdr workspace
+        /// attached, pressing Enter
+        /// must focus the existing
+        /// workspace (`herdr workspace
+        /// focus <ws_id>`) — not create
+        /// a duplicate (`herdr workspace
+        /// create ...`).
+        ///
+        /// Root cause: `select_for_run_impl`
+        /// read `self.tmux_windows` to
+        /// look up an existing
+        /// workspace with a matching
+        /// cwd, but `App::refresh` only
+        /// populated `tmux_windows`
+        /// for directories mode, so
+        /// the `*` view's
+        /// `tmux_windows` was always
+        /// empty and the matcher
+        /// always fell into the create
+        /// branch. The fix primes the
+        /// cache at the top of the
+        /// `is_panes_query` block in
+        /// `select_for_run_impl`.
+        ///
+        /// The test uses a fake
+        /// `MultiplexerBackend` whose
+        /// `snapshot()` returns a
+        /// single active pane at
+        /// `/tmp` (workspace `wA`).
+        /// The session row's `dir`
+        /// is set to `/tmp` so the
+        /// matcher should find the
+        /// existing workspace after
+        /// `select_for_run_impl`
+        /// primes the cache.
+        #[cfg(feature = "herdr")]
+        #[test]
+        fn session_row_in_panes_mode_focuses_existing_herdr_workspace() {
+            use crate::multiplexer::{
+                ActiveContext, CurrentPaneInfo, MultiplexerBackend,
+            };
+            use crate::tui::state::HistoryRow;
+
+            /// Deterministic fake
+            /// herdr backend for
+            /// this test. Reports
+            /// one active pane at
+            /// `/tmp` (workspace
+            /// `wA`) from its
+            /// `snapshot()` /
+            /// `snapshot_current_panes()`
+            /// so the matcher in
+            /// `select_for_run_impl`
+            /// finds the existing
+            /// workspace. Stages
+            /// commands with the
+            /// same shape as the
+            /// real herdr backend
+            /// (workspace ids
+            /// stripped from
+            /// `wA:p1` → `wA`).
+            struct FakeHerdrBackend;
+            impl MultiplexerBackend for FakeHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    vec![ActiveContext {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        path: String::from("/tmp"),
+                    }]
+                }
+                fn snapshot_current_panes(
+                    &self,
+                    _current_pane: &str,
+                ) -> Vec<CurrentPaneInfo> {
+                    vec![CurrentPaneInfo {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        tab_id: String::from("wA:t1"),
+                        session_label: String::from("wA"),
+                        path: String::from("/tmp"),
+                        current_command: String::from("zsh"),
+                        is_last: false,
+                    }]
+                }
+                fn focus_command(
+                    &self,
+                    pane_id: &str,
+                ) -> Option<String> {
+                    if pane_id.is_empty() {
+                        return None;
+                    }
+                    let ws = pane_id
+                        .split(':')
+                        .next()
+                        .unwrap_or(pane_id);
+                    Some(format!(
+                        "herdr workspace focus {} 2>/dev/null",
+                        ws
+                    ))
+                }
+                fn focus_session(
+                    &self,
+                    label: &str,
+                ) -> Option<String> {
+                    if label.is_empty() {
+                        return None;
+                    }
+                    Some(format!(
+                        "herdr workspace focus {} 2>/dev/null",
+                        label
+                    ))
+                }
+                fn focus_pane(
+                    &self,
+                    pane_id: &str,
+                    tab_id: &str,
+                ) -> Option<String> {
+                    let ws = pane_id
+                        .split(':')
+                        .next()
+                        .unwrap_or(pane_id);
+                    if ws.is_empty() {
+                        return None;
+                    }
+                    if tab_id.is_empty() {
+                        Some(format!(
+                            "herdr workspace focus {} 2>/dev/null",
+                            ws
+                        ))
+                    } else {
+                        Some(format!(
+                            "herdr workspace focus {} 2>/dev/null && herdr tab focus {} 2>/dev/null",
+                            ws, tab_id
+                        ))
+                    }
+                }
+                fn create_command(
+                    &self,
+                    dir: &std::path::Path,
+                    label: &str,
+                ) -> Option<String> {
+                    Some(format!(
+                        "herdr workspace create --cwd {} --label {} --focus 2>/dev/null",
+                        dir.display(),
+                        label
+                    ))
+                }
+                fn send_in_pane_command(
+                    &self,
+                    pane_id: &str,
+                    body: &str,
+                ) -> Option<String> {
+                    if pane_id.is_empty() {
+                        return None;
+                    }
+                    Some(format!(
+                        "herdr pane send-text {} {} 2>/dev/null",
+                        pane_id,
+                        body
+                    ))
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
+            }
+
+            let mut app = directories_test_app(&[]);
+            // Swap in the fake
+            // herdr backend BEFORE
+            // the first `refresh()`
+            // so `fetch_session_panes`
+            // picks up our fake's
+            // `snapshot_current_panes`.
+            app.multiplexer =
+                Box::new(FakeHerdrBackend);
+            // Configure a session
+            // whose `dir` matches
+            // the fake backend's
+            // reported cwd.
+            app.sessions = vec![HistoryRow {
+                id: -10_002,
+                command: String::from("tmp session"),
+                directory: String::from("/tmp"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("session"),
+                source: String::from("sessions"),
+            }];
+            // Open the `*` mode.
+            app.query = String::from("*");
+            app.refresh();
+            // Find the session
+            // row.
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "session")
+                .expect("session row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            // Pressing Enter on
+            // the session row
+            // must populate
+            // `tmux_windows` (via
+            // the fix in
+            // `select_for_run_impl`)
+            // and find the
+            // existing workspace
+            // — staging
+            // `herdr workspace focus wA`,
+            // NOT
+            // `herdr workspace create`.
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for session row");
+            eprintln!("[test] staged command: {staged}");
+            assert!(
+                staged.contains("herdr workspace focus"),
+                "must focus the existing workspace, got: {staged:?}"
+            );
+            assert!(
+                !staged.contains("herdr workspace create"),
+                "must NOT recreate the workspace, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("herdr workspace focus wA"),
+                "must focus workspace wA (the workspace_id portion of pane id wA:p1), got: {staged:?}"
             );
         }
 
