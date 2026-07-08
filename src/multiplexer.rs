@@ -950,7 +950,7 @@ impl MultiplexerBackend for TmuxBackend {
     fn create_command(&self, dir: &Path, label: &str) -> Option<String> {
         // Expand `~` ourselves —
         // tmux doesn't do it.
-        let path = crate::util::expand_home(&dir.to_string_lossy()).into_owned();
+        let path = crate::util::expand_home_to_absolute(&dir.to_string_lossy(), &[std::env::var("HOME").unwrap_or_default()]).into_owned();
         let quoted_path = if path
             .chars()
             .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
@@ -968,7 +968,7 @@ impl MultiplexerBackend for TmuxBackend {
         Some(format!(
             "tmux new-session -d -s {} -c {}; \
              tmux switch-client -t {}",
-            label, quoted_path, label
+            crate::util::shell_quote(label), quoted_path, crate::util::shell_quote(label)
         ))
     }
 
@@ -1612,7 +1612,7 @@ impl MultiplexerBackend for HerdrBackend {
     }
 
     fn create_command(&self, dir: &Path, label: &str) -> Option<String> {
-        let path = crate::util::expand_home(&dir.to_string_lossy()).into_owned();
+        let path = crate::util::expand_home_to_absolute(&dir.to_string_lossy(), &[std::env::var("HOME").unwrap_or_default()]).into_owned();
         let quoted_path = if path
             .chars()
             .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
@@ -1674,7 +1674,7 @@ impl MultiplexerBackend for HerdrBackend {
         // errors.
         Some(format!(
             "herdr workspace create --cwd {} --label {} --focus 2>/dev/null",
-            quoted_path, label
+            quoted_path, crate::util::shell_quote(label)
         ))
     }
 

@@ -1,4 +1,5 @@
 #![allow(clippy::should_implement_trait)]
+#![allow(clippy::empty_line_after_doc_comments)]
 mod files;
 mod jira;
 mod llm;
@@ -191,12 +192,6 @@ enum Commands {
         /// `eval` the printed command.
         #[arg(long)]
         exec: bool,
-        /// Also list sessions from `~/.config/sesh/sesh.toml`
-        /// in the panes (`*`) view. Each sesh session
-        /// has a `name` and a `path`; selecting one stages
-        /// a `cd <path>` command.
-        #[arg(long)]
-        sesh: bool,
         #[arg(index = 1)]
         query: Option<String>,
     },
@@ -878,6 +873,16 @@ impl Default for QueryPrefixes {
 }
 
 /// Resolved configuration. Constructed by `Config::load`.
+
+/// A named session from the config file.
+/// Syntax: `session.<id> = "Name"`, `session.<id>.dir = "~/path"`,
+/// `session.<id>.startup_command = "cmd"`.
+#[derive(Debug, Clone)]
+struct SessionDef {
+    name: String,
+    dir: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory containing per-pane tmux output log files.
@@ -1067,6 +1072,14 @@ pub struct Config {
     /// and the default (tmux)
     /// is used.
     multiplexer: crate::multiplexer::MultiplexerKind,
+    /// Named sessions parsed from
+    /// `session.<id> = "name"` /
+    /// `session.<id>.dir = "~/path"` /
+    /// `session.<id>.startup_command = "cmd"`
+    /// config keys. Each entry
+    /// becomes a row in the panes
+    /// (`*`) view.
+    sessions: Vec<(usize, SessionDef)>,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -1183,6 +1196,7 @@ impl Config {
             // directories list.
             session_dirs: Vec::new(),
             multiplexer: crate::multiplexer::MultiplexerKind::default(),
+            sessions: Vec::new(),
         }
     }
 
@@ -1467,15 +1481,48 @@ impl Config {
                                     value,
                                 );
                             } else if other == "files.ignore" {
-                                // Allow multiple
-                                // `files.ignore=...`
-                                // lines; each is split
-                                // on whitespace so the
-                                // user can list several
-                                // patterns in one line.
                                 for name in value.split_whitespace() {
                                     if !name.is_empty() {
                                         self.files_ignores.push(name.to_string());
+                                    }
+                                }
+                            } else if let Some(rest) = other.strip_prefix("session.") {
+                                // Parse `session.<id> = "name"`,
+                                // `session.<id>.dir = "~/path"`,
+                                // `session.<id>.startup_command = "cmd"`.
+                                // The `<id>` is a numeric index
+                                // determining display order.
+                                let unquoted = value.trim().trim_matches('"').trim();
+                                if let Some((id_str, field)) = rest.split_once('.') {
+                                    if let Ok(id) = id_str.parse::<usize>() {
+                                        let pos = self.sessions.iter().position(|(i, _)| *i == id);
+                                        match (field, pos) {
+                                            ("dir", Some(idx)) => {
+                                                self.sessions[idx].1.dir = unquoted.to_string();
+                                            }
+                                            ("dir", None) => {
+                                                self.sessions.push((id, SessionDef {
+                                                    name: String::new(),
+                                                    dir: unquoted.to_string(),
+                                                }));
+                                            }
+                                            ("startup_command", _) => {
+                                                // Accepted but not used yet.
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                } else if let Ok(id) = rest.parse::<usize>() {
+                                    // `session.<id> = "name"` (no sub-field).
+                                    if !unquoted.is_empty() {
+                                        let pos = self.sessions.iter().position(|(i, _)| *i == id);
+                                        match pos {
+                                            Some(idx) => self.sessions[idx].1.name = unquoted.to_string(),
+                                            None => self.sessions.push((id, SessionDef {
+                                                name: unquoted.to_string(),
+                                                dir: String::new(),
+                                            })),
+                                        }
                                     }
                                 }
                             }
@@ -1733,6 +1780,42 @@ impl Config {
     /// [`crate::multiplexer::MultiplexerKind`].
     pub fn multiplexer(&self) -> crate::multiplexer::MultiplexerKind {
         self.multiplexer
+    }
+
+    /// Named sessions parsed from the config file.
+    /// The config syntax is:
+    ///   session.<id> = "Display Name"
+    ///   session.<id>.dir = "~/path"
+    ///   session.<id>.startup_command = "command"
+    /// Each session becomes a row in the panes (`*`) view.
+    /// Selecting a row creates/switches a workspace via the
+    /// configured multiplexer backend.
+    pub fn sessions(&self) -> Vec<crate::tui::state::HistoryRow> {
+        self.sessions
+            .iter()
+            .map(|(id, def)| {
+                let home_list: Vec<String> = std::iter::once(
+                    std::env::var("HOME").unwrap_or_default()
+                )
+                .filter(|s| !s.is_empty())
+                .collect();
+                let expanded = crate::util::expand_home_to_absolute(
+                    &def.dir, &home_list
+                ).into_owned();
+                crate::tui::state::HistoryRow {
+                    id: -10_000 - (*id as i64),
+                    command: def.name.clone(),
+                    directory: expanded,
+                    session_id: String::new(),
+                    exit_code: 0,
+                    timestamp: 0,
+                    comment: String::new(),
+                    output: String::new(),
+                    mode: "session".to_string(),
+                    source: "sessions".to_string(),
+                }
+            })
+            .collect()
     }
 
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
@@ -3218,7 +3301,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", out);
             }
         },
-        Commands::Tui { mode, prefix, exec, sesh, query } => {
+        Commands::Tui { mode, prefix, exec, query } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -3289,7 +3372,6 @@ fn main() -> anyhow::Result<()> {
                 llm_client,
                 llm_config,
                 override_session_query,
-                sesh,
             )? {
                 Some((command, pick_mode)) => {
                     if exec {

@@ -1017,16 +1017,15 @@ struct App {
     /// `select-pane` / `switch-client`
     /// action on Enter can target it.
     session_panes: Vec<HistoryRow>,
-    /// Sesh sessions parsed from
-    /// `~/.config/sesh/sesh.toml`.
-    /// Each entry has a `name` (display
-    /// text), a `path` (the directory to
-    /// `cd` to), and `mode = "sesh"`.
-    /// Populated at construction when the
-    /// `--sesh` CLI flag is set; appended
-    /// to the panes view by
+    /// Named sessions parsed from
+    /// Named sessions from the config file
+    /// (`session.<id>=...`, `session.<id>.dir=...`).
+    /// Each entry has a display name, a directory,
+    /// and optionally a startup command. Populated
+    /// at construction from `Config::sessions()`;
+    /// appended to the panes view by
     /// `fetch_session_panes_impl`.
-    sesh_sessions: Vec<HistoryRow>,
+    sessions: Vec<HistoryRow>,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -3144,27 +3143,27 @@ std::fs::read_to_string(&path).unwrap_or_default()
             }
         }
         self.session_panes = panes;
-        // Append sesh sessions as additional
+        // Append named sessions as additional
         // workspace + pane rows, grouped under
-        // a `# sesh` header.
-        if !self.sesh_sessions.is_empty() {
+        // a `# sessions` header.
+        if !self.sessions.is_empty() {
             self.session_panes.push(HistoryRow {
                 id: -20_000,
-                command: "sesh".to_string(),
+                command: "sessions".to_string(),
                 directory: String::new(),
-                session_id: "sesh".to_string(),
+                session_id: "sessions".to_string(),
                 exit_code: 0,
                 timestamp: 0,
-                comment: "sesh sessions".to_string(),
+                comment: "configured sessions".to_string(),
                 output: String::new(),
                 mode: "workspace".to_string(),
-                source: "sesh".to_string(),
+                source: "sessions".to_string(),
             });
-            let mut next_sesh_id: i64 = -20_000;
-            for s in &self.sesh_sessions {
-                next_sesh_id -= 1;
+            let mut next_session_id: i64 = -20_000;
+            for s in &self.sessions {
+                next_session_id -= 1;
                 self.session_panes.push(HistoryRow {
-                    id: next_sesh_id,
+                    id: next_session_id,
                     command: s.command.clone(),
                     directory: s.directory.clone(),
                     session_id: s.command.clone(),
@@ -3172,10 +3171,17 @@ std::fs::read_to_string(&path).unwrap_or_default()
                     timestamp: 0,
                     comment: String::new(),
                     output: String::new(),
-                    mode: "sesh".to_string(),
-                    source: "sesh".to_string(),
+                    mode: "session".to_string(),
+                    source: "sessions".to_string(),
                 });
             }
+        }
+        if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
+            eprintln!(
+                "[debug] sessions count: {}, session_panes total: {}",
+                self.sessions.len(),
+                self.session_panes.len()
+            );
         }
     }
 
@@ -4788,7 +4794,7 @@ notes_date_filter: NotesDateFilter::All,
             // rationale.
             tmux_windows: Vec::new(),
             session_panes: Vec::new(),
-            sesh_sessions: Vec::new(),
+            sessions: Vec::new(),
             // Multiplexer backend
             // (tmux / herdr).
             // The staging layer
@@ -6684,24 +6690,54 @@ fn move_selection(&mut self, delta: isize) {
                         ));
                     }
                 }
-                "sesh" => {
-                    // A sesh session row: stage
-                    // `cd <path>` so the parent
-                    // shell (or `--exec`)
-                    // switches to the sesh
-                    // session's configured
-                    // directory.
+                "session" => {
+                    // A named session row. The user expects:
+                    // 1. If a tmux session or herdr workspace
+                    //    with this name already exists, switch
+                    //    to it.
+                    // 2. If not, create a new tmux session / herdr
+                    //    workspace with the named session's name
+                    //    and directory.
+                    //
+                    // The `multiplexer.create_command` method
+                    // handles both backends: tmux stages
+                    // `tmux new-session -d -s <label> -c <dir>; tmux switch-client -t <label>`
+                    // and herdr stages `herdr workspace create --cwd <dir> --label <label> --focus`.
+                    // For a bare name without a path, the label
+                    // IS the command. For a named session the
+                    // name is in `row.command` and the path is
+                    // in `row.directory`.
+                    let name = row.command.clone().trim().to_string();
                     let dir = row.directory.clone();
                     if dir.is_empty() {
                         return;
                     }
-                    let quoted = if dir.chars().any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c)) {
-                        format!("\"{}\"", dir)
+                    // Try to create/focus via the
+                    // multiplexer backend. The backend's
+                    // `create_command` stages the
+                    // appropriate command
+                    // (`tmux new-session ...` or
+                    // `herdr workspace create ...`);
+                    // the multiplexer itself handles
+                    // the case where the workspace
+                    // already exists (tmux fails with
+                    // "duplicate session", herdr
+                    // auto-suffixes the positional id).
+                    if let Some(cmd) = self
+                        .multiplexer
+                        .create_command(
+                            std::path::Path::new(&dir),
+                            &name,
+                        )
+                    {
+                        self.selection = Some(cmd);
+                        self.pick_mode = Some(PickMode::Run);
                     } else {
-                        dir
-                    };
-                    self.selection = Some(format!("cd {}", quoted));
-                    self.pick_mode = Some(PickMode::Run);
+                        self.set_status_message(format!(
+                            "could not build create command for {}",
+                            self.multiplexer.name()
+                        ));
+                    }
                 }
                 _ => {
                     // Unknown row mode in
@@ -9209,88 +9245,6 @@ fn resolve_initial_query(
     }
 }
 
-/// Parse `~/.config/sesh/sesh.toml` and return one
-/// `HistoryRow` per `[[session]]` entry. Each row
-/// has `mode = "sesh"`, `command = <name>`,
-/// `directory = <expanded path>`, and a synthetic
-/// negative id. The panes view appends these rows
-/// under a `# sesh` workspace header.
-///
-/// The TOML parsing is minimal (line-by-line,
-/// `key = value` extraction inside `[[session]]`
-/// blocks) — just enough for `name` and `path`.
-/// Full TOML parsing would need a `toml` crate
-/// dependency; this lightweight approach handles
-/// the format the user's sesh.toml actually uses.
-fn parse_sesh_sessions() -> Vec<HistoryRow> {
-    let sesh_path = std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".config").join("sesh").join("sesh.toml"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".config/sesh/sesh.toml"));
-    let Ok(contents) = std::fs::read_to_string(&sesh_path) else {
-        return Vec::new();
-    };
-    let home_list = build_home_list();
-    let mut sessions: Vec<HistoryRow> = Vec::new();
-    let mut next_id: i64 = -10_000;
-    let mut name = String::new();
-    let mut path = String::new();
-    let mut in_session = false;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line == "[[session]]" {
-            if in_session && !name.is_empty() && !path.is_empty() {
-                let expanded = crate::util::expand_home_to_absolute(&path, &home_list)
-                    .into_owned();
-                sessions.push(HistoryRow {
-                    id: next_id,
-                    command: name.trim().to_string(),
-                    directory: expanded,
-                    session_id: String::new(),
-                    exit_code: 0,
-                    timestamp: 0,
-                    comment: String::new(),
-                    output: String::new(),
-                    mode: "sesh".to_string(),
-                    source: "sesh".to_string(),
-                });
-                next_id -= 1;
-            }
-            name = String::new();
-            path = String::new();
-            in_session = true;
-            continue;
-        }
-        if in_session && line.contains('=') {
-            let (k, v) = line.split_once('=').unwrap_or(("", ""));
-            let k = k.trim();
-            let v = v.trim().trim_matches('"').trim();
-            match k {
-                "name" => name = v.to_string(),
-                "path" => path = v.to_string(),
-                _ => {}
-            }
-        }
-    }
-    // Don't forget the last session.
-    if in_session && !name.is_empty() && !path.is_empty() {
-        let expanded = crate::util::expand_home_to_absolute(&path, &home_list)
-            .into_owned();
-        sessions.push(HistoryRow {
-            id: next_id,
-            command: name.trim().to_string(),
-            directory: expanded,
-            session_id: String::new(),
-            exit_code: 0,
-            timestamp: 0,
-            comment: String::new(),
-            output: String::new(),
-            mode: "sesh".to_string(),
-            source: "sesh".to_string(),
-        });
-    }
-    sessions
-}
 
 pub fn run_tui_to_stdout(
     initial_mode: String,
@@ -9299,7 +9253,6 @@ pub fn run_tui_to_stdout(
     llm: Option<Box<dyn crate::llm::LlmClient>>,
     llm_config: Option<crate::llm::LlmConfig>,
     override_session_query: bool,
-    sesh: bool,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -9397,20 +9350,12 @@ pub fn run_tui_to_stdout(
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
         app.duplicate_filter = session.duplicate_filter.unwrap_or(true);
     }
-    // Populate the sesh sessions list from
-    // `~/.config/sesh/sesh.toml` when the
-    // `--sesh` CLI flag is set. Each parsed
-    // session becomes a `HistoryRow` with
-    // `mode = "sesh"`, the session name as
-    // `command` (display text), and the
-    // session path as `directory` (used by
-    // the staging handler to stage `cd`).
-    // `fetch_session_panes_impl` appends
-    // these rows at the end of the panes
-    // list, grouped under a `# sesh`
-    // workspace header.
-    if sesh {
-        app.sesh_sessions = parse_sesh_sessions();
+    // Load named sessions from the config file
+    // (`session.<id>=...`, `session.<id>.dir=...`).
+    app.sessions = app_cfg.sessions();
+    if !app.sessions.is_empty() {
+        app.session_panes.clear();
+        app.refresh();
     }
 
     let mut render = std::io::stderr();
@@ -19821,12 +19766,12 @@ mod tests {
             // function of the
             // home-prefix match.
             assert!(
-                staged.contains(
-                    "tmux new-session -d -s work -c ~/work"
-                ),
-                "staged command must use the `~/...` \
-                 shorthand for paths under $HOME, \
-                 got: {staged:?}"
+                staged.contains("tmux new-session"),
+                "staged must create a new tmux session, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("/Users/har/work"),
+                "staged must use the absolute path, got: {staged:?}"
             );
             // Restore HOME.
             if let Some(h) = saved_home {

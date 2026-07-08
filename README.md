@@ -53,8 +53,11 @@ of falling through to zsh's native history.
   [note_search](https://github.com/snharbec/note_search): search
   notes (`@`), list open todos (`!`), and create new entries
   (`@new <text>` / `!@new <text>`) directly from the TUI.
-- **Sesh session support** (`--sesh`): list sessions from
-  `~/.config/sesh/sesh.toml` in the panes (`*`) view.
+- **Named sessions** (config): define sessions directly in
+  `~/.config/smarthistory/config` via
+  `session.<id> = "name"` + `session.<id>.dir = "~/path"`.
+  They appear in the panes (`*`) view under a `# sessions`
+  header; selecting one creates/switches a workspace.
 - **Single Rust binary, no runtime dependencies.** No `fzf`,
   no `uuidgen`, no `/dev/urandom` access.
 
@@ -107,7 +110,7 @@ smarthistory update                      # normalize stored directory paths
 ### TUI subcommand options
 
 ```bash
-smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [--sesh] [QUERY]
+smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 ```
 
 - `--mode <scope>` — start in a specific scope (SESS, DIR, GLOBAL).
@@ -117,9 +120,7 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [--sesh] [Q
 - `--exec` — execute the selected command directly via `sh -c`
   instead of printing it to stdout. Use when launching from outside
   a shell (e.g. a herdr keybinding or GUI launcher).
-- `--sesh` — also list sessions from `~/.config/sesh/sesh.toml`
-  in the panes (`*`) view. Selecting a sesh session stages
-  `cd <path>`.
+
 
 ### TUI key bindings (subset)
 
