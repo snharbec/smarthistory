@@ -17,8 +17,8 @@ use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
-    format_diff, format_time, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView,
-    NotesDateFilter, OutputView, QuestionView,
+    AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView,
+    HelpView, NotesDateFilter, OutputView, QuestionView, format_diff, format_time,
 };
 use regex::Regex;
 
@@ -85,6 +85,15 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(picker) = app.theme_picker.as_ref() {
         draw_theme_picker(f, app, picker);
+    }
+
+    // The add-session /
+    // add-host dialog is the
+    // topmost overlay: drawn
+    // last so it sits on top
+    // of every other pane.
+    if let Some(dialog) = app.add_entry_dialog.as_ref() {
+        draw_add_entry_dialog(f, app, dialog);
     }
 
     // If a comment exists, draw the labeled entries pane as an overlay
@@ -198,6 +207,264 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             .as_ref(),
         )
         .split(popup_layout[1])[1]
+}
+
+/// Draw the add-session /
+/// add-host dialog. Renders
+/// as a centered overlay with
+/// one input line per field
+/// (the focused field is
+/// highlighted), a status
+/// hint (the dialog's source
+/// directory and command),
+/// and a footer showing the
+/// key bindings (Tab, Enter,
+/// Esc, Ctrl-C).
+fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
+    // Height: 1 (title) +
+    // dialog.fields.len()
+    // (one per field) + 1
+    // (source hint) + 1
+    // (footer) + 2 (borders)
+    // = fields + 5. Cap at
+    // 80% of the screen
+    // height to leave room
+    // for the underlying
+    // TUI to peek through
+    // (visual cue that the
+    // dialog is a
+    // transient overlay).
+    let needed = (dialog.fields.len() as u16) + 5;
+    let pct = ((needed * 100) / f.area().height.max(1)).min(80);
+    let area = centered_rect(70, pct, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let title = match dialog.kind {
+        AddEntryKind::Session => " Add session ",
+        AddEntryKind::Host => " Add host ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .title_style(Theme::accent())
+        .border_style(Theme::accent());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split the inner
+    // area into one row per
+    // field plus a source
+    // hint plus a footer.
+    let mut constraints: Vec<Constraint> = dialog
+        .fields
+        .iter()
+        .map(|_| Constraint::Length(1))
+        .collect();
+    constraints.push(Constraint::Length(1)); // source hint
+    constraints.push(Constraint::Length(1)); // footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    // Render each field as
+    // a single line:
+    // `<name>: <value>`
+    // with a marker
+    // showing the cursor.
+    // The focused field is
+    // rendered in the
+    // highlight color; the
+    // rest in the default
+    // foreground.
+    for (i, field) in dialog.fields.iter().enumerate() {
+        let is_focused = i == dialog.focused;
+        let label_style = if is_focused {
+            Theme::highlight()
+        } else {
+            Style::default()
+        };
+        let value_style = if is_focused {
+            Theme::highlight()
+        } else {
+            Style::default()
+        };
+        // Split the value
+        // into the
+        // pre-cursor
+        // segment, the
+        // cursor cell,
+        // and the
+        // post-cursor
+        // segment so
+        // the cursor
+        // position is
+        // visible. (We
+        // approximate
+        // the cursor
+        // with a
+        // reversed
+        // space when
+        // the value
+        // is empty;
+        // the
+        // placeholder
+        // hint is
+        // shown in
+        // dim style.)
+        let chars: Vec<char> = field.value.chars().collect();
+        let mut spans: Vec<Span> = Vec::new();
+        // `<Name>: `
+        spans.push(Span::styled(
+            format!("{}: ", field.name),
+            label_style,
+        ));
+        if field.value.is_empty() && is_focused {
+            // Empty
+            // focused
+            // field:
+            // show the
+            // placeholder
+            // in dim
+            // style
+            // followed
+            // by a
+            // reversed
+            // space
+            // (the
+            // cursor).
+            spans.push(Span::styled(
+                field.placeholder.to_string(),
+                Theme::dim(),
+            ));
+            spans.push(Span::styled(
+                " ",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        } else {
+            // Pre-cursor
+            // text.
+            let pre: String = chars
+                .iter()
+                .take(field.cursor)
+                .collect();
+            spans.push(Span::styled(pre, value_style));
+            // Cursor cell.
+            if is_focused {
+                if field.cursor < chars.len() {
+                    // The
+                    // cursor
+                    // sits
+                    // ON a
+                    // character
+                    // —
+                    // show
+                    // the
+                    // character
+                    // in
+                    // reverse.
+                    let c = chars[field.cursor];
+                    spans.push(Span::styled(
+                        c.to_string(),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                } else {
+                    // Cursor
+                    // is at
+                    // the
+                    // end —
+                    // show
+                    // a
+                    // reversed
+                    // space.
+                    spans.push(Span::styled(
+                        " ",
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                }
+            }
+            // Post-cursor
+            // text.
+            let post: String = chars
+                .iter()
+                .skip(if is_focused {
+                    field.cursor + if field.cursor < chars.len() { 1 } else { 0 }
+                } else {
+                    field.cursor
+                })
+                .collect();
+            if !post.is_empty() {
+                spans.push(Span::styled(post, value_style));
+            }
+        }
+        // Required-field
+        // marker: a
+        // trailing `*` so
+        // the user knows
+        // which fields
+        // must be non-
+        // empty.
+        if field.required {
+            spans.push(Span::styled(" *", Theme::warning()));
+        }
+        // Error indicator:
+        // when the dialog
+        // has an error
+        // and this is the
+        // failing field,
+        // show a small
+        // marker.
+        if let Some(err) = &dialog.error
+            && err.contains(field.name) {
+                spans.push(Span::styled(
+                    format!("  ({})", err),
+                    Theme::error(),
+                ));
+            }
+        f.render_widget(Paragraph::new(Line::from(spans)), chunks[i]);
+    }
+
+    // Source hint: a dim
+    // single line showing
+    // where the entry's
+    // pre-filled values
+    // came from.
+    let hint_idx = dialog.fields.len();
+    let hint = Line::from(vec![
+        Span::styled("from: ", Theme::dim()),
+        Span::styled(
+            format!(
+                "{:?} in {}",
+                dialog.source_command,
+                crate::util::shorten_home_path(
+                    &dialog.source_directory,
+                    &app.home_list,
+                ),
+            ),
+            Theme::dim(),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(hint), chunks[hint_idx]);
+
+    // Footer: key
+    // bindings hint.
+    let footer_idx = hint_idx + 1;
+    let footer = Line::from(vec![
+        Span::styled("Tab", Theme::highlight()),
+        Span::raw("/"),
+        Span::styled("S-Tab", Theme::highlight()),
+        Span::raw(" next/prev field, "),
+        Span::styled("Enter", Theme::highlight()),
+        Span::raw(" commit, "),
+        Span::styled("Esc", Theme::highlight()),
+        Span::raw(" cancel, "),
+        Span::styled("Ctrl-U", Theme::highlight()),
+        Span::raw(" clear, "),
+        Span::styled("Ctrl-W", Theme::highlight()),
+        Span::raw(" delete word"),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[footer_idx]);
 }
 
 fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
@@ -992,6 +1259,33 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         binding_for(Action::DeleteMatching),
         "delete ALL matching entries (with confirmation)",
+    );
+
+    lines.push(Line::from(""));
+
+    // ----- Config -----
+    //
+    // The two `Add*` actions
+    // open a multi-field
+    // dialog that writes a
+    // new `session.<id>` or
+    // `host.<id>` line to
+    // `~/.config/smarthistory/config`
+    // and refreshes the
+    // in-memory list. They
+    // work in any mode where
+    // a row is selected (the
+    // dialog pre-fills from
+    // the row's `directory`).
+    row(
+        &mut lines,
+        binding_for(Action::AddSession),
+        "add the selected directory as a new named session",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::AddHost),
+        "add the selected directory as a new host (SSH connection)",
     );
 
     lines.push(Line::from(""));

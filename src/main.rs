@@ -414,7 +414,21 @@ pub(crate) const MAX_OUTPUT_LINES: usize = DEFAULT_CAPTURE_LINES;
 ///
 /// When the file is absent, built-in defaults are used. When the
 /// file is present, the keys it defines override the defaults.
-fn config_path() -> Option<std::path::PathBuf> {
+/// Resolve the path to the user's
+/// smarthistory config file
+/// (`$HOME/.config/smarthistory/config`).
+/// Returns `None` only when
+/// `$HOME` is unset (a
+/// degenerate environment; in
+/// practice every Unix-y shell
+/// has it). Exposed as `pub` so
+/// the TUI can check whether a
+/// config file is locatable
+/// before opening the
+/// add-entry dialog (the
+/// dialog's commit path needs
+/// to write to the file).
+pub fn config_path() -> Option<std::path::PathBuf> {
     let home = env::var("HOME").ok()?;
     Some(
         std::path::PathBuf::from(home)

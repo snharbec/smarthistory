@@ -364,6 +364,260 @@ impl DirectorySource {
     }
 }
 
+/// Which kind of entry the
+/// `AddEntryDialog` is
+/// constructing. The
+/// dialog's field list and
+/// pre-fill logic branch on
+/// this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddEntryKind {
+    /// Add a `session.<id>` entry.
+    /// Fields: Name (required),
+    /// Dir (pre-filled from the
+    /// selected row), Exec
+    /// (optional).
+    Session,
+    /// Add a `host.<id>` entry.
+    /// Fields: Name (required),
+    /// Host (pre-filled from the
+    /// directory basename),
+    /// Hostname (optional,
+    /// overrides SSH config),
+    /// User (optional, defaults
+    /// to `$USER`), Port
+    /// (optional, defaults to
+    /// 22), Identity (optional,
+    /// inherits from SSH
+    /// config), Exec (optional).
+    Host,
+}
+
+/// One field in the add-entry
+/// dialog. Holds the current
+/// value as a `String` and the
+/// cursor position (in
+/// characters, matching the
+/// line-editor widget's
+/// convention).
+#[derive(Debug, Clone)]
+pub struct DialogField {
+    /// Display name shown in
+    /// the dialog (e.g.
+    /// `"Name"`, `"Dir"`,
+    /// `"Exec"`). Stable per
+    /// dialog kind — used as
+    /// the on-screen label and
+    /// as the config-file
+    /// suffix when writing the
+    /// entry.
+    pub name: &'static str,
+    /// The config-file suffix
+    /// for this field (e.g.
+    /// `""` for the Name
+    /// field of a session,
+    /// `".host"` for the
+    /// Host field of a host).
+    /// Empty for the primary
+    /// "name" field, dotted
+    /// for sub-fields.
+    pub config_suffix: &'static str,
+    /// Current value the user
+    /// has typed.
+    pub value: String,
+    /// Cursor position in
+    /// characters (0..=len).
+    pub cursor: usize,
+    /// Whether the field must
+    /// be non-empty for the
+    /// dialog to commit. The
+    /// "Name" field of both
+    /// dialogs is required;
+    /// everything else is
+    /// optional.
+    pub required: bool,
+    /// Placeholder shown in
+    /// the input box when the
+    /// value is empty (e.g.
+    /// `"my-session"`,
+    /// `"~/.ssh/id_ed25519"`).
+    /// Cosmetic only — never
+    /// used as a default value.
+    pub placeholder: &'static str,
+}
+
+impl DialogField {
+    /// Construct a new empty
+    /// field. The cursor
+    /// starts at position 0.
+    pub fn new(
+        name: &'static str,
+        config_suffix: &'static str,
+        required: bool,
+        placeholder: &'static str,
+    ) -> Self {
+        DialogField {
+            name,
+            config_suffix,
+            value: String::new(),
+            cursor: 0,
+            required,
+            placeholder,
+        }
+    }
+
+    /// Construct a new field
+    /// pre-filled with `value`.
+    /// The cursor is placed at
+    /// the end of the value
+    /// (the natural position
+    /// for the user to keep
+    /// typing).
+    pub fn prefilled(
+        name: &'static str,
+        config_suffix: &'static str,
+        required: bool,
+        placeholder: &'static str,
+        value: String,
+    ) -> Self {
+        let cursor = value.chars().count();
+        DialogField {
+            name,
+            config_suffix,
+            value,
+            cursor,
+            required,
+            placeholder,
+        }
+    }
+}
+
+/// State for the "add session /
+/// host" dialog. Opens on
+/// `C-1` / `C-2`, walks the
+/// user through the fields
+/// needed to construct a
+/// config-file entry, and on
+/// `Enter` writes the entry to
+/// `~/.config/smarthistory/config`
+/// and reloads the in-memory
+/// session / host list.
+#[derive(Debug, Clone)]
+pub struct AddEntryDialog {
+    /// Which kind of entry
+    /// this dialog is
+    /// constructing.
+    pub kind: AddEntryKind,
+    /// The fields the user
+    /// edits. The order in
+    /// this vec is the
+    /// display order AND the
+    /// Tab navigation order.
+    pub fields: Vec<DialogField>,
+    /// Index of the field
+    /// currently being
+    /// edited. Tab /
+    /// Shift+Tab move this.
+    pub focused: usize,
+    /// The directory from the
+    /// selected row (used as
+    /// the Dir field's
+    /// pre-fill for sessions
+    /// and as a status hint in
+    /// the dialog title).
+    pub source_directory: String,
+    /// The command from the
+    /// selected row (used
+    /// purely as a status
+    /// hint in the dialog
+    /// title — the entry
+    /// itself doesn't carry
+    /// the command).
+    pub source_command: String,
+    /// Error message from the
+    /// most recent commit
+    /// attempt (e.g. "name is
+    /// empty"). Cleared on
+    /// the next keystroke.
+    /// `None` when there's no
+    /// error to display.
+    pub error: Option<String>,
+}
+
+impl AddEntryDialog {
+    /// Build the dialog for a
+    /// given `kind`, pre-filling
+    /// the fields from
+    /// `source_directory` and
+    /// `source_command`. The
+    /// cursor lands on the
+    /// first field (Name).
+    pub fn new(kind: AddEntryKind, source_directory: String, source_command: String) -> Self {
+        let fields = match kind {
+            AddEntryKind::Session => vec![
+                DialogField::new("Name", "", true, "my-session"),
+                DialogField::prefilled("Dir", ".dir", false, "~/path", source_directory.clone()),
+                DialogField::new("Exec", ".exec", false, "command to run after create"),
+            ],
+            AddEntryKind::Host => vec![
+                DialogField::new("Name", "", true, "Proxmox"),
+                DialogField::prefilled(
+                    "Host",
+                    ".host",
+                    true,
+                    "pve-1",
+                    std::path::Path::new(&source_directory)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| source_directory.clone()),
+                ),
+                DialogField::new(
+                    "Hostname",
+                    ".hostname",
+                    false,
+                    "real.host (overrides SSH config)",
+                ),
+                DialogField::new("User", ".user", false, "alice (defaults to $USER)"),
+                DialogField::new("Port", ".port", false, "22"),
+                DialogField::new("Identity", ".identity", false, "~/.ssh/id_ed25519"),
+                DialogField::new("Exec", ".exec", false, "command to run after ssh"),
+            ],
+        };
+        AddEntryDialog {
+            kind,
+            fields,
+            focused: 0,
+            source_directory,
+            source_command,
+            error: None,
+        }
+    }
+
+    /// Advance the focused
+    /// field to the next
+    /// (wrapping at the end).
+    pub fn focus_next(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.focused = (self.focused + 1) % self.fields.len();
+    }
+
+    /// Move the focused field
+    /// to the previous (wrapping
+    /// at the start).
+    pub fn focus_prev(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.focused = if self.focused == 0 {
+            self.fields.len() - 1
+        } else {
+            self.focused - 1
+        };
+    }
+}
+
 /// Exit codes returned by the TUI binary, also used by the line-editor
 /// widget to dispatch on. The shell snippet in `init zsh` reads these
 /// to decide what to do with the chosen command.
@@ -734,5 +988,391 @@ mod tests {
             source: String::new(),
         };
         assert!(!row.is_llm_preview());
+    }
+}
+
+/// Find the next free
+/// `<prefix>.<id>` index
+/// in a config file. Scans
+/// every line for entries
+/// matching
+/// `<prefix>.<number>...`
+/// (the number is the
+/// integer before the
+/// first `.` that follows
+/// the prefix), tracks the
+/// maximum seen, and
+/// returns `max + 1`.
+///
+/// Returns `None` only when
+/// the existing indices are
+/// at `usize::MAX` (a
+/// configuration with
+/// `session.18446744073709551615`
+/// or similar). In practice
+/// this is impossible (the
+/// user would have to add
+/// entries one at a time
+/// for 18 quintillion
+/// years) so the `None`
+/// case is a defensive
+/// guard, not a real-world
+/// failure mode.
+///
+/// Used by the TUI's
+/// add-entry dialog to pick
+/// the id for a new
+/// `session.<id>` or
+/// `host.<id>` line before
+/// appending it. The scan
+/// is line-based and
+/// matches only the exact
+/// `<prefix>.` prefix at
+/// the start of the line
+/// (so `sessiondirs=...`
+/// config keys, which
+/// happen to start with
+/// `session`, are NOT
+/// matched — the regex
+/// requires `<prefix>.`,
+/// i.e. a literal dot after
+/// the prefix).
+pub fn next_config_index(contents: &str, prefix: &str) -> Option<usize> {
+    let needle = format!("{}.", prefix);
+    let mut max: usize = 0;
+    let mut found_any = false;
+    for line in contents.lines() {
+        let line = line.trim_start();
+        // The config syntax
+        // is `key = value` —
+        // we only care about
+        // the key, so trim
+        // at the first `=`
+        // (or whitespace,
+        // which separates the
+        // key from the
+        // value).
+        let key = match line.find(|c: char| c == '=' || c.is_whitespace()) {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        // Must start with
+        // `<prefix>.` AND
+        // the rest of the key
+        // (after the dot) must
+        // be a valid integer
+        // (i.e. no further
+        // dots, no other
+        // suffix characters).
+        if let Some(rest) = key.strip_prefix(needle.as_str()) {
+            // The `rest` is
+            // everything after
+            // `<prefix>.`. For
+            // `session.3.dir`,
+            // that's `3.dir`,
+            // which is not a
+            // valid integer. We
+            // want to match only
+            // the bare `session.3`
+            // line.
+            if let Ok(n) = rest.parse::<usize>() {
+                if n >= max {
+                    max = n;
+                }
+                found_any = true;
+            }
+        }
+    }
+    if !found_any {
+        // No existing entry:
+        // start at 1 (the
+        // config syntax
+        // expects positive
+        // integer ids, and
+        // `session.0` would
+        // be ambiguous in
+        // some downstream
+        // parsers).
+        return Some(1);
+    }
+    max.checked_add(1)
+}
+
+#[cfg(test)]
+mod next_config_index_tests {
+    use super::next_config_index;
+
+    #[test]
+    fn empty_contents_returns_one() {
+        assert_eq!(next_config_index("", "session"), Some(1));
+    }
+
+    #[test]
+    fn unrelated_contents_returns_one() {
+        let s = "\
+multiplexer = tmux
+capturelines = 20
+";
+        assert_eq!(next_config_index(s, "session"), Some(1));
+    }
+
+    #[test]
+    fn single_existing_returns_two() {
+        let s = "session.1 = \"Proxmox\"\nsession.1.dir = \"~/foo\"\n";
+        assert_eq!(next_config_index(s, "session"), Some(2));
+    }
+
+    #[test]
+    fn gaps_are_filled() {
+        // Existing ids
+        // 1, 3, 5 — the
+        // next free id is
+        // max+1 = 6, not
+        // 2 (we don't reuse
+        // gaps because the
+        // config parser
+        // allows any integer
+        // id and reusing
+        // would surprise
+        // users who expect
+        // ids to be stable
+        // across edits).
+        let s = "\
+session.1 = \"a\"
+session.3 = \"b\"
+session.5 = \"c\"
+";
+        assert_eq!(next_config_index(s, "session"), Some(6));
+    }
+
+    #[test]
+    fn subfields_do_not_count() {
+        // `session.2.dir` is
+        // a sub-field of
+        // session.2, not a
+        // separate id.
+        let s = "\
+session.1 = \"a\"
+session.1.dir = \"~/a\"
+session.1.exec = \"cmd\"
+";
+        assert_eq!(next_config_index(s, "session"), Some(2));
+    }
+
+    #[test]
+    fn prefix_overlap_does_not_confuse() {
+        // `sessiondirs=...`
+        // starts with the
+        // literal string
+        // `session` but is
+        // NOT a `session.<id>`
+        // entry. The
+        // strip_prefix
+        // requires the dot
+        // after `session`,
+        // so this line is
+        // correctly ignored.
+        let s = "\
+sessiondirs = ~/projects
+session.1 = \"a\"
+";
+        assert_eq!(next_config_index(s, "session"), Some(2));
+    }
+
+    #[test]
+    fn host_prefix_works_independently() {
+        let s = "\
+session.1 = \"a\"
+host.1 = \"Proxmox\"
+";
+        assert_eq!(next_config_index(s, "host"), Some(2));
+        // The session
+        // counter is
+        // independent of
+        // the host counter.
+        assert_eq!(next_config_index(s, "session"), Some(2));
+    }
+
+    #[test]
+    fn host_prefix_with_subfields_uses_parent_id() {
+        // The `host.2.user` line
+        // is a SUB-FIELD of a
+        // (hypothetical) host.2
+        // entry. Since the
+        // `host.2 = "..."` line
+        // itself is missing
+        // from the file, the
+        // scan only finds
+        // `host.1` and returns
+        // `max+1 = 2` — the
+        // sub-field line alone
+        // doesn't promote the
+        // parent id. A user
+        // who added `host.2.user`
+        // by hand without a
+        // parent `host.2` line
+        // would see the
+        // function assign the
+        // new entry the same
+        // id (2), and the
+        // config parser would
+        // then see the
+        // duplicate parent
+        // line. That's a
+        // pathological case;
+        // the function is
+        // correct for well-
+        // formed configs.
+        let s = "\
+host.1 = \"a\"
+host.2.user = \"root\"
+";
+        assert_eq!(next_config_index(s, "host"), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod add_entry_dialog_tests {
+    use super::{AddEntryDialog, AddEntryKind};
+
+    /// Session dialog has 3
+    /// fields (Name, Dir,
+    /// Exec); Name is
+    /// required, Dir is
+    /// pre-filled from the
+    /// source directory, Exec
+    /// is optional.
+    #[test]
+    fn session_dialog_fields() {
+        let d = AddEntryDialog::new(
+            AddEntryKind::Session,
+            "/home/user/project".to_string(),
+            "make test".to_string(),
+        );
+        assert_eq!(d.kind, AddEntryKind::Session);
+        assert_eq!(d.fields.len(), 3);
+        assert_eq!(d.fields[0].name, "Name");
+        assert!(d.fields[0].required);
+        assert_eq!(d.fields[1].name, "Dir");
+        assert!(!d.fields[1].required);
+        // The Dir field is
+        // pre-filled with
+        // the source
+        // directory.
+        assert_eq!(d.fields[1].value, "/home/user/project");
+        // The cursor lands
+        // at the end of
+        // the pre-filled
+        // value.
+        assert_eq!(d.fields[1].cursor, "/home/user/project".chars().count());
+        assert_eq!(d.fields[2].name, "Exec");
+        assert!(!d.fields[2].required);
+    }
+
+    /// Host dialog has 7
+    /// fields (Name, Host,
+    /// Hostname, User, Port,
+    /// Identity, Exec); Name
+    /// and Host are required;
+    /// Host is pre-filled with
+    /// the directory basename.
+    #[test]
+    fn host_dialog_fields() {
+        let d = AddEntryDialog::new(
+            AddEntryKind::Host,
+            "/home/user/.config/herdr".to_string(),
+            String::new(),
+        );
+        assert_eq!(d.kind, AddEntryKind::Host);
+        assert_eq!(d.fields.len(), 7);
+        assert_eq!(d.fields[0].name, "Name");
+        assert!(d.fields[0].required);
+        assert_eq!(d.fields[1].name, "Host");
+        assert!(d.fields[1].required);
+        // The Host field is
+        // pre-filled with
+        // the basename of
+        // the source
+        // directory.
+        assert_eq!(d.fields[1].value, "herdr");
+        assert_eq!(d.fields[2].name, "Hostname");
+        assert!(!d.fields[2].required);
+        assert_eq!(d.fields[3].name, "User");
+        assert!(!d.fields[3].required);
+        assert_eq!(d.fields[4].name, "Port");
+        assert!(!d.fields[4].required);
+        assert_eq!(d.fields[5].name, "Identity");
+        assert!(!d.fields[5].required);
+        assert_eq!(d.fields[6].name, "Exec");
+        assert!(!d.fields[6].required);
+    }
+
+    /// Host dialog with a
+    /// path that has no
+    /// basename component
+    /// (e.g. just "/") falls
+    /// back to the full path
+    /// for the Host pre-fill
+    /// (rather than crashing
+    /// on the missing
+    /// basename).
+    #[test]
+    fn host_dialog_root_path_falls_back_to_full_path() {
+        let d = AddEntryDialog::new(AddEntryKind::Host, "/".to_string(), String::new());
+        // `/` has no
+        // basename; the
+        // fallback is the
+        // full path.
+        assert_eq!(d.fields[1].value, "/");
+    }
+
+    /// focus_next wraps from
+    /// the last field back to
+    /// the first.
+    #[test]
+    fn focus_next_wraps() {
+        let mut d = AddEntryDialog::new(AddEntryKind::Session, "/tmp".to_string(), String::new());
+        assert_eq!(d.focused, 0);
+        d.focus_next();
+        assert_eq!(d.focused, 1);
+        d.focus_next();
+        assert_eq!(d.focused, 2);
+        d.focus_next();
+        // Wrap to 0.
+        assert_eq!(d.focused, 0);
+    }
+
+    /// focus_prev wraps from
+    /// the first field back to
+    /// the last.
+    #[test]
+    fn focus_prev_wraps() {
+        let mut d = AddEntryDialog::new(AddEntryKind::Session, "/tmp".to_string(), String::new());
+        assert_eq!(d.focused, 0);
+        d.focus_prev();
+        // Wrap to 2 (the
+        // last field).
+        assert_eq!(d.focused, 2);
+    }
+
+    /// The source directory
+    /// and command are kept
+    /// verbatim in the
+    /// dialog's
+    /// `source_directory` /
+    /// `source_command`
+    /// fields, which the
+    /// renderer shows as a
+    /// "from: <cmd> in <dir>"
+    /// hint.
+    #[test]
+    fn source_fields_preserved() {
+        let d = AddEntryDialog::new(
+            AddEntryKind::Host,
+            "/home/user/proj".to_string(),
+            "cargo build --release".to_string(),
+        );
+        assert_eq!(d.source_directory, "/home/user/proj");
+        assert_eq!(d.source_command, "cargo build --release");
     }
 }

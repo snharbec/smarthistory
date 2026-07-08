@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{ExitFilter, HostDef, MatchAlgorithm, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
+pub use state::{AddEntryDialog, AddEntryKind, ExitFilter, HostDef, MatchAlgorithm, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -1049,6 +1049,18 @@ struct App {
     /// doesn't carry. Index-aligned
     /// with `hosts`.
     host_defs: Vec<HostDef>,
+    /// The "add session / host"
+    /// dialog state. `None`
+    /// when the dialog is
+    /// closed. Opened by the
+    /// `AddSession` / `AddHost`
+    /// actions (`C-1` /
+    /// `C-2`); the dialog
+    /// handles its own input
+    /// until the user commits
+    /// (Enter) or cancels
+    /// (Esc).
+    add_entry_dialog: Option<AddEntryDialog>,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -4912,6 +4924,7 @@ notes_date_filter: NotesDateFilter::All,
             sessions: Vec::new(),
             hosts: Vec::new(),
             host_defs: Vec::new(),
+            add_entry_dialog: None,
             // Multiplexer backend
             // (tmux / herdr).
             // The staging layer
@@ -9542,8 +9555,362 @@ fn move_selection(&mut self, delta: isize) {
         self.theme_picker.is_some()
     }
 
+    fn is_add_entry_dialog_open(&self) -> bool {
+        self.add_entry_dialog.is_some()
+    }
+
+    fn close_add_entry_dialog(&mut self) {
+        self.add_entry_dialog = None;
+    }
+
     fn open_theme_picker(&mut self) {
         self.theme_picker = Some(ThemePicker::new(self.theme));
+    }
+
+    /// Open the "add session /
+    /// host" dialog. The
+    /// dialog is pre-filled
+    /// from the currently
+    /// selected row's
+    /// `directory` (used as
+    /// the Dir / Host field)
+    /// and `command` (shown in
+    /// the dialog title as a
+    /// reminder of which
+    /// history row the entry
+    /// is being created from).
+    ///
+    /// The action is a no-op
+    /// (with a status
+    /// message) when no row
+    /// is selected, when the
+    /// selected row has no
+    /// `directory`, or when
+    /// the config file can't
+    /// be located. A second
+    /// invocation while the
+    /// dialog is already open
+    /// is also a no-op (the
+    /// existing dialog stays
+    /// on screen).
+    fn open_add_entry_dialog(&mut self, kind: AddEntryKind) {
+        // Already-open
+        // dialog: keep the
+        // existing one
+        // (re-entering would
+        // surprise the user by
+        // resetting their
+        // typing).
+        if self.add_entry_dialog.is_some() {
+            return;
+        }
+        let Some(row) = self.selected_row() else {
+            self.set_status_message(
+                "no row selected — move to a history row first".to_string(),
+            );
+            return;
+        };
+        let directory = row.directory.clone();
+        if directory.is_empty() {
+            self.set_status_message(
+                "selected row has no directory — nothing to add".to_string(),
+            );
+            return;
+        }
+        // Sanity-check the
+        // config file: it
+        // must be locatable,
+        // otherwise we can't
+        // write the new entry.
+        // The lookup is the
+        // same one
+        // `Config::load` uses.
+        if crate::config_path().is_none() {
+            self.set_status_message(
+                "no config file found — set $XDG_CONFIG_HOME/smarthistory/config \
+                 or ~/.config/smarthistory/config"
+                    .to_string(),
+            );
+            return;
+        }
+        self.add_entry_dialog = Some(AddEntryDialog::new(
+            kind,
+            directory,
+            row.command.clone(),
+        ));
+        self.set_status_message(match kind {
+            AddEntryKind::Session => "add session: type a name, then Tab".to_string(),
+            AddEntryKind::Host => "add host: type a name, then Tab".to_string(),
+        });
+    }
+
+    /// Commit the add-entry
+    /// dialog: validate the
+    /// fields, write the new
+    /// entry to the config
+    /// file, reload the
+    /// in-memory session /
+    /// host list, refresh the
+    /// panes view, and close
+    /// the dialog.
+    ///
+    /// On validation failure
+    /// (e.g. empty Name), the
+    /// dialog stays open and
+    /// the error is surfaced
+    /// in the dialog's own
+    /// `error` field (shown
+    /// inline in the dialog
+    /// title).
+    fn commit_add_entry_dialog(&mut self) {
+        // Validate first, copying
+        // out the first failing
+        // field's name so we can
+        // release the borrow of
+        // `self.add_entry_dialog`
+        // before mutating
+        // `self.status_message`.
+        let failing_name: Option<String> = self
+            .add_entry_dialog
+            .as_ref()
+            .and_then(|d| {
+                d.fields
+                    .iter()
+                    .find(|f| f.required && f.value.trim().is_empty())
+                    .map(|f| f.name.to_string())
+            });
+        if let Some(name) = failing_name {
+            self.set_status_message(format!("`{}` is required", name));
+            if let Some(d) = self.add_entry_dialog.as_mut() {
+                d.error = Some(format!("`{}` is required", name));
+            }
+            return;
+        }
+        // Hand off to the
+        // write helper. On
+        // success, the
+        // helper closes the
+        // dialog and reloads
+        // the in-memory lists.
+        let result = self.write_new_entry_to_config();
+        if let Err(e) = result {
+            self.set_status_message(format!("add-entry: {}", e));
+            if let Some(d) = self.add_entry_dialog.as_mut() {
+                d.error = Some(e);
+            }
+        }
+    }
+
+    /// Write the dialog's
+    /// contents as a new
+    /// `session.<id>` or
+    /// `host.<id>` line in
+    /// `~/.config/smarthistory/config`.
+    /// On success, reloads
+    /// the config and refreshes
+    /// the panes view so the
+    /// new row appears.
+    ///
+    /// Returns the new id on
+    /// success, or an error
+    /// string the caller can
+    /// surface to the user.
+    fn write_new_entry_to_config(&mut self) -> Result<usize, String> {
+        // Snapshot the dialog
+        // up-front so the
+        // immutable borrow of
+        // `self.add_entry_dialog`
+        // is released before
+        // we start mutating
+        // `self` below.
+        let (kind, fields) = {
+            let d = self
+                .add_entry_dialog
+                .as_ref()
+                .ok_or_else(|| "no dialog open".to_string())?;
+            (d.kind, d.fields.clone())
+        };
+        let config_path = crate::config_path()
+            .ok_or_else(|| "no config file path".to_string())?;
+        // Build the
+        // config-file lines.
+        // Each non-empty
+        // field becomes a
+        // line:
+        //
+        // session.3 = "Proxmox"
+        // session.3.dir = "~/foo"
+        // session.3.exec = "nvim"
+        //
+        // The Name field
+        // (config_suffix = "")
+        // becomes the first
+        // line; sub-fields
+        // follow. Empty
+        // sub-fields are
+        // skipped (no
+        // `session.3.dir =`
+        // lines for unset
+        // values).
+        let name = fields
+            .first()
+            .map(|f| f.value.trim().to_string())
+            .ok_or_else(|| "dialog has no name field".to_string())?;
+        if name.is_empty() {
+            return Err("`Name` is required".to_string());
+        }
+        // Read the existing
+        // config so we can
+        // find the next
+        // available id.
+        let contents = std::fs::read_to_string(&config_path).map_err(|e| {
+            format!(
+                "failed to read {}: {}",
+                config_path.display(),
+                e,
+            )
+        })?;
+        let prefix = match kind {
+            AddEntryKind::Session => "session",
+            AddEntryKind::Host => "host",
+        };
+        let new_id = crate::tui::state::next_config_index(&contents, prefix)
+            .ok_or_else(|| {
+                format!(
+                    "no free {} id (existing ids are exhausted)",
+                    prefix,
+                )
+            })?;
+        // Build the new
+        // lines. The Name
+        // field's value is
+        // always written
+        // (the Name field is
+        // required). Other
+        // fields are skipped
+        // when empty so the
+        // config file stays
+        // terse.
+        let mut lines: Vec<String> = Vec::new();
+        for field in &fields {
+            let value = field.value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let line = if field.config_suffix.is_empty() {
+                // Name field.
+                format!("{}.{} = {:?}", prefix, new_id, value)
+            } else {
+                format!(
+                    "{}.{}{} = {:?}",
+                    prefix, new_id, field.config_suffix, value,
+                )
+            };
+            lines.push(line);
+        }
+        // Append to the
+        // config file. Use
+        // a trailing newline
+        // if the file
+        // doesn't end in
+        // one, and a blank
+        // line separator
+        // between existing
+        // content and the
+        // new block for
+        // readability.
+        let mut new_contents = contents.clone();
+        if !new_contents.ends_with('\n') {
+            new_contents.push('\n');
+        }
+        new_contents.push('\n');
+        for line in &lines {
+            new_contents.push_str(line);
+            new_contents.push('\n');
+        }
+        // Atomic write:
+        // write to a temp
+        // file in the same
+        // directory, then
+        // rename over the
+        // original. This
+        // avoids leaving a
+        // half-written
+        // config if the
+        // process is killed
+        // mid-write.
+        let tmp_path = config_path.with_extension("tmp");
+        std::fs::write(&tmp_path, new_contents.as_bytes()).map_err(|e| {
+            format!(
+                "failed to write {}: {}",
+                tmp_path.display(),
+                e,
+            )
+        })?;
+        std::fs::rename(&tmp_path, &config_path).map_err(|e| {
+            format!(
+                "failed to rename {} to {}: {}",
+                tmp_path.display(),
+                config_path.display(),
+                e,
+            )
+        })?;
+        // Reload the config
+        // and update the
+        // in-memory session /
+        // host lists. The
+        // simplest path is
+        // to re-run
+        // `Config::load()` —
+        // the file is read
+        // once at startup,
+        // so this is the
+        // first time we
+        // refresh after a
+        // write. The reload
+        // also re-merges the
+        // SSH config for
+        // host entries, so
+        // a user adding a
+        // new host whose
+        // alias matches an
+        // existing SSH
+        // config block
+        // gets the
+        // auto-filled
+        // defaults
+        // (Hostname, User,
+        // etc.) on the very
+        // next refresh.
+        let new_cfg = crate::Config::load();
+        self.sessions = new_cfg.sessions();
+        self.hosts = new_cfg.hosts();
+        self.host_defs = new_cfg.host_defs();
+        // The panes view
+        // was populated
+        // from
+        // `self.session_panes`
+        // BEFORE we updated
+        // sessions / hosts.
+        // Clear and
+        // re-refresh so the
+        // `# sessions` and
+        // `# hosts` blocks
+        // pick up the new
+        // entries.
+        self.session_panes.clear();
+        self.refresh();
+        // Close the dialog.
+        self.add_entry_dialog = None;
+        let kind_label = match kind {
+            AddEntryKind::Session => "session",
+            AddEntryKind::Host => "host",
+        };
+        self.set_status_message(format!(
+            "added {} {:?} (id={})",
+            kind_label, name, new_id,
+        ));
+        Ok(new_id)
     }
 
     /// Restore the picker to the theme that was active when it
@@ -10225,6 +10592,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_comment_edit_key(app, key);
     }
 
+    // The add-session / add-host
+    // dialog takes precedence
+    // over the action dispatch
+    // so printable characters
+    // type into the focused
+    // field rather than into
+    // the search query. Enter
+    // commits (or surfaces a
+    // validation error), Tab
+    // / Shift+Tab move between
+    // fields, Esc cancels.
+    if app.is_add_entry_dialog_open() {
+        return handle_add_entry_dialog_key(app, key);
+    }
+
     // Action-based dispatch: look up the user-configured binding
     // for this key. Anything not explicitly bound falls through to
     // the default "type a character into the query" behavior.
@@ -10451,6 +10833,27 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::ThemePicker => {
             app.open_theme_picker();
+            false
+        }
+        Action::AddSession => {
+            // Open the add-entry
+            // dialog in "session"
+            // mode. The dialog
+            // itself handles the
+            // no-row case (status
+            // message, no
+            // `add_entry_dialog`
+            // set).
+            app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Session);
+            false
+        }
+        Action::AddHost => {
+            // Same, but in "host"
+            // mode. The Host field
+            // is pre-filled with
+            // the selected row's
+            // directory basename.
+            app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Host);
             false
         }
     }
@@ -11530,6 +11933,277 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
         }
         _ => false,
     }
+}
+
+/// Input handling for the
+/// add-session / add-host
+/// dialog. The dialog is
+/// a multi-field text
+/// editor with Tab/Shift+Tab
+/// to move between fields,
+/// Enter to commit, Esc to
+/// cancel, and the standard
+/// printable-character /
+/// Backspace / Left / Right
+/// edits inside each field.
+///
+/// Always returns `false`
+/// (the TUI doesn't exit
+/// when the dialog
+/// commits — the dialog
+/// closes itself, and the
+/// user is left looking at
+/// the refreshed panes
+/// view with a status
+/// message confirming
+/// the new entry).
+fn handle_add_entry_dialog_key(app: &mut App, key: KeyEvent) -> bool {
+    // The cancel / cancel-buffer
+    // shortcuts mirror the
+    // comment-edit dialog so
+    // the muscle memory is
+    // identical: Ctrl-C
+    // aborts the whole TUI;
+    // Esc just closes the
+    // dialog.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.cancelled = true;
+                return true;
+            }
+            // Ctrl-U clears the
+            // focused field. Same
+            // shortcut as the main
+            // search query.
+            KeyCode::Char('u') => {
+                if let Some(d) = app.add_entry_dialog.as_mut()
+                    && let Some(field) = d.fields.get_mut(d.focused) {
+                        field.value.clear();
+                        field.cursor = 0;
+                        d.error = None;
+                    }
+                return false;
+            }
+            // Ctrl-W deletes one
+            // word backward in the
+            // focused field.
+            KeyCode::Char('w') => {
+                if let Some(d) = app.add_entry_dialog.as_mut()
+                    && let Some(field) = d.fields.get_mut(d.focused) {
+                        delete_field_word_backward(field);
+                        d.error = None;
+                    }
+                return false;
+            }
+            _ => return false,
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel: close the
+            // dialog without
+            // writing anything to
+            // the config file.
+            app.close_add_entry_dialog();
+            app.set_status_message("add-entry: cancelled".to_string());
+            false
+        }
+        KeyCode::Enter => {
+            // Commit: validate the
+            // required fields, then
+            // write the entry. The
+            // commit method closes
+            // the dialog on success
+            // and keeps it open (with
+            // an error) on failure.
+            app.commit_add_entry_dialog();
+            false
+        }
+        KeyCode::Tab => {
+            // Next field. Shift+Tab
+            // (KeyCode::BackTab)
+            // goes the other way.
+            if let Some(d) = app.add_entry_dialog.as_mut() {
+                d.focus_next();
+                d.error = None;
+            }
+            false
+        }
+        KeyCode::BackTab => {
+            if let Some(d) = app.add_entry_dialog.as_mut() {
+                d.focus_prev();
+                d.error = None;
+            }
+            false
+        }
+        KeyCode::Backspace => {
+            if let Some(d) = app.add_entry_dialog.as_mut()
+                && let Some(field) = d.fields.get_mut(d.focused)
+                    && field.cursor > 0 {
+                        // Delete the
+                        // character
+                        // before the
+                        // cursor. The
+                        // cursor is in
+                        // characters
+                        // (matching the
+                        // main query
+                        // editor), so
+                        // we walk left
+                        // one char
+                        // from the
+                        // byte index
+                        // that maps
+                        // to
+                        // `cursor - 1`
+                        // characters.
+                        let byte_idx = char_to_byte_idx(&field.value, field.cursor - 1);
+                        // Find the
+                        // next
+                        // char
+                        // boundary
+                        // after
+                        // `byte_idx`
+                        // (i.e. the
+                        // char
+                        // that
+                        // occupies
+                        // positions
+                        // `cursor - 1`
+                        // ).
+                        if let Some(next) = field.value[byte_idx..].chars().next() {
+                            field.value.replace_range(byte_idx..byte_idx + next.len_utf8(), "");
+                        }
+                        field.cursor -= 1;
+                        d.error = None;
+                    }
+            false
+        }
+        KeyCode::Left => {
+            if let Some(d) = app.add_entry_dialog.as_mut()
+                && let Some(field) = d.fields.get_mut(d.focused)
+                    && field.cursor > 0 {
+                        field.cursor -= 1;
+                    }
+            false
+        }
+        KeyCode::Right => {
+            if let Some(d) = app.add_entry_dialog.as_mut()
+                && let Some(field) = d.fields.get_mut(d.focused)
+                    && field.cursor < field.value.chars().count() {
+                        field.cursor += 1;
+                    }
+            false
+        }
+        KeyCode::Home => {
+            if let Some(d) = app.add_entry_dialog.as_mut()
+                && let Some(field) = d.fields.get_mut(d.focused) {
+                    field.cursor = 0;
+                }
+            false
+        }
+        KeyCode::End => {
+            if let Some(d) = app.add_entry_dialog.as_mut()
+                && let Some(field) = d.fields.get_mut(d.focused) {
+                    field.cursor = field.value.chars().count();
+                }
+            false
+        }
+        KeyCode::Char(c) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && let Some(d) = app.add_entry_dialog.as_mut()
+                    && let Some(field) = d.fields.get_mut(d.focused) {
+                        // Insert `c` at
+                        // the cursor.
+                        // The cursor
+                        // is in
+                        // characters,
+                        // so convert
+                        // to a byte
+                        // index
+                        // first.
+                        let byte_idx = char_to_byte_idx(&field.value, field.cursor);
+                        field.value.insert(byte_idx, c);
+                        field.cursor += 1;
+                        d.error = None;
+                    }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Convert a character
+/// index in `s` to the
+/// corresponding byte
+/// index. Returns `s.len()`
+/// when `idx` is at or past
+/// the end of `s`. Used by
+/// the dialog's per-field
+/// cursor to translate
+/// between the character-
+/// oriented cursor (which
+/// is what the user
+/// perceives) and the
+/// byte-oriented `String`
+/// API.
+fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or_else(|| s.len())
+}
+
+/// Delete one word backward
+/// in a dialog field's
+/// value (the readline /
+/// bash `Ctrl-W` semantics).
+/// First eats trailing
+/// whitespace immediately
+/// before the cursor, then
+/// walks left through the
+/// preceding run of
+/// non-whitespace characters
+/// and removes them.
+fn delete_field_word_backward(field: &mut crate::tui::state::DialogField) {
+    if field.cursor == 0 {
+        return;
+    }
+    let chars: Vec<char> = field.value.chars().collect();
+    let mut new_cursor = field.cursor;
+    // Phase 1: skip
+    // trailing
+    // whitespace
+    // immediately
+    // before the
+    // cursor.
+    while new_cursor > 0 && chars[new_cursor - 1].is_whitespace() {
+        new_cursor -= 1;
+    }
+    // Phase 2: walk
+    // left through
+    // the
+    // non-whitespace
+    // run.
+    while new_cursor > 0 && !chars[new_cursor - 1].is_whitespace() {
+        new_cursor -= 1;
+    }
+    // Convert the
+    // new cursor
+    // position to a
+    // byte index
+    // and splice out
+    // everything
+    // from there to
+    // the old
+    // cursor.
+    let old_byte = char_to_byte_idx(&field.value, field.cursor);
+    let new_byte = char_to_byte_idx(&field.value, new_cursor);
+    field.value.replace_range(new_byte..old_byte, "");
+    field.cursor = new_cursor;
 }
 
 #[cfg(test)]

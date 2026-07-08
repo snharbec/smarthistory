@@ -214,6 +214,47 @@ pub enum Action {
     /// shown in the mode
     /// strip as a chip.
     CycleDirectorySource,
+    /// Add the selected row's
+    /// directory as a new
+    /// `session.<id>` entry in
+    /// the config file. Opens
+    /// a multi-field dialog
+    /// (Name, Dir, Exec) that
+    /// writes the entry to
+    /// `~/.config/smarthistory/config`
+    /// and reloads the in-memory
+    /// session list so the new
+    /// row appears in the panes
+    /// view immediately.
+    ///
+    /// Default key: `C-1`. The
+    /// key is a no-op (with a
+    /// status message) when no
+    /// row is selected, when
+    /// the selected row has no
+    /// directory, or when the
+    /// config file can't be
+    /// located.
+    AddSession,
+    /// Add the selected row's
+    /// directory as a new
+    /// `host.<id>` entry in the
+    /// config file. Opens a
+    /// multi-field dialog
+    /// (Name, Host, Hostname,
+    /// User, Port, Identity,
+    /// Exec) that writes the
+    /// entry and reloads the
+    /// in-memory host list. The
+    /// Host field is pre-filled
+    /// with the basename of the
+    /// selected row's
+    /// directory.
+    ///
+    /// Default key: `C-2`. Same
+    /// no-op semantics as
+    /// `AddSession`.
+    AddHost,
 }
 
 impl Action {
@@ -238,6 +279,8 @@ impl Action {
             Action::CycleExitFilter => "cycle-exit-filter",
             Action::CycleSortOrder => "cycle-sort-order",
             Action::CycleDirectorySource => "cycle-directory-source",
+            Action::AddSession => "add-session",
+            Action::AddHost => "add-host",
             Action::Describe => "describe",
             Action::Correct => "correct",
             Action::Run => "run",
@@ -277,6 +320,8 @@ impl Action {
             Action::CycleExitFilter => "Cycle exit filter",
             Action::CycleSortOrder => "Cycle sort order",
             Action::CycleDirectorySource => "Cycle directory source",
+            Action::AddSession => "Add selected directory as a session",
+            Action::AddHost => "Add selected directory as a host",
             Action::Describe => "Describe selected command",
             Action::Correct => "Correct selected command",
             Action::Run => "Run",
@@ -338,6 +383,11 @@ impl Action {
             Action::Describe => "llm",
             Action::Correct => "llm",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
+            // Adding new entries to the config file
+            // (session / host). The dialog state
+            // machine lives in `tui.rs`; these
+            // actions just open it.
+            Action::AddSession | Action::AddHost => "config",
         }
     }
 
@@ -378,6 +428,8 @@ impl Action {
             Action::ThemePicker => "T",
             Action::ToggleSearchMode => "C-f",
             Action::MarkTodoDone => "C-x",
+            Action::AddSession => "C-1",
+            Action::AddHost => "C-2",
         }
     }
 }
@@ -650,6 +702,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::ThemePicker,
     Action::ToggleSearchMode,
     Action::MarkTodoDone,
+    Action::AddSession,
+    Action::AddHost,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
