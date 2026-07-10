@@ -312,10 +312,14 @@ impl JiraConfig {
         })
     }
 
-    /// The browse URL for a single issue key: `{url}/{key}`.
-    /// The url's trailing slash is trimmed first.
+    /// The browse URL for a single issue key:
+    /// `{server}/browse/{key}`. This matches the standard
+    /// JIRA browse path pattern. The `JIRA_URL` env var is
+    /// still read for backwards compatibility but the
+    /// default (when `JIRA_URL` is unset) now includes the
+    /// `/browse/` path segment.
     pub fn browse_url(&self, key: &str) -> String {
-        format!("{}/{}", self.url.trim_end_matches('/'), key)
+        format!("{}/browse/{}", self.server, key)
     }
 }
 
@@ -2370,7 +2374,7 @@ mod tests {
     // ---- JiraConfig::browse_url ----
 
     #[test]
-    fn browse_url_appends_key_after_trimming_slash() {
+    fn browse_url_uses_server_with_browse_path() {
         let cfg = JiraConfig {
             server: "https://jira.internal".to_string(),
             token: "tok".to_string(),
@@ -2383,7 +2387,7 @@ mod tests {
         };
         assert_eq!(
             cfg.browse_url("PROJ-123"),
-            "https://jira.company.com/browse/PROJ-123"
+            "https://jira.internal/browse/PROJ-123"
         );
     }
 
@@ -2401,7 +2405,7 @@ mod tests {
             certificate_password: None,
             ca_certificate_path: None,
         };
-        assert_eq!(cfg.browse_url("X-1"), "https://jira/X-1");
+        assert_eq!(cfg.browse_url("X-1"), "https://jira/browse/X-1");
     }
 
     // ---- JSON parsing ----

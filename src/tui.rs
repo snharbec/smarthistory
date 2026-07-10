@@ -25724,7 +25724,7 @@ mod tests {
             assert_eq!(
                 app.selection.as_deref(),
                 Some(format!(
-                    "{} \"https://browse.example.com/browse/PROJ-42\"",
+                    "{} \"https://jira.example.com/browse/PROJ-42\"",
                     if cfg!(target_os = "macos") { "open" } else { "xdg-open" }
                 ).as_str()),
                 "got: {:?}",
