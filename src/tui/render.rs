@@ -110,7 +110,7 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
     let (title, message) = match mode {
         ConfirmMode::DeleteSelected => (
             " Delete selected entry ",
-            "Are you sure you want to delete the selected history entry?".to_string(),
+            "This will delete ALL history entries with the same command text,\nincluding their comments and captured output.".to_string(),
         ),
         ConfirmMode::DeleteMatching => (
             " Delete ALL matching entries ",

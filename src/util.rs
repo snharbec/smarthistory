@@ -113,6 +113,31 @@ pub fn escape_like(s: &str) -> String {
     out
 }
 
+/// Escape `*`, `?`, and `[` in a
+/// GLOB pattern so the user's
+/// literal text is matched.
+/// SQLite's `GLOB` operator uses
+/// `*` (any sequence), `?` (any
+/// single char), and `[...]` (char
+/// class) as wildcards — these
+/// must be escaped (by wrapping
+/// with `[...]`) so the user's
+/// query text is treated
+/// literally.
+pub fn escape_glob(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == '*' || ch == '?' || ch == '[' {
+            out.push('[');
+            out.push(ch);
+            out.push(']');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Canonicalize a directory path the
 /// way the rest of smarthistory
 /// expects it to be stored and

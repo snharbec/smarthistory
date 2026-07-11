@@ -1437,11 +1437,33 @@ impl App {
         if c == p.output || c == p.llm || c == p.question
             || c == p.notes || c == p.todo || c == p.directories
             || c == p.panes || c == p.jira || c == p.files
+            || c == p.tags
         {
             &self.query[c.len_utf8()..]
         } else {
             self.query.as_str()
         }
+    }
+
+    /// Whether the current query body (the search text
+    /// after stripping the prefix character) contains
+    /// any uppercase ASCII characters. When `true`, the
+    /// search should be case-sensitive; when `false`, the
+    /// search should be case-insensitive (the historical
+    /// default).
+    ///
+    /// This is a heuristic: the user types `git` →
+    /// case-insensitive (matches `GIT`, `Git`, etc.);
+    /// the user types `Git` → case-sensitive (matches only
+    /// `Git`, not `git` or `GIT`). The rule is intuirive
+    /// and matches what most IDE / editor search toggles
+    /// (the "smart case" mode) do.
+    ///
+    /// The check looks at the body AFTER prefix stripping
+    /// so prefix characters like `+` or `=` (which are
+    /// not uppercase) don't interfere.
+    fn is_case_sensitive(&self) -> bool {
+        self.search_body().chars().any(|c| c.is_ascii_uppercase())
     }
 
     /// The output-search body, i.e. everything after the
@@ -3616,10 +3638,11 @@ std::fs::read_to_string(&path).unwrap_or_default()
                 .collect()
         };
         let filter = self.panes_pattern().trim();
+        let case_sensitive = self.is_case_sensitive();
         let tokens: Vec<String> = filter
             .split_whitespace()
             .filter(|t| !t.is_empty())
-            .map(|t| t.to_lowercase())
+            .map(|t| if case_sensitive { t.to_string() } else { t.to_lowercase() })
             .collect();
         if tokens.is_empty() {
             return Ok(section_rows);
@@ -3643,14 +3666,22 @@ std::fs::read_to_string(&path).unwrap_or_default()
         Ok(section_rows
             .iter()
             .filter(|r| {
-                let cmd_lc = r.command.to_lowercase();
-                let dir_lc = r.comment.to_lowercase();
-                let tab_lc = r.output.to_lowercase();
-                tokens.iter().all(|tok| {
-                    cmd_lc.contains(tok)
-                        || dir_lc.contains(tok)
-                        || tab_lc.contains(tok)
-                })
+                if case_sensitive {
+                    tokens.iter().all(|tok| {
+                        r.command.contains(tok)
+                            || r.comment.contains(tok)
+                            || r.output.contains(tok)
+                    })
+                } else {
+                    let cmd_lc = r.command.to_lowercase();
+                    let dir_lc = r.comment.to_lowercase();
+                    let tab_lc = r.output.to_lowercase();
+                    tokens.iter().all(|tok| {
+                        cmd_lc.contains(tok)
+                            || dir_lc.contains(tok)
+                            || tab_lc.contains(tok)
+                    })
+                }
             })
             .cloned()
             .collect())
@@ -3744,10 +3775,11 @@ std::fs::read_to_string(&path).unwrap_or_default()
         };
         let current_dir = std::env::current_dir().unwrap_or_default();
         let pattern = self.tags_pattern().trim();
+        let case_sensitive = self.is_case_sensitive();
         let tokens: Vec<String> = pattern
             .split_whitespace()
             .filter(|t| !t.is_empty())
-            .map(|t| t.to_lowercase())
+            .map(|t| if case_sensitive { t.to_string() } else { t.to_lowercase() })
             .collect();
         let mut rows: Vec<HistoryRow> = Vec::new();
         let mut next_id: i64 = -1;
@@ -3805,11 +3837,14 @@ std::fs::read_to_string(&path).unwrap_or_default()
                 current_dir.join(&current_file).to_string_lossy().into_owned()
             };
             // Apply the token filter.
-            let display_lc = display.to_lowercase();
-            let file_lc = current_file.to_lowercase();
             if !tokens.is_empty() {
+                let (display_check, file_check) = if case_sensitive {
+                    (display.to_string(), current_file.clone())
+                } else {
+                    (display.to_lowercase(), current_file.to_lowercase())
+                };
                 let all_match = tokens.iter().all(|tok| {
-                    display_lc.contains(tok) || file_lc.contains(tok)
+                    display_check.contains(tok) || file_check.contains(tok)
                 });
                 if !all_match {
                     continue;
@@ -4716,6 +4751,7 @@ fn fetch_recent_notes_with_filter(
         if body.is_empty() {
             return true;
         }
+        let case_sensitive = self.is_case_sensitive();
         match self.match_algorithm {
             MatchAlgorithm::Regex => {
                 if let Some(ref re) = self.query_regex {
@@ -4724,22 +4760,43 @@ fn fetch_recent_notes_with_filter(
                 // Regex mode but no valid compiled regex yet — treat
                 // the body as a literal pattern so the user sees at
                 // least the matches that contain it.
-                text.to_lowercase().contains(&body.to_lowercase())
+                if case_sensitive {
+                    text.contains(body)
+                } else {
+                    text.to_lowercase().contains(&body.to_lowercase())
+                }
             }
             MatchAlgorithm::Fuzzy => {
                 // Fuzzy search: every whitespace-separated word in the
                 // body must be a fuzzy subsequence of the text.
-                body
-                    .split_whitespace()
-                    .all(|term| fuzzy_match(term, text))
+                if case_sensitive {
+                    body
+                        .split_whitespace()
+                        .all(|term| fuzzy_match(term, text))
+                } else {
+                    // Case-insensitive: lower-case both sides
+                    // before the subsequence check.
+                    let lc_text = text.to_lowercase();
+                    body
+                        .split_whitespace()
+                        .all(|term| fuzzy_match(&term.to_lowercase(), &lc_text))
+                }
             }
             MatchAlgorithm::Substring => {
                 // Plain text: every whitespace-separated word must
-                // appear (case-insensitive).
-                let lower = text.to_lowercase();
-                body
-                    .split_whitespace()
-                    .all(|w| lower.contains(&w.to_lowercase()))
+                // appear. Case-sensitive when the body has
+                // uppercase, case-insensitive otherwise.
+                if case_sensitive {
+                    text.split_whitespace().all(|_| true) // handled below
+                        && body
+                            .split_whitespace()
+                            .all(|w| text.contains(w))
+                } else {
+                    let lower = text.to_lowercase();
+                    body
+                        .split_whitespace()
+                        .all(|w| lower.contains(&w.to_lowercase()))
+                }
             }
         }
     }
@@ -5556,6 +5613,7 @@ notes_date_filter: NotesDateFilter::All,
             let regex = self.query_regex.clone();
             let is_regex = self.match_algorithm == MatchAlgorithm::Regex;
             let is_fuzzy = self.match_algorithm == MatchAlgorithm::Fuzzy;
+            let case_sensitive = self.is_case_sensitive();
             self.rows.retain(|r| {
                 if body.is_empty() {
                     true
@@ -5565,12 +5623,17 @@ notes_date_filter: NotesDateFilter::All,
                     } else {
                         // No valid regex yet (in-progress typo) — fall
                         // back to a literal substring match.
-                        r.command
-                            .to_lowercase()
-                            .contains(&body.to_lowercase())
-                            || r.comment
-                                .to_lowercase()
-                                .contains(&body.to_lowercase())
+                        // Respect the case-sensitivity heuristic:
+                        // if the body has uppercase, match
+                        // case-sensitively; otherwise,
+                        // case-insensitively.
+                        if case_sensitive {
+                            r.command.contains(&body)
+                                || r.comment.contains(&body)
+                        } else {
+                            r.command.to_lowercase().contains(&body.to_lowercase())
+                                || r.comment.to_lowercase().contains(&body.to_lowercase())
+                        }
                     }
                 } else if is_fuzzy {
                     body
@@ -6192,13 +6255,34 @@ notes_date_filter: NotesDateFilter::All,
                     params.push(Box::new(format!("%{}%", escaped)));
                 }
             } else {
+                let case_sensitive = self.is_case_sensitive();
                 for word in self.query.split_whitespace() {
-                    let escaped = crate::util::escape_like(word);
-                    clause.push_str(
-                        " AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
-                    );
-                    params.push(Box::new(format!("%{}%", escaped)));
-                    params.push(Box::new(format!("%{}%", escaped)));
+                    let escaped = if case_sensitive {
+                        // GLOB uses `*` and `?`
+                        // as wildcards; escape
+                        // them so the user's
+                        // literal text is
+                        // matched.
+                        crate::util::escape_glob(word)
+                    } else {
+                        crate::util::escape_like(word)
+                    };
+                    if case_sensitive {
+                        clause.push_str(
+                            " AND (h.command GLOB ? OR c.comment GLOB ?)",
+                        );
+                    } else {
+                        clause.push_str(
+                            " AND (h.command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
+                        );
+                    }
+                    if case_sensitive {
+                        params.push(Box::new(format!("*{}*", escaped)));
+                        params.push(Box::new(format!("*{}*", escaped)));
+                    } else {
+                        params.push(Box::new(format!("%{}%", escaped)));
+                        params.push(Box::new(format!("%{}%", escaped)));
+                    }
                 }
             }
         }
@@ -10568,9 +10652,36 @@ fn move_selection(&mut self, delta: isize) {
     }
 
     fn delete_selected(&mut self) -> Result<()> {
+        // Delete ALL history items with the same command text
+        // (not just the one row). The user's intent when pressing
+        // Ctrl-D on a history entry is "remove this command from
+        // my history" — keeping duplicates with the same text
+        // would be confusing. We also delete the command's
+        // comment (if any) and its captured output rows (the
+        // `history_output` table is `ON DELETE CASCADE` in
+        // schema but SQLite doesn't enable FK enforcement by
+        // default, so we do the cleanup explicitly).
         if let Some(row) = self.selected_row() {
+            let command = row.command.clone();
+            // Delete the comment for this command (if any).
+            // The `command_comments` table has one row per
+            // unique command text, so this removes the comment
+            // globally — the user's intent is to remove the
+            // command entirely, not leave an orphaned comment.
             self.conn
-                .execute("DELETE FROM history WHERE id = ?1", params![row.id])?;
+                .execute("DELETE FROM command_comments WHERE command = ?1", params![&command])?;
+            // Delete captured output for all history rows
+            // with this command (explicit cascade — SQLite's
+            // `ON DELETE CASCADE` is not active without
+            // `PRAGMA foreign_keys = ON`).
+            self.conn.execute(
+                "DELETE FROM history_output WHERE history_id IN \
+                 (SELECT id FROM history WHERE command = ?1)",
+                params![&command],
+            )?;
+            // Delete all history rows with the same command text.
+            self.conn
+                .execute("DELETE FROM history WHERE command = ?1", params![&command])?;
             self.refresh();
             self.refresh_labeled();
         }
