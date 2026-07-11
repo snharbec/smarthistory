@@ -7984,12 +7984,29 @@ fn move_selection(&mut self, delta: isize) {
                         let ts = crate::jira::updated_to_epoch(&issue.updated);
                         let id = next_id;
                         next_id -= 1;
+                        // Map the JIRA workflow status to an exit-code
+                        // sentinel so the row's `✓`/`✗` marker reflects
+                        // whether the issue is closed or still open.
+                        // `Closed` and `To be Reviewed` are treated as
+                        // "done" (exit_code = 0 → green ✓); every other
+                        // status is "still open" (exit_code = 1 → red ✗).
+                        // The comparison is case-insensitive so a JIRA
+                        // instance that lowercases its workflow names
+                        // (e.g. `closed`) still matches.
+                        let status_lower = issue.status.to_ascii_lowercase();
+                        let jira_exit_code = if status_lower == "closed"
+                            || status_lower == "to be reviewed"
+                        {
+                            0
+                        } else {
+                            1
+                        };
                         crate::tui::state::HistoryRow {
                             id,
                             command: issue.key,
                             directory: String::new(),
                             session_id: String::new(),
-                            exit_code: 0,
+                            exit_code: jira_exit_code,
                             timestamp: if ts > 0 { ts } else { now_epoch },
                             comment: issue.summary,
                             // Newlines between
@@ -25050,6 +25067,80 @@ mod tests {
             // 5 pairs (Status, Priority,
             // Due, Assignee, Description).
             assert_eq!(out.matches("**").count(), 10);
+        }
+
+        /// JIRA rows with status `"Closed"` or
+        /// `"To be Reviewed"` are treated as
+        /// "done" — `exit_code = 0` so the
+        /// row shows a green `✓` marker.
+        /// Every other status is "still open"
+        /// — `exit_code = 1` so the row shows
+        /// a red `✗` marker. The comparison is
+        /// case-insensitive.
+        #[test]
+        fn jira_row_exit_code_reflects_closed_status() {
+            use std::sync::Arc;
+            let fake = FakeJira {
+                issues: vec![
+                    crate::jira::JiraIssue {
+                        key: "PROJ-1".to_string(),
+                        summary: "done".to_string(),
+                        status: "Closed".to_string(),
+                        ..Default::default()
+                    },
+                    crate::jira::JiraIssue {
+                        key: "PROJ-2".to_string(),
+                        summary: "in review".to_string(),
+                        status: "To be Reviewed".to_string(),
+                        ..Default::default()
+                    },
+                    crate::jira::JiraIssue {
+                        key: "PROJ-3".to_string(),
+                        summary: "in progress".to_string(),
+                        status: "In Progress".to_string(),
+                        ..Default::default()
+                    },
+                    crate::jira::JiraIssue {
+                        key: "PROJ-4".to_string(),
+                        summary: "lowercase closed".to_string(),
+                        status: "closed".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+                ..Default::default()
+            };
+            let mut app = directories_test_app(&[]);
+            app.set_jira_client(Arc::new(fake));
+            app.query = String::from("-");
+            app.refresh();
+            app.jira_debounce_started = Some(
+                std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50),
+            );
+            app.jira_maybe_autocall();
+            assert_eq!(app.jira_rows.len(), 4);
+            // PROJ-1: Closed → exit_code 0 (green ✓).
+            assert_eq!(
+                app.jira_rows[0].exit_code, 0,
+                "Closed status must map to exit_code 0",
+            );
+            // PROJ-2: To be Reviewed → exit_code 0 (green ✓).
+            assert_eq!(
+                app.jira_rows[1].exit_code, 0,
+                "To be Reviewed status must map to exit_code 0",
+            );
+            // PROJ-3: In Progress → exit_code 1 (red ✗).
+            assert_eq!(
+                app.jira_rows[2].exit_code, 1,
+                "In Progress status must map to exit_code 1",
+            );
+            // PROJ-4: closed (lowercase) → exit_code 0.
+            assert_eq!(
+                app.jira_rows[3].exit_code, 0,
+                "lowercase `closed` must still match (case-insensitive)",
+            );
         }
 
         /// When the issue has empty values
