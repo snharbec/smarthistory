@@ -14707,26 +14707,15 @@ mod tests {
                 fn focus_pane(
                     &self,
                     pane_id: &str,
-                    tab_id: &str,
+                    _tab_id: &str,
                 ) -> Option<String> {
-                    let ws = pane_id
-                        .split(':')
-                        .next()
-                        .unwrap_or(pane_id);
-                    if ws.is_empty() {
+                    if pane_id.is_empty() {
                         return None;
                     }
-                    if tab_id.is_empty() {
-                        Some(format!(
-                            "herdr workspace focus {} 2>/dev/null",
-                            ws
-                        ))
-                    } else {
-                        Some(format!(
-                            "herdr workspace focus {} 2>/dev/null && herdr tab focus {} 2>/dev/null",
-                            ws, tab_id
-                        ))
-                    }
+                    Some(format!(
+                        "herdr pane zoom {} 2>/dev/null && herdr pane zoom {} --off 2>/dev/null",
+                        pane_id, pane_id,
+                    ))
                 }
                 fn create_command(
                     &self,

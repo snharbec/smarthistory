@@ -448,17 +448,11 @@ pub trait MultiplexerBackend: Send + Sync {
     ///   window for you so
     ///   `tab_id` is ignored).
     /// - herdr:
-    ///   `herdr workspace focus <ws> && herdr tab focus <tab_id>`
-    ///   (the workspace switch
-    ///   + tab switch is the
-    ///   closest equivalent of
-    ///   a focused-pane jump
-    ///   the herdr CLI exposes;
-    ///   the specific pane inside
-    ///   the tab becomes the
-    ///   focused pane via herdr's
-    ///   default tab-focused-pane
-    ///   selection).
+    ///   `herdr pane zoom <pane_id> && herdr pane zoom <pane_id> --off`
+    ///   (the first `pane zoom` focuses the exact pane across
+    ///   workspaces and tabs and zooms it; the second call
+    ///   un-zooms while keeping focus on that pane, so the
+    ///   user lands on the right pane without a zoomed view).
     fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String>;
 
     /// Stage a command that, when
@@ -1698,67 +1692,29 @@ impl MultiplexerBackend for HerdrBackend {
         ))
     }
 
-    fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String> {
-        // The herdr CLI
-        // doesn't expose a
-        // pane-level focus
-        // command directly —
-        // the closest
-        // equivalent is
-        // "switch to the
-        // workspace AND the
-        // tab the pane lives
-        // in". The pane within
-        // the tab becomes the
-        // focused-by-default
-        // pane (the
-        // previously-focused
-        // pane in the tab is
-        // restored).
+    fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
+        // Use `pane zoom` (which delegates to the socket API's
+        // `pane.zoom` method) to focus the specific pane. Unlike
+        // `workspace focus` + `tab focus`, which only switches the
+        // workspace and tab (leaving the pane focus to whatever was
+        // last focused in that tab), `pane zoom <pane_id>` focuses
+        // the EXACT pane the user selected — across workspaces and
+        // tabs — and zooms it to fill the tab. The second call
+        // (`pane zoom <pane_id> --off`) un-zooms while keeping the
+        // focus on that pane, so the pane is focused but NOT
+        // zoomed.
         //
-        // Strip the `:pN`
-        // suffix from the
-        // pane id to get the
-        // workspace id (the
-        // leftmost colon-free
-        // component). If the
-        // user picked a
-        // workspace row
-        // directly we'd be in
-        // `focus_session` —
-        // here the row
-        // definitely has a
-        // `:pN` suffix.
-        let workspace_id = pane_id.split(':').next().unwrap_or(pane_id);
-        if workspace_id.is_empty() {
+        // `tab_id` is no longer needed (pane.zoom resolves the
+        // workspace+tab from the pane_id itself), but kept as a
+        // parameter so the trait contract is uniform across
+        // backends.
+        if pane_id.is_empty() {
             return None;
         }
-        if tab_id.is_empty() {
-            // No tab_id — degrade
-            // to a
-            // workspace-session
-            // focus (the
-            // `&&`-chain is
-            // redundant then).
-            return Some(format!(
-                "herdr workspace focus {} 2>/dev/null",
-                workspace_id
-            ));
-        }
-        // `workspace focus` switches
-        // the active workspace;
-        // `tab focus <tab_id>` then
-        // brings the pane's tab
-        // forward inside it. `&&`
-        // short-circuits so a
-        // stale workspace id (the
-        // workspace was closed)
-        // doesn't try a tab focus
-        // against a dead workspace.
         Some(format!(
-            "herdr workspace focus {} 2>/dev/null && \
-             herdr tab focus {} 2>/dev/null",
-            workspace_id, tab_id
+            "herdr pane zoom {} 2>/dev/null && \
+             herdr pane zoom {} --off 2>/dev/null",
+            pane_id, pane_id,
         ))
     }
 
@@ -2457,62 +2413,53 @@ mod tests {
 
     #[cfg(feature = "herdr")]
     #[test]
-    fn herdr_focus_pane_chains_workspace_and_tab_focus() {
-        // Selecting a pane
-        // row stages
-        // `herdr workspace focus <ws> && herdr tab focus <tab_id>`
-        // — the closest
-        // herdr equivalent of
-        // "switch to this
-        // pane" (herdr's
-        // public CLI doesn't
-        // expose a pane-level
-        // focus command, but
-        // `workspace focus` +
-        // `tab focus` brings
-        // the user to the
-        // right workspace AND
-        // the right tab,
-        // where the
-        // previously-focused
-        // pane becomes
-        // focused by
-        // default).
+    fn herdr_focus_pane_uses_pane_zoom() {
+        // Selecting a pane row stages
+        // `herdr pane zoom <pane_id> && herdr pane zoom <pane_id> --off`.
+        // The first `pane zoom` call focuses the EXACT pane
+        // (across workspaces and tabs) and zooms it to fill
+        // the tab. The second call (`--off`) un-zooms while
+        // keeping the focus on that pane, so the user lands
+        // on the right pane without a zoomed view.
+        //
+        // This replaces the old `workspace focus + tab focus`
+        // approach, which only switched the workspace and tab
+        // but left the pane-focus to whatever was last focused
+        // in that tab.
         let b = HerdrBackend;
         let cmd = b.focus_pane("wA:p3", "wA:t2").expect("non-empty ids");
         assert_eq!(
             cmd,
-            "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t2 2>/dev/null"
+            "herdr pane zoom wA:p3 2>/dev/null && herdr pane zoom wA:p3 --off 2>/dev/null"
         );
         // An empty `tab_id`
-        // degrades to a
-        // bare
-        // `workspace focus`
-        // command (no tab
-        // switch).
+        // doesn't change the
+        // behavior — `pane zoom`
+        // resolves the workspace
+        // and tab from the
+        // pane_id itself.
         let cmd = b.focus_pane("wA:p3", "").expect("non-empty pane id");
-        assert_eq!(cmd, "herdr workspace focus wA 2>/dev/null");
+        assert_eq!(
+            cmd,
+            "herdr pane zoom wA:p3 2>/dev/null && herdr pane zoom wA:p3 --off 2>/dev/null"
+        );
         // An empty `pane_id`
         // is rejected.
         assert!(b.focus_pane("", "").is_none());
         // A bare workspace
         // id (no `:pN`)
-        // still works — the
-        // `focus_pane` doesn't
-        // REQUIRE the `:pN`
-        // suffix because
-        // herdr's
-        // `workspace focus`
-        // accepts the bare
-        // id directly
-        // (whether the caller
-        // is pane-row or
-        // workspace-row
-        // doesn't matter).
+        // still produces a
+        // valid command —
+        // `pane zoom` accepts
+        // workspace ids too
+        // (it will focus the
+        // workspace's
+        // focused-pane-by-
+        // default).
         let cmd = b.focus_pane("wA", "wA:t1").expect("bare ws id");
         assert_eq!(
             cmd,
-            "herdr workspace focus wA 2>/dev/null && herdr tab focus wA:t1 2>/dev/null"
+            "herdr pane zoom wA 2>/dev/null && herdr pane zoom wA --off 2>/dev/null"
         );
     }
 
