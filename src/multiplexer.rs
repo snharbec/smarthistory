@@ -1234,6 +1234,55 @@ struct HerdrPaneRecord {
     agent: String,
 }
 
+/// Look up the running process's command line inside a
+/// herdr pane via the socket API's `pane.process_info`
+/// method. Returns `Some(cmdline)` where `cmdline` is the
+/// human-readable foreground-process command line, or
+/// `None` when the lookup fails (no socket, no foreground
+/// process, malformed response).
+///
+/// Prefers `cmdline` (the full command line, e.g.
+/// `nvim /Users/.../config.toml`) when present; falls back
+/// to `argv0` (the first argument / executable name, e.g.
+/// `zsh`, `pi`) — both are more informative than the
+/// OS-level `name` (which would show `node` for a `pi`
+/// invocation, hiding the user-visible program).
+///
+/// The lookup is best-effort: a failure doesn't break the
+/// panes view — the caller falls back to the agent name
+/// alone (the historical behavior).
+#[cfg(feature = "herdr")]
+pub fn herdr_pane_cmdline(pane_id: &str) -> Option<String> {
+    let json = herdr_run_json(&["pane", "process-info", "--pane", pane_id])?;
+    let processes = json
+        .get("result")
+        .and_then(|r| r.get("process_info"))
+        .and_then(|p| p.get("foreground_processes"))
+        .and_then(|p| p.as_array())?;
+    let first = processes.first()?;
+    // Prefer `cmdline` (full
+    // command line) when
+    // present; fall back to
+    // `argv0` (the executable
+    // name) — both are more
+    // user-visible than the
+    // OS `name`.
+    if let Some(cmd) = first.get("cmdline").and_then(|v| v.as_str())
+        && !cmd.is_empty() {
+            return Some(cmd.to_string());
+        }
+    first
+        .get("argv0")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+#[cfg(not(feature = "herdr"))]
+pub fn herdr_pane_cmdline(_pane_id: &str) -> Option<String> {
+    None
+}
+
 #[cfg(feature = "herdr")]
 fn parse_herdr_pane_list(json: &serde_json::Value) -> Vec<HerdrPaneRecord> {
     let mut out = Vec::new();
@@ -1603,6 +1652,25 @@ impl MultiplexerBackend for HerdrBackend {
                     .cloned()
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| r.workspace_id.clone());
+                // The pane's `current_command`
+                // is initialized to the agent
+                // name (e.g. `pi`) so the row
+                // renders immediately. The
+                // full process command line
+                // (e.g. `nvim config.toml`,
+                // `-zsh`, `ssh har@host`) is
+                // fetched asynchronously by
+                // the App's background
+                // `pane_cmdlines` lookup and
+                // patched in after the first
+                // frame — see
+                // `App::spawn_pane_cmdlines`
+                // and
+                // `App::process_pane_cmdlines`.
+                // This keeps the panes view
+                // fast (no ~30ms-per-pane
+                // blocking call on the
+                // render path).
                 CurrentPaneInfo {
                     pane_id: r.pane_id,
                     window_id: r.workspace_id.clone(),

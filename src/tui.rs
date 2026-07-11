@@ -1077,6 +1077,18 @@ struct App {
     /// at a glance which section is
     /// filtered.
     panes_filter: PanesFilter,
+    /// Background request for pane cmdlines (see
+    /// `PaneCmdlineRequest`). Spawned after the
+    /// panes snapshot is populated so the cmdline
+    /// appears asynchronously without blocking
+    /// the first render.
+    pane_cmdlines_request: Option<PaneCmdlineRequest>,
+    /// Monotonic counter incremented on every
+    /// `fetch_session_panes_impl` call. Acts as a
+    /// snapshot id so a stale background cmdline
+    /// lookup (from an old snapshot) is detected
+    /// and discarded.
+    panes_snapshot_id: u64,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -3304,6 +3316,36 @@ std::fs::read_to_string(&path).unwrap_or_default()
                 self.session_panes.len()
             );
         }
+        // Bump the snapshot id and spawn an
+        // asynchronous cmdline lookup for every
+        // pane row in the new snapshot. The
+        // background thread is the herdr path's
+        // way of getting the running process's
+        // command line (`nvim config.toml`,
+        // `ssh har@host`, …) without blocking
+        // the first render — the panes view is
+        // shown immediately with the agent name,
+        // and the cmdline is patched in later
+        // when the lookup completes (see
+        // `process_pane_cmdlines`).
+        //
+        // We also cancel any in-flight lookup
+        // from a previous snapshot — its results
+        // would be stale (the panes may have
+        // changed since) and could overwrite the
+        // new snapshot's rows.
+        self.panes_snapshot_id = self.panes_snapshot_id.wrapping_add(1);
+        // The background cmdlines lookup is spawned lazily
+        // from `process_pane_cmdlines` (called on every
+        // run-loop tick), NOT here. This avoids the
+        // spawn-and-immediately-cancel pattern that
+        // happened when `fetch_session_panes_impl` was
+        // called multiple times in quick succession during
+        // TUI initialization (sessions / hosts population
+        // triggers several refreshes, each bumping the
+        // snapshot id). The lazy spawn fires once,
+        // after the run loop settles, and the snapshot
+        // id at that point matches the current snapshot.
     }
 
     /// Return the cached session-panes list,
@@ -3323,6 +3365,197 @@ std::fs::read_to_string(&path).unwrap_or_default()
     /// empty list (no tmux / not in a
     /// session / the only pane is the current
     /// one) is a valid result.
+    /// Spawn a background thread to look up each
+    /// pane's running-process command line via
+    /// `multiplexer::herdr_pane_cmdline`. The
+    /// thread sends `(pane_id, cmdline)` pairs
+    /// over a channel; the run loop polls the
+    /// channel in `process_pane_cmdlines`.
+    ///
+    /// Only spawned for the herdr backend (the
+    /// tmux backend already has the
+    /// `current_command` in its snapshot via
+    /// `#{pane_current_command}`; no extra
+    /// lookup is needed there).
+    ///
+    /// Cancels any previous in-flight request
+    /// before spawning — its results would be
+    /// stale (from a previous snapshot).
+    ///
+    /// `snapshot_id` is stashed on the request
+    /// so the App can detect stale results on
+    /// receipt (a snapshot that has been
+    /// superseded by a newer one between spawn
+    /// and receipt).
+    fn spawn_pane_cmdlines(&mut self, snapshot_id: u64) {
+        // Cancel any previous in-flight request.
+        if let Some(prev) = self.pane_cmdlines_request.take() {
+            prev.cancelled.store(true, Ordering::Relaxed);
+        }
+        // Only the herdr backend needs the
+        // background lookup. The tmux
+        // backend's snapshot already carries
+        // `current_command` via
+        // `#{pane_current_command}`.
+        if self.multiplexer.name() != "herdr" {
+            return;
+        }
+        // Collect the pane ids to look up
+        // (only `mode == "pane"` rows —
+        // workspace headers, sessions, and
+        // hosts have no running process).
+        let pane_ids: Vec<String> = self
+            .session_panes
+            .iter()
+            .filter(|r| r.mode == "pane")
+            .map(|r| r.session_id.clone())
+            .collect();
+        if pane_ids.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        std::thread::spawn(move || {
+            for pane_id in &pane_ids {
+                if cancelled_clone.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(cmdline) =
+                    crate::multiplexer::herdr_pane_cmdline(pane_id)
+                {
+                    if cancelled_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let _ = tx.send((pane_id.clone(), cmdline));
+                }
+            }
+        });
+        self.pane_cmdlines_request = Some(PaneCmdlineRequest {
+            receiver: rx,
+            cancelled,
+            snapshot_id,
+        });
+    }
+
+    /// Drain the background pane-cmdline channel
+    /// and patch the results into
+    /// `self.session_panes`. Called from the
+    /// run loop tick every ~100ms. Each received
+    /// `(pane_id, cmdline)` pair updates the
+    /// matching pane row's `command` field in
+    /// place (combining the agent name and the
+    /// cmdline — same logic the synchronous path
+    /// used before this was moved to a
+    /// background thread).
+    ///
+    /// Stale results (from a snapshot that has
+    /// been superseded by a newer one) are
+    /// discarded — the `snapshot_id` check at
+    /// the top of the function guards against
+    /// overwriting the new snapshot with old
+    /// data.
+    ///
+    /// When the channel is closed (the thread
+    /// finished), the request is taken out of
+    /// `pane_cmdlines_request` so the next poll
+    /// is a no-op.
+    fn process_pane_cmdlines(&mut self) {
+        // Lazy spawn: if no lookup is in flight AND
+        // we have pane rows AND the backend is herdr,
+        // spawn one now. This fires once, after the
+        // run loop has settled (the multiple
+        // `fetch_session_panes_impl` calls during
+        // init have all happened), so the snapshot
+        // id at spawn time matches the current
+        // snapshot — the request survives long
+        // enough to deliver results.
+        if self.pane_cmdlines_request.is_none()
+            && self.multiplexer.name() == "herdr"
+            && self.is_panes_query()
+            && self.session_panes.iter().any(|r| r.mode == "pane")
+        {
+            self.spawn_pane_cmdlines(self.panes_snapshot_id);
+        }
+        let Some(request) = self.pane_cmdlines_request.as_ref() else {
+            return;
+        };
+        // Discard stale results from a
+        // superseded snapshot.
+        if request.snapshot_id != self.panes_snapshot_id {
+            if let Some(req) = self.pane_cmdlines_request.take() {
+                req.cancelled.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        // Drain everything that's ready.
+        let mut updates: Vec<(String, String)> = Vec::new();
+        loop {
+            match request.receiver.try_recv() {
+                Ok(pair) => updates.push(pair),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread finished — take the
+                    // request so we stop polling.
+                    self.pane_cmdlines_request = None;
+                    break;
+                }
+            }
+        }
+        if updates.is_empty() {
+            return;
+        }
+        // Patch each update into the matching
+        // pane row. The `command` field is what
+        // the renderer shows as the row's
+        // primary text.
+        for (pane_id, cmdline) in &updates {
+            if let Some(row) = self
+                .session_panes
+                .iter_mut()
+                .find(|r| r.mode == "pane" && &r.session_id == pane_id)
+            {
+                // Combine the agent name
+                // (if any) with the
+                // cmdline (if any). When
+                // the agent and the
+                // cmdline's first token
+                // match (e.g.
+                // agent="pi" and
+                // argv0="pi"), show
+                // only the cmdline
+                // (avoids `pi pi`).
+                let agent = row.command.clone();
+                let combined = if agent.is_empty() {
+                    cmdline.clone()
+                } else {
+                    let cmd_first =
+                        cmdline.split_whitespace().next().unwrap_or("");
+                    if cmd_first.eq_ignore_ascii_case(&agent) {
+                        cmdline.clone()
+                    } else {
+                        format!("{} {}", agent, cmdline)
+                    }
+                };
+                row.command = combined;
+            }
+        }
+        // Re-fetch the panes so the patched
+        // `session_panes` values flow into
+        // `self.rows` (which `build_merged_rows`
+        // reads in panes mode), then rebuild
+        // the merged list so the next render
+        // picks up the updated `command` fields.
+        // Only do this if we're actually in
+        // panes mode — otherwise the rebuild
+        // is wasted work (and could thrash
+        // the main view).
+        if self.is_panes_query() {
+            self.rows = self.fetch().unwrap_or_default();
+            self.merged_rows = self.build_merged_rows();
+        }
+    }
+
     fn fetch_panes(&mut self) -> Result<Vec<HistoryRow>> {
         self.fetch_session_panes();
         // Apply the panes-filter
@@ -4507,6 +4740,40 @@ struct JiraRequest {
     cancelled: Arc<AtomicBool>,
 }
 
+/// An in-flight pane-cmdline lookup request.
+/// Spawned by `App::spawn_pane_cmdlines` when
+/// the `*`-mode panes view is populated. The
+/// background thread calls
+/// `multiplexer::herdr_pane_cmdline` for each
+/// pane in the snapshot and streams results
+/// back over the channel; the run loop polls
+/// them in `process_pane_cmdlines`.
+///
+/// The result is `Vec<(pane_id, cmdline)>` —
+/// one entry per pane whose cmdline was
+/// successfully looked up. Panes whose lookup
+/// fails (or whose `process-info` returns no
+/// foreground process) are simply absent
+/// from the result; the row keeps its initial
+/// agent-name display.
+///
+/// The `snapshot_id` tracks which snapshot
+/// the request belongs to, so a stale result
+/// from a superseded snapshot (the user
+/// refreshed the panes view while a previous
+/// lookup was in flight) is discarded rather
+/// than overwriting the new snapshot.
+struct PaneCmdlineRequest {
+    receiver: mpsc::Receiver<(String, String)>,
+    cancelled: Arc<AtomicBool>,
+    /// Monotonic counter incremented on each
+    /// `fetch_session_panes_impl` call. The
+    /// spawned thread stashes the counter at
+    /// spawn time; the App checks it on
+    /// receipt to detect stale results.
+    snapshot_id: u64,
+}
+
 /// An in-flight JIRA comments fetch request.
 /// Mirrors `JiraRequest` (a background thread
 /// sends the result over the channel, the run
@@ -4975,6 +5242,8 @@ notes_date_filter: NotesDateFilter::All,
             host_defs: Vec::new(),
             add_entry_dialog: None,
             panes_filter: PanesFilter::default(),
+            pane_cmdlines_request: None,
+            panes_snapshot_id: 0,
             // Multiplexer backend
             // (tmux / herdr).
             // The staging layer
@@ -10499,6 +10768,25 @@ fn run_loop(
             let request = app.jira_add_comment_request.take().unwrap();
             app.process_jira_add_comment_result(request, key, result);
         }
+
+        // Drain the background pane-cmdline lookup
+        // (only in the herdr backend). Each ready
+        // `(pane_id, cmdline)` pair patches the
+        // matching pane row's `command` field in
+        // place and triggers a merged-rows
+        // rebuild so the next draw reflects
+        // the cmdline (e.g. `nvim config.toml`,
+        // `ssh har@host`) instead of just the
+        // agent name.
+        //
+        // The poll is unconditional (not gated on
+        // `is_panes_query`) so a lookup that was
+        // in flight when the user left `*` mode
+        // is still drained — the stale-result
+        // guard in `process_pane_cmdlines` drops
+        // anything that doesn't match the
+        // current snapshot.
+        app.process_pane_cmdlines();
 
         if !crossterm::event::poll(Duration::from_millis(100))? {
             // No input ready. Still a chance to drive the
