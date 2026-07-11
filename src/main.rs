@@ -867,6 +867,14 @@ pub struct QueryPrefixes {
     /// the typed pattern. Selecting a row opens
     /// the file in `$EDITOR`.
     pub files: char,
+    /// Prefix for the tags-view mode (default
+    /// `$`). Lists every symbol defined in a
+    /// universal tag file (`tags`) in the
+    /// current directory, filtered by the
+    /// typed pattern. Selecting a row opens
+    /// the file in `$EDITOR` at the correct
+    /// line (`+LINE_NUMBER`).
+    pub tags: char,
     pub jira: char,
 }
 
@@ -882,6 +890,7 @@ impl Default for QueryPrefixes {
             directories: '#',
             panes: '*',
             files: '~',
+            tags: '$',
             jira: '-',
         }
     }
@@ -2189,6 +2198,7 @@ impl Config {
             "directories" => prefixes.directories = c,
             "panes" => prefixes.panes = c,
             "files" => prefixes.files = c,
+            "tags" => prefixes.tags = c,
             "jira" => prefixes.jira = c,
             _ => {}
         }

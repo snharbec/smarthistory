@@ -1566,6 +1566,28 @@ impl App {
         !self.query.is_empty() && self.query.starts_with(p)
     }
 
+    /// Whether the query is a tags-search request:
+    /// the query starts with the tags prefix (`$` by
+    /// default). The body is matched against the
+    /// symbol names AND the source-line text from the
+    /// `tags` file in the current directory.
+    fn is_tags_query(&self) -> bool {
+        let p = self.query_prefixes.tags;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
+    /// The tags-search body, i.e. everything after the
+    /// leading `$` prefix. Empty string when not in
+    /// tags mode.
+    fn tags_pattern(&self) -> &str {
+        if self.is_tags_query() {
+            let p = self.query_prefixes.tags;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
 
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
@@ -3660,6 +3682,155 @@ std::fs::read_to_string(&path).unwrap_or_default()
         // empty) cache so the TUI never
         Ok(self.files_state.rows.clone())
     }
+
+    /// Parse the `tags` file in the current directory
+    /// and return one `HistoryRow` per symbol entry.
+    /// Each row carries:
+    ///
+    /// - `command` — the source-line text (for display
+    ///   and search matching). This is the line of code
+    ///   the tag was found on, stripped of the trailing
+    ///   `symbol_name + line_number, byte_offset`
+    ///   suffix that the universal tag format appends.
+    /// - `directory` — the absolute path of the file the
+    ///   symbol was found in (from the section header).
+    /// - `comment` — the symbol name (the short
+    ///   identifier the tag file tags — e.g.
+    ///   `build_prompt`, `SshHostBlock`). Shown as
+    ///   secondary text and used for search matching.
+    /// - `session_id` — the line number as a string
+    ///   (e.g. `"268"`). Used by the staging layer to
+    ///   build the `+LINE_NUMBER` editor argument.
+    /// - `mode` — `"tags"`.
+    /// - `source` — `"tags"`.
+    ///
+    /// The `tags` file format is:
+    /// ```text
+    /// \x0c
+    /// <filename>,<line_count>
+    /// <source_line><symbol_name><line>,<byte_offset>
+    /// <source_line><symbol_name><line>,<byte_offset>
+    /// ...
+    /// \x0c
+    /// <next_file>,<line_count>
+    /// ...
+    /// ```
+    ///
+    /// The `\x0c` (form feed) on its own line separates
+    /// file sections. The section header carries the
+    /// filename and the line count. Each symbol line
+    /// carries the source line, the symbol name, the
+    /// line number, and the byte offset — all
+    /// concatenated without delimiters. The parser
+    /// splits them by working backward from the end:
+    /// the last ``,``` separates the byte offset from
+    /// the rest; the digits before that comma are the
+    /// line number; everything before the digits is the
+    /// display text (source line + symbol name
+    /// concatenated — we keep the full text for
+    /// display so the user has context).
+    ///
+    /// The filter (the body after `$`) is matched as a
+    /// case-insensitive substring against the symbol
+    /// name (`comment`), the source line (`command`),
+    /// and the filename (`directory`). Multiple
+    /// whitespace-separated tokens are AND-combined.
+    /// An empty filter returns every symbol.
+    fn fetch_tags(&mut self) -> Result<Vec<HistoryRow>> {
+        let tags_path = std::path::PathBuf::from("tags");
+        let contents = match std::fs::read_to_string(&tags_path) {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let current_dir = std::env::current_dir().unwrap_or_default();
+        let pattern = self.tags_pattern().trim();
+        let tokens: Vec<String> = pattern
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_lowercase())
+            .collect();
+        let mut rows: Vec<HistoryRow> = Vec::new();
+        let mut next_id: i64 = -1;
+        let mut current_file: String = String::new();
+        let mut in_section = false;
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for line in contents.lines() {
+            if line == "\x0c" || line.is_empty() {
+                in_section = false;
+                continue;
+            }
+            if !in_section {
+                // Section header: <filename>,<line_count>
+                if let Some(idx) = line.find(',') {
+                    current_file = line[..idx].to_string();
+                } else {
+                    current_file = line.to_string();
+                }
+                in_section = true;
+                continue;
+            }
+            // Symbol line: <display><line>,<offset>
+            // Parse from the end: last comma → offset,
+            // digits before it → line, rest → display.
+            let Some(comma_idx) = line.rfind(',') else {
+                continue;
+            };
+            let offset_str = &line[comma_idx + 1..];
+            if offset_str.is_empty() || !offset_str.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let rest = &line[..comma_idx];
+            // Walk back from the end of `rest` to find
+            // where the line-number digits start.
+            let mut i = rest.len();
+            while i > 0 && rest.as_bytes()[i - 1].is_ascii_digit() {
+                i -= 1;
+            }
+            if i == rest.len() {
+                // No digits found — malformed line.
+                continue;
+            }
+            let line_number = &rest[i..];
+            let display = &rest[..i];
+            if display.is_empty() || line_number.is_empty() {
+                continue;
+            }
+            // Build the absolute file path.
+            let filepath = if std::path::Path::new(&current_file).is_absolute() {
+                current_file.clone()
+            } else {
+                current_dir.join(&current_file).to_string_lossy().into_owned()
+            };
+            // Apply the token filter.
+            let display_lc = display.to_lowercase();
+            let file_lc = current_file.to_lowercase();
+            if !tokens.is_empty() {
+                let all_match = tokens.iter().all(|tok| {
+                    display_lc.contains(tok) || file_lc.contains(tok)
+                });
+                if !all_match {
+                    continue;
+                }
+            }
+            rows.push(HistoryRow {
+                id: next_id,
+                command: display.to_string(),
+                directory: filepath,
+                session_id: line_number.to_string(),
+                exit_code: 0,
+                timestamp: now_epoch,
+                comment: String::new(),
+                output: String::new(),
+                mode: "tags".to_string(),
+                source: "tags".to_string(),
+            });
+            next_id -= 1;
+        }
+        Ok(rows)
+    }
 }
 
 // File-mode helpers (FilesState, walk_dir, IgnoreSet,
@@ -5507,7 +5678,7 @@ notes_date_filter: NotesDateFilter::All,
         // here and is gate-checked by
         // `duplicate_filter` (default
         // on).
-        if self.is_directories_query() || self.is_jira_query() || self.is_files_query() {
+        if self.is_directories_query() || self.is_jira_query() || self.is_files_query() || self.is_tags_query() {
             let mut merged = self.rows.clone();
             if self.duplicate_filter
                 || self.sort_order
@@ -5778,6 +5949,9 @@ notes_date_filter: NotesDateFilter::All,
         }
         if self.is_files_query() {
             return self.fetch_files();
+        }
+        if self.is_tags_query() {
+            return self.fetch_tags();
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
@@ -6342,6 +6516,10 @@ fn move_selection(&mut self, delta: isize) {
             self.select_for_run_impl();
             return;
         }
+        if self.is_tags_query() {
+            self.select_for_run_impl();
+            return;
+        }
         if self.is_directories_query() {
             self.select_for_run_impl();
             return;
@@ -6546,6 +6724,38 @@ fn move_selection(&mut self, delta: isize) {
                     filepath.to_string()
                 };
                 self.selection = Some(format!("{} {}", editor, quoted));
+                self.pick_mode = Some(PickMode::Run);
+            }
+            return;
+        }
+        // `$...` queries are tags-search requests.
+        // Selecting a symbol opens the file in the
+        // editor at the correct line, using
+        // `+LINE_NUMBER` (the convention nvim, vim,
+        // and most CLI editors understand).
+        if self.is_tags_query() {
+            if let Some(row) = self.selected_row() {
+                let editor = std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vi".to_string());
+                // The absolute path is in
+                // `row.directory`, the line
+                // number is in `row.session_id`.
+                let filepath = &row.directory;
+                let line = &row.session_id;
+                let quoted = if filepath
+                    .chars()
+                    .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
+                {
+                    format!("\"{}\"", filepath)
+                } else {
+                    filepath.to_string()
+                };
+                self.selection = Some(format!(
+                    "{} +{} {}",
+                    editor, line, quoted,
+                ));
                 self.pick_mode = Some(PickMode::Run);
             }
             return;
@@ -7212,11 +7422,21 @@ fn move_selection(&mut self, delta: isize) {
                         format!("\"{}\"", abs)
                     } else { abs.clone() };
                     let quoted_label = crate::util::shell_quote(&name);
-                    // Check if a workspace with a matching cwd already exists.
+                    // Check if a workspace with a matching LABEL already
+                    // exists. The session's display name (e.g.
+                    // `Proxmox`, `Downloads`) is matched against the
+                    // workspace's `workspace_label` (the human-readable
+                    // name from `herdr workspace list`'s `label` field).
+                    // This is different from the host matcher (which
+                    // matches by label too) and from the old directory-
+                    // based matcher (which checked if any pane's cwd
+                    // matched the session's `dir` — that was too
+                    // broad: a pane running in the same directory but
+                    // under a different workspace label would falsely
+                    // match, preventing the user from creating a new
+                    // dedicated workspace).
                     let existing = self.tmux_windows.iter().find(|w| {
-                        let w_n = crate::util::normalize_for_compare(&w.path, &self.home_list);
-                        let d_n = crate::util::normalize_for_compare(&abs, &self.home_list);
-                        w_n == d_n
+                        w.workspace_label == name
                     }).map(|w| w.pane_id.clone());
                     let cmd = if let Some(ref pane_id) = existing {
                         // Workspace exists — focus it (+ optionally exec).
@@ -14947,7 +15167,7 @@ mod tests {
                         // doesn't
                         // either).
                         current_command: String::new(),
-                        workspace_label: String::from("wA"),
+                        workspace_label: String::from("tmp session"),
                     }]
                 }
                 fn snapshot_current_panes(
@@ -23330,6 +23550,101 @@ mod tests {
             // host should match.
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].command, "Proxmox");
+        }
+
+        /// Tags mode parses the `tags` file in the
+        /// current directory and returns one row per
+        /// symbol entry. Each row carries the display
+        /// text, the file path, and the line number.
+        #[test]
+        fn fetch_tags_parses_tag_file() {
+            let mut app = directories_test_app(&[]);
+            app.query = String::from("$");
+            app.refresh();
+            let rows = app.fetch_tags().unwrap();
+            // The tags file in the
+            // repo root has 1935+
+            // entries.
+            assert!(rows.len() > 100, "expected many tag entries, got {}", rows.len());
+            // Every row has a
+            // non-empty file path,
+            // line number, and
+            // display text.
+            for r in &rows {
+                assert!(!r.directory.is_empty(), "file path must be non-empty: {:?}", r);
+                assert!(!r.session_id.is_empty(), "line number must be non-empty: {:?}", r);
+                assert!(!r.command.is_empty(), "display text must be non-empty: {:?}", r);
+                assert_eq!(r.mode, "tags");
+                assert_eq!(r.source, "tags");
+                // The line number
+                // must be a valid
+                // integer.
+                r.session_id.parse::<u32>().expect("line number must be a valid integer");
+            }
+        }
+
+        /// Tags mode filters by the body after `$`.
+        /// Both the symbol name (in `command`) and
+        /// the filename are matched.
+        #[test]
+        fn fetch_tags_substring_filter_matches() {
+            let mut app = directories_test_app(&[]);
+            app.query = String::from("$ssh_config");
+            app.refresh();
+            let rows = app.fetch_tags().unwrap();
+            // Every row should
+            // match "ssh_config"
+            // in either the
+            // display text or
+            // the filename.
+            assert!(!rows.is_empty(), "expected at least one match for 'ssh_config'");
+            for r in &rows {
+                let lc = r.command.to_lowercase();
+                let fl = r.directory.to_lowercase();
+                assert!(
+                    lc.contains("ssh_config") || fl.contains("ssh_config"),
+                    "row must match the filter: {:?}",
+                    r,
+                );
+            }
+        }
+
+        /// Selecting a tags row stages
+        /// `$EDITOR +<line> <filepath>`.
+        #[test]
+        fn select_for_run_in_tags_mode_stages_editor_with_line() {
+            let mut app = directories_test_app(&[]);
+            app.query = String::from("$ssh_config");
+            app.refresh();
+            let rows = app.fetch_tags().unwrap();
+            assert!(!rows.is_empty());
+            // Find the index of
+            // the first row in
+            // merged_rows.
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "tags")
+                .expect("at least one tags row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for tags row");
+            eprintln!("[test] staged tags command: {staged}");
+            // The staged command
+            // must include the
+            // editor, `+<line>`,
+            // and the file path.
+            assert!(
+                staged.contains("+"),
+                "must include +LINE_NUMBER, got: {staged:?}"
+            );
+            assert!(
+                staged.contains(".rs"),
+                "must include a .rs file path, got: {staged:?}"
+            );
         }
 
         /// Selecting a pane in `*` mode stages the

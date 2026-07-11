@@ -1480,6 +1480,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         qp.files.to_string(),
         "list every file in the current directory (selecting one opens it in $EDITOR)",
     );
+    mode_row(
+        &mut lines,
+        "tags",
+        qp.tags.to_string(),
+        "list every symbol from the `tags` file (selecting one opens $EDITOR +LINE file)",
+    );
 
     lines.push(Line::from(""));
 
@@ -4352,6 +4358,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 ("-".to_string(), " jira ".to_string(), app.query.as_str())
             } else if app.is_files_query() {
                 ("~".to_string(), format!(" files{} ", algo), app.query.as_str())
+            } else if app.is_tags_query() {
+                ("$".to_string(), format!(" symbols{} ", algo), app.query.as_str())
             } else {
                 (
                     "> ".to_string(),
@@ -4395,6 +4403,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::info_color())
             } else if app.is_files_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_tags_query() {
+                Style::default().fg(Theme::success_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())
             } else if is_fuzzy {
@@ -4434,6 +4444,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             } else if app.is_jira_query() {
                 Style::default().fg(Theme::info_color())
             } else if app.is_files_query() {
+                Style::default().fg(Theme::success_color())
+            } else if app.is_tags_query() {
                 Style::default().fg(Theme::success_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())

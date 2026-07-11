@@ -187,6 +187,7 @@ prefix characters are configurable via `prefix.<mode>=<char>`.
 | Panes         | `*`    | List all panes across all tmux sessions / herdr workspaces. |
 | JIRA          | `-`    | Search JIRA issues via REST API.                   |
 | Files         | `~`    | List every file in the current directory tree.     |
+| Tags          | `$`    | List every symbol from the `tags` file. Selecting opens `$EDITOR +LINE file`. |
 
 ### Quick-create from notes/todo mode
 
