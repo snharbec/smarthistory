@@ -364,6 +364,68 @@ impl DirectorySource {
     }
 }
 
+/// Filter for the `*`-mode panes view.
+/// Determines which section(s) of the
+/// tree are shown:
+///
+/// - `All` — every section (live
+///   multiplexer panes + `# sessions` +
+///   `# hosts`). The default.
+/// - `Windows` — only live
+///   multiplexer panes (rows with
+///   `source == "pane"` or `"workspace"`).
+/// - `Hosts` — only the `# hosts`
+///   block (rows with `source ==
+///   "hosts"`).
+/// - `Sessions` — only the `# sessions`
+///   block (rows with `source ==
+///   "sessions"`).
+///
+/// Toggled by the `FilterPanesWindows`,
+/// `FilterPanesHosts`, and
+/// `FilterPanesSessions` actions
+/// (default keys `F7`, `F8`, `F9`).
+/// Pressing the active filter's key
+/// again resets to `All` (toggle off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanesFilter {
+    /// Show all sections (default).
+    #[default]
+    All,
+    /// Show only live multiplexer
+    /// panes / workspaces.
+    Windows,
+    /// Show only the `# hosts` block.
+    Hosts,
+    /// Show only the `# sessions` block.
+    Sessions,
+}
+
+impl PanesFilter {
+    /// Short display label
+    /// for the mode-strip
+    /// chip. Returns the
+    /// empty string for `All`
+    /// (no chip shown).
+    pub fn label(self) -> &'static str {
+        match self {
+            PanesFilter::All => "",
+            PanesFilter::Windows => "PANES",
+            PanesFilter::Hosts => "HOSTS",
+            PanesFilter::Sessions => "SESSIONS",
+        }
+    }
+
+    /// Returns `true` when
+    /// the filter is at its
+    /// default (`All`). Used
+    /// by the renderer to
+    /// hide the chip.
+    pub fn is_default(self) -> bool {
+        self == PanesFilter::All
+    }
+}
+
 /// Which kind of entry the
 /// `AddEntryDialog` is
 /// constructing. The

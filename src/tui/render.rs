@@ -1290,6 +1290,34 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
 
+    // ----- Panes filter -----
+    //
+    // The three `FilterPanes*`
+    // actions toggle the `*`-mode
+    // panes view between showing
+    // all sections (live multiplexer
+    // panes + `# sessions` + `# hosts`)
+    // and showing only one section.
+    // Pressing the active filter's
+    // key again resets to All.
+    row(
+        &mut lines,
+        binding_for(Action::FilterPanesWindows),
+        "panes: show only live multiplexer windows / panes",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::FilterPanesHosts),
+        "panes: show only the `# hosts` block",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::FilterPanesSessions),
+        "panes: show only the `# sessions` block",
+    );
+
+    lines.push(Line::from(""));
+
     // ----- Cancel -----
     row(
         &mut lines,
@@ -2109,6 +2137,28 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Panes-filter chip:
+    // shown only in panes
+    // mode (`*`) and only
+    // when the filter is
+    // not the default
+    // (`All`). The user's
+    // current filter
+    // (Windows / Hosts /
+    // Sessions) is the
+    // load-bearing
+    // information here, so
+    // it's worth a chip
+    // when the user has
+    // chosen a non-default
+    // filter.
+    let panes_filter_chip = if app.is_panes_query()
+        && !app.panes_filter.is_default()
+    {
+        Some(panes_filter_badge(app.panes_filter))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -2138,6 +2188,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = dirsrc_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = panes_filter_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -2399,6 +2453,28 @@ fn directory_source_badge(
         Style::default()
             .fg(Theme::badge_fg_color())
             .bg(Theme::highlight_color())
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn panes_filter_badge(filter: crate::tui::state::PanesFilter) -> Span<'static> {
+    // The panes-filter chip
+    // uses the warning color
+    // (`yellow` by default)
+    // so it stands out from
+    // the accent-colored DIR
+    // chip and the
+    // success-colored SESS
+    // mode badge. The label
+    // is the filter's
+    // `label()` ("PANES" /
+    // "HOSTS" / "SESSIONS").
+    let label = filter.label();
+    Span::styled(
+        format!(" *:{} ", label),
+        Style::default()
+            .fg(Theme::badge_fg_color())
+            .bg(Theme::warning_color())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -2784,7 +2860,17 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // `focus_session`;
     // selecting a pane row
     // stages `focus_pane`.
-    if row.mode == "pane" {
+    if row.mode == "pane" || row.mode == "session" || row.mode == "host" {
+        // `pane`, `session`, and `host` rows are
+        // all children of a `workspace` header row
+        // in the `*`-mode tree. Indent them with
+        // the same `  · ` tree connector so they're
+        // visually grouped under their header.
+        // Without this, `# sessions` and `# hosts`
+        // header rows would have their child rows
+        // flush with the left margin, looking like
+        // flat history rows rather than tree
+        // children.
         spans.push(Span::raw("  · "));
     } else if row.mode == "workspace" {
         spans.push(Span::styled(

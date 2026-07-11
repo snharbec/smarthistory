@@ -143,6 +143,11 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 | `Ctrl+H`  | Open the help overlay.                                         |
 | `:`       | Open the command palette.                                       |
 | `T`       | Open the theme picker.                                          |
+| `Ctrl+1`  | Add the selected directory as a new named session (`*` mode).  |
+| `Ctrl+2`  | Add the selected directory as a new host (`*` mode).            |
+| `F7`      | Panes filter: show only live multiplexer windows (`*` mode).   |
+| `F8`      | Panes filter: show only the `# hosts` block (`*` mode).         |
+| `F9`      | Panes filter: show only the `# sessions` block (`*` mode).     |
 | `Esc`     | Close any overlay / cancel the picker.                         |
 
 All keybindings are user-configurable via `key.<action>=<spec>` in the

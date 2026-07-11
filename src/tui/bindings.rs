@@ -255,6 +255,29 @@ pub enum Action {
     /// no-op semantics as
     /// `AddSession`.
     AddHost,
+    /// Filter the `*`-mode panes view to show
+    /// only live multiplexer panes (hide
+    /// `# sessions` and `# hosts`). Pressing
+    /// the key again (when already filtered
+    /// to Windows) resets to `All`.
+    ///
+    /// Default key: `F7`. No-op outside of
+    /// panes mode (with a status message).
+    FilterPanesWindows,
+    /// Filter the `*`-mode panes view to show
+    /// only the `# hosts` block. Pressing
+    /// the key again resets to `All`.
+    ///
+    /// Default key: `F8`. No-op outside of
+    /// panes mode.
+    FilterPanesHosts,
+    /// Filter the `*`-mode panes view to show
+    /// only the `# sessions` block. Pressing
+    /// the key again resets to `All`.
+    ///
+    /// Default key: `F9`. No-op outside of
+    /// panes mode.
+    FilterPanesSessions,
 }
 
 impl Action {
@@ -281,6 +304,9 @@ impl Action {
             Action::CycleDirectorySource => "cycle-directory-source",
             Action::AddSession => "add-session",
             Action::AddHost => "add-host",
+            Action::FilterPanesWindows => "filter-panes-windows",
+            Action::FilterPanesHosts => "filter-panes-hosts",
+            Action::FilterPanesSessions => "filter-panes-sessions",
             Action::Describe => "describe",
             Action::Correct => "correct",
             Action::Run => "run",
@@ -322,6 +348,9 @@ impl Action {
             Action::CycleDirectorySource => "Cycle directory source",
             Action::AddSession => "Add selected directory as a session",
             Action::AddHost => "Add selected directory as a host",
+            Action::FilterPanesWindows => "Filter panes: windows only",
+            Action::FilterPanesHosts => "Filter panes: hosts only",
+            Action::FilterPanesSessions => "Filter panes: sessions only",
             Action::Describe => "Describe selected command",
             Action::Correct => "Correct selected command",
             Action::Run => "Run",
@@ -388,6 +417,9 @@ impl Action {
             // machine lives in `tui.rs`; these
             // actions just open it.
             Action::AddSession | Action::AddHost => "config",
+            Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
+                "panes"
+            }
         }
     }
 
@@ -430,6 +462,9 @@ impl Action {
             Action::MarkTodoDone => "C-x",
             Action::AddSession => "C-1",
             Action::AddHost => "C-2",
+            Action::FilterPanesWindows => "F7",
+            Action::FilterPanesHosts => "F8",
+            Action::FilterPanesSessions => "F9",
         }
     }
 }
@@ -704,6 +739,9 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::MarkTodoDone,
     Action::AddSession,
     Action::AddHost,
+    Action::FilterPanesWindows,
+    Action::FilterPanesHosts,
+    Action::FilterPanesSessions,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of

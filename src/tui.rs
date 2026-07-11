@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use bindings::{action_for_key, format_key_spec, format_key_specs, Action, KeyBindings, ALL_ACTIONS};
-pub use state::{AddEntryDialog, AddEntryKind, ExitFilter, HostDef, MatchAlgorithm, Mode, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
+pub use state::{AddEntryDialog, AddEntryKind, ExitFilter, HostDef, MatchAlgorithm, Mode, PanesFilter, HistoryRow, PickMode, SortOrder, TmuxWindowInfo, exit_code};
 pub use theme::{install_palette, SelectedTheme, BuiltinTheme, ThemePicker};
 
 /// Persistent state of the last TUI session. Stored in
@@ -1061,6 +1061,22 @@ struct App {
     /// (Enter) or cancels
     /// (Esc).
     add_entry_dialog: Option<AddEntryDialog>,
+    /// Filter for the `*`-mode panes view.
+    /// When set to a non-`All` value,
+    /// `fetch_panes` hides rows whose
+    /// `source` doesn't match the
+    /// filter. Toggled by the
+    /// `FilterPanesWindows` /
+    /// `FilterPanesHosts` /
+    /// `FilterPanesSessions` actions
+    /// (`F7` / `F8` / `F9`); pressing
+    /// the active filter's key again
+    /// resets to `All`. The current
+    /// value is shown as a chip in the
+    /// mode strip so the user can see
+    /// at a glance which section is
+    /// filtered.
+    panes_filter: PanesFilter,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -3309,6 +3325,41 @@ std::fs::read_to_string(&path).unwrap_or_default()
     /// one) is a valid result.
     fn fetch_panes(&mut self) -> Result<Vec<HistoryRow>> {
         self.fetch_session_panes();
+        // Apply the panes-filter
+        // (toggled by F7 / F8 /
+        // F9) BEFORE the token
+        // filter so the user can
+        // narrow within the
+        // filtered section (e.g.
+        // `*vim` with the Windows
+        // filter on shows only
+        // live panes running vim).
+        //
+        // The filter is on the
+        // row's `source` field:
+        //   - `Windows` keeps
+        //     `pane` + `workspace`
+        //     (live multiplexer).
+        //   - `Hosts` keeps `hosts`.
+        //   - `Sessions` keeps
+        //     `sessions`.
+        //   - `All` keeps everything.
+        let section_rows: Vec<HistoryRow> = if self.panes_filter.is_default() {
+            self.session_panes.clone()
+        } else {
+            self.session_panes
+                .iter()
+                .filter(|r| match self.panes_filter {
+                    PanesFilter::All => true,
+                    PanesFilter::Windows => {
+                        r.source == "pane" || r.source == "workspace"
+                    }
+                    PanesFilter::Hosts => r.source == "hosts",
+                    PanesFilter::Sessions => r.source == "sessions",
+                })
+                .cloned()
+                .collect()
+        };
         let filter = self.panes_pattern().trim();
         let tokens: Vec<String> = filter
             .split_whitespace()
@@ -3316,15 +3367,14 @@ std::fs::read_to_string(&path).unwrap_or_default()
             .map(|t| t.to_lowercase())
             .collect();
         if tokens.is_empty() {
-            return Ok(self.session_panes.clone());
+            return Ok(section_rows);
         }
         // When the match algorithm is Substring, use the fast
         // inline substring check. When it's Fuzzy or Regex,
         // defer to `query_matches_text` which respects the
         // active algorithm.
         if self.match_algorithm != MatchAlgorithm::Substring {
-            return Ok(self
-                .session_panes
+            return Ok(section_rows
                 .iter()
                 .filter(|r| {
                     self.query_matches_text(&r.command)
@@ -3335,8 +3385,7 @@ std::fs::read_to_string(&path).unwrap_or_default()
                 .cloned()
                 .collect());
         }
-        Ok(self
-            .session_panes
+        Ok(section_rows
             .iter()
             .filter(|r| {
                 let cmd_lc = r.command.to_lowercase();
@@ -4925,6 +4974,7 @@ notes_date_filter: NotesDateFilter::All,
             hosts: Vec::new(),
             host_defs: Vec::new(),
             add_entry_dialog: None,
+            panes_filter: PanesFilter::default(),
             // Multiplexer backend
             // (tmux / herdr).
             // The staging layer
@@ -5845,6 +5895,44 @@ notes_date_filter: NotesDateFilter::All,
         }
         self.directory_source =
             self.directory_source.next();
+        self.refresh();
+    }
+
+    /// Toggle the `*`-mode panes filter.
+    /// If `target` is already active,
+    /// resets to `All` (toggle off).
+    /// Otherwise sets the filter to
+    /// `target`. After changing the
+    /// filter, refreshes the list so
+    /// the rows update immediately.
+    ///
+    /// No-op (with a status message)
+    /// when not in panes (`*`) mode —
+    /// the filter only applies to the
+    /// panes view, so firing it
+    /// elsewhere would surprise the
+    /// user.
+    fn toggle_panes_filter(&mut self, target: PanesFilter) {
+        if !self.is_panes_query() {
+            self.set_status_message("PanES filter is only available in panes mode (type `*`)".to_string());
+            return;
+        }
+        if self.panes_filter == target {
+            // Same key pressed again — reset.
+            self.panes_filter = PanesFilter::All;
+            self.set_status_message("panes filter: all".to_string());
+        } else {
+            self.panes_filter = target;
+            self.set_status_message(format!(
+                "panes filter: {}",
+                target.label().to_lowercase(),
+            ));
+        }
+        // Reset the selection to the
+        // first row so the cursor
+        // doesn't land on a row
+        // that's now filtered out.
+        self.list_state.select(Some(0));
         self.refresh();
     }
 
@@ -10854,6 +10942,18 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // the selected row's
             // directory basename.
             app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Host);
+            false
+        }
+        Action::FilterPanesWindows => {
+            app.toggle_panes_filter(PanesFilter::Windows);
+            false
+        }
+        Action::FilterPanesHosts => {
+            app.toggle_panes_filter(PanesFilter::Hosts);
+            false
+        }
+        Action::FilterPanesSessions => {
+            app.toggle_panes_filter(PanesFilter::Sessions);
             false
         }
     }
@@ -22764,6 +22864,178 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].session_id, "%2");
             assert_eq!(rows[0].command, "vim");
+        }
+
+        /// The `FilterPanesWindows` filter hides
+        /// `# sessions` and `# hosts` rows, keeping
+        /// only live multiplexer panes.
+        #[test]
+        fn fetch_panes_windows_filter_hides_sessions_and_hosts() {
+            use crate::tui::state::HistoryRow;
+            let mut app = panes_test_app(&[
+                ("%1", "@1", "/tmp", "zsh"),
+            ]);
+            // Inject a session row
+            // and a host row so
+            // we can verify they're
+            // filtered out.
+            app.session_panes.push(HistoryRow {
+                id: -20_001,
+                command: String::from("my session"),
+                directory: String::from("/tmp"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("session"),
+                source: String::from("sessions"),
+            });
+            app.session_panes.push(HistoryRow {
+                id: -25_001,
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            });
+            app.query = String::from("*");
+            app.panes_filter = PanesFilter::Windows;
+            let rows = app.fetch_panes().unwrap();
+            // Only the pane row
+            // should remain.
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].source, "pane");
+            assert_eq!(rows[0].command, "zsh");
+        }
+
+        /// The `FilterPanesHosts` filter keeps
+        /// only the `# hosts` block.
+        #[test]
+        fn fetch_panes_hosts_filter_keeps_only_hosts() {
+            use crate::tui::state::HistoryRow;
+            let mut app = panes_test_app(&[
+                ("%1", "@1", "/tmp", "zsh"),
+            ]);
+            app.session_panes.push(HistoryRow {
+                id: -20_001,
+                command: String::from("my session"),
+                directory: String::from("/tmp"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("session"),
+                source: String::from("sessions"),
+            });
+            app.session_panes.push(HistoryRow {
+                id: -25_001,
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            });
+            app.query = String::from("*");
+            app.panes_filter = PanesFilter::Hosts;
+            let rows = app.fetch_panes().unwrap();
+            // Only the host row
+            // should remain.
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].source, "hosts");
+            assert_eq!(rows[0].command, "Proxmox");
+        }
+
+        /// The `FilterPanesSessions` filter keeps
+        /// only the `# sessions` block.
+        #[test]
+        fn fetch_panes_sessions_filter_keeps_only_sessions() {
+            use crate::tui::state::HistoryRow;
+            let mut app = panes_test_app(&[
+                ("%1", "@1", "/tmp", "zsh"),
+            ]);
+            app.session_panes.push(HistoryRow {
+                id: -20_001,
+                command: String::from("my session"),
+                directory: String::from("/tmp"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("session"),
+                source: String::from("sessions"),
+            });
+            app.session_panes.push(HistoryRow {
+                id: -25_001,
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            });
+            app.query = String::from("*");
+            app.panes_filter = PanesFilter::Sessions;
+            let rows = app.fetch_panes().unwrap();
+            // Only the session
+            // row should remain.
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].source, "sessions");
+            assert_eq!(rows[0].command, "my session");
+        }
+
+        /// The token filter is applied AFTER the
+        /// section filter, so `*Proxmox` with
+        /// the Hosts filter shows only hosts
+        /// matching "Proxmox".
+        #[test]
+        fn fetch_panes_section_filter_composes_with_token_filter() {
+            use crate::tui::state::HistoryRow;
+            let mut app = panes_test_app(&[]);
+            app.session_panes.push(HistoryRow {
+                id: -25_001,
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            });
+            app.session_panes.push(HistoryRow {
+                id: -25_002,
+                command: String::from("bmlv"),
+                directory: String::from("root@bmlv"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+            });
+            app.query = String::from("*Proxmox");
+            app.panes_filter = PanesFilter::Hosts;
+            let rows = app.fetch_panes().unwrap();
+            // Only the Proxmox
+            // host should match.
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].command, "Proxmox");
         }
 
         /// Selecting a pane in `*` mode stages the
