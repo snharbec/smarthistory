@@ -10793,9 +10793,21 @@ fn resolve_initial_query(
 fn find_tags_file() -> std::path::PathBuf {
     let mut dir = std::env::current_dir().unwrap_or_default();
     loop {
-        let candidate = dir.join("tags");
-        if candidate.is_file() {
-            return candidate;
+        // Check for both lowercase `tags` and
+        // uppercase `TAGS` — different ctags
+        // invocations produce different
+        // filenames (e.g. `ctags -R` writes
+        // `tags`, while `etags` / `ctags -e`
+        // writes `TAGS`). The lowercase form is
+        // checked first (it's the more common
+        // convention).
+        let lower = dir.join("tags");
+        if lower.is_file() {
+            return lower;
+        }
+        let upper = dir.join("TAGS");
+        if upper.is_file() {
+            return upper;
         }
         match dir.parent() {
             Some(parent) if parent != dir => {
