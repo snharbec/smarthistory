@@ -231,6 +231,7 @@ pub struct JiraConfig {
     /// Base URL for *browsing* a ticket, e.g.
     /// `https://jira.company.com/browse`. A ticket key is
     /// appended as `{url}/{key}`.
+    #[allow(dead_code)]
     pub url: String,
     /// The standard project key (the `JIRA_PROJECT` env
     /// var) used for the default query when the user

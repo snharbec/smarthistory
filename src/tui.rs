@@ -3768,12 +3768,24 @@ std::fs::read_to_string(&path).unwrap_or_default()
     /// whitespace-separated tokens are AND-combined.
     /// An empty filter returns every symbol.
     fn fetch_tags(&mut self) -> Result<Vec<HistoryRow>> {
-        let tags_path = std::path::PathBuf::from("tags");
+        // Search for a `tags` file in the current directory,
+        // then walk upward through parent directories until
+        // one is found (or we hit the filesystem root). This
+        // mirrors how editors like vim/nvim discover tag files:
+        // the first `tags` file found (closest to the cwd) is
+        // the one that's used. The file paths inside the tag
+        // file are relative to the directory containing the tag
+        // file, so we resolve them against that directory (not
+        // the cwd) to produce correct absolute paths.
+        let tags_path = find_tags_file();
+        let tags_dir = tags_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         let contents = match std::fs::read_to_string(&tags_path) {
             Ok(s) => s,
             Err(_) => return Ok(Vec::new()),
         };
-        let current_dir = std::env::current_dir().unwrap_or_default();
         let pattern = self.tags_pattern().trim();
         let case_sensitive = self.is_case_sensitive();
         let tokens: Vec<String> = pattern
@@ -3830,11 +3842,14 @@ std::fs::read_to_string(&path).unwrap_or_default()
             if display.is_empty() || line_number.is_empty() {
                 continue;
             }
-            // Build the absolute file path.
+            // Build the absolute file path. File paths in
+            // the tag file are relative to the directory
+            // containing the tag file (not necessarily
+            // the cwd), so we resolve against `tags_dir`.
             let filepath = if std::path::Path::new(&current_file).is_absolute() {
                 current_file.clone()
             } else {
-                current_dir.join(&current_file).to_string_lossy().into_owned()
+                tags_dir.join(&current_file).to_string_lossy().into_owned()
             };
             // Apply the token filter.
             if !tokens.is_empty() {
@@ -10763,6 +10778,38 @@ fn resolve_initial_query(
     }
 }
 
+
+/// Find a `tags` file by walking upward from the
+/// current directory. Returns the first `tags` file
+/// found (closest to the cwd), or a path pointing
+/// to `tags` in the current directory if none is
+/// found (the `read_to_string` call in `fetch_tags`
+/// will then fail with a file-not-found error and
+/// return an empty list — the historical behavior).
+///
+/// Walk: cwd → parent → parent → … until either a
+/// `tags` file is found or we reach the filesystem
+/// root (a directory whose parent is itself).
+fn find_tags_file() -> std::path::PathBuf {
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    loop {
+        let candidate = dir.join("tags");
+        if candidate.is_file() {
+            return candidate;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => {
+                dir = parent.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    // No tags file found — return the default path
+    // so the error message in `fetch_tags` is
+    // consistent ("file not found" rather than
+    // "no tags file searched").
+    std::path::PathBuf::from("tags")
+}
 
 pub fn run_tui_to_stdout(
     initial_mode: String,

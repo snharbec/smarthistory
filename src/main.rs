@@ -243,6 +243,26 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Remove ALL history entries (and their captured output) older
+    /// than the given number of days. Unlike `clean` (which filters
+    /// by command/directory/exit-code), `prune` is a time-based
+    /// bulk delete: every row whose `timestamp` is older than
+    /// `now - N days` is removed, along with its `history_output`
+    /// row and its `command_comments` entry (if no other history row
+    /// shares the same command text after the prune).
+    ///
+    /// Example: `smarthistory prune 30` deletes everything older
+    /// than 30 days.
+    Prune {
+        /// Number of days. Entries older than this are removed.
+        /// Must be >= 0. A value of 0 removes everything (same as
+        /// `clean --force`).
+        #[arg(index = 1)]
+        days: u32,
+        /// Skip the confirmation prompt.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Return the most probable next commands that follow the given
     /// command in the global history, ordered by frequency (then
     /// lexicographically for ties). Used by the Ctrl-S line-editor
@@ -3887,6 +3907,74 @@ fn main() -> anyhow::Result<()> {
                 imported,
                 updated,
                 filename.display()
+            );
+        }
+        Commands::Prune { days, force } => {
+            // Compute the cutoff timestamp: now - days*86400.
+            // Uses the same epoch-seconds convention as the
+            // `timestamp` column in the history table.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let cutoff = now - (days as i64) * 86_400;
+
+            // Count the rows that will be deleted (for the
+            // confirmation message).
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM history WHERE timestamp < ?1",
+                params![cutoff],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            if n == 0 {
+                println!("No entries older than {} day{}; nothing to prune.", days, if days == 1 { "" } else { "s" });
+                return Ok(());
+            }
+
+            if !force
+                && !confirm(&format!(
+                    "Prune {} entr{} older than {} day{}? [y/N] ",
+                    n,
+                    if n == 1 { "y" } else { "ies" },
+                    days,
+                    if days == 1 { "" } else { "s" }
+                ))
+            {
+                println!("Aborted.");
+                return Ok(());
+            }
+
+            // Delete captured output first (explicit cascade —
+            // SQLite doesn't enforce FK constraints by default).
+            let output_deleted = conn.execute(
+                "DELETE FROM history_output WHERE history_id IN \
+                 (SELECT id FROM history WHERE timestamp < ?1)",
+                params![cutoff],
+            )?;
+            // Delete the history rows.
+            let deleted = conn.execute(
+                "DELETE FROM history WHERE timestamp < ?1",
+                params![cutoff],
+            )?;
+            // Delete orphaned comments (command_comments entries
+            // whose command text no longer appears in any history
+            // row after the prune).
+            let comments_deleted = conn.execute(
+                "DELETE FROM command_comments WHERE command NOT IN \
+                 (SELECT command FROM history)",
+                [],
+            )?;
+            println!(
+                "Pruned {} entr{} older than {} day{} ({} output row{}, {} orphaned comment{}).",
+                deleted,
+                if deleted == 1 { "y" } else { "ies" },
+                days,
+                if days == 1 { "" } else { "s" },
+                output_deleted,
+                if output_deleted == 1 { "" } else { "s" },
+                comments_deleted,
+                if comments_deleted == 1 { "" } else { "s" },
             );
         }
         Commands::Update => {
