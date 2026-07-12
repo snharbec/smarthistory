@@ -1332,6 +1332,12 @@ struct App {
     /// stay in one struct.
     files_state: crate::files::FilesState,
 
+    /// Aggregated ag-mode state:
+    /// debounce timer, in-flight search
+    /// request, last searched pattern,
+    /// and cached rows.
+    ag_state: crate::ag::AgState,
+
     /// User-configured additional
     /// directory basenames to
     /// skip during the walk
@@ -1437,7 +1443,7 @@ impl App {
         if c == p.output || c == p.llm || c == p.question
             || c == p.notes || c == p.todo || c == p.directories
             || c == p.panes || c == p.jira || c == p.files
-            || c == p.tags
+            || c == p.tags || c == p.ag
         {
             &self.query[c.len_utf8()..]
         } else {
@@ -1610,6 +1616,27 @@ impl App {
         }
     }
 
+    /// Whether the query is an ag content-search request:
+    /// the query starts with the ag prefix (`,` by
+    /// default). The body is split into search terms
+    /// and file-pattern globs (tokens containing `*`).
+    fn is_ag_query(&self) -> bool {
+        let p = self.query_prefixes.ag;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
+    /// The ag-search body, i.e. everything after the
+    /// leading ag prefix. Empty string when not in
+    /// ag mode.
+    #[allow(dead_code)]
+    fn ag_pattern(&self) -> &str {
+        if self.is_ag_query() {
+            let p = self.query_prefixes.ag;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
 
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
@@ -4550,6 +4577,10 @@ fn fetch_recent_notes_with_filter(
         // it here means every edit path also
         // drives files search-as-you-type.
         self.files_touch();
+        // Same co-location for the ag-mode
+        // search debounce. `ag_touch` is a
+        // no-op outside `,` mode.
+        self.ag_touch();
     }
 
     /// Construct the virtual preview row used to display the
@@ -5556,6 +5587,7 @@ notes_date_filter: NotesDateFilter::All,
             llm_preview_description: None,
             llm_in_flight: false,
             llm_request: None,
+            ag_state: crate::ag::AgState::new(),
             files_state: crate::files::FilesState::new(),
             files_ignores,
             jira_rows: Vec::new(),
@@ -5640,7 +5672,9 @@ notes_date_filter: NotesDateFilter::All,
             self.fetch_session_panes();
         }
         self.rows = self.fetch().unwrap_or_default();
-        if self.match_algorithm != MatchAlgorithm::Substring {
+        if self.match_algorithm != MatchAlgorithm::Substring
+            && !self.is_ag_query()
+        {
             // Two-phase borrow: copy the rows out, then post-filter.
             // Avoids the borrow checker complaining about
             // simultaneously borrowing `self.rows` and `self`.
@@ -5776,7 +5810,7 @@ notes_date_filter: NotesDateFilter::All,
         // here and is gate-checked by
         // `duplicate_filter` (default
         // on).
-        if self.is_directories_query() || self.is_jira_query() || self.is_files_query() || self.is_tags_query() {
+        if self.is_directories_query() || self.is_jira_query() || self.is_files_query() || self.is_tags_query() || self.is_ag_query() {
             let mut merged = self.rows.clone();
             if self.duplicate_filter
                 || self.sort_order
@@ -6050,6 +6084,9 @@ notes_date_filter: NotesDateFilter::All,
         }
         if self.is_tags_query() {
             return self.fetch_tags();
+        }
+        if self.is_ag_query() {
+            return self.fetch_ag();
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
@@ -6651,6 +6688,10 @@ fn move_selection(&mut self, delta: isize) {
             self.select_for_run_impl();
             return;
         }
+        if self.is_ag_query() {
+            self.select_for_run_impl();
+            return;
+        }
         // Default: history mode.
         if let Some(row) = self.selected_row() {
             if row.mode == "llm" && !row.output.is_empty() {
@@ -6879,6 +6920,34 @@ fn move_selection(&mut self, delta: isize) {
             }
             return;
         }
+        // `,` queries are ag content-search requests.
+        // Selecting a match opens the file in $EDITOR
+        // at the matching line number.
+        if self.is_ag_query() {
+            if let Some(row) = self.selected_row() {
+                let editor = std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vi".to_string());
+                let filepath = &row.directory;
+                let line = &row.session_id;
+                let quoted = if filepath
+                    .chars()
+                    .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
+                {
+                    format!("\"{}\"", filepath)
+                } else {
+                    filepath.to_string()
+                };
+                self.selection = Some(format!(
+                    "{} +{} {}",
+                    editor, line, quoted,
+                ));
+                self.pick_mode = Some(PickMode::Run);
+            }
+            return;
+        }
+
         // `#...` queries are directories-view
         // requests. Selecting a
         // directory stages `cd
@@ -8301,6 +8370,83 @@ fn move_selection(&mut self, delta: isize) {
         );
         if current == request.pattern {
             self.files_state.rows = rows;
+            self.refresh();
+        }
+    }
+
+    // ---- AG (`,`-prefix) content search ----
+
+    /// Return cached ag search results.
+    fn fetch_ag(&mut self) -> Result<Vec<HistoryRow>> {
+        Ok(self.ag_state.rows.clone())
+    }
+
+    /// Arm the ag-mode debounce. Mirrors `files_touch`.
+    fn ag_touch(&mut self) {
+        if self.is_ag_query() {
+            self.ag_state.debounce_started = Some(std::time::Instant::now());
+            if let Some(request) = self.ag_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            self.ag_state.in_flight = false;
+        } else {
+            self.ag_state.debounce_started = None;
+            self.ag_state.in_flight = false;
+            self.ag_state.request = None;
+            self.ag_state.last_pattern = None;
+        }
+    }
+
+    /// Check whether the ag-mode debounce has elapsed
+    /// and spawn a background search if so.
+    fn ag_maybe_autocall(&mut self) {
+        if !self.is_ag_query() {
+            return;
+        }
+        if self.ag_state.in_flight {
+            return;
+        }
+        let Some(started) = self.ag_state.debounce_started else {
+            return;
+        };
+        if started.elapsed() < crate::ag::AG_DEBOUNCE {
+            return;
+        }
+        let pattern = crate::ag::AgState::current_pattern(
+            &self.query,
+            self.query_prefixes.ag,
+        );
+        if self.ag_state.has_results_for(&pattern) {
+            return;
+        }
+        self.ag_state.last_pattern = Some(pattern.clone());
+        self.spawn_ag_search(pattern);
+    }
+
+    /// Spawn a background thread that runs `ag` and
+    /// parses the results.
+    fn spawn_ag_search(&mut self, pattern: String) {
+        let request = crate::ag::spawn_ag_search(pattern);
+        self.ag_state.in_flight = true;
+        self.ag_state.request = Some(request);
+        self.set_status_message("Searching with ag…".to_string());
+    }
+
+    /// Process an ag-mode search result from the
+    /// background thread.
+    fn process_ag_result(
+        &mut self,
+        request: crate::ag::AgRequest,
+        rows: Vec<HistoryRow>,
+    ) {
+        self.ag_state.in_flight = false;
+        self.ag_state.request = None;
+        let current = crate::ag::AgState::current_pattern(
+            &self.query,
+            self.query_prefixes.ag,
+        );
+        if current == request.pattern {
+            self.ag_state.rows = rows;
             self.refresh();
         }
     }
@@ -10853,7 +10999,11 @@ fn find_tags_file() -> std::path::PathBuf {
 /// (file not found, line number out of range,
 /// etc.) — `fetch_tags` treats the context as
 /// best-effort.
-fn read_source_context(filepath: &str, line_number: usize) -> String {
+/// Read up to 5 lines of context around `line_number` in `filepath`,
+/// returning a formatted string with line numbers. The target line is
+/// marked with `>>` for visual distinction. Used by both tags mode
+/// and ag mode to populate the details-pane preview.
+pub fn read_source_context(filepath: &str, line_number: usize) -> String {
     if line_number == 0 {
         return String::new();
     }
@@ -11150,6 +11300,16 @@ fn run_loop(
             app.process_files_result(request, result);
         }
 
+        // Check for ag-mode search result
+        // from background thread. Mirrors the
+        // files-mode poll above.
+        if let Some(request) = app.ag_state.request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+        {
+            let request = app.ag_state.request.take().unwrap();
+            app.process_ag_result(request, result);
+        }
+
         // Check for JIRA comments-fetch result
         // from background thread (mirrors the
         // search poll above). When the
@@ -11260,6 +11420,11 @@ fn run_loop(
             // walk would never fire (no other
             // edit path arms the debounce).
             app.files_maybe_autocall();
+            // Same debounce drive for ag-mode
+            // searches: spawns the background
+            // ag search after `AG_DEBOUNCE` of
+            // quiet typing in `,` mode.
+            app.ag_maybe_autocall();
             continue;
         }
         let Event::Key(key) = event::read()? else {
@@ -11334,6 +11499,20 @@ fn run_loop(
                     }
                     app.jira_add_comment_in_flight = false;
                     app.set_status_message("JIRA add-comment cancelled".to_string());
+                    continue;
+                }
+
+        // Same cancel handling for an in-flight
+        // ag search. Pressing Esc sets the
+        // cancelled flag on the worker thread.
+        if app.ag_state.request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+                && matches!(action, Action::Cancel) {
+                    if let Some(request) = app.ag_state.request.take() {
+                        request.cancelled.store(true, Ordering::Relaxed);
+                    }
+                    app.ag_state.in_flight = false;
+                    app.set_status_message("ag search cancelled".to_string());
                     continue;
                 }
 

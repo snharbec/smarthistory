@@ -1486,6 +1486,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         qp.tags.to_string(),
         "list every symbol from the `tags` file (selecting one opens $EDITOR +LINE file)",
     );
+    mode_row(
+        &mut lines,
+        "ag",
+        qp.ag.to_string(),
+        "search file contents with ag (The Silver Searcher); `*` tokens restrict file patterns",
+    );
 
     lines.push(Line::from(""));
 
@@ -2165,6 +2171,18 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Ag-mode chip: shown only in ag mode.
+    let ag_chip = if app.is_ag_query() {
+        Some(Span::styled(
+            " AG ",
+            Style::default()
+                .fg(Theme::badge_fg_color())
+                .bg(Theme::warning_color())
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -2198,6 +2216,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = panes_filter_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = ag_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -4360,6 +4382,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 ("~".to_string(), format!(" files{} ", algo), app.query.as_str())
             } else if app.is_tags_query() {
                 ("$".to_string(), format!(" symbols{} ", algo), app.query.as_str())
+            } else if app.is_ag_query() {
+                (",".to_string(), format!(" ag{} ", algo), app.query.as_str())
             } else {
                 (
                     "> ".to_string(),
@@ -4405,6 +4429,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::success_color())
             } else if app.is_tags_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_ag_query() {
+                Style::default().fg(Theme::warning_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())
             } else if is_fuzzy {
@@ -4447,6 +4473,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::success_color())
             } else if app.is_tags_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_ag_query() {
+                Style::default().fg(Theme::warning_color())
             } else if is_regex {
                 Style::default().fg(Theme::warning_color())
             } else if is_fuzzy {

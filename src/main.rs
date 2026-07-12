@@ -1,5 +1,6 @@
 #![allow(clippy::should_implement_trait)]
 #![allow(clippy::empty_line_after_doc_comments)]
+mod ag;
 mod files;
 mod jira;
 mod llm;
@@ -895,6 +896,15 @@ pub struct QueryPrefixes {
     /// the file in `$EDITOR` at the correct
     /// line (`+LINE_NUMBER`).
     pub tags: char,
+    /// Prefix for the ag content-search mode
+    /// (default `,`). Searches the current
+    /// directory tree using `ag` (The Silver
+    /// Searcher). Tokens containing `*` are
+    /// treated as file-pattern globs (`-G`)
+    /// and restrict which files are searched.
+    /// Selecting a row opens the file in
+    /// `$EDITOR` at the matching line.
+    pub ag: char,
     pub jira: char,
 }
 
@@ -911,6 +921,7 @@ impl Default for QueryPrefixes {
             panes: '*',
             files: '~',
             tags: '$',
+            ag: ',',
             jira: '-',
         }
     }
@@ -2219,6 +2230,7 @@ impl Config {
             "panes" => prefixes.panes = c,
             "files" => prefixes.files = c,
             "tags" => prefixes.tags = c,
+            "ag" => prefixes.ag = c,
             "jira" => prefixes.jira = c,
             _ => {}
         }
