@@ -3865,6 +3865,23 @@ std::fs::read_to_string(&path).unwrap_or_default()
                     continue;
                 }
             }
+            // Read 5 lines of context around the
+            // symbol (2 before, the match line,
+            // 2 after) from the source file so
+            // the details pane shows the
+            // surrounding code. The context is
+            // stored in `output` (which the
+            // renderer displays in the details /
+            // output preview pane). Best-effort:
+            // if the file can't be read or the
+            // line number is out of range,
+            // `output` stays empty and the row
+            // still works (just without the
+            // preview).
+            let context = read_source_context(
+                &filepath,
+                line_number.parse::<usize>().unwrap_or(0),
+            );
             rows.push(HistoryRow {
                 id: next_id,
                 command: display.to_string(),
@@ -3872,8 +3889,11 @@ std::fs::read_to_string(&path).unwrap_or_default()
                 session_id: line_number.to_string(),
                 exit_code: 0,
                 timestamp: now_epoch,
-                comment: String::new(),
-                output: String::new(),
+                comment: std::path::Path::new(&current_file)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                output: context,
                 mode: "tags".to_string(),
                 source: "tags".to_string(),
             });
@@ -10821,6 +10841,44 @@ fn find_tags_file() -> std::path::PathBuf {
     // consistent ("file not found" rather than
     // "no tags file searched").
     std::path::PathBuf::from("tags")
+}
+
+/// Read up to 5 lines of source context around
+/// `line_number` (2 before, the line itself, 2
+/// after) from the given file. Returns the
+/// context as a newline-joined string; the
+/// match line is prefixed with `>> ` so the
+/// user can spot it at a glance in the details
+/// pane. Returns the empty string on any error
+/// (file not found, line number out of range,
+/// etc.) — `fetch_tags` treats the context as
+/// best-effort.
+fn read_source_context(filepath: &str, line_number: usize) -> String {
+    if line_number == 0 {
+        return String::new();
+    }
+    let contents = match std::fs::read_to_string(filepath) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    // line_number is 1-based; convert to 0-based.
+    let target = line_number.saturating_sub(1);
+    if target >= lines.len() {
+        return String::new();
+    }
+    let start = target.saturating_sub(2);
+    let end = (target + 3).min(lines.len());
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let absolute = start + i;
+        if absolute == target {
+            out.push(format!(">> {:>5}  {}", line_number, line));
+        } else {
+            out.push(format!("   {:>5}  {}", absolute + 1, line));
+        }
+    }
+    out.join("\n")
 }
 
 pub fn run_tui_to_stdout(
