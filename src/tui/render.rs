@@ -48,8 +48,8 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         .constraints(
             [
                 Constraint::Length(1), // mode strip
-                Constraint::Fill(1),   // list: take all remaining space
-                Constraint::Length(8), // details: fixed 8 lines incl. header/borders
+                Constraint::Fill(1),   // list
+                Constraint::Length(8), // details row
                 Constraint::Length(3), // input
                 Constraint::Length(1), // status
             ]
@@ -60,13 +60,24 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     draw_mode_strip(f, app, chunks[0]);
     draw_list(f, app, chunks[1]);
 
-    let detail_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-        .split(chunks[2]);
-
-    draw_details(f, app, detail_chunks[0]);
-    draw_output_preview(f, app, detail_chunks[1]);
+    match app.pane_visibility {
+        crate::tui::state::PaneVisibility::Both => {
+            let detail_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(
+                    [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
+                )
+                .split(chunks[2]);
+            draw_details(f, app, detail_chunks[0]);
+            draw_output_preview(f, app, detail_chunks[1]);
+        }
+        crate::tui::state::PaneVisibility::Details => {
+            draw_details(f, app, chunks[2]);
+        }
+        crate::tui::state::PaneVisibility::OutputPreview => {
+            draw_output_preview(f, app, chunks[2]);
+        }
+    }
 
     draw_input(f, app, chunks[3]);
     draw_status(f, app, chunks[4]);
@@ -2183,6 +2194,21 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Pane-visibility chip: shown only when the layout is
+    // not the default (`Both`). Lets the user know at a
+    // glance that one of the detail panes is hidden.
+    let pane_vis_chip = if app.pane_visibility != crate::tui::state::PaneVisibility::Both {
+        let label = app.pane_visibility.label();
+        Some(Span::styled(
+            format!(" {} ", label.to_ascii_uppercase()),
+            Style::default()
+                .fg(Theme::badge_fg_color())
+                .bg(Theme::highlight_color())
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -2220,6 +2246,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = ag_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = pane_vis_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }
@@ -4233,6 +4263,144 @@ fn push_plain_span(spans: &mut Vec<Span<'static>>, text: String, base: Style) {
     }
 }
 
+/// Parse a single line containing ANSI escape sequences (as produced by
+/// `bat --color=always`) into ratatui `Span`s with the appropriate
+/// foreground colors and modifiers.
+///
+/// Supported sequences:
+/// - `\x1b[m` or `\x1b[0m` → reset
+/// - `\x1b[1m` → bold
+/// - `\x1b[3m` → italic
+/// - `\x1b[38;2;R;G;Bm` → truecolor foreground
+/// - `\x1b[38;5;Nm` → 256-color foreground (approximated)
+fn parse_ansi_line(line: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut current_text = String::new();
+    let mut current_style = Style::default();
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            let mut params = String::new();
+            let mut cmd = '\0';
+            while let Some(&ch) = chars.peek() {
+                if ch.is_ascii_alphabetic() {
+                    cmd = ch;
+                    chars.next();
+                    break;
+                }
+                params.push(ch);
+                chars.next();
+            }
+            if cmd == 'm' {
+                if !current_text.is_empty() {
+                    spans.push(Span::styled(current_text.clone(), current_style));
+                    current_text.clear();
+                }
+                current_style = apply_ansi_sgr(&params, current_style);
+            }
+        } else {
+            current_text.push(c);
+        }
+    }
+    if !current_text.is_empty() {
+        spans.push(Span::styled(current_text, current_style));
+    }
+    spans
+}
+
+/// Apply a single SGR parameter string to a base style.
+fn apply_ansi_sgr(params: &str, style: Style) -> Style {
+    let parts: Vec<&str> = params.split(';').collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        return Style::default(); // ESC[m = reset
+    }
+    let primary = parts[0];
+    match primary {
+        "0" => Style::default(),
+        "1" => style.add_modifier(Modifier::BOLD),
+        "3" => style.add_modifier(Modifier::ITALIC),
+        "38" if parts.len() >= 3 => match parts[1] {
+            "2" if parts.len() >= 5 => {
+                let r = parts[2].parse::<u8>().unwrap_or(0);
+                let g = parts[3].parse::<u8>().unwrap_or(0);
+                let b = parts[4].parse::<u8>().unwrap_or(0);
+                style.fg(ratatui::style::Color::Rgb(r, g, b))
+            }
+            "5" if parts.len() >= 3 => {
+                let n = parts[2].parse::<u8>().unwrap_or(0);
+                let (r, g, b) = xterm256_to_rgb(n);
+                style.fg(ratatui::style::Color::Rgb(r, g, b))
+            }
+            _ => style,
+        },
+        "48" if parts.len() >= 3 => match parts[1] {
+            "2" if parts.len() >= 5 => {
+                let r = parts[2].parse::<u8>().unwrap_or(0);
+                let g = parts[3].parse::<u8>().unwrap_or(0);
+                let b = parts[4].parse::<u8>().unwrap_or(0);
+                style.bg(ratatui::style::Color::Rgb(r, g, b))
+            }
+            "5" if parts.len() >= 3 => {
+                let n = parts[2].parse::<u8>().unwrap_or(0);
+                let (r, g, b) = xterm256_to_rgb(n);
+                style.bg(ratatui::style::Color::Rgb(r, g, b))
+            }
+            _ => style,
+        },
+        _ => style,
+    }
+}
+
+/// Convert a standard xterm 256-color index to an RGB triple.
+fn xterm256_to_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        0..=7 => {
+            const COLORS: [(u8, u8, u8); 8] = [
+                (0, 0, 0),
+                (205, 0, 0),
+                (0, 205, 0),
+                (205, 205, 0),
+                (0, 0, 238),
+                (205, 0, 205),
+                (0, 205, 205),
+                (229, 229, 229),
+            ];
+            COLORS[n as usize]
+        }
+        8..=15 => {
+            const COLORS: [(u8, u8, u8); 8] = [
+                (127, 127, 127),
+                (255, 0, 0),
+                (0, 255, 0),
+                (255, 255, 0),
+                (92, 92, 255),
+                (255, 0, 255),
+                (0, 255, 255),
+                (255, 255, 255),
+            ];
+            COLORS[(n - 8) as usize]
+        }
+        16..=231 => {
+            let c = n - 16;
+            let r = c / 36;
+            let g = (c % 36) / 6;
+            let b = c % 6;
+            (
+                if r == 0 { 0 } else { r * 40 + 55 },
+                if g == 0 { 0 } else { g * 40 + 55 },
+                if b == 0 { 0 } else { b * 40 + 55 },
+            )
+        }
+        _ => {
+            let gray = n - 232;
+            let v = gray * 10 + 8;
+            (v, v, v)
+        }
+    }
+}
+
 fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -4262,19 +4430,24 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let preview_lines: Vec<Line> = row
-        .output
-        .lines()
-        .take(4) // Show up to 4 lines to fit the new larger detail pane
-        // `**...**` markers in the line are turned
-        // into bold spans; everything else stays
-        // plain. The convention is used by the
-        // JIRA-mode row builder to emphasise
-        // attribute labels (Status, Priority,
-        // …). Other modes don't emit `**` and
-        // render unchanged.
-        .map(render_preview_line)
-        .collect();
+    // Ag-mode and tags-mode rows typically have more
+    // content worth previewing; give them one extra line.
+    let take_n = if row.mode == "ag" || row.mode == "tags" { 5 } else { 4 };
+    let is_ansi_ag = row.mode == "ag" && row.output.contains('\x1b');
+    let preview_lines: Vec<Line> = if is_ansi_ag {
+        row.output
+            .lines()
+            .take(take_n)
+            .map(parse_ansi_line)
+            .map(Line::from)
+            .collect()
+    } else {
+        row.output
+            .lines()
+            .take(take_n)
+            .map(render_preview_line)
+            .collect()
+    };
 
     let paragraph = Paragraph::new(preview_lines)
         .block(block)
@@ -5496,5 +5669,51 @@ mod tests {
         let line = render_preview_line("");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "");
+    }
+}
+
+// Fix the test expectations — adjacent text after a reset gets merged
+// into a single default-style span, so 3 spans not 4.
+#[cfg(test)]
+mod ansi_tests {
+    use super::*;
+
+    #[test]
+    fn parse_ansi_truecolor() {
+        let input = "\x1b[38;2;102;217;239mfn\x1b[0m \x1b[38;2;166;226;46mmain\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "fn");
+        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Rgb(102, 217, 239)));
+        assert_eq!(spans[1].content, " ");
+        assert_eq!(spans[2].content, "main");
+        assert_eq!(spans[2].style.fg, Some(ratatui::style::Color::Rgb(166, 226, 46)));
+    }
+
+    #[test]
+    fn parse_ansi_bold_and_italic() {
+        let input = "\x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 3);
+        assert!(spans[0].style.add_modifier == ratatui::style::Modifier::BOLD);
+        assert_eq!(spans[1].content, " ");
+        assert!(spans[2].style.add_modifier == ratatui::style::Modifier::ITALIC);
+    }
+
+    #[test]
+    fn parse_ansi_plain_text_unchanged() {
+        let input = "no escapes here";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "no escapes here");
+    }
+
+    #[test]
+    fn parse_ansi_256_color() {
+        let input = "\x1b[38;5;196mred\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "red");
+        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Rgb(255, 0, 0)));
     }
 }

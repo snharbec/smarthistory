@@ -230,6 +230,15 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     let mut rows: Vec<HistoryRow> = Vec::new();
     let mut next_id: i64 = -1;
 
+    // Use the first explicit language for bat syntax highlighting.
+    // If multiple languages were specified we use only the first
+    // to avoid guessing per-file; bat auto-detects from extension
+    // when no language is given, but here we prefer the user's
+    // explicit choice.
+    let bat_lang = languages.first().copied();
+    let mut bat_count = 0usize;
+    const BAT_MAX: usize = 50;
+
     for line in stdout.lines() {
         // Format: file:line_number:matched_content
         // (or file:line_number:column:matched_content when --column is used,
@@ -273,10 +282,30 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
         let line_number = line_num.parse::<usize>().unwrap_or(0);
         let context = read_source_context(&abs_path, line_number);
 
+        // If a language was specified, pipe the context through
+        // `bat` for syntax highlighting. We cap the number of
+        // bat calls to keep the background thread responsive.
+        let output = if let Some(lang) = bat_lang {
+            if bat_count < BAT_MAX {
+                bat_count += 1;
+                highlight_with_bat(&context, lang).unwrap_or(context)
+            } else {
+                context
+            }
+        } else {
+            context
+        };
+
         let basename = std::path::Path::new(file)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| file.to_string());
+
+        let source = if let Some(lang) = bat_lang {
+            format!("ag:{}", lang)
+        } else {
+            "ag".to_string()
+        };
 
         rows.push(HistoryRow {
             id: next_id,
@@ -286,9 +315,9 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             exit_code: 0,
             timestamp: 0,
             comment: basename,
-            output: context,
+            output,
             mode: "ag".to_string(),
-            source: "ag".to_string(),
+            source,
         });
         next_id -= 1;
 
@@ -334,4 +363,31 @@ mod tests {
     fn glob_to_regex_no_star_is_literal() {
         assert_eq!(glob_to_ag_regex("Makefile"), r"Makefile$");
     }
+}
+
+/// Pipe source context through `bat` for syntax highlighting.
+/// Returns `None` if `bat` is not on PATH or the call fails.
+fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
+    let mut child = std::process::Command::new("bat")
+        .arg("--language")
+        .arg(lang)
+        .arg("--plain")
+        .arg("--color=always")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    {
+        let stdin = child.stdin.as_mut()?;
+        use std::io::Write;
+        let _ = stdin.write_all(context.as_bytes());
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }

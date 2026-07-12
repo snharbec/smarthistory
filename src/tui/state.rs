@@ -426,6 +426,66 @@ impl PanesFilter {
     }
 }
 
+/// Which detail panes are
+/// visible in the TUI layout.
+/// Toggle order: BOTH →
+/// Details → OutputPreview →
+/// BOTH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneVisibility {
+    /// Show both details and
+    /// output preview (default).
+    #[default]
+    Both,
+    /// Show only the details
+    /// pane; output preview
+    /// is hidden.
+    Details,
+    /// Show only the output
+    /// preview pane; details
+    /// is hidden.
+    OutputPreview,
+}
+
+impl PaneVisibility {
+    pub fn next(self) -> Self {
+        match self {
+            PaneVisibility::Both => PaneVisibility::Details,
+            PaneVisibility::Details => PaneVisibility::OutputPreview,
+            PaneVisibility::OutputPreview => PaneVisibility::Both,
+        }
+    }
+
+    /// Human-readable label for the status bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            PaneVisibility::Both => "both",
+            PaneVisibility::Details => "details",
+            PaneVisibility::OutputPreview => "output",
+        }
+    }
+
+    /// Canonical string for persistence.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaneVisibility::Both => "both",
+            PaneVisibility::Details => "details",
+            PaneVisibility::OutputPreview => "output",
+        }
+    }
+
+    /// Parse a string like "both", "details", "output"
+    /// (case-insensitive). Returns `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "both" => Some(PaneVisibility::Both),
+            "details" => Some(PaneVisibility::Details),
+            "output" => Some(PaneVisibility::OutputPreview),
+            _ => None,
+        }
+    }
+}
+
 /// Which kind of entry the
 /// `AddEntryDialog` is
 /// constructing. The

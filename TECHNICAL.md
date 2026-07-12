@@ -519,8 +519,9 @@ touched by the herdr backend:
 | `Up`      | Widget  | Walk back through matches for the current line.                 |
 | `Down`    | Widget  | Walk forward through matches; clear the line at the start.     |
 | `Ctrl+G`  | Widget  | Cycle search scope: SESS → DIR → GLOBAL → STATS → SESS.            |
-| `C-f`     | TUI     | Cycle the match algorithm: SUBSTRING → FUZZY → REGEX → SUBSTRING. The algorithm applies to all prefix modes (history, directories, panes, notes, todos, files, output) except JIRA (which has its own JQL syntax). Note: in notes and todos mode, the algorithm is accepted but the note_search library's own query parser takes precedence. Rebindable via `key.toggle-search-mode=...` (also reachable through the command palette). |
-| `F4`      | TUI     | Cycle the TUI sort order: AGE (newest first, the default) → FREQ (most-run commands first within the currently filtered set, with one row per command — duplicates are collapsed implicitly) → AGE. The chosen order is persisted in the session file (`~/.cache/smarthistory/session`) and restored on the next TUI call. A `FREQ` chip in the mode strip signals the non-default order. Rebindable via `key.cycle-sort-order=...`. |
+| `C-f`     | TUI     | Cycle the match algorithm: SUBSTRING → FUZZY → REGEX → SUBSTRING. Rebindable via `key.toggle-search-mode=...`. |
+| `F4`      | TUI     | Cycle the TUI sort order: AGE (newest first) → FREQ (most-run commands first) → AGE. The chosen order is persisted in the session file. Rebindable via `key.cycle-sort-order=...`. |
+| `F6`      | TUI     | Toggle detail-pane visibility. Cycles: BOTH → Details only → Output Preview only → BOTH. When only one pane is visible, it uses the full detail-row width. Rebindable via `key.toggle-pane-visibility=...`. A chip (`DETAILS` / `OUTPUT`) appears in the mode strip when the layout is not BOTH. |
 | `Ctrl+S`  | TUI     | Toggle the duplicate filter (LAST only vs ALL entries).         |
 | `Ctrl+N`  | TUI     | Cycle to the next theme (None → ratatui-themes list).         |
 | `Ctrl+P`  | TUI     | Cycle to the previous theme.                                   |

@@ -76,6 +76,17 @@ struct TuiSession {
     /// file can't wedge the
     /// TUI on startup.
     directory_source: Option<String>,
+    /// Which detail panes were
+    /// visible at the end of
+    /// the last session
+    /// (`both` / `details` /
+    /// `output`). `None`
+    /// means "no preference"
+    /// and falls back to
+    /// `PaneVisibility::Both`.
+    /// Unrecognised values
+    /// are silently dropped.
+    pane_visibility: Option<String>,
 }
 
 /// All theme choices available in the TUI. The first entry, `None`,
@@ -167,6 +178,26 @@ impl TuiSession {
                         s.directory_source =
                             Some(value.to_string());
                     }
+                "panevisibility"
+                    // Same pattern
+                    // as the other
+                    // session fields:
+                    // only accept
+                    // values that
+                    // `PaneVisibility::parse`
+                    // recognises
+                    // (lowercase
+                    // `both` /
+                    // `details` /
+                    // `output`).
+                    if crate::tui::state::PaneVisibility::parse(
+                        value,
+                    )
+                    .is_some()
+                    => {
+                        s.pane_visibility =
+                            Some(value.to_string());
+                    }
                 _ => {}
             }
         }
@@ -202,6 +233,9 @@ impl TuiSession {
         }
         if let Some(ref ds) = self.directory_source {
             out.push_str(&format!("directorysource={}\n", ds));
+        }
+        if let Some(ref pv) = self.pane_visibility {
+            out.push_str(&format!("panevisibility={}\n", pv));
         }
         if let Err(e) = std::fs::write(&path, out) {
             eprintln!("warning: failed to persist TUI session: {}", e);
@@ -903,6 +937,11 @@ struct App {
     /// cycle is Substring → Fuzzy → Regex
     /// → Substring.
     match_algorithm: MatchAlgorithm,
+    /// Which detail panes are visible. Cycled
+    /// between BOTH → Details → Output
+    /// Preview → BOTH with `F6`
+    /// (configurable).
+    pane_visibility: crate::tui::state::PaneVisibility,
     /// The currently-selected TUI palette. Defaults to
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
@@ -5461,6 +5500,7 @@ impl App {
         jira_fragments: std::collections::HashMap<String, String>,
         files_ignores: Vec<String>,
         multiplexer: Box<dyn crate::multiplexer::MultiplexerBackend>,
+        pane_visibility: crate::tui::state::PaneVisibility,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -5506,6 +5546,7 @@ impl App {
             query_cursor: initial_cursor,
             query_regex: None,
             match_algorithm: MatchAlgorithm::default(),
+            pane_visibility,
             theme,
             bindings,
             status_message: None,
@@ -11111,6 +11152,11 @@ pub fn run_tui_to_stdout(
         .as_deref()
         .and_then(SortOrder::parse)
         .unwrap_or_default();
+    let initial_pane_visibility = session
+        .pane_visibility
+        .as_deref()
+        .and_then(crate::tui::state::PaneVisibility::parse)
+        .unwrap_or_default();
     let mut app = App::new(
         conn,
         effective_mode,
@@ -11130,6 +11176,7 @@ pub fn run_tui_to_stdout(
         app_cfg.jira_fragments().clone(),
         app_cfg.files_ignores().to_vec(),
         crate::multiplexer::backend_for(app_cfg.multiplexer()),
+        initial_pane_visibility,
     );
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
@@ -11249,6 +11296,14 @@ pub fn run_tui_to_stdout(
                 }
                 .to_string(),
             )
+        },
+        // Persist only when the user has changed the pane
+        // visibility away from the default (`Both`). Same
+        // policy as the other session fields.
+        pane_visibility: if app.pane_visibility == crate::tui::state::PaneVisibility::Both {
+            None
+        } else {
+            Some(app.pane_visibility.as_str().to_string())
         },
     };
     session.save();
@@ -11886,6 +11941,15 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::FilterPanesSessions => {
             app.toggle_panes_filter(PanesFilter::Sessions);
+            false
+        }
+        Action::TogglePaneVisibility => {
+            // Cycle through: BOTH → Details → OutputPreview → BOTH.
+            app.pane_visibility = app.pane_visibility.next();
+            app.set_status_message(format!(
+                "Pane layout: {}",
+                app.pane_visibility.label()
+            ));
             false
         }
     }
@@ -14179,6 +14243,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 app
@@ -14251,6 +14316,7 @@ mod tests {
                     std::collections::HashMap::new(),
                     Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 )
         }
 
@@ -14321,6 +14387,7 @@ mod tests {
                     std::collections::HashMap::new(),
                     Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 )
         }
 
@@ -14557,6 +14624,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 let all_count = app.merged_rows().len();
@@ -15183,6 +15251,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 // Restore the env var as soon as the initial
@@ -15297,6 +15366,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 unsafe {
@@ -16392,6 +16462,7 @@ mod tests {
                     std::collections::HashMap::new(),
                     Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 )
         }
 
@@ -16584,6 +16655,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.select_for_run();
                 assert!(app.selection.is_none());
@@ -17325,6 +17397,7 @@ mod tests {
                     std::collections::HashMap::new(),
                     Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 )
         }
 
@@ -17935,6 +18008,7 @@ mod tests {
                         sort_order: Some("frequency".to_string()),
                         theme: None,
                         directory_source: None,
+                        pane_visibility: None,
                 };
                 let rendered = format!("{:?}", s);
                 // The `Debug` output includes the
@@ -18815,6 +18889,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 // Restore env before any `?` can
                 // short-circuit out of the test (so
@@ -18922,6 +18997,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -19041,6 +19117,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -19162,6 +19239,7 @@ mod tests {
                     std::collections::HashMap::new(),
                 Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
                 );
                 app.refresh();
                 if let Some(prev) = prev_session {
@@ -21087,6 +21165,7 @@ mod tests {
                 std::collections::HashMap::new(),
             Vec::new(),
                     test_multiplexer(),
+                    crate::tui::state::PaneVisibility::default(),
             );
             // `App::new` calls
             // `build_session_subdirs`

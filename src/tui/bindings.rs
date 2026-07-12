@@ -278,6 +278,14 @@ pub enum Action {
     /// Default key: `F9`. No-op outside of
     /// panes mode.
     FilterPanesSessions,
+    /// Toggle detail pane visibility. Cycles
+    /// through: BOTH → Details only → Output
+    /// Preview only → BOTH. When only one
+    /// pane is visible, the remaining pane
+    /// uses the full detail-row height.
+    ///
+    /// Default key: `F6`. Works in any mode.
+    TogglePaneVisibility,
 }
 
 impl Action {
@@ -324,6 +332,7 @@ impl Action {
             Action::ThemePicker => "theme-picker",
             Action::ToggleSearchMode => "toggle-search-mode",
             Action::MarkTodoDone => "mark-todo-done",
+            Action::TogglePaneVisibility => "toggle-pane-visibility",
         }
     }
 
@@ -368,6 +377,7 @@ impl Action {
             Action::ThemePicker => "Theme picker",
             Action::ToggleSearchMode => "Toggle search mode",
             Action::MarkTodoDone => "Mark todo done",
+            Action::TogglePaneVisibility => "Toggle pane visibility",
         }
     }
 
@@ -420,6 +430,7 @@ impl Action {
             Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
                 "panes"
             }
+            Action::TogglePaneVisibility => "layout",
         }
     }
 
@@ -465,6 +476,7 @@ impl Action {
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
+            Action::TogglePaneVisibility => "F6",
         }
     }
 }
@@ -742,6 +754,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::FilterPanesWindows,
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,
+    Action::TogglePaneVisibility,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
