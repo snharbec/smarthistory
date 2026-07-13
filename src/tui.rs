@@ -5659,6 +5659,14 @@ notes_date_filter: NotesDateFilter::All,
             app.jira_debounce_started = Some(std::time::Instant::now());
             app.jira_maybe_autocall();
         }
+        // If the restored query is an ag query, arm the
+        // debounce and fire the search immediately so the
+        // user sees results on the first frame rather than
+        // an empty list. This mirrors the JIRA path above.
+        if app.is_ag_query() {
+            app.ag_state.debounce_started = Some(std::time::Instant::now());
+            app.ag_maybe_autocall();
+        }
         // Rows are ordered newest first; index 0 is the newest entry.
         // Keep the selection on the newest match so it appears at the
         // bottom of the bottom-aligned list.
@@ -8913,8 +8921,11 @@ fn move_selection(&mut self, delta: isize) {
             // If the query was prefilled from the session cache and the
             // user hasn't touched it yet, the first character should
             // replace it rather than append (so the cached query
-            // doesn't accidentally end up as a prefix).
-            if self.query_prefilled && !self.query_touched {
+            // doesn't accidentally end up as a prefix). Space is
+            // excepted — the user expects to be able to add a space
+            // and keep typing a multi-word refinement of the cached
+            // query.
+            if self.query_prefilled && !self.query_touched && c != ' ' {
                 self.query.clear();
                 // Reset the cursor to the (now-empty) end so
                 // the new character lands at position 0.
