@@ -41,9 +41,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How long the files-mode walk waits after the last keystroke
@@ -294,6 +294,7 @@ pub fn walk_dir(
                 output: String::new(),
                 mode: mode.to_string(),
                 source: String::new(),
+                ..Default::default()
             });
         }
         // Always recurse into directories so deep files

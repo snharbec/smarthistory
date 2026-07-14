@@ -1981,6 +1981,8 @@ impl App {
                         output: r.text.clone(),
                         mode: "todo".to_string(),
                         source: String::new(),
+
+                        ..Default::default()
                     }
                 })
                 .collect()
@@ -2405,6 +2407,8 @@ impl App {
                 output: String::new(),
                 mode: "directory".to_string(),
                 source: "history".to_string(),
+
+                ..Default::default()
             });
         }
         // Augment with the user's
@@ -2544,6 +2548,8 @@ impl App {
                 output: String::new(),
                 mode: "directory".to_string(),
                 source: "sessiondir".to_string(),
+
+                ..Default::default()
             });
         }
         // Add rows for the
@@ -2783,6 +2789,8 @@ impl App {
                 output: String::new(),
                 mode: "directory".to_string(),
                 source: "tmux".to_string(),
+
+                ..Default::default()
             });
         }
         // Apply the
@@ -3170,6 +3178,8 @@ impl App {
                 output: String::new(),
                 mode: "workspace".to_string(),
                 source: "workspace".to_string(),
+
+                ..Default::default()
             });
             next_id -= 1;
             // Then the pane rows.
@@ -3195,6 +3205,8 @@ impl App {
                     output: pr.tab_id.clone(),
                     mode: "pane".to_string(),
                     source: "pane".to_string(),
+
+                    ..Default::default()
                 });
             }
         }
@@ -3251,6 +3263,8 @@ impl App {
                 output: String::new(),
                 mode: "workspace".to_string(),
                 source: "sessions".to_string(),
+
+                ..Default::default()
             });
             let mut next_session_id: i64 = -20_000;
             for s in &self.sessions {
@@ -3266,6 +3280,8 @@ impl App {
                     output: String::new(),
                     mode: "session".to_string(),
                     source: "sessions".to_string(),
+
+                    ..Default::default()
                 });
             }
         }
@@ -3293,6 +3309,8 @@ impl App {
                 output: String::new(),
                 mode: "workspace".to_string(),
                 source: "hosts".to_string(),
+
+                ..Default::default()
             });
             let mut next_host_id: i64 = -25_000;
             for h in &self.hosts {
@@ -3336,6 +3354,8 @@ impl App {
                     output: String::new(),
                     mode: "host".to_string(),
                     source: "hosts".to_string(),
+
+                    ..Default::default()
                 });
             }
         }
@@ -3634,39 +3654,90 @@ impl App {
         if tokens.is_empty() {
             return Ok(section_rows);
         }
-        // When the match algorithm is Substring, use the fast
-        // inline substring check. When it's Fuzzy or Regex,
-        // defer to `query_matches_text` which respects the
-        // active algorithm.
-        if self.match_algorithm != MatchAlgorithm::Substring {
-            return Ok(section_rows
-                .iter()
-                .filter(|r| {
-                    self.query_matches_text(&r.command)
-                        || self.query_matches_text(&r.comment)
-                        || (!r.output.is_empty() && self.query_matches_text(&r.output))
+        // Per-row match predicate. Used for both
+        // the Substring fast path and the Fuzzy /
+        // Regex delegating path.
+        let row_matches = |r: &HistoryRow| -> bool {
+            // When the match algorithm is Substring,
+            // use the fast inline AND-by-token check.
+            // When it's Fuzzy or Regex, delegate to
+            // `query_matches_text` so the active
+            // algorithm is honored.
+            if self.match_algorithm != MatchAlgorithm::Substring {
+                return self.query_matches_text(&r.command)
+                    || self.query_matches_text(&r.comment)
+                    || (!r.output.is_empty() && self.query_matches_text(&r.output));
+            }
+            if case_sensitive {
+                tokens.iter().all(|tok| {
+                    r.command.contains(tok) || r.comment.contains(tok) || r.output.contains(tok)
                 })
-                .cloned()
-                .collect());
-        }
-        Ok(section_rows
-            .iter()
-            .filter(|r| {
-                if case_sensitive {
-                    tokens.iter().all(|tok| {
-                        r.command.contains(tok) || r.comment.contains(tok) || r.output.contains(tok)
-                    })
-                } else {
-                    let cmd_lc = r.command.to_lowercase();
-                    let dir_lc = r.comment.to_lowercase();
-                    let tab_lc = r.output.to_lowercase();
-                    tokens.iter().all(|tok| {
-                        cmd_lc.contains(tok) || dir_lc.contains(tok) || tab_lc.contains(tok)
-                    })
+            } else {
+                let cmd_lc = r.command.to_lowercase();
+                let dir_lc = r.comment.to_lowercase();
+                let tab_lc = r.output.to_lowercase();
+                tokens
+                    .iter()
+                    .all(|tok| cmd_lc.contains(tok) || dir_lc.contains(tok) || tab_lc.contains(tok))
+            }
+        };
+        // Group-aware filter: the panes-mode rows
+        // are already laid out as a linearised
+        // tree (`workspace_header, pane, pane, …,
+        // workspace_header, pane, …`) by
+        // `fetch_session_panes_impl`. Each group is
+        // "one workspace header followed by its
+        // zero-or-more child pane rows". A group
+        // matches if ANY row in the group matches
+        // (workspace-label match OR any-child-pane
+        // match), in which case the WHOLE group is
+        // emitted. This is what the user asked
+        // for: "I searched for `SmartHistory`, I
+        // want to see the workspace AND its panes".
+        // Hosts (`source == "hosts"`) and sessions
+        // (`source == "sessions"`) are standalone
+        // rows (no children) and use the legacy
+        // per-row filter.
+        let mut out: Vec<HistoryRow> = Vec::new();
+        let mut idx = 0;
+        while idx < section_rows.len() {
+            let row = &section_rows[idx];
+            if row.source == "workspace" {
+                // Collect the contiguous group:
+                // this `workspace` header plus every
+                // immediately following row whose
+                // `source` is `"pane"`. Rows after
+                // the first non-`pane` row start a
+                // new group.
+                let group_start = idx;
+                let mut group_end = idx + 1;
+                while group_end < section_rows.len() && section_rows[group_end].source == "pane" {
+                    group_end += 1;
                 }
-            })
-            .cloned()
-            .collect())
+                let group = &section_rows[group_start..group_end];
+                // Group matches if any row in it
+                // matches. This is the
+                // parent-wins-and-child-wins semantic:
+                // typing the workspace label keeps
+                // the whole workspace; typing a pane
+                // command keeps that pane AND its
+                // parent workspace header.
+                if group.iter().any(row_matches) {
+                    out.extend_from_slice(group);
+                }
+                idx = group_end;
+            } else {
+                // Standalone row (hosts, sessions,
+                // or a stray pane that lost its
+                // header for any reason): per-row
+                // filter.
+                if row_matches(row) {
+                    out.push(row.clone());
+                }
+                idx += 1;
+            }
+        }
+        Ok(out)
     }
 
     /// Walk the current directory
@@ -3954,6 +4025,8 @@ impl App {
                 output,
                 mode: "tags".to_string(),
                 source,
+
+                ..Default::default()
             });
             next_id -= 1;
         }
@@ -4374,6 +4447,8 @@ impl App {
                             output: self.read_note_preview(&note.filename),
                             mode: "note".to_string(),
                             source: String::new(),
+
+                            ..Default::default()
                         }
                     })
                     .collect();
@@ -4459,6 +4534,8 @@ impl App {
                             output: self.read_note_preview(&note.filename),
                             mode: "note".to_string(),
                             source: String::new(),
+
+                            ..Default::default()
                         }
                     })
                     .collect();
@@ -4786,6 +4863,8 @@ impl App {
             output: command,
             mode: "llm".to_string(),
             source: String::new(),
+
+            ..Default::default()
         };
         self.llm_preview = Some(preview);
         self.llm_preview_description = Some(fired_description);
@@ -6089,6 +6168,8 @@ impl App {
                     output: row.get(7).unwrap_or_default(),
                     mode: row.get(8).unwrap_or_default(),
                     source: String::new(),
+
+                    ..Default::default()
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -6188,6 +6269,8 @@ impl App {
                     output: row.get(7).unwrap_or_default(),
                     mode: row.get(8).unwrap_or_default(),
                     source: String::new(),
+
+                    ..Default::default()
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -7375,6 +7458,8 @@ impl App {
                             output: details.join("\n"),
                             mode: "jira".to_string(),
                             source: "jira".to_string(),
+
+                            ..Default::default()
                         }
                     })
                     .collect();
@@ -9327,6 +9412,8 @@ impl App {
                     output: row.get(7).unwrap_or_default(),
                     mode: row.get(8).unwrap_or_default(),
                     source: String::new(),
+
+                    ..Default::default()
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -13981,6 +14068,8 @@ mod tests {
             output: String::new(),
             mode: "session".to_string(),
             source: "sessions".to_string(),
+
+            ..Default::default()
         });
         // Rebuild merged_rows
         app.refresh();
@@ -14180,6 +14269,8 @@ mod tests {
             output: String::new(),
             mode: String::from("session"),
             source: String::from("sessions"),
+
+            ..Default::default()
         }];
         // Open the `*` mode.
         app.query = String::from("*");
@@ -14315,6 +14406,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         }];
         app.host_defs = vec![HostDef {
             name: String::from("Proxmox"),
@@ -14422,6 +14515,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         }];
         app.host_defs = vec![HostDef {
             name: String::from("custom"),
@@ -14555,6 +14650,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         }];
         app.host_defs = vec![HostDef {
             name: String::from("Proxmox"),
@@ -15390,6 +15487,8 @@ mod tests {
             output: String::new(),
             mode: String::new(),
             source: String::new(),
+
+            ..Default::default()
         });
         app.llm_preview_description = Some("describe something".to_string());
         // The user edits the description by
@@ -15482,6 +15581,8 @@ mod tests {
             output: String::new(),
             mode: String::new(),
             source: String::new(),
+
+            ..Default::default()
         });
         app.llm_preview_description = Some("find files".to_string());
         // Debounce expired in the past.
@@ -15640,6 +15741,8 @@ mod tests {
             output: "find . -name '*.txt'".to_string(),
             mode: String::new(),
             source: String::new(),
+
+            ..Default::default()
         });
         app.llm_preview_description = Some("find files".to_string());
         // Arm the debounce recently (well
@@ -15680,6 +15783,8 @@ mod tests {
             output: String::new(),
             mode: String::new(),
             source: String::new(),
+
+            ..Default::default()
         });
         app.llm_preview_description = Some("old description".to_string());
         app.llm_debounce_started = Some(std::time::Instant::now());
@@ -19181,6 +19286,8 @@ mod tests {
             output: String::new(),
             mode: String::from("todo"),
             source: String::new(),
+
+            ..Default::default()
         };
         app.mark_todo_done_for_row(&row);
         let contents = fs::read_to_string(dir.join("note.md")).expect("read note.md");
@@ -21620,6 +21727,8 @@ mod tests {
                     output: window_id.to_string(),
                     mode: "pane".to_string(),
                     source: "pane".to_string(),
+
+                    ..Default::default()
                 }
             })
             .collect();
@@ -21669,6 +21778,146 @@ mod tests {
         assert_eq!(rows[0].command, "vim");
     }
 
+    /// Group-aware filter: when the user types a token
+    /// that matches a workspace LABEL, the entire
+    /// workspace (header + every child pane) is shown,
+    /// even when the panes themselves don't match. This
+    /// is the user's "I searched for SmartHistory, I want
+    /// to see the workspace AND its panes" use case. The
+    /// tree is built by `fetch_session_panes_impl`, but
+    /// `panes_test_app` doesn't go through that path so
+    /// we inject a workspace + pane group directly into
+    /// `session_panes` and let the filter logic in
+    /// `fetch_panes` apply the parent-wins rule.
+    #[test]
+    fn fetch_panes_workspace_label_match_keeps_whole_group() {
+        use crate::tui::state::HistoryRow;
+        let mut app = panes_test_app(&[]);
+        // Build: workspace "SmartHistory" (no pane
+        // rows match `*SmartHistory` on their own) +
+        // two child panes running zsh and vim.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        app.session_panes = vec![
+            HistoryRow {
+                id: -1,
+                command: "SmartHistory".to_string(),
+                directory: "/tmp/SmartHistory".to_string(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: now,
+                comment: "2 panes".to_string(),
+                output: String::new(),
+                mode: "workspace".to_string(),
+                source: "workspace".to_string(),
+                workspace_label: "SmartHistory".to_string(),
+            },
+            HistoryRow {
+                id: -2,
+                command: "zsh".to_string(),
+                directory: "/tmp/SmartHistory".to_string(),
+                session_id: "%10".to_string(),
+                exit_code: 0,
+                timestamp: now,
+                comment: "~/SmartHistory".to_string(),
+                output: "@1".to_string(),
+                mode: "pane".to_string(),
+                source: "pane".to_string(),
+                workspace_label: "SmartHistory".to_string(),
+            },
+            HistoryRow {
+                id: -3,
+                command: "vim".to_string(),
+                directory: "/tmp/SmartHistory".to_string(),
+                session_id: "%11".to_string(),
+                exit_code: 0,
+                timestamp: now,
+                comment: "~/SmartHistory".to_string(),
+                output: "@1".to_string(),
+                mode: "pane".to_string(),
+                source: "pane".to_string(),
+                workspace_label: "SmartHistory".to_string(),
+            },
+        ];
+        app.query = String::from("*SmartHistory");
+        let rows = app.fetch_panes().unwrap();
+        // The workspace header AND its two child panes
+        // are all kept, because the workspace label
+        // matches the query.
+        assert_eq!(
+            rows.len(),
+            3,
+            "expected workspace + 2 panes, got {} rows",
+            rows.len()
+        );
+        assert_eq!(rows[0].mode, "workspace");
+        assert_eq!(rows[0].command, "SmartHistory");
+        assert_eq!(rows[1].mode, "pane");
+        assert_eq!(rows[1].command, "zsh");
+        assert_eq!(rows[2].mode, "pane");
+        assert_eq!(rows[2].command, "vim");
+        // The renderer reads `workspace_label` to
+        // show the badge; verify it was set on the
+        // pane rows so the chip rendering is wired
+        // up end-to-end.
+        assert_eq!(rows[1].workspace_label, "SmartHistory");
+        assert_eq!(rows[2].workspace_label, "SmartHistory");
+    }
+
+    /// Group-aware filter: when a child pane's command
+    /// matches, the parent workspace header is ALSO
+    /// kept (the user sees which workspace the matching
+    /// pane belongs to). Mirrors the parent-wins case.
+    #[test]
+    fn fetch_panes_pane_match_keeps_parent_workspace_header() {
+        use crate::tui::state::HistoryRow;
+        let mut app = panes_test_app(&[]);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        app.session_panes = vec![
+            HistoryRow {
+                id: -1,
+                command: "SmartHistory".to_string(),
+                directory: "/tmp/SmartHistory".to_string(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: now,
+                comment: "2 panes".to_string(),
+                output: String::new(),
+                mode: "workspace".to_string(),
+                source: "workspace".to_string(),
+                workspace_label: "SmartHistory".to_string(),
+            },
+            HistoryRow {
+                id: -2,
+                command: "vim".to_string(),
+                directory: "/tmp/SmartHistory".to_string(),
+                session_id: "%10".to_string(),
+                exit_code: 0,
+                timestamp: now,
+                comment: "~/SmartHistory".to_string(),
+                output: "@1".to_string(),
+                mode: "pane".to_string(),
+                source: "pane".to_string(),
+                workspace_label: "SmartHistory".to_string(),
+            },
+        ];
+        // `*vim` matches the pane's command; the
+        // workspace header is also kept so the user
+        // sees the context.
+        app.query = String::from("*vim");
+        let rows = app.fetch_panes().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].mode, "workspace");
+        assert_eq!(rows[0].command, "SmartHistory");
+        assert_eq!(rows[1].mode, "pane");
+        assert_eq!(rows[1].command, "vim");
+    }
+
     /// The `FilterPanesWindows` filter hides
     /// `# sessions` and `# hosts` rows, keeping
     /// only live multiplexer panes.
@@ -21691,6 +21940,8 @@ mod tests {
             output: String::new(),
             mode: String::from("session"),
             source: String::from("sessions"),
+
+            ..Default::default()
         });
         app.session_panes.push(HistoryRow {
             id: -25_001,
@@ -21703,6 +21954,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         });
         app.query = String::from("*");
         app.panes_filter = PanesFilter::Windows;
@@ -21731,6 +21984,8 @@ mod tests {
             output: String::new(),
             mode: String::from("session"),
             source: String::from("sessions"),
+
+            ..Default::default()
         });
         app.session_panes.push(HistoryRow {
             id: -25_001,
@@ -21743,6 +21998,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         });
         app.query = String::from("*");
         app.panes_filter = PanesFilter::Hosts;
@@ -21771,6 +22028,8 @@ mod tests {
             output: String::new(),
             mode: String::from("session"),
             source: String::from("sessions"),
+
+            ..Default::default()
         });
         app.session_panes.push(HistoryRow {
             id: -25_001,
@@ -21783,6 +22042,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         });
         app.query = String::from("*");
         app.panes_filter = PanesFilter::Sessions;
@@ -21813,6 +22074,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         });
         app.session_panes.push(HistoryRow {
             id: -25_002,
@@ -21825,6 +22088,8 @@ mod tests {
             output: String::new(),
             mode: String::from("host"),
             source: String::from("hosts"),
+
+            ..Default::default()
         });
         app.query = String::from("*Proxmox");
         app.panes_filter = PanesFilter::Hosts;
@@ -22267,6 +22532,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -2,
@@ -22290,6 +22557,8 @@ mod tests {
                 output: String::from("@1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -3,
@@ -22302,6 +22571,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -4,
@@ -22314,6 +22585,8 @@ mod tests {
                 output: String::from("@2"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
         ];
         app.query = String::from("*");
@@ -22460,6 +22733,8 @@ mod tests {
                 output: String::from("wA"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -2,
@@ -22472,6 +22747,8 @@ mod tests {
                 output: String::from("wA"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
         ];
         // The `*`-mode
@@ -22654,6 +22931,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             // First shell — under dedup this would be kept.
             HistoryRow {
@@ -22667,6 +22946,8 @@ mod tests {
                 output: String::from("wA:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             // Second shell — same command (""), so under dedup
             // it would be DROPPED. The user's bug.
@@ -22681,6 +22962,8 @@ mod tests {
                 output: String::from("wA:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             // Workspace header for wB: 1 pane running pi,
             // plus a sibling pi pane. Two pi rows would
@@ -22697,6 +22980,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -5,
@@ -22709,6 +22994,8 @@ mod tests {
                 output: String::from("wB:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -6,
@@ -22721,6 +23008,8 @@ mod tests {
                 output: String::from("wB:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
         ];
         // Trigger the panes view
@@ -22882,6 +23171,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -2,
@@ -22894,6 +23185,8 @@ mod tests {
                 output: String::from("wA:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -3,
@@ -22906,6 +23199,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -4,
@@ -22918,6 +23213,8 @@ mod tests {
                 output: String::from("wB:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
         ];
         app.query = String::from("*");
@@ -22992,6 +23289,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -2,
@@ -23004,6 +23303,8 @@ mod tests {
                 output: String::from("wA:t1"),
                 mode: String::from("pane"),
                 source: String::from("pane"),
+
+                ..Default::default()
             },
             HistoryRow {
                 id: -3,
@@ -23016,6 +23317,8 @@ mod tests {
                 output: String::new(),
                 mode: String::from("workspace"),
                 source: String::from("workspace"),
+
+                ..Default::default()
             },
         ];
         app.query = String::from("*");
@@ -23124,6 +23427,8 @@ mod tests {
             output: String::new(),
             mode: "pane".to_string(),
             source: "pane".to_string(),
+
+            ..Default::default()
         });
         app.query = String::from("*");
         app.refresh();
@@ -23325,6 +23630,8 @@ mod tests {
             output: String::new(),
             mode: String::from("pane"),
             source: String::from("pane"),
+
+            ..Default::default()
         });
         // ……actually:
         // `fetch_session_panes`
@@ -23699,6 +24006,8 @@ mod tests {
             output: String::new(),
             mode: "jira".to_string(),
             source: "jira".to_string(),
+
+            ..Default::default()
         });
         app.query = String::from("-");
         app.refresh();
@@ -24985,6 +25294,8 @@ mod tests {
             output: String::new(),
             mode: "jira".to_string(),
             source: "jira".to_string(),
+
+            ..Default::default()
         });
         app.query = String::from("-");
         app.refresh();

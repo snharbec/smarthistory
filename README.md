@@ -168,14 +168,14 @@ multiplexer=herdr
 
 ```
 #  smarthistory
-  · pi                  ~/smarthistory
-  ·                     ~/smarthistory
+  · [smarthistory] pi                  ~/smarthistory
+  · [smarthistory]                     ~/smarthistory
 #  dir: Downloads
-  ·                     ~/Downloads
-  ·                     /private/tmp
+  · [dir: Downloads]                   ~/Downloads
+  · [dir: Downloads]                   /private/tmp
 ```
 
-  The workspace label (e.g. `smarthistory`, `dir: Downloads`) comes from `herdr workspace list`'s `label` field. Selecting a workspace header row stages `herdr workspace focus <id>`; selecting a pane row stages `herdr workspace focus <ws> && herdr tab focus <tab_id>`.
+  The workspace label (e.g. `smarthistory`, `dir: Downloads`) comes from `herdr workspace list`'s `label` field. Every pane row carries a `[<label>]` chip so the user can see which session / workspace each pane belongs to (useful when the workspace header is hidden by a filter). Selecting a workspace header row stages `herdr workspace focus <id>`; selecting a pane row stages `herdr workspace focus <ws> && herdr tab focus <tab_id>`. The filter is **group-aware**: typing a token that matches a workspace label keeps the whole workspace (header + every child pane); typing a token that matches a pane's command / cwd keeps that pane and its parent workspace header.
 
 - **`*` mode (hosts)**: a `# hosts` block at the bottom of the panes view. Each host becomes a row; selecting a row either focuses an existing workspace already running that host's `ssh` connection (or matching the host's display name on herdr), or creates a new workspace and bootstraps the `ssh` body inside the first pane.
 

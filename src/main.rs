@@ -2119,6 +2119,7 @@ impl Config {
                     output: String::new(),
                     mode: "session".to_string(),
                     source: "sessions".to_string(),
+                    ..Default::default()
                 }
             })
             .collect()
@@ -2201,6 +2202,7 @@ impl Config {
                     output: String::new(),
                     mode: "host".to_string(),
                     source: "hosts".to_string(),
+                    ..Default::default()
                 }
             })
             .collect()

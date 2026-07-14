@@ -1455,12 +1455,23 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         // every pane across every
         // tmux session / herdr
         // workspace (selecting one
-        // jumps to it; each row
-        // shows a `[label]` badge
-        // so the user can tell
-        // which session / workspace
-        // the pane belongs to).
-        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; selecting a workspace jumps to the session/workspace, selecting a pane jumps to the pane)",
+        // jumps to it; each pane
+        // row carries a `[label]`
+        // badge so the user can
+        // tell which session /
+        // workspace the pane
+        // belongs to, and the
+        // filter is "group-aware":
+        // typing a token that
+        // matches a workspace
+        // label keeps the whole
+        // workspace (header + all
+        // child panes), and
+        // typing a pane command
+        // keeps that pane + its
+        // parent workspace
+        // header).
+        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; each pane row carries a [label] badge showing its session / workspace; the filter is group-aware: a match on the workspace label keeps the whole workspace, a match on a pane keeps the pane and its parent header)",
     );
     mode_row(
         &mut lines,
@@ -2892,10 +2903,24 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // glance that this is a
     // workspace-level row,
     // not a pane. Selecting
-    // a workspace row stages
-    // `focus_session`;
-    // selecting a pane row
-    // stages `focus_pane`.
+    // The `*`-mode tree groups
+    // rows visually. Every row
+    // gets a tree-position
+    // marker (so the connector
+    // is consistent for both
+    // unfiltered and filtered
+    // views), then the row's
+    // primary content. The
+    // markers are:
+    //   - `workspace` rows: a
+    //     bold `# ` accent prefix
+    //     identifying the
+    //     workspace as the
+    //     group header.
+    //   - `pane` / `session` /
+    //     `host` rows: `  · ` to
+    //     indent them under
+    //     their parent.
     if row.mode == "pane" || row.mode == "session" || row.mode == "host" {
         // `pane`, `session`, and `host` rows are
         // all children of a `workspace` header row
@@ -2913,6 +2938,55 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
             "# ",
             Style::default()
                 .fg(Theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // For `pane` rows in the
+    // `*`-mode tree, show the
+    // parent workspace /
+    // session name as a chip
+    // after the tree connector
+    // and BEFORE the row's
+    // command text. This is
+    // what the user asked for:
+    // "the workspace (herdr) or
+    // session name (tmux) should
+    // be added to the panes as
+    // well". The badge is
+    // important when:
+    //   - the user filters the
+    //     list down to a single
+    //     workspace (the
+    //     header is still
+    //     visible, but the
+    //     `· ` indent alone
+    //     doesn't say which
+    //     workspace it belongs
+    //     to);
+    //   - the user types a token
+    //     that matches a pane
+    //     command — the
+    //     group-aware filter
+    //     keeps the parent
+    //     header, but having
+    //     the label visible on
+    //     every pane row
+    //     makes scanning a
+    //     long list easier.
+    // The chip uses the
+    // `info` slot's colour (the
+    // same blue the `+`-output
+    // mode uses) so it's
+    // visually distinct from
+    // the row's command /
+    // cwd content.
+    if row.mode == "pane" && !row.workspace_label.is_empty() {
+        spans.push(Span::styled(
+            format!("[{}] ", row.workspace_label),
+            Style::default()
+                .fg(Theme::badge_fg_color())
+                .bg(Theme::info_color())
                 .add_modifier(Modifier::BOLD),
         ));
     }

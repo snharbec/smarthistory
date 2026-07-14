@@ -31,6 +31,14 @@ All notable changes to this project will be documented in this file.
   the command palette, help overlay, and config printer can render
   both specs; either can be removed via `key.delete-word-backward=...`
   in the config file.
+- The panes (`*`) prefix is now a properly-typed tree: every pane
+  row carries a `[<label>]` chip showing the session / workspace it
+  belongs to, and the filter is **group-aware**. Typing a token that
+  matches a workspace label keeps the whole workspace (header + every
+  child pane); typing a token that matches a pane's command / cwd
+  keeps that pane and its parent workspace header. The new
+  `HistoryRow::workspace_label` field carries the label from
+  `fetch_session_panes_impl` to the renderer.
 
 ### Fixed
 

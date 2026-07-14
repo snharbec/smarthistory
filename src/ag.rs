@@ -24,9 +24,9 @@
 use crate::highlight::{highlight_with_bat, parse_query_tokens};
 use crate::tui::read_source_context;
 use crate::tui::state::HistoryRow;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How long the ag-mode debounce waits after the last
@@ -305,6 +305,7 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             output,
             mode: "ag".to_string(),
             source,
+            ..Default::default()
         });
         next_id -= 1;
 

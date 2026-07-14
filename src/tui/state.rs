@@ -71,6 +71,32 @@ pub struct HistoryRow {
     /// filter (ALL / TMUX
     /// / CFG).
     pub source: String,
+    /// Workspace or session
+    /// name that the row
+    /// belongs to in the
+    /// `*`-mode tree. Set on
+    /// every `pane` row by
+    /// `fetch_session_panes_impl`
+    /// so the renderer can show
+    /// a `[SmartHistory]`-style
+    /// badge next to each pane,
+    /// and so the group-aware
+    /// filter in `fetch_panes`
+    /// can attribute child
+    /// panes back to their
+    /// parent workspace without
+    /// re-walking the row list.
+    /// Empty on every non-pane
+    /// row.
+    ///
+    /// For tmux this is the
+    /// session name (e.g. `0`,
+    /// `1`, or a named session
+    /// like `work`); for herdr
+    /// it's the workspace label
+    /// (e.g. `SmartHistory`,
+    /// `dir: Downloads`).
+    pub workspace_label: String,
 }
 
 impl HistoryRow {
@@ -1009,6 +1035,7 @@ mod tests {
             output: String::new(),
             mode: "command".to_string(),
             source: String::new(),
+            ..Default::default()
         };
         assert!(!row.is_llm_preview());
     }
@@ -1031,6 +1058,7 @@ mod tests {
             output: String::new(),
             mode: "command".to_string(),
             source: String::new(),
+            ..Default::default()
         };
         assert!(!row.is_llm_preview());
     }
@@ -1062,6 +1090,7 @@ mod tests {
             output: String::new(),
             mode: "todo".to_string(),
             source: String::new(),
+            ..Default::default()
         };
         assert!(
             !row.is_llm_preview(),
@@ -1096,6 +1125,7 @@ mod tests {
             output: String::new(),
             mode: String::new(),
             source: String::new(),
+            ..Default::default()
         };
         assert!(row.is_llm_preview());
     }
@@ -1124,6 +1154,7 @@ mod tests {
             output: "Paris".to_string(),
             mode: "question".to_string(),
             source: String::new(),
+            ..Default::default()
         };
         assert!(!row.is_llm_preview());
     }
