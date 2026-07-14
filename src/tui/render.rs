@@ -1776,8 +1776,11 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         };
         let is_selected = row_pos == menu.selected;
         let category = action.category();
-        // Pad the action label so the key column lines up. Width
-        // 22 is enough for "Edit (cursor at start)" plus a space.
+        // Pad the action label so the key column lines up.
+        // Width 22 is enough for "Edit (cursor at start)"
+        // plus a space; the key column is 24 so two-spec
+        // bindings like "C-w, M-Backspace" fit without
+        // overflowing into the category bracket.
         let mut spans = vec![
             Span::styled(
                 format!("  {:<22} ({})", label, config_key),
@@ -1788,7 +1791,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
                 },
             ),
             Span::styled(
-                format!("{:>14}", key),
+                format!("{:>24}", key),
                 if is_selected {
                     highlight_style
                 } else {

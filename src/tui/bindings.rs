@@ -191,6 +191,15 @@ pub enum Action {
     /// the same shortcut works in bash / readline /
     /// zsh line editors and the user's muscle
     /// memory transfers.
+    ///
+    /// Default bindings: `C-w` (the readline convention)
+    /// **and** `M-Backspace` (the macOS / many GUI
+    /// editors' convention). Both fire the same
+    /// action so users coming from either muscle
+    /// memory get the expected behaviour. Either
+    /// spec can be removed via `key.delete-word-backward=…`
+    /// in the config file; see `default_keys()` for
+    /// the full list.
     DeleteWordBackward,
     /// Open the command palette: a menu where the user can pick
     /// any action by name, with its current binding displayed.
@@ -479,6 +488,28 @@ impl Action {
             Action::TogglePaneVisibility => "F6",
         }
     }
+
+    /// Every default key spec for this action, in display order.
+    ///
+    /// Most actions have a single default key, but some
+    /// (notably `DeleteWordBackward`, which binds both
+    /// `C-w` and `M-Backspace`) ship with two so users from
+    /// different muscle-memory backgrounds get the expected
+    /// behaviour. `KeyBindings::defaults()` iterates this
+    /// list; tests that compare against "the full default
+    /// binding" should use this method (or the
+    /// `format_key_specs(bindings.specs(action))` form)
+    /// rather than `default_key()`, which only returns the
+    /// first spec.
+    pub fn default_keys(self) -> &'static [&'static str] {
+        match self {
+            Action::DeleteWordBackward => &["C-w", "M-Backspace"],
+            // Every other action keeps the single-spec form
+            // for now. The slice indirection avoids forcing
+            // a `Vec` allocation in the hot path.
+            _ => &[],
+        }
+    }
 }
 
 /// A parsed key binding. `None` means "any key with these
@@ -663,13 +694,24 @@ pub struct KeyBindings {
 
 impl KeyBindings {
     /// Build a fresh binding table with every action wired to its
-    /// default key (one spec per action).
+    /// default key(s). Actions that ship with multiple default
+    /// specs (see `Action::default_keys`) get every spec bound
+    /// in the listed order; everything else uses the single
+    /// `default_key()` spec.
     pub fn defaults() -> Self {
         let mut by_action = HashMap::new();
         for a in ALL_ACTIONS {
-            let spec =
-                parse_key_spec(a.default_key()).expect("default key bindings must always parse");
-            by_action.insert(*a, vec![spec]);
+            let extra = a.default_keys();
+            let specs: Vec<KeySpec> = if extra.is_empty() {
+                vec![parse_key_spec(a.default_key())
+                    .expect("default key bindings must always parse")]
+            } else {
+                extra
+                    .iter()
+                    .map(|s| parse_key_spec(s).expect("default key bindings must always parse"))
+                    .collect()
+            };
+            by_action.insert(*a, specs);
         }
         KeyBindings { by_action }
     }

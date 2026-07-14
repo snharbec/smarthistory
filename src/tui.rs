@@ -16841,6 +16841,41 @@ mod tests {
         assert_eq!(action, Action::DeleteWordBackward);
     }
 
+    /// `M-Backspace` is also bound by default so users
+    /// coming from the macOS / GUI-editor muscle
+    /// memory (where the conventional "delete
+    /// previous word" key is Alt-Backspace, not
+    /// Ctrl-W) get the expected behaviour without
+    /// having to remap.
+    #[test]
+    fn delete_word_backward_alt_backspace_routes() {
+        let bindings = KeyBindings::defaults();
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        let action =
+            action_for_key(&bindings, &key).expect("M-Backspace is bound by default alongside C-w");
+        assert_eq!(action, Action::DeleteWordBackward);
+    }
+
+    /// Both default keys are listed in `default_keys()`
+    /// and `KeyBindings::defaults()` registers both.
+    /// Tests that compare against the full default
+    /// binding set should use this canonical
+    /// comma-joined form, not `default_key()` (which
+    /// only returns the first spec).
+    #[test]
+    fn delete_word_backward_defaults_have_both_specs() {
+        assert_eq!(
+            Action::DeleteWordBackward.default_keys(),
+            &["C-w", "M-Backspace"]
+        );
+        let bindings = KeyBindings::defaults();
+        assert_eq!(bindings.specs(Action::DeleteWordBackward).len(), 2);
+        assert_eq!(
+            format_key_specs(bindings.specs(Action::DeleteWordBackward)),
+            "C-w, M-Backspace"
+        );
+    }
+
     /// Basic case: cursor at end of `git status`,
     /// press `Ctrl-W`, get `git `. The trailing
     /// word `status` is eaten; the space between

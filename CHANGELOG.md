@@ -23,6 +23,14 @@ All notable changes to this project will be documented in this file.
   syntax-highlighted code. The shared `parse_query_tokens` helper in the
   new `src/highlight.rs` module backs both modes (and any future content
   view that wants the same classification).
+- `DeleteWordBackward` now ships with two default bindings: the
+  readline-style `Ctrl-W` **and** the macOS / GUI-editor-style
+  `Alt-Backspace`. Both fire the same action, so users coming from
+  either muscle memory get the expected behaviour without remapping.
+  The action's `Action::default_keys()` API exposes the full list so
+  the command palette, help overlay, and config printer can render
+  both specs; either can be removed via `key.delete-word-backward=...`
+  in the config file.
 
 ### Fixed
 
