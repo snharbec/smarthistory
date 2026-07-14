@@ -5658,6 +5658,15 @@ notes_date_filter: NotesDateFilter::All,
         if app.is_jira_query() {
             app.jira_debounce_started = Some(std::time::Instant::now());
             app.jira_maybe_autocall();
+            // Eagerly build the JQL so the input
+            // border title shows it on the first
+            // frame rather than waiting for the
+            // debounce tick. The field will be
+            // refreshed when the search actually
+            // fires if the user has typed more
+            // in the meantime.
+            let jql = app.jira_build_query();
+            app.jira_last_jql = Some(jql);
         }
         // If the restored query is an ag query, arm the
         // debounce and fire the search immediately so the
@@ -11090,6 +11099,8 @@ pub fn run_tui_to_stdout(
     llm: Option<Box<dyn crate::llm::LlmClient>>,
     llm_config: Option<crate::llm::LlmConfig>,
     override_session_query: bool,
+    override_pane_visibility: Option<&str>,
+    override_panes_filter: Option<&str>,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -11220,6 +11231,20 @@ pub fn run_tui_to_stdout(
         app.session_panes.clear();
         app.refresh();
     }
+
+    // Apply CLI overrides for pane
+    // visibility and panes-filter.
+    // The CLI flags take precedence
+    // over the session file and the
+    // defaults.
+    if let Some(v) = override_pane_visibility
+        && let Some(pv) = crate::tui::state::PaneVisibility::parse(v) {
+            app.pane_visibility = pv;
+        }
+    if let Some(f) = override_panes_filter
+        && let Some(pf) = crate::tui::state::PanesFilter::parse(f) {
+            app.panes_filter = pf;
+        }
 
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;

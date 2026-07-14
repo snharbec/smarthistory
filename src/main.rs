@@ -194,6 +194,25 @@ enum Commands {
         /// `eval` the printed command.
         #[arg(long)]
         exec: bool,
+        /// Which detail pane layout to use on startup.
+        /// Values: `both` (default, Details + Output Preview
+        /// side-by-side), `details` (only the Details pane),
+        /// `output` (only the Output Preview pane).
+        /// The persisted session value takes precedence if
+        /// the user has changed the layout interactively in
+        /// a previous session; this flag overrides when the
+        /// user explicitly passes it on the CLI.
+        #[arg(long, value_name = "LAYOUT")]
+        pane: Option<String>,
+        /// Initial filter for the panes (`*`) prefix mode.
+        /// Values: `all` (default), `windows` (show only
+        /// live multiplexer panes), `hosts` (show only the
+        /// hosts block), `sessions` (show only the sessions
+        /// block). Only has an effect when the initial
+        /// query is the `*` prefix (or when `--prefix '*'`
+        /// is used).
+        #[arg(long, value_name = "FILTER")]
+        panes_filter: Option<String>,
         #[arg(index = 1)]
         query: Option<String>,
     },
@@ -3668,7 +3687,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", out);
             }
         },
-        Commands::Tui { mode, prefix, exec, query } => {
+        Commands::Tui { mode, prefix, exec, query, pane, panes_filter } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -3739,6 +3758,8 @@ fn main() -> anyhow::Result<()> {
                 llm_client,
                 llm_config,
                 override_session_query,
+                pane.as_deref(),
+                panes_filter.as_deref(),
             )? {
                 Some((command, pick_mode)) => {
                     if exec {

@@ -1360,6 +1360,19 @@ pub fn build_jql(
     fragments: &std::collections::HashMap<String, String>,
 ) -> (String, Vec<String>) {
     let body = body.trim();
+    // If the user has included an `ORDER BY` clause in
+    // their query (e.g. from a persisted session), strip
+    // it before parsing. `build_jql` always appends
+    // `ORDER BY updated DESC` at the end, so a user-
+    // supplied ORDER BY would be double-counted and its
+    // individual words (`order`, `by`, `updated`,
+    // `DESC`) would incorrectly become free-text search
+    // tokens.
+    let body = if let Some(pos) = body.to_ascii_lowercase().find("order by") {
+        body[..pos].trim()
+    } else {
+        body
+    };
     if body.is_empty() {
         // The "all aliases" view: an empty body with
         // `@me` / `@today` / `@week` / `@month` would
@@ -1376,11 +1389,14 @@ pub fn build_jql(
             Vec::new(),
         );
     }
-    let key_re = regex::Regex::new(r"^\w+-\d+$").expect("static regex");
+    let key_re = regex::Regex::new(r"^[A-Z]+-[0-9]+$").expect("static regex");
     let kv_re = regex::Regex::new(r"^(\w+)=(.*)$").expect("static regex");
     let mut keys: Vec<&str> = Vec::new();
     let mut kvs: Vec<(&str, &str)> = Vec::new();
     let mut text: Vec<&str> = Vec::new();
+    // Explicit `project=...` takes precedence over the
+    // default project and is placed first in the JQL.
+    let mut explicit_project: Option<&str> = None;
     // Alias state. `me` is a boolean (it's orthogonal
     // to the date aliases). `date_filter` is the
     // "last one wins" resolved date window — initially
@@ -1468,7 +1484,13 @@ pub fn build_jql(
                     if key_re.is_match(tok) {
                         keys.push(tok);
                     } else if let Some(caps) = kv_re.captures(tok) {
-                        kvs.push((caps.get(1).unwrap().as_str(), caps.get(2).unwrap().as_str()));
+                        let field = caps.get(1).unwrap().as_str();
+                        let value = caps.get(2).unwrap().as_str();
+                        if field.eq_ignore_ascii_case("project") {
+                            explicit_project = Some(value);
+                        } else {
+                            kvs.push((field, value));
+                        }
                     } else {
                         text.push(tok);
                     }
@@ -1477,10 +1499,25 @@ pub fn build_jql(
         }
     }
     let mut parts: Vec<String> = Vec::new();
-    // Always scope to the default project when one is
-    // configured, so free-text searches don't leak
-    // results from other projects.
-    if let Some(p) = default_project {
+    // A bare issue-key query is globally unique —
+    // scoping it to a (possibly wrong) default project
+    // would make the search fail. When the query
+    // contains only issue keys, omit the project clause.
+    let is_keys_only = !keys.is_empty()
+        && explicit_project.is_none()
+        && kvs.is_empty()
+        && text.is_empty()
+        && !me_alias
+        && date_filter.is_none()
+        && fragment_clauses.is_empty();
+    // Project clause: explicit `project=...` from the
+    // query takes precedence over the default project.
+    let project_value = if is_keys_only {
+        None
+    } else {
+        explicit_project.or(default_project)
+    };
+    if let Some(p) = project_value {
         parts.push(format!("project = {}", escape_jql_string(p)));
     }
     // Alias clauses come next, in a stable order: the
@@ -1771,7 +1808,9 @@ mod tests {
 
     #[test]
     fn build_jql_combines_all_three_groups_with_and() {
-        // keys first, then field=value, then free text.
+        // Project (explicit or default) always comes
+        // first, then aliases, then keys, then other
+        // field-values, then free text.
         assert_eq!(
             call_jql(
                 "PROJ-123 project=PROJ crash",
@@ -1779,7 +1818,7 @@ mod tests {
                 TEST_NOW_EPOCH,
                 &empty_fragments()
             ),
-            r#"key = PROJ-123 AND project = "PROJ" AND (description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
+            r#"project = "PROJ" AND key = PROJ-123 AND (description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
         );
     }
 
@@ -1808,6 +1847,86 @@ mod tests {
     }
 
     #[test]
+    fn build_jql_strips_user_supplied_order_by() {
+        // Users may persist a session query that includes
+        // the ORDER BY clause. `build_jql` always appends
+        // its own `ORDER BY updated DESC`, so the user-
+        // supplied clause must be stripped before parsing
+        // to avoid double-counting and mis-tokenization.
+        assert_eq!(
+            call_jql("crash ORDER BY updated DESC", None, TEST_NOW_EPOCH, &empty_fragments()),
+            r#"(description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
+        );
+        // Case-insensitive match.
+        assert_eq!(
+            call_jql("crash order by updated DESC", None, TEST_NOW_EPOCH, &empty_fragments()),
+            r#"(description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
+        );
+        // With project scope.
+        assert_eq!(
+            call_jql("crash ORDER BY updated DESC", Some("PROJ"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "PROJ" AND (description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn build_jql_explicit_project_overrides_default() {
+        // The full ordering policy:
+        //   1. project (explicit > default)
+        //   2. @me / date aliases
+        //   3. fragments
+        //   4. issue keys
+        //   5. other field-value pairs
+        //   6. free-text tokens
+        //
+        // Below we mirror the user's specification table
+        // with ENG as the default project.
+
+        // Empty body with a default project.
+        assert_eq!(
+            call_jql("", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "ENG" ORDER BY updated DESC"#,
+        );
+
+        // Single free-text token.
+        assert_eq!(
+            call_jql("test1", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "ENG" AND (description ~ "test1" OR summary ~ "test1") ORDER BY updated DESC"#,
+        );
+
+        // Multiple free-text tokens are ANDed.
+        assert_eq!(
+            call_jql("test1 test2", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "ENG" AND (description ~ "test1" OR summary ~ "test1") AND (description ~ "test2" OR summary ~ "test2") ORDER BY updated DESC"#,
+        );
+
+        // Explicit `project=...` overrides the default
+        // project and appears first.
+        assert_eq!(
+            call_jql("project=RMS", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "RMS" ORDER BY updated DESC"#,
+        );
+
+        // Free text + explicit project.
+        assert_eq!(
+            call_jql("test1 project=RMS", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "RMS" AND (description ~ "test1" OR summary ~ "test1") ORDER BY updated DESC"#,
+        );
+
+        // @me alias + explicit project.
+        assert_eq!(
+            call_jql("@me project=RMS", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "RMS" AND assignee = currentUser() ORDER BY updated DESC"#,
+        );
+
+        // @me + explicit project + free text.
+        assert_eq!(
+            call_jql("@me project=RMS test1", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "RMS" AND assignee = currentUser() AND (description ~ "test1" OR summary ~ "test1") ORDER BY updated DESC"#,
+        );
+    }
+
+    #[test]
     fn build_jql_free_text_with_default_project_is_scoped() {
         // When a default project is configured, free-text
         // searches must NOT leak results from other projects.
@@ -1818,10 +1937,52 @@ mod tests {
     }
 
     #[test]
-    fn build_jql_issue_key_with_default_project_is_scoped() {
+    fn build_jql_issue_key_ignores_default_project() {
+        // A bare issue key is globally unique — adding
+        // a project scope would cause a mismatch if the
+        // key belongs to a different project.
         assert_eq!(
-            call_jql("PROJ-123", Some("PROJ"), TEST_NOW_EPOCH, &empty_fragments()),
-            r#"project = "PROJ" AND key = PROJ-123 ORDER BY updated DESC"#
+            call_jql("PROJ-123", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            "key = PROJ-123 ORDER BY updated DESC",
+        );
+    }
+
+    #[test]
+    fn build_jql_issue_key_with_default_project_is_scoped() {
+        // Only when the query ALSO contains free text,
+        // field-values, aliases, or fragments does the
+        // project scope apply.
+        assert_eq!(
+            call_jql("PROJ-123 crash", Some("PROJ"), TEST_NOW_EPOCH, &empty_fragments()),
+            r#"project = "PROJ" AND key = PROJ-123 AND (description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn build_jql_issue_key_only_uppercase() {
+        // Only uppercase project keys with digits after
+        // a hyphen match the issue-key pattern.
+        assert_eq!(
+            call_jql("ENG-123", None, TEST_NOW_EPOCH, &empty_fragments()),
+            "key = ENG-123 ORDER BY updated DESC",
+        );
+
+        // Lowercase is treated as free text.
+        assert_eq!(
+            call_jql("eng-123", None, TEST_NOW_EPOCH, &empty_fragments()),
+            r#"(description ~ "eng-123" OR summary ~ "eng-123") ORDER BY updated DESC"#,
+        );
+
+        // Mixed case is free text.
+        assert_eq!(
+            call_jql("Eng-123", None, TEST_NOW_EPOCH, &empty_fragments()),
+            r#"(description ~ "Eng-123" OR summary ~ "Eng-123") ORDER BY updated DESC"#,
+        );
+
+        // No hyphen is free text.
+        assert_eq!(
+            call_jql("ENG123", None, TEST_NOW_EPOCH, &empty_fragments()),
+            r#"(description ~ "ENG123" OR summary ~ "ENG123") ORDER BY updated DESC"#,
         );
     }
 

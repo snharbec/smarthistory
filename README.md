@@ -84,6 +84,8 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 - `--mode <scope>` — start in a specific scope (SESS, DIR, GLOBAL).
 - `--prefix <char>` — start directly in a prefix mode (`*` for panes, `#` for directories, `@` for notes, etc.). Overrides the persisted session query.
 - `--exec` — execute the selected command directly via `sh -c` instead of printing it to stdout. Use when launching from outside a shell (e.g. a herdr keybinding or GUI launcher).
+- `--pane <LAYOUT>` — set the initial detail pane layout: `both` (default, side-by-side), `details` (only the Details pane), `output` (only the Output Preview pane). Overrides the persisted session value.
+- `--panes-filter <FILTER>` — set the initial filter for panes (`*`) mode: `all` (default), `windows` (live multiplexer panes only), `hosts` (only the `# hosts` block), `sessions` (only the `# sessions` block). Only effective when the initial query starts with the panes prefix.
 
 ### TUI key bindings (subset)
 
@@ -105,6 +107,7 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 | `T` | Open the theme picker. |
 | `Ctrl+1` | Add the selected directory as a new named session (`*` mode). |
 | `Ctrl+2` | Add the selected directory as a new host (`*` mode). |
+| `F6` | Toggle pane visibility: BOTH → Details → Output Preview → BOTH. |
 | `F7` | Panes filter: show only live multiplexer windows (`*` mode). |
 | `F8` | Panes filter: show only the `# hosts` block (`*` mode). |
 | `F9` | Panes filter: show only the `# sessions` block (`*` mode). |

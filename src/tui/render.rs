@@ -4550,7 +4550,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             } else if app.is_panes_query() {
                 ("*".to_string(), format!(" panes{} ", algo), app.query.as_str())
             } else if app.is_jira_query() {
-                ("-".to_string(), " jira ".to_string(), app.query.as_str())
+                let jql_title = app
+                    .jira_last_jql
+                    .as_deref()
+                    .map_or_else(|| " jira ".to_string(), |j| format!(" jira ({}) ", j));
+                ("-".to_string(), jql_title, app.query.as_str())
             } else if app.is_files_query() {
                 ("~".to_string(), format!(" files{} ", algo), app.query.as_str())
             } else if app.is_tags_query() {

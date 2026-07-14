@@ -424,6 +424,22 @@ impl PanesFilter {
     pub fn is_default(self) -> bool {
         self == PanesFilter::All
     }
+
+    /// Parse a string like
+    /// "all", "windows",
+    /// "hosts", "sessions"
+    /// (case-insensitive).
+    /// Returns `None` for
+    /// anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Some(PanesFilter::All),
+            "windows" | "panes" | "win" => Some(PanesFilter::Windows),
+            "hosts" | "host" => Some(PanesFilter::Hosts),
+            "sessions" | "session" => Some(PanesFilter::Sessions),
+            _ => None,
+        }
+    }
 }
 
 /// Which detail panes are
