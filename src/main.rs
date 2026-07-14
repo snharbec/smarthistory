@@ -2,6 +2,7 @@
 #![allow(clippy::empty_line_after_doc_comments)]
 mod ag;
 mod files;
+mod highlight;
 mod jira;
 mod llm;
 mod multiplexer;
@@ -10,13 +11,13 @@ mod tui;
 mod util;
 
 use clap::Parser;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process;
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -73,8 +74,22 @@ fn generate_uuid_v4() -> String {
 
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15],
     )
 }
 
@@ -486,9 +501,10 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
             return std::path::PathBuf::from(home);
         }
     } else if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = env::var("HOME") {
-            return std::path::PathBuf::from(home).join(rest);
-        }
+        && let Ok(home) = env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
     std::path::PathBuf::from(path)
 }
 
@@ -513,18 +529,6 @@ fn parse_capture_lines(s: &str) -> Option<usize> {
         None
     } else {
         s.parse::<usize>().ok()
-    }
-}
-
-/// Parse a boolean config value. Accepts "on", "true", "1", "yes"
-/// (case-insensitive, also with leading/trailing whitespace) as true;
-/// "off", "false", "0", "no" as false. Anything else falls back to
-/// `default` rather than failing to parse the whole config file.
-fn parse_bool(s: &str, default: bool) -> bool {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "on" | "true" | "1" | "yes" => true,
-        "off" | "false" | "0" | "no" => false,
-        _ => default,
     }
 }
 
@@ -698,38 +702,39 @@ pub fn validate_config() -> ConfigReport {
     // --- Unknown key.* action names ---
     if let Some(ref p) = path
         && p.is_file()
-            && let Ok(contents) = std::fs::read_to_string(p) {
-                let known: std::collections::HashSet<&'static str> = ALL_ACTIONS
-                    .iter()
-                    .map(|a| a.config_key())
-                    .collect();
-                for raw in contents.lines() {
-                    let line = raw.split('#').next().unwrap_or("").trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let (k, _) = match line.split_once('=') {
-                        Some(kv) => kv,
-                        None => continue,
-                    };
-                    let k = k.trim();
-                    if let Some(name) = k.strip_prefix("key.")
-                        && !name.is_empty() && !known.contains(name) {
-                            issues.push(ConfigIssue {
-                                level: ConfigIssueLevel::Error,
-                                category: "key".into(),
-                                message: format!(
-                                    "unknown key action {:?}: did you mean one of {:?}?",
-                                    name,
-                                    ALL_ACTIONS
-                                        .iter()
-                                        .map(|a| a.config_key())
-                                        .collect::<Vec<_>>()
-                                ),
-                            });
-                        }
-                }
+        && let Ok(contents) = std::fs::read_to_string(p)
+    {
+        let known: std::collections::HashSet<&'static str> =
+            ALL_ACTIONS.iter().map(|a| a.config_key()).collect();
+        for raw in contents.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
             }
+            let (k, _) = match line.split_once('=') {
+                Some(kv) => kv,
+                None => continue,
+            };
+            let k = k.trim();
+            if let Some(name) = k.strip_prefix("key.")
+                && !name.is_empty()
+                && !known.contains(name)
+            {
+                issues.push(ConfigIssue {
+                    level: ConfigIssueLevel::Error,
+                    category: "key".into(),
+                    message: format!(
+                        "unknown key action {:?}: did you mean one of {:?}?",
+                        name,
+                        ALL_ACTIONS
+                            .iter()
+                            .map(|a| a.config_key())
+                            .collect::<Vec<_>>()
+                    ),
+                });
+            }
+        }
+    }
 
     // --- tmux pane output directory checks ---
     let dir = &cfg.tmux_pane_output_dir;
@@ -792,7 +797,11 @@ pub fn validate_config() -> ConfigReport {
 
 /// Print every known configuration key with its resolved value.
 fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
-    let _ = writeln!(f, "  tmuxpaneoutputdir = {}", cfg.tmux_pane_output_dir.display());
+    let _ = writeln!(
+        f,
+        "  tmuxpaneoutputdir = {}",
+        cfg.tmux_pane_output_dir.display()
+    );
     let mut cmds: Vec<&String> = cfg.ignore_capture.iter().collect();
     cmds.sort();
     let _ = writeln!(
@@ -930,7 +939,6 @@ pub struct QueryPrefixes {
 impl Default for QueryPrefixes {
     fn default() -> Self {
         QueryPrefixes {
-
             output: '+',
             llm: '=',
             question: '%',
@@ -1240,7 +1248,11 @@ impl Default for TuiTheme {
 impl Config {
     pub fn default() -> Self {
         let dir = env::var("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".cache").join("tmux-history"))
+            .map(|h| {
+                std::path::PathBuf::from(h)
+                    .join(".cache")
+                    .join("tmux-history")
+            })
             .unwrap_or_else(|_| std::path::PathBuf::from(".cache/tmux-history"));
         let ignore: std::collections::HashSet<String> =
             DEFAULT_NO_CAPTURE.iter().map(|s| s.to_string()).collect();
@@ -1297,9 +1309,10 @@ impl Config {
     pub fn load() -> Self {
         let mut cfg = Config::default();
         if let Some(path) = config_path()
-            && let Ok(contents) = std::fs::read_to_string(&path) {
-                cfg.parse(&contents);
-            }
+            && let Ok(contents) = std::fs::read_to_string(&path)
+        {
+            cfg.parse(&contents);
+        }
         // Environment variables override config file values.
         if let Ok(db) = env::var("NOTE_SEARCH_DATABASE") {
             let path = std::path::PathBuf::from(&db);
@@ -1373,10 +1386,7 @@ impl Config {
                     self.tmux_pane_output_dir = expand_tilde(value);
                 }
                 "ignorecapture" => {
-                    self.ignore_capture = value
-                        .split_whitespace()
-                        .map(|s| s.to_string())
-                        .collect();
+                    self.ignore_capture = value.split_whitespace().map(|s| s.to_string()).collect();
                 }
                 "capturelines" => {
                     if let Some(parsed) = parse_capture_lines(value) {
@@ -1386,26 +1396,27 @@ impl Config {
                     }
                 }
                 "duplicatefilter" => {
-                    self.duplicate_filter = parse_bool(value, true);
+                    self.duplicate_filter = crate::util::parse_bool(value, true);
                 }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
-                    if matches!(upper.as_str(), "SESS" | "SESSION" | "DIR" | "DIRECTORY" | "GLOBAL") {
+                    if matches!(
+                        upper.as_str(),
+                        "SESS" | "SESSION" | "DIR" | "DIRECTORY" | "GLOBAL"
+                    ) {
                         self.initial_mode = upper;
                     }
                 }
-                "multiplexer" => {
-                    match crate::multiplexer::MultiplexerKind::parse(value) {
-                        Some(kind) => self.multiplexer = kind,
-                        None => eprintln!(
-                            "smarthistory: ignoring invalid \
+                "multiplexer" => match crate::multiplexer::MultiplexerKind::parse(value) {
+                    Some(kind) => self.multiplexer = kind,
+                    None => eprintln!(
+                        "smarthistory: ignoring invalid \
                              multiplexer={:?} (expected \
                              `tmux` or `herdr`); using \
                              default",
-                            value
-                        ),
-                    }
-                }
+                        value
+                    ),
+                },
                 "ollama.url" => {
                     ollama_url = value.to_string();
                 }
@@ -1450,8 +1461,7 @@ impl Config {
                         eprintln!(
                             "warning: todo.line_option {:?} must contain \"$LINE\"; \
                              keeping default \"{}\"",
-                            value,
-                            self.todo_line_option
+                            value, self.todo_line_option
                         );
                     }
                 }
@@ -1484,9 +1494,7 @@ impl Config {
                     // since moved).
                     let trimmed = value.trim();
                     if !trimmed.is_empty() {
-                        self.home_map.push(
-                            std::path::PathBuf::from(trimmed),
-                        );
+                        self.home_map.push(std::path::PathBuf::from(trimmed));
                     }
                 }
                 "sessiondirs" => {
@@ -1548,161 +1556,172 @@ impl Config {
                         // walker returned an
                         // empty list for
                         // it.)
-                        self.session_dirs.push(
-                            expand_tilde(trimmed),
-                        );
+                        self.session_dirs.push(expand_tilde(trimmed));
                     }
                 }
                 other => {
                     if let Some(cmd) = other.strip_prefix("capturelines.")
-                        && !cmd.is_empty() {
-                            self.capture_lines_per_command
-                                .insert(cmd.to_string(), parse_capture_lines(value));
-                        } else if let Some(field) = other.strip_prefix("tuicolor.") {
-                            Self::assign_theme_field(&mut self.theme, field, value);
-                        } else if let Some(action) = other.strip_prefix("key.")
-                            && !action.is_empty() {
-                                key_entries.insert(action.to_string(), value.to_string());
-                            } else if let Some(prefix) = other.strip_prefix("prefix.") {
-                                Self::assign_prefix(&mut self.query_prefixes, prefix, value);
-                            } else if let Some(name) = other.strip_prefix("jira.search.")
-                                && !name.is_empty() {
-                                Self::assign_jira_fragment(
-                                    &mut self.jira_fragments,
-                                    name,
-                                    value,
-                                );
-                            } else if other == "files.ignore" {
-                                for name in value.split_whitespace() {
-                                    if !name.is_empty() {
-                                        self.files_ignores.push(name.to_string());
+                        && !cmd.is_empty()
+                    {
+                        self.capture_lines_per_command
+                            .insert(cmd.to_string(), parse_capture_lines(value));
+                    } else if let Some(field) = other.strip_prefix("tuicolor.") {
+                        Self::assign_theme_field(&mut self.theme, field, value);
+                    } else if let Some(action) = other.strip_prefix("key.")
+                        && !action.is_empty()
+                    {
+                        key_entries.insert(action.to_string(), value.to_string());
+                    } else if let Some(prefix) = other.strip_prefix("prefix.") {
+                        Self::assign_prefix(&mut self.query_prefixes, prefix, value);
+                    } else if let Some(name) = other.strip_prefix("jira.search.")
+                        && !name.is_empty()
+                    {
+                        Self::assign_jira_fragment(&mut self.jira_fragments, name, value);
+                    } else if other == "files.ignore" {
+                        for name in value.split_whitespace() {
+                            if !name.is_empty() {
+                                self.files_ignores.push(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = other.strip_prefix("session.") {
+                        // Parse `session.<id> = "name"`,
+                        // `session.<id>.dir = "~/path"`,
+                        // `session.<id>.startup_command = "cmd"`.
+                        // The `<id>` is a numeric index
+                        // determining display order.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if let Some((id_str, field)) = rest.split_once('.') {
+                            if let Ok(id) = id_str.parse::<usize>() {
+                                let pos = self.sessions.iter().position(|(i, _)| *i == id);
+                                match (field, pos) {
+                                    ("dir", Some(idx)) => {
+                                        self.sessions[idx].1.dir = unquoted.to_string();
                                     }
-                                }
-                            } else if let Some(rest) = other.strip_prefix("session.") {
-                                // Parse `session.<id> = "name"`,
-                                // `session.<id>.dir = "~/path"`,
-                                // `session.<id>.startup_command = "cmd"`.
-                                // The `<id>` is a numeric index
-                                // determining display order.
-                                let unquoted = value.trim().trim_matches('"').trim();
-                                if let Some((id_str, field)) = rest.split_once('.') {
-                                    if let Ok(id) = id_str.parse::<usize>() {
-                                        let pos = self.sessions.iter().position(|(i, _)| *i == id);
-                                        match (field, pos) {
-                                            ("dir", Some(idx)) => {
-                                                self.sessions[idx].1.dir = unquoted.to_string();
-                                            }
-                                            ("dir", None) => {
-                                                self.sessions.push((id, SessionDef {
-                                                    name: String::new(),
-                                                    dir: unquoted.to_string(),
-                                                    exec: String::new(),
-                                                }));
-                                            }
-                                            ("exec", Some(idx)) => {
-                                                self.sessions[idx].1.exec = unquoted.to_string();
-                                            }
-                                            ("exec", None) => {
-                                                self.sessions.push((id, SessionDef {
-                                                    name: String::new(),
-                                                    dir: String::new(),
-                                                    exec: unquoted.to_string(),
-                                                }));
-                                            }
-                                            ("startup_command", _) => {
-                                                // Accepted but not used yet.
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                } else if let Ok(id) = rest.parse::<usize>() {
-                                    // `session.<id> = "name"` (no sub-field).
-                                    if !unquoted.is_empty() {
-                                        let pos = self.sessions.iter().position(|(i, _)| *i == id);
-                                        match pos {
-                                            Some(idx) => self.sessions[idx].1.name = unquoted.to_string(),
-                                            None => self.sessions.push((id, SessionDef {
-                                                name: unquoted.to_string(),
-                                                dir: String::new(),
+                                    ("dir", None) => {
+                                        self.sessions.push((
+                                            id,
+                                            SessionDef {
+                                                name: String::new(),
+                                                dir: unquoted.to_string(),
                                                 exec: String::new(),
-                                            })),
-                                        }
+                                            },
+                                        ));
                                     }
+                                    ("exec", Some(idx)) => {
+                                        self.sessions[idx].1.exec = unquoted.to_string();
+                                    }
+                                    ("exec", None) => {
+                                        self.sessions.push((
+                                            id,
+                                            SessionDef {
+                                                name: String::new(),
+                                                dir: String::new(),
+                                                exec: unquoted.to_string(),
+                                            },
+                                        ));
+                                    }
+                                    ("startup_command", _) => {
+                                        // Accepted but not used yet.
+                                    }
+                                    _ => {}
                                 }
-                            } else if let Some(rest) = other.strip_prefix("host.") {
-                                // Parse `host.<id> = "name"`,
-                                // `host.<id>.host = "alias"`,
-                                // `host.<id>.hostname = "real"`,
-                                // `host.<id>.user = "u"`,
-                                // `host.<id>.port = N`,
-                                // `host.<id>.identity = "path"`,
-                                // `host.<id>.dir = "~/path"`,
-                                // `host.<id>.exec = "cmd"`.
-                                // The `<id>` is a numeric index
-                                // determining display order.
-                                //
-                                // `host` is the SSH config
-                                // `Host` alias (also used as
-                                // the connection target when
-                                // no `hostname` is set);
-                                // `hostname` is the real
-                                // `HostName` to connect to.
-                                let unquoted = value.trim().trim_matches('"').trim();
-                                if let Some((id_str, field)) = rest.split_once('.') {
-                                    if let Ok(id) = id_str.parse::<usize>() {
-                                        let pos = self.hosts.iter().position(|(i, _)| *i == id);
-                                        let set = |host: &mut crate::tui::state::HostDef, field: &str, val: &str| {
-                                            match field {
-                                                "host" => host.host = val.to_string(),
-                                                "hostname" => host.hostname = val.to_string(),
-                                                "user" => host.user = val.to_string(),
-                                                "port" => {
-                                                    if let Ok(n) = val.parse::<u16>() {
-                                                        host.port = n;
-                                                    } else {
-                                                        eprintln!(
-                                                            "warning: host.{}.port = {:?} is not a valid port; ignoring",
-                                                            id, val
-                                                        );
-                                                    }
-                                                }
-                                                "identity" => host.identity = val.to_string(),
-                                                "dir" => host.dir = val.to_string(),
-                                                "exec" => host.exec = val.to_string(),
-                                                _ => {
-                                                    eprintln!(
-                                                        "warning: unknown host field {:?} in host.{}; ignoring",
-                                                        field, id
-                                                    );
-                                                }
+                            }
+                        } else if let Ok(id) = rest.parse::<usize>() {
+                            // `session.<id> = "name"` (no sub-field).
+                            if !unquoted.is_empty() {
+                                let pos = self.sessions.iter().position(|(i, _)| *i == id);
+                                match pos {
+                                    Some(idx) => self.sessions[idx].1.name = unquoted.to_string(),
+                                    None => self.sessions.push((
+                                        id,
+                                        SessionDef {
+                                            name: unquoted.to_string(),
+                                            dir: String::new(),
+                                            exec: String::new(),
+                                        },
+                                    )),
+                                }
+                            }
+                        }
+                    } else if let Some(rest) = other.strip_prefix("host.") {
+                        // Parse `host.<id> = "name"`,
+                        // `host.<id>.host = "alias"`,
+                        // `host.<id>.hostname = "real"`,
+                        // `host.<id>.user = "u"`,
+                        // `host.<id>.port = N`,
+                        // `host.<id>.identity = "path"`,
+                        // `host.<id>.dir = "~/path"`,
+                        // `host.<id>.exec = "cmd"`.
+                        // The `<id>` is a numeric index
+                        // determining display order.
+                        //
+                        // `host` is the SSH config
+                        // `Host` alias (also used as
+                        // the connection target when
+                        // no `hostname` is set);
+                        // `hostname` is the real
+                        // `HostName` to connect to.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if let Some((id_str, field)) = rest.split_once('.') {
+                            if let Ok(id) = id_str.parse::<usize>() {
+                                let pos = self.hosts.iter().position(|(i, _)| *i == id);
+                                let set = |host: &mut crate::tui::state::HostDef,
+                                           field: &str,
+                                           val: &str| {
+                                    match field {
+                                        "host" => host.host = val.to_string(),
+                                        "hostname" => host.hostname = val.to_string(),
+                                        "user" => host.user = val.to_string(),
+                                        "port" => {
+                                            if let Ok(n) = val.parse::<u16>() {
+                                                host.port = n;
+                                            } else {
+                                                eprintln!(
+                                                    "warning: host.{}.port = {:?} is not a valid port; ignoring",
+                                                    id, val
+                                                );
                                             }
-                                        };
-                                        match pos {
-                                            Some(idx) => {
-                                                let (_, host) = &mut self.hosts[idx];
-                                                set(host, field, unquoted);
-                                            }
-                                            None => {
-                                                let mut host = crate::tui::state::HostDef::default();
-                                                set(&mut host, field, unquoted);
-                                                self.hosts.push((id, host));
-                                            }
+                                        }
+                                        "identity" => host.identity = val.to_string(),
+                                        "dir" => host.dir = val.to_string(),
+                                        "exec" => host.exec = val.to_string(),
+                                        _ => {
+                                            eprintln!(
+                                                "warning: unknown host field {:?} in host.{}; ignoring",
+                                                field, id
+                                            );
                                         }
                                     }
-                                } else if let Ok(id) = rest.parse::<usize>() {
-                                    // `host.<id> = "name"` (no sub-field).
-                                    if !unquoted.is_empty() {
-                                        let pos = self.hosts.iter().position(|(i, _)| *i == id);
-                                        match pos {
-                                            Some(idx) => self.hosts[idx].1.name = unquoted.to_string(),
-                                            None => self.hosts.push((id, crate::tui::state::HostDef {
-                                                name: unquoted.to_string(),
-                                                ..crate::tui::state::HostDef::default()
-                                            })),
-                                        }
+                                };
+                                match pos {
+                                    Some(idx) => {
+                                        let (_, host) = &mut self.hosts[idx];
+                                        set(host, field, unquoted);
+                                    }
+                                    None => {
+                                        let mut host = crate::tui::state::HostDef::default();
+                                        set(&mut host, field, unquoted);
+                                        self.hosts.push((id, host));
                                     }
                                 }
                             }
+                        } else if let Ok(id) = rest.parse::<usize>() {
+                            // `host.<id> = "name"` (no sub-field).
+                            if !unquoted.is_empty() {
+                                let pos = self.hosts.iter().position(|(i, _)| *i == id);
+                                match pos {
+                                    Some(idx) => self.hosts[idx].1.name = unquoted.to_string(),
+                                    None => self.hosts.push((
+                                        id,
+                                        crate::tui::state::HostDef {
+                                            name: unquoted.to_string(),
+                                            ..crate::tui::state::HostDef::default()
+                                        },
+                                    )),
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1721,7 +1740,11 @@ impl Config {
                     "warning: ollama.{} is set but the other half is missing; \
                      LLM mode is disabled. Set both ollama.url and ollama.model \
                      in ~/.config/smarthistory/config.",
-                    if ollama_url.is_empty() { "url" } else { "model" }
+                    if ollama_url.is_empty() {
+                        "url"
+                    } else {
+                        "model"
+                    }
                 );
             } else {
                 self.llm = Some(llm::LlmConfig {
@@ -1821,16 +1844,19 @@ impl Config {
                             .max()
                             .map(|m| m.saturating_add(1))
                             .unwrap_or(1);
-                        self.hosts.push((next_id, crate::tui::state::HostDef {
-                            name: block.alias.clone(),
-                            host: block.alias.clone(),
-                            hostname: block.hostname.clone(),
-                            user: block.user.clone(),
-                            port: block.port,
-                            identity: block.identity.clone(),
-                            dir: String::new(),
-                            exec: String::new(),
-                        }));
+                        self.hosts.push((
+                            next_id,
+                            crate::tui::state::HostDef {
+                                name: block.alias.clone(),
+                                host: block.alias.clone(),
+                                hostname: block.hostname.clone(),
+                                user: block.user.clone(),
+                                port: block.port,
+                                identity: block.identity.clone(),
+                                dir: String::new(),
+                                exec: String::new(),
+                            },
+                        ));
                     }
                 }
             }
@@ -2076,14 +2102,12 @@ impl Config {
         self.sessions
             .iter()
             .map(|(id, def)| {
-                let home_list: Vec<String> = std::iter::once(
-                    std::env::var("HOME").unwrap_or_default()
-                )
-                .filter(|s| !s.is_empty())
-                .collect();
-                let expanded = crate::util::expand_home_to_absolute(
-                    &def.dir, &home_list
-                ).into_owned();
+                let home_list: Vec<String> =
+                    std::iter::once(std::env::var("HOME").unwrap_or_default())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                let expanded =
+                    crate::util::expand_home_to_absolute(&def.dir, &home_list).into_owned();
                 crate::tui::state::HistoryRow {
                     id: -10_000 - (*id as i64),
                     command: def.name.clone(),
@@ -2145,10 +2169,7 @@ impl Config {
                 } else {
                     String::new()
                 };
-                let connection_string = format!(
-                    "{}{}{}",
-                    user_prefix, target, port_suffix
-                );
+                let connection_string = format!("{}{}{}", user_prefix, target, port_suffix);
                 crate::tui::state::HistoryRow {
                     // Placeholder id;
                     // `fetch_session_panes_impl`
@@ -2196,10 +2217,7 @@ impl Config {
     /// that the projected `HistoryRow`
     /// doesn't carry.
     pub fn host_defs(&self) -> Vec<crate::tui::state::HostDef> {
-        self.hosts
-            .iter()
-            .map(|(_, def)| def.clone())
-            .collect()
+        self.hosts.iter().map(|(_, def)| def.clone()).collect()
     }
 
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
@@ -2297,10 +2315,7 @@ impl Config {
         // *does* want to override `@today` should
         // rename their config key — not papercut the
         // built-in.
-        if matches!(
-            key.as_str(),
-            "me" | "today" | "week" | "month"
-        ) {
+        if matches!(key.as_str(), "me" | "today" | "week" | "month") {
             eprintln!(
                 "warning: jira.search.{} is a reserved alias name; \
                  fragment is ignored. Rename the fragment to use it \
@@ -2473,7 +2488,10 @@ fn extract_tmux_output(
             sleep(RETRY_DELAY);
         }
     }
-    anyhow::bail!("command not found in tmux log after {} attempts", MAX_ATTEMPTS)
+    anyhow::bail!(
+        "command not found in tmux log after {} attempts",
+        MAX_ATTEMPTS
+    )
 }
 
 /// Locate the line in `lines` (scanning from the end) that best
@@ -2918,7 +2936,10 @@ fn build_filter_sql(
                 // Caller asked for an unknown column; fall back to
                 // a plain command match so the rest of the filter
                 // keeps working.
-                eprintln!("warning: unsupported query column {:?}, falling back to command", col);
+                eprintln!(
+                    "warning: unsupported query column {:?}, falling back to command",
+                    col
+                );
                 clause.push_str(&format!(
                     " AND {prefix}command LIKE ? ESCAPE '\\'",
                     prefix = qualified_column_prefix
@@ -3217,19 +3238,28 @@ fn main() -> anyhow::Result<()> {
             let mut stmt = conn.prepare(&sql)?;
             let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-            let rows = stmt.query_map(&params_ref[..], move |row| -> Result<Vec<(String, String)>, rusqlite::Error> {
-                let row_data: Vec<(String, String)> = raw_names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
-                    .collect();
-                Ok(row_data)
-            })?;
+            let rows = stmt.query_map(
+                &params_ref[..],
+                move |row| -> Result<Vec<(String, String)>, rusqlite::Error> {
+                    let row_data: Vec<(String, String)> = raw_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
+                        .collect();
+                    Ok(row_data)
+                },
+            )?;
 
             let mut out_rows: Vec<Vec<String>> = Vec::new();
             for row in rows {
                 let raw_row = row?;
-                out_rows.push(project_row(&raw_row, &selected_fields, &derived, query_ref, no_highlight));
+                out_rows.push(project_row(
+                    &raw_row,
+                    &selected_fields,
+                    &derived,
+                    query_ref,
+                    no_highlight,
+                ));
             }
             for out in pad_rows(&out_rows, &selected_fields) {
                 println!("{}", out.join("  "));
@@ -3286,7 +3316,13 @@ fn main() -> anyhow::Result<()> {
             let mut out_rows: Vec<Vec<String>> = Vec::new();
             for row in rows {
                 let raw_row = row?;
-                out_rows.push(project_row(&raw_row, &selected_fields, &derived, query_ref, no_highlight));
+                out_rows.push(project_row(
+                    &raw_row,
+                    &selected_fields,
+                    &derived,
+                    query_ref,
+                    no_highlight,
+                ));
             }
             for out in pad_rows(&out_rows, &selected_fields) {
                 println!("{}", out.join("  "));
@@ -3319,8 +3355,7 @@ fn main() -> anyhow::Result<()> {
                 exit_code.as_deref(),
             );
             let count_sql = format!("SELECT COUNT(*) FROM history{}", where_clause);
-            let params_ref: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
+            let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
             let n: i64 = {
                 let mut stmt = conn.prepare(&count_sql)?;
@@ -3345,7 +3380,11 @@ fn main() -> anyhow::Result<()> {
 
             let delete_sql = format!("DELETE FROM history{}", where_clause);
             let deleted = conn.execute(&delete_sql, &params_ref[..])?;
-            println!("Deleted {} entr{}.", deleted, if deleted == 1 { "y" } else { "ies" });
+            println!(
+                "Deleted {} entr{}.",
+                deleted,
+                if deleted == 1 { "y" } else { "ies" }
+            );
         }
         Commands::Init { shell } => {
             if shell != "zsh" {
@@ -3414,19 +3453,28 @@ fn main() -> anyhow::Result<()> {
             let mut stmt = conn.prepare(&sql)?;
 
             let raw_names: Vec<String> = raw_fields.clone();
-            let rows = stmt.query_map([], move |row| -> Result<Vec<(String, String)>, rusqlite::Error> {
-                let row_data: Vec<(String, String)> = raw_names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
-                    .collect();
-                Ok(row_data)
-            })?;
+            let rows = stmt.query_map(
+                [],
+                move |row| -> Result<Vec<(String, String)>, rusqlite::Error> {
+                    let row_data: Vec<(String, String)> = raw_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.clone(), cell_to_string(row, i)))
+                        .collect();
+                    Ok(row_data)
+                },
+            )?;
 
             let mut out_rows: Vec<Vec<String>> = Vec::new();
             for row in rows {
                 let raw_row = row?;
-                out_rows.push(project_row(&raw_row, &selected_fields, &derived, None, false));
+                out_rows.push(project_row(
+                    &raw_row,
+                    &selected_fields,
+                    &derived,
+                    None,
+                    false,
+                ));
             }
             let out_rows = pad_rows(&out_rows, &selected_fields);
             if table {
@@ -3502,8 +3550,7 @@ fn main() -> anyhow::Result<()> {
             let cfg = Config::load();
             let joined = command.join(" ");
             let max_lines = cfg.capture_lines_for(&joined);
-            let (command_str, exit_code, output) =
-                capture_command_output(&command, max_lines)?;
+            let (command_str, exit_code, output) = capture_command_output(&command, max_lines)?;
 
             // Echo the command output to the terminal so capture feels
             // like a normal execution.
@@ -3515,8 +3562,7 @@ fn main() -> anyhow::Result<()> {
             let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
-            let history_id = upsert_history_row(&conn, &command_str, &pwd, &session_id, exit_code,
-            )?;
+            let history_id = upsert_history_row(&conn, &command_str, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
         Commands::CaptureTmux {
@@ -3543,15 +3589,10 @@ fn main() -> anyhow::Result<()> {
             let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
-            let history_id = upsert_history_row(
-                &conn, &command, &pwd, &session_id, exit_code
-            )?;
+            let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
-        Commands::CaptureHerdr {
-            command,
-            exit_code,
-        } => {
+        Commands::CaptureHerdr { command, exit_code } => {
             // Read the herdr pane scrollback via
             // `herdr pane read <pane_id> --source recent-unwrapped
             // --lines <N>` and extract the command
@@ -3559,20 +3600,15 @@ fn main() -> anyhow::Result<()> {
             // `capture-tmux`. The pane id comes from the
             // `HERDR_PANE_ID` env var (set by herdr in
             // every pane process).
-            let pane_id =
-                env::var("HERDR_PANE_ID").unwrap_or_default();
+            let pane_id = env::var("HERDR_PANE_ID").unwrap_or_default();
             if pane_id.is_empty() {
                 // Not inside a herdr pane — fall back to
                 // a plain `add` so the history entry is
                 // still recorded.
-                let pwd =
-                    crate::util::current_directory_for_storage();
+                let pwd = crate::util::current_directory_for_storage();
                 let session_id =
-                    env::var("SMART_HISTORY_SESSION")
-                        .unwrap_or_else(|_| "default".to_string());
-                upsert_history_row(
-                    &conn, &command, &pwd, &session_id, exit_code,
-                )?;
+                    env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+                upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
                 return Ok(());
             }
             let cfg = Config::load();
@@ -3586,14 +3622,17 @@ fn main() -> anyhow::Result<()> {
                 let max = cfg.capture_lines_for(&command);
                 let read_lines: usize = match max {
                     Some(n) => n + 50, // 50 extra lines for prompt+context
-                    None => 500,        // broad request for unlimited capture
+                    None => 500,       // broad request for unlimited capture
                 };
                 let pane_output = std::process::Command::new("herdr")
                     .args([
-                        "pane", "read",
+                        "pane",
+                        "read",
                         &pane_id,
-                        "--source", "recent-unwrapped",
-                        "--lines", &read_lines.to_string(),
+                        "--source",
+                        "recent-unwrapped",
+                        "--lines",
+                        &read_lines.to_string(),
                     ])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
@@ -3601,52 +3640,48 @@ fn main() -> anyhow::Result<()> {
                 match pane_output {
                     Ok(o) if !o.stdout.is_empty() => {
                         let text = String::from_utf8_lossy(&o.stdout);
-                        let lines: Vec<String> =
-                            text.lines().map(strip_ansi).collect();
-                        extract_pane_output(&command, &lines, max)
-                            .unwrap_or_else(|_| {
-                                // Command line scrolled off the
-                                // top of the pane buffer (common
-                                // for high-output commands like
-                                // `ps -ef`). Capture whatever IS
-                                // in the buffer as the best
-                                // available approximation.
-                                let end = lines.len();
-                                let effective_end = if end > 0 {
-                                    let last = lines[end - 1].trim_end();
-                                    if last.ends_with("$ ")
-                                        || last.ends_with("# ")
-                                        || last.ends_with("% ")
-                                        || last.ends_with("> ")
-                                        || last.is_empty()
-                                    {
-                                        end.saturating_sub(1)
-                                    } else {
-                                        end
-                                    }
-                                } else { end };
-                                let capped = match max {
-                                    Some(n) => effective_end.min(n),
-                                    None => effective_end,
-                                };
-                                if capped > 0 {
-                                    lines[..capped].join("\n")
+                        let lines: Vec<String> = text.lines().map(strip_ansi).collect();
+                        extract_pane_output(&command, &lines, max).unwrap_or_else(|_| {
+                            // Command line scrolled off the
+                            // top of the pane buffer (common
+                            // for high-output commands like
+                            // `ps -ef`). Capture whatever IS
+                            // in the buffer as the best
+                            // available approximation.
+                            let end = lines.len();
+                            let effective_end = if end > 0 {
+                                let last = lines[end - 1].trim_end();
+                                if last.ends_with("$ ")
+                                    || last.ends_with("# ")
+                                    || last.ends_with("% ")
+                                    || last.ends_with("> ")
+                                    || last.is_empty()
+                                {
+                                    end.saturating_sub(1)
                                 } else {
-                                    String::new()
+                                    end
                                 }
-                            })
+                            } else {
+                                end
+                            };
+                            let capped = match max {
+                                Some(n) => effective_end.min(n),
+                                None => effective_end,
+                            };
+                            if capped > 0 {
+                                lines[..capped].join("\n")
+                            } else {
+                                String::new()
+                            }
+                        })
                     }
                     _ => String::new(),
                 }
             };
-            let pwd =
-                crate::util::current_directory_for_storage();
+            let pwd = crate::util::current_directory_for_storage();
             let session_id =
-                env::var("SMART_HISTORY_SESSION")
-                    .unwrap_or_else(|_| "default".to_string());
-            let history_id = upsert_history_row(
-                &conn, &command, &pwd, &session_id, exit_code
-            )?;
+                env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+            let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
         Commands::Config { action } => match action {
@@ -3687,7 +3722,14 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", out);
             }
         },
-        Commands::Tui { mode, prefix, exec, query, pane, panes_filter } => {
+        Commands::Tui {
+            mode,
+            prefix,
+            exec,
+            query,
+            pane,
+            panes_filter,
+        } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -3695,8 +3737,16 @@ fn main() -> anyhow::Result<()> {
             // Otherwise fall back to the config file's `initialmode`
             // (or `SESS` if unset).
             let initial_mode = mode
-                .or_else(|| std::env::var("SMARTHISTORY_TUI_MODE").ok().filter(|s| !s.is_empty()))
-                .or_else(|| std::env::var("SMARTHISTORY_MODE").ok().filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    std::env::var("SMARTHISTORY_TUI_MODE")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| {
+                    std::env::var("SMARTHISTORY_MODE")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| {
                     let cfg = Config::load();
                     cfg.initial_mode
@@ -3730,11 +3780,7 @@ fn main() -> anyhow::Result<()> {
                         // (it's always a single char by construction;
                         // we accept multi-char input defensively for
                         // shell-quoted strings).
-                        let first_char = p
-                            .chars()
-                            .next()
-                            .unwrap_or_default()
-                            .to_string();
+                        let first_char = p.chars().next().unwrap_or_default().to_string();
                         (first_char, true)
                     }
                     (None, Some(q)) => (q.to_string(), false),
@@ -3778,14 +3824,9 @@ fn main() -> anyhow::Result<()> {
                             .arg(&command)
                             .status();
                         match status {
-                            Ok(s) => std::process::exit(
-                                s.code().unwrap_or(1)
-                            ),
+                            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
                             Err(e) => {
-                                eprintln!(
-                                    "smarthistory: failed to exec {:?}: {}",
-                                    command, e
-                                );
+                                eprintln!("smarthistory: failed to exec {:?}: {}", command, e);
                                 std::process::exit(1);
                             }
                         }
@@ -3870,10 +3911,7 @@ fn main() -> anyhow::Result<()> {
             let export: HistoryExport = serde_json::from_str(&json)?;
 
             if export.version != 1 {
-                anyhow::bail!(
-                    "Unsupported export version {}; expected 1",
-                    export.version
-                );
+                anyhow::bail!("Unsupported export version {}; expected 1", export.version);
             }
 
             let mut imported = 0usize;
@@ -3909,30 +3947,32 @@ fn main() -> anyhow::Result<()> {
 
                 // Store the comment if present.
                 if let Some(ref comment) = row.comment
-                    && !comment.is_empty() {
-                        conn.execute(
-                            "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                    && !comment.is_empty()
+                {
+                    conn.execute(
+                        "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
                              ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
-                            params![row.command, comment],
-                        )?;
-                    }
+                        params![row.command, comment],
+                    )?;
+                }
 
                 // Store the output if present.
                 if let Some(ref output) = row.output
-                    && !output.is_empty() {
-                        // Get the history id for this row.
-                        let history_id: i64 = conn.query_row(
+                    && !output.is_empty()
+                {
+                    // Get the history id for this row.
+                    let history_id: i64 = conn.query_row(
                             "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
                             params![row.command, row.directory, row.session_id],
                             |r| r.get(0),
                         )?;
-                        conn.execute(
-                            "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
+                    conn.execute(
+                        "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
                              ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, \
                              captured_at = (strftime('%s', 'now'))",
-                            params![history_id, output],
-                        )?;
-                    }
+                        params![history_id, output],
+                    )?;
+                }
             }
 
             eprintln!(
@@ -3961,7 +4001,11 @@ fn main() -> anyhow::Result<()> {
             )?;
 
             if n == 0 {
-                println!("No entries older than {} day{}; nothing to prune.", days, if days == 1 { "" } else { "s" });
+                println!(
+                    "No entries older than {} day{}; nothing to prune.",
+                    days,
+                    if days == 1 { "" } else { "s" }
+                );
                 return Ok(());
             }
 
@@ -3986,10 +4030,8 @@ fn main() -> anyhow::Result<()> {
                 params![cutoff],
             )?;
             // Delete the history rows.
-            let deleted = conn.execute(
-                "DELETE FROM history WHERE timestamp < ?1",
-                params![cutoff],
-            )?;
+            let deleted =
+                conn.execute("DELETE FROM history WHERE timestamp < ?1", params![cutoff])?;
             // Delete orphaned comments (command_comments entries
             // whose command text no longer appears in any history
             // row after the prune).
@@ -4050,33 +4092,14 @@ fn main() -> anyhow::Result<()> {
             // touched.
             let mut stmt = conn
                 .prepare("SELECT id, directory FROM history")
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "prepare: {e}"
-                    )
-                })?;
+                .map_err(|e| anyhow::anyhow!("prepare: {e}"))?;
             let mut updates: Vec<(i64, String)> = Vec::new();
-            let mut rows = stmt
-                .query([])
-                .map_err(|e| {
-                    anyhow::anyhow!("query: {e}")
-                })?;
-            while let Some(row) = rows.next().map_err(|e| {
-                anyhow::anyhow!("row: {e}")
-            })? {
-                let id: i64 = row.get(0).map_err(|e| {
-                    anyhow::anyhow!("id: {e}")
-                })?;
-                let directory: String = row
-                    .get(1)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "directory: {e}"
-                        )
-                    })?;
-                let shortened = crate::util::expand_home_with_config(
-                    &directory, cfg.home_map(),
-                );
+            let mut rows = stmt.query([]).map_err(|e| anyhow::anyhow!("query: {e}"))?;
+            while let Some(row) = rows.next().map_err(|e| anyhow::anyhow!("row: {e}"))? {
+                let id: i64 = row.get(0).map_err(|e| anyhow::anyhow!("id: {e}"))?;
+                let directory: String =
+                    row.get(1).map_err(|e| anyhow::anyhow!("directory: {e}"))?;
+                let shortened = crate::util::expand_home_with_config(&directory, cfg.home_map());
                 if shortened.as_ref() != directory {
                     updates.push((id, shortened.into_owned()));
                 }
@@ -4150,9 +4173,7 @@ fn main() -> anyhow::Result<()> {
                 let (cmd, sid) = match row {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!(
-                            "warning: failed to read history id={id}: {e}"
-                        );
+                        eprintln!("warning: failed to read history id={id}: {e}");
                         skipped += 1;
                         continue;
                     }
@@ -4165,9 +4186,7 @@ fn main() -> anyhow::Result<()> {
                        AND id != ?4",
                     rusqlite::params![cmd, new_dir, sid, id],
                 ) {
-                    eprintln!(
-                        "warning: failed to clear collision for id={id}: {e}"
-                    );
+                    eprintln!("warning: failed to clear collision for id={id}: {e}");
                     skipped += 1;
                     continue;
                 }
@@ -4194,9 +4213,7 @@ fn main() -> anyhow::Result<()> {
                         skipped += 1;
                     }
                     Err(e) => {
-                        eprintln!(
-                            "warning: failed to rewrite history id={id}: {e}"
-                        );
+                        eprintln!("warning: failed to rewrite history id={id}: {e}");
                         skipped += 1;
                     }
                 }
@@ -4272,20 +4289,14 @@ mod tests {
 
     #[test]
     fn highlight_wraps_all_occurrences() {
-        assert_eq!(
-            highlight("foo bar foo", "foo", "[", "]"),
-            "[foo] bar [foo]"
-        );
+        assert_eq!(highlight("foo bar foo", "foo", "[", "]"), "[foo] bar [foo]");
     }
 
     #[test]
     fn highlight_no_occurrences() {
         // When the needle doesn't appear, the haystack is returned
         // unchanged.
-        assert_eq!(
-            highlight("hello world", "xyz", "[", "]"),
-            "hello world"
-        );
+        assert_eq!(highlight("hello world", "xyz", "[", "]"), "hello world");
     }
 
     #[test]
@@ -4345,10 +4356,7 @@ mod tests {
 
     fn write_temp_log(contents: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "smarthistory-tmux-test-{}.log",
-            generate_uuid_v4()
-        ));
+        let path = dir.join(format!("smarthistory-tmux-test-{}.log", generate_uuid_v4()));
         std::fs::write(&path, contents).expect("write log");
         path
     }
@@ -4357,7 +4365,8 @@ mod tests {
     fn extract_tmux_output_uses_last_match() {
         let log = "some other line\necho first\necho first output\nrandom line\necho first again\nlast output\n";
         let path = write_temp_log(log);
-        let out = extract_tmux_output("echo first again", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
+        let out = extract_tmux_output("echo first again", &path, Some(MAX_OUTPUT_LINES))
+            .expect("extract");
         assert!(out.contains("echo first again"));
         assert!(out.contains("last output"));
         assert!(!out.contains("echo first output"));
@@ -4396,7 +4405,8 @@ mod tests {
             writeln!(f, "$ delayedcmd").unwrap();
             writeln!(f, "output line 1").unwrap();
         });
-        let out = extract_tmux_output("delayedcmd", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
+        let out =
+            extract_tmux_output("delayedcmd", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
         handle.join().unwrap();
         assert!(out.contains("delayedcmd"));
         assert!(out.contains("output line 1"));
@@ -4512,7 +4522,10 @@ file2
         let input = "har@arrakis.fritz.box in ~/smarthistory/smarthistory\x07\x1b[K\x1b[?1h\x1b=\x1b[?2004h\x1b[32mhead\x1b[39m \x1b[4mREADME.md\x1b[24m\x1b[?1l\x1b>\x1b[?2004l";
         let out = strip_ansi(input);
         // The BEL is removed and the prompt+command collapse together.
-        assert_eq!(out, "har@arrakis.fritz.box in ~/smarthistory/smarthistoryhead README.md");
+        assert_eq!(
+            out,
+            "har@arrakis.fritz.box in ~/smarthistory/smarthistoryhead README.md"
+        );
         assert!(out.trim_end().ends_with("head README.md"));
     }
 
@@ -4550,11 +4563,17 @@ tmuxpaneoutputdir=~/custom-tmux
         )
         .expect("write");
         let prev = std::env::var("HOME").ok();
-        unsafe { std::env::set_var("HOME", &dir); }
+        unsafe {
+            std::env::set_var("HOME", &dir);
+        }
         let cfg = Config::load();
         match prev {
-            Some(p) => unsafe { std::env::set_var("HOME", p); },
-            None => unsafe { std::env::remove_var("HOME"); },
+            Some(p) => unsafe {
+                std::env::set_var("HOME", p);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
         }
         // User override replaces the default ignore list.
         assert!(cfg.ignore_capture("mycustomcmd"));
@@ -4661,9 +4680,15 @@ tmuxpaneoutputdir=~/custom-tmux
         cfg.parse("multiplexer=tmux\n");
         assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Tmux);
         cfg.parse("multiplexer=herdr\n");
-        assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Herdr);
+        assert_eq!(
+            cfg.multiplexer(),
+            crate::multiplexer::MultiplexerKind::Herdr
+        );
         cfg.parse("multiplexer=HERDR\n");
-        assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Herdr);
+        assert_eq!(
+            cfg.multiplexer(),
+            crate::multiplexer::MultiplexerKind::Herdr
+        );
         // Unrecognised value:
         // the previous
         // value is
@@ -4727,8 +4752,7 @@ tmuxpaneoutputdir=~/custom-tmux
     /// config") holds.
     #[test]
     fn sessiondirs_expands_tilde() {
-        let home = std::env::var("HOME")
-            .expect("HOME must be set for this test");
+        let home = std::env::var("HOME").expect("HOME must be set for this test");
         // Exercise the
         // production parse
         // path: feed the
@@ -4789,13 +4813,18 @@ tmuxpaneoutputdir=~/custom-tmux
         // A multiline command must be escaped to a single line so the
         // CLI output (one row per line) and the zsh widget's `(f)`
         // record splitter see exactly one match per row.
-        let row_data = vec![
-            ("command".to_string(), "for i in 1 2 3\ndo echo $i\ndone".to_string()),
-        ];
+        let row_data = vec![(
+            "command".to_string(),
+            "for i in 1 2 3\ndo echo $i\ndone".to_string(),
+        )];
         let fields = vec!["command".to_string()];
         let out = project_row(&row_data, &fields, &[], None, true);
         assert_eq!(out.len(), 1);
-        assert!(!out[0].contains('\n'), "escaped command still has a newline: {:?}", out[0]);
+        assert!(
+            !out[0].contains('\n'),
+            "escaped command still has a newline: {:?}",
+            out[0]
+        );
         assert_eq!(out[0], "for i in 1 2 3\\ndo echo $i\\ndone");
     }
 
@@ -4803,13 +4832,15 @@ tmuxpaneoutputdir=~/custom-tmux
     fn project_row_escapes_output_field() {
         // The `output` field is also escaped (it can contain newlines
         // from captured command output).
-        let row_data = vec![
-            ("output".to_string(), "line1\nline2".to_string()),
-        ];
+        let row_data = vec![("output".to_string(), "line1\nline2".to_string())];
         let fields = vec!["output".to_string()];
         let out = project_row(&row_data, &fields, &[], None, true);
         assert_eq!(out.len(), 1);
-        assert!(!out[0].contains('\n'), "escaped output still has a newline: {:?}", out[0]);
+        assert!(
+            !out[0].contains('\n'),
+            "escaped output still has a newline: {:?}",
+            out[0]
+        );
         assert_eq!(out[0], "line1\\nline2");
     }
 }

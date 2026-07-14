@@ -156,9 +156,7 @@ pub fn parse(contents: &str) -> Vec<SshHostBlock> {
                         merge_into_defaults(&mut out, block, &defaults);
                     }
                 }
-                let aliases: Vec<String> = tokens
-                    .map(|s| s.to_string())
-                    .collect();
+                let aliases: Vec<String> = tokens.map(|s| s.to_string()).collect();
                 if aliases.is_empty() {
                     // No alias on this Host
                     // line — OpenSSH would
@@ -226,41 +224,45 @@ pub fn parse(contents: &str) -> Vec<SshHostBlock> {
             }
             "hostname" => {
                 if let Some(ref mut block) = current
-                    && let Some(v) = tokens.next() {
-                        block.hostname = v.to_string();
-                    }
+                    && let Some(v) = tokens.next()
+                {
+                    block.hostname = v.to_string();
+                }
             }
             "user" => {
                 if let Some(ref mut block) = current
-                    && let Some(v) = tokens.next() {
-                        block.user = v.to_string();
-                    }
+                    && let Some(v) = tokens.next()
+                {
+                    block.user = v.to_string();
+                }
             }
             "port" => {
                 if let Some(ref mut block) = current
                     && let Some(v) = tokens.next()
-                        && let Ok(n) = v.parse::<u16>() {
-                            block.port = n;
-                        }
+                    && let Ok(n) = v.parse::<u16>()
+                {
+                    block.port = n;
+                }
             }
             "identityfile" => {
                 if let Some(ref mut block) = current
-                    && block.identity.is_empty() {
-                        // The first
-                        // `IdentityFile`
-                        // wins; OpenSSH
-                        // accepts
-                        // multiple and
-                        // tries them in
-                        // order. We
-                        // mirror that
-                        // by keeping the
-                        // first one
-                        // only.
-                        if let Some(v) = tokens.next() {
-                            block.identity = v.to_string();
-                        }
+                    && block.identity.is_empty()
+                {
+                    // The first
+                    // `IdentityFile`
+                    // wins; OpenSSH
+                    // accepts
+                    // multiple and
+                    // tries them in
+                    // order. We
+                    // mirror that
+                    // by keeping the
+                    // first one
+                    // only.
+                    if let Some(v) = tokens.next() {
+                        block.identity = v.to_string();
                     }
+                }
             }
             _ => {
                 // Unrecognised keyword
@@ -348,10 +350,9 @@ fn strip_comment(line: &str) -> &str {
     // `#` is safe.
     let bytes = line.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b'#'
-            && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
-                return &line[..i];
-            }
+        if b == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+            return &line[..i];
+        }
     }
     line
 }
@@ -454,7 +455,10 @@ Host proxmox
     User root
 ";
         let blocks = parse(input);
-        assert_eq!(blocks[0].user, "root", "explicit block must win over defaults");
+        assert_eq!(
+            blocks[0].user, "root",
+            "explicit block must win over defaults"
+        );
     }
 
     #[test]

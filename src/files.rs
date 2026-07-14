@@ -41,9 +41,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// How long the files-mode walk waits after the last keystroke
@@ -372,10 +372,7 @@ pub fn read_preview_bytes(path: &Path) -> Option<String> {
 /// Cancellation is cooperative: the run loop flips
 /// `cancelled` to abort a stale walk; the worker checks
 /// the flag just before sending.
-pub fn spawn_walk(
-    pattern: String,
-    ignore: IgnoreSet,
-) -> FilesRequest {
+pub fn spawn_walk(pattern: String, ignore: IgnoreSet) -> FilesRequest {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_clone = cancelled.clone();
@@ -392,7 +389,8 @@ pub fn spawn_walk(
         rows.sort_by(|a, b| {
             let a_is_dir = a.mode == "directory";
             let b_is_dir = b.mode == "directory";
-            a_is_dir.cmp(&b_is_dir)
+            a_is_dir
+                .cmp(&b_is_dir)
                 .reverse()
                 .then(a.command.cmp(&b.command))
         });

@@ -177,10 +177,7 @@ pub trait JiraClient: Send + Sync {
     /// from "the issue has no comments". The TUI
     /// shows the error as a status message and
     /// doesn't open the overlay.
-    fn fetch_comments(
-        &self,
-        key: &str,
-    ) -> Result<Vec<JiraComment>, JiraError>;
+    fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>, JiraError>;
 
     /// Post a new comment to a JIRA issue.
     /// Called when the user saves the
@@ -211,11 +208,7 @@ pub trait JiraClient: Send + Sync {
     /// `RestJiraClient` keeps the fake
     /// minimal and ensures all clients
     /// produce the same wire format.
-    fn add_comment(
-        &self,
-        key: &str,
-        body: &str,
-    ) -> Result<(), JiraError>;
+    fn add_comment(&self, key: &str, body: &str) -> Result<(), JiraError>;
 }
 
 /// Configuration read from the environment. `None` means
@@ -360,8 +353,7 @@ impl RestJiraClient {
     /// concrete `RestJiraClient`.
     fn build_blocking_client(&self) -> Result<reqwest::blocking::Client, JiraError> {
         use reqwest::blocking::Client;
-        let client_builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(15));
+        let client_builder = Client::builder().timeout(std::time::Duration::from_secs(15));
         let client_builder = match &self.config.ca_certificate_path {
             Some(path) => {
                 let der = std::fs::read(path).map_err(|e| {
@@ -393,19 +385,14 @@ impl RestJiraClient {
                         e
                     ))
                 })?;
-                let password = self
-                    .config
-                    .certificate_password
-                    .as_deref()
-                    .unwrap_or("");
-                let identity = reqwest::Identity::from_pkcs12_der(&der, password)
-                    .map_err(|e| {
-                        JiraError::Http(format!(
-                            "failed to parse certificate '{}': {}",
-                            path.display(),
-                            e
-                        ))
-                    })?;
+                let password = self.config.certificate_password.as_deref().unwrap_or("");
+                let identity = reqwest::Identity::from_pkcs12_der(&der, password).map_err(|e| {
+                    JiraError::Http(format!(
+                        "failed to parse certificate '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
                 client_builder
                     .identity(identity)
                     .build()
@@ -643,10 +630,7 @@ impl JiraClient for RestJiraClient {
     /// paginate today. This is documented at the
     /// call site (and the test `JIRA_DEBOUNCE` is
     /// independent of the comment fetch).
-    fn fetch_comments(
-        &self,
-        key: &str,
-    ) -> Result<Vec<JiraComment>, JiraError> {
+    fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>, JiraError> {
         use reqwest::blocking::Client;
         let url = format!(
             "{}/rest/api/2/issue/{}/comment?maxResults=100",
@@ -662,8 +646,7 @@ impl JiraClient for RestJiraClient {
         // refactor isn't strictly necessary and
         // the reader benefits from seeing each
         // method's full setup in one place.
-        let client_builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(15));
+        let client_builder = Client::builder().timeout(std::time::Duration::from_secs(15));
         let client_builder = match &self.config.ca_certificate_path {
             Some(path) => {
                 let der = std::fs::read(path).map_err(|e| {
@@ -695,19 +678,14 @@ impl JiraClient for RestJiraClient {
                         e
                     ))
                 })?;
-                let password = self
-                    .config
-                    .certificate_password
-                    .as_deref()
-                    .unwrap_or("");
-                let identity = reqwest::Identity::from_pkcs12_der(&der, password)
-                    .map_err(|e| {
-                        JiraError::Http(format!(
-                            "failed to parse certificate '{}': {}",
-                            path.display(),
-                            e
-                        ))
-                    })?;
+                let password = self.config.certificate_password.as_deref().unwrap_or("");
+                let identity = reqwest::Identity::from_pkcs12_der(&der, password).map_err(|e| {
+                    JiraError::Http(format!(
+                        "failed to parse certificate '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
                 client_builder
                     .identity(identity)
                     .build()
@@ -729,16 +707,13 @@ impl JiraClient for RestJiraClient {
             let excerpt: String = body.chars().take(200).collect();
             return Err(JiraError::Api(format!("{}: {}", status, excerpt.trim())));
         }
-        let body = resp.text().map_err(|e| {
-            JiraError::Http(e.to_string())
-        })?;
+        let body = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
         let snippet: String = body.chars().take(300).collect();
         let parsed: CommentsResponse = serde_json::from_str(&body).map_err(|e| {
             JiraError::Parse(format!("{} — body starts with: {}", e, snippet.trim()))
         })?;
         Ok(parsed.comments.into_iter().map(JiraComment::from).collect())
     }
-
 
     /// Post a new comment to a JIRA issue.
     /// Implementation: a POST to
@@ -776,12 +751,7 @@ impl JiraClient for RestJiraClient {
     /// response, but a successful
     /// response is still validated
     /// via the status code).
-    fn add_comment(
-        &self,
-        key: &str,
-        body: &str,
-    ) -> Result<(), JiraError> {
-        
+    fn add_comment(&self, key: &str, body: &str) -> Result<(), JiraError> {
         let url = format!(
             "{}/rest/api/2/issue/{}/comment",
             self.config.server,
@@ -817,11 +787,7 @@ impl JiraClient for RestJiraClient {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
             let excerpt: String = body.chars().take(200).collect();
-            return Err(JiraError::Api(format!(
-                "{}: {}",
-                status,
-                excerpt.trim()
-            )));
+            return Err(JiraError::Api(format!("{}: {}", status, excerpt.trim())));
         }
         // We don't need the response
         // body — JIRA returns the
@@ -1037,11 +1003,7 @@ impl From<ApiComment> for JiraComment {
         // truncate comment bodies — the
         // show-output overlay is scrollable, so
         // a long comment is fine.
-        let body = a
-            .body
-            .as_ref()
-            .map(extract_adf_text)
-            .unwrap_or_default();
+        let body = a.body.as_ref().map(extract_adf_text).unwrap_or_default();
         // `created` is the sort key. When it's
         // missing (system comment), we keep
         // `created` as the empty string so the
@@ -1058,9 +1020,7 @@ impl From<ApiComment> for JiraComment {
         // "last-edited" semantics consistent
         // for callers that want to display it
         // (we don't, today).
-        let updated = a
-            .updated
-            .unwrap_or_else(|| created.clone());
+        let updated = a.updated.unwrap_or_else(|| created.clone());
         JiraComment {
             id: a.id.unwrap_or_default(),
             author: a.author.map(|n| n.name_or_empty()).unwrap_or_default(),
@@ -1107,11 +1067,7 @@ pub fn extract_adf_text(value: &serde_json::Value) -> String {
     out
 }
 
-fn extract_adf_text_into(
-    value: &serde_json::Value,
-    out: &mut String,
-    _in_paragraph: bool,
-) {
+fn extract_adf_text_into(value: &serde_json::Value, out: &mut String, _in_paragraph: bool) {
     match value {
         serde_json::Value::String(s) => {
             out.push_str(s);
@@ -1154,10 +1110,7 @@ fn extract_adf_text_into(
             }
         }
         serde_json::Value::Object(map) => {
-            let node_type = map
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let node_type = map.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match node_type {
                 "text" => {
                     if let Some(s) = map.get("text").and_then(|t| t.as_str()) {
@@ -1217,9 +1170,9 @@ fn extract_adf_text_into(
                             .get("attrs")
                             .and_then(|a| a.get("href"))
                             .and_then(|t| t.as_str())
-                        {
-                            out.push_str(href);
-                        }
+                    {
+                        out.push_str(href);
+                    }
                 }
                 "emoji" => {
                     // ADF emoji nodes carry the
@@ -1854,17 +1807,32 @@ mod tests {
         // supplied clause must be stripped before parsing
         // to avoid double-counting and mis-tokenization.
         assert_eq!(
-            call_jql("crash ORDER BY updated DESC", None, TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "crash ORDER BY updated DESC",
+                None,
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"(description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
         );
         // Case-insensitive match.
         assert_eq!(
-            call_jql("crash order by updated DESC", None, TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "crash order by updated DESC",
+                None,
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"(description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
         );
         // With project scope.
         assert_eq!(
-            call_jql("crash ORDER BY updated DESC", Some("PROJ"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "crash ORDER BY updated DESC",
+                Some("PROJ"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "PROJ" AND (description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
         );
     }
@@ -1896,32 +1864,57 @@ mod tests {
 
         // Multiple free-text tokens are ANDed.
         assert_eq!(
-            call_jql("test1 test2", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "test1 test2",
+                Some("ENG"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "ENG" AND (description ~ "test1" OR summary ~ "test1") AND (description ~ "test2" OR summary ~ "test2") ORDER BY updated DESC"#,
         );
 
         // Explicit `project=...` overrides the default
         // project and appears first.
         assert_eq!(
-            call_jql("project=RMS", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "project=RMS",
+                Some("ENG"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "RMS" ORDER BY updated DESC"#,
         );
 
         // Free text + explicit project.
         assert_eq!(
-            call_jql("test1 project=RMS", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "test1 project=RMS",
+                Some("ENG"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "RMS" AND (description ~ "test1" OR summary ~ "test1") ORDER BY updated DESC"#,
         );
 
         // @me alias + explicit project.
         assert_eq!(
-            call_jql("@me project=RMS", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "@me project=RMS",
+                Some("ENG"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "RMS" AND assignee = currentUser() ORDER BY updated DESC"#,
         );
 
         // @me + explicit project + free text.
         assert_eq!(
-            call_jql("@me project=RMS test1", Some("ENG"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "@me project=RMS test1",
+                Some("ENG"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "RMS" AND assignee = currentUser() AND (description ~ "test1" OR summary ~ "test1") ORDER BY updated DESC"#,
         );
     }
@@ -1953,7 +1946,12 @@ mod tests {
         // field-values, aliases, or fragments does the
         // project scope apply.
         assert_eq!(
-            call_jql("PROJ-123 crash", Some("PROJ"), TEST_NOW_EPOCH, &empty_fragments()),
+            call_jql(
+                "PROJ-123 crash",
+                Some("PROJ"),
+                TEST_NOW_EPOCH,
+                &empty_fragments()
+            ),
             r#"project = "PROJ" AND key = PROJ-123 AND (description ~ "crash" OR summary ~ "crash") ORDER BY updated DESC"#
         );
     }
@@ -2803,13 +2801,11 @@ mod tests {
         // The most common shape: a doc with one
         // paragraph containing one text node.
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"Hello world."}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "Hello world."
         );
     }
@@ -2824,16 +2820,14 @@ mod tests {
         // survive so the description body can
         // span multiple rendered lines.)
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"First."}
                     ]},
                     {"type":"paragraph","content":[
                         {"type":"text","text":"Second."}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "First.\nSecond."
         );
     }
@@ -2845,15 +2839,13 @@ mod tests {
         // (formatting marks between them). The
         // extractor concatenates them in order.
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"The "},
                         {"type":"text","text":"quick "},
                         {"type":"text","text":"fox."}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "The quick fox."
         );
     }
@@ -2865,8 +2857,7 @@ mod tests {
         // extractor prefers that over a
         // hand-rolled `@`-prefix concatenation.
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"Hi "},
                         {"type":"mention","attrs":{
@@ -2874,8 +2865,7 @@ mod tests {
                         }},
                         {"type":"text","text":" please review."}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "Hi @alice please review."
         );
     }
@@ -2888,15 +2878,13 @@ mod tests {
         // Management customers whose mention
         // shape omits the `text` shorthand.
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"mention","attrs":{
                             "id":"5","displayName":"Alice"
                         }}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "@Alice"
         );
     }
@@ -2910,8 +2898,7 @@ mod tests {
         // without breaking the line on
         // long URLs).
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"See "},
                         {"type":"link","attrs":{
@@ -2921,8 +2908,7 @@ mod tests {
                         ]},
                         {"type":"text","text":" for more."}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "See docs for more."
         );
     }
@@ -2934,15 +2920,13 @@ mod tests {
         // author pasted a URL with no
         // descriptive text.
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"link","attrs":{
                             "href":"https://example.com/wonky/url"
                         }}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "https://example.com/wonky/url"
         );
     }
@@ -2955,16 +2939,14 @@ mod tests {
         // gets a hint that an emoji was in the
         // original.
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"Hello "},
                         {"type":"emoji","attrs":{
                             "shortName":":wave:","id":"1f44b"
                         }}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "Hello :wave:"
         );
     }
@@ -2979,15 +2961,13 @@ mod tests {
         // layout wants the line breaks to
         // survive.)
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"paragraph","content":[
                         {"type":"text","text":"line one"},
                         {"type":"hardBreak"},
                         {"type":"text","text":"line two"}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "line one\nline two"
         );
     }
@@ -3003,8 +2983,7 @@ mod tests {
         // layout wants each item on its own
         // line in the rendered preview / overlay.)
         assert_eq!(
-            extract_adf_text(&adf(
-                r#"{"type":"doc","version":1,"content":[
+            extract_adf_text(&adf(r#"{"type":"doc","version":1,"content":[
                     {"type":"bulletList","content":[
                         {"type":"listItem","content":[
                             {"type":"paragraph","content":[
@@ -3017,8 +2996,7 @@ mod tests {
                             ]}
                         ]}
                     ]}
-                ]}"#
-            )),
+                ]}"#)),
             "first\nsecond"
         );
     }

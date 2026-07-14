@@ -114,19 +114,13 @@ impl BuiltinTheme {
             BuiltinTheme::Dracula => Some(ratatui_themes::ThemeName::Dracula),
             BuiltinTheme::OneDarkPro => Some(ratatui_themes::ThemeName::OneDarkPro),
             BuiltinTheme::Nord => Some(ratatui_themes::ThemeName::Nord),
-            BuiltinTheme::CatppuccinMocha => {
-                Some(ratatui_themes::ThemeName::CatppuccinMocha)
-            }
-            BuiltinTheme::CatppuccinLatte => {
-                Some(ratatui_themes::ThemeName::CatppuccinLatte)
-            }
+            BuiltinTheme::CatppuccinMocha => Some(ratatui_themes::ThemeName::CatppuccinMocha),
+            BuiltinTheme::CatppuccinLatte => Some(ratatui_themes::ThemeName::CatppuccinLatte),
             BuiltinTheme::GruvboxDark => Some(ratatui_themes::ThemeName::GruvboxDark),
             BuiltinTheme::GruvboxLight => Some(ratatui_themes::ThemeName::GruvboxLight),
             BuiltinTheme::TokyoNight => Some(ratatui_themes::ThemeName::TokyoNight),
             BuiltinTheme::SolarizedDark => Some(ratatui_themes::ThemeName::SolarizedDark),
-            BuiltinTheme::SolarizedLight => {
-                Some(ratatui_themes::ThemeName::SolarizedLight)
-            }
+            BuiltinTheme::SolarizedLight => Some(ratatui_themes::ThemeName::SolarizedLight),
             BuiltinTheme::MonokaiPro => Some(ratatui_themes::ThemeName::MonokaiPro),
             BuiltinTheme::RosePine => Some(ratatui_themes::ThemeName::RosePine),
             BuiltinTheme::Kanagawa => Some(ratatui_themes::ThemeName::Kanagawa),
@@ -159,8 +153,12 @@ impl BuiltinTheme {
     /// startup if a curated theme's TOML is missing or
     /// malformed — that's a build-time bug, not a user error.
     fn curated_palette(self) -> ratatui_themes::ThemePalette {
-        let c = curated::palette_for(self.slug())
-            .unwrap_or_else(|| panic!("curated theme {:?} not found in theme/curated/", self.slug()));
+        let c = curated::palette_for(self.slug()).unwrap_or_else(|| {
+            panic!(
+                "curated theme {:?} not found in theme/curated/",
+                self.slug()
+            )
+        });
         ratatui_themes::ThemePalette {
             accent: c.accent,
             secondary: c.secondary,
@@ -294,22 +292,20 @@ impl SelectedTheme {
     }
 }
 
-
-
-
 // --- Palette runtime ---
 
 fn resolve_color(s: &str) -> Color {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix('#').or_else(|| s.strip_prefix("0x"))
         && hex.len() == 6
-            && let (Ok(r), Ok(g), Ok(b)) = (
-                u8::from_str_radix(&hex[0..2], 16),
-                u8::from_str_radix(&hex[2..4], 16),
-                u8::from_str_radix(&hex[4..6], 16),
-            ) {
-                return Color::Rgb(r, g, b);
-            }
+        && let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        )
+    {
+        return Color::Rgb(r, g, b);
+    }
     match s.to_ascii_lowercase().as_str() {
         "black" => Color::Black,
         "red" => Color::Red,
@@ -444,7 +440,6 @@ impl Palette {
     }
 }
 
-
 /// Rebuild the active palette for the chosen theme and store it in
 /// the `PALETTE` thread-local. When `theme` is `SelectedTheme::None`
 /// the palette is rebuilt from the user's manually-configured
@@ -557,10 +552,10 @@ mod tests {
     }
 }
 
-mod styles;
-mod picker;
-pub mod palette_storage;
 mod curated;
+pub mod palette_storage;
+mod picker;
+mod styles;
 
-pub use styles::Theme;
 pub use picker::ThemePicker;
+pub use styles::Theme;

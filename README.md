@@ -145,7 +145,7 @@ The first character of the query selects the prefix mode. Each mode answers a di
 | Panes | `*` | List all panes across all tmux sessions / herdr workspaces. |
 | JIRA | `-` | Search JIRA issues via REST API. |
 | Files | `~` | List every file in the current directory tree. |
-| Tags | `$` | List every symbol from the `tags` file. Selecting opens `$EDITOR +LINE file`. |
+| Tags | `$` | List every symbol from the `tags` file. Selecting opens `$EDITOR +LINE file`. An optional `@lang` token (e.g. `@rust`) filters by file extension and pipes the preview through `bat` for syntax highlighting. |
 
 ### Quick-create from notes/todo mode
 

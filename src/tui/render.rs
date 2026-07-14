@@ -5,14 +5,14 @@
 // draw_theme_picker, etc.) and the highlight_matches helpers.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
 };
 
-use super::bindings::{format_key_specs, Action};
+use super::bindings::{Action, format_key_specs};
 use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
@@ -64,9 +64,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         crate::tui::state::PaneVisibility::Both => {
             let detail_chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints(
-                    [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
-                )
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
                 .split(chunks[2]);
             draw_details(f, app, detail_chunks[0]);
             draw_output_preview(f, app, detail_chunks[1]);
@@ -327,10 +325,7 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
         let chars: Vec<char> = field.value.chars().collect();
         let mut spans: Vec<Span> = Vec::new();
         // `<Name>: `
-        spans.push(Span::styled(
-            format!("{}: ", field.name),
-            label_style,
-        ));
+        spans.push(Span::styled(format!("{}: ", field.name), label_style));
         if field.value.is_empty() && is_focused {
             // Empty
             // focused
@@ -345,10 +340,7 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
             // space
             // (the
             // cursor).
-            spans.push(Span::styled(
-                field.placeholder.to_string(),
-                Theme::dim(),
-            ));
+            spans.push(Span::styled(field.placeholder.to_string(), Theme::dim()));
             spans.push(Span::styled(
                 " ",
                 Style::default().add_modifier(Modifier::REVERSED),
@@ -356,10 +348,7 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
         } else {
             // Pre-cursor
             // text.
-            let pre: String = chars
-                .iter()
-                .take(field.cursor)
-                .collect();
+            let pre: String = chars.iter().take(field.cursor).collect();
             spans.push(Span::styled(pre, value_style));
             // Cursor cell.
             if is_focused {
@@ -427,12 +416,10 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
         // show a small
         // marker.
         if let Some(err) = &dialog.error
-            && err.contains(field.name) {
-                spans.push(Span::styled(
-                    format!("  ({})", err),
-                    Theme::error(),
-                ));
-            }
+            && err.contains(field.name)
+        {
+            spans.push(Span::styled(format!("  ({})", err), Theme::error()));
+        }
         f.render_widget(Paragraph::new(Line::from(spans)), chunks[i]);
     }
 
@@ -448,10 +435,7 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
             format!(
                 "{:?} in {}",
                 dialog.source_command,
-                crate::util::shorten_home_path(
-                    &dialog.source_directory,
-                    &app.home_list,
-                ),
+                crate::util::shorten_home_path(&dialog.source_directory, &app.home_list,),
             ),
             Theme::dim(),
         ),
@@ -1345,9 +1329,9 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     // "F3-cycled" modes (plain / regex /
     // fuzzy / output) are also reachable
     // via `Action::ToggleSearchMode`, but
-                // the remaining eight (LLM / question
-                // / notes / todo / directories / panes
-                // / JIRA / files) require the user to type the
+    // the remaining eight (LLM / question
+    // / notes / todo / directories / panes
+    // / JIRA / files) require the user to type the
     // prefix character directly. Listing
     // them all in the help is the only way
     // the user discovers the LLM, question,
@@ -1373,9 +1357,8 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "  FUZZY/REGEX) applies to all modes except JIRA; cycle it with",
     ));
     lines.push(Line::from(format!(
-        "  {} (the toggle-search-mode key).", format_key_specs(
-            app.bindings.specs(Action::ToggleSearchMode)
-        ),
+        "  {} (the toggle-search-mode key).",
+        format_key_specs(app.bindings.specs(Action::ToggleSearchMode)),
     )));
     lines.push(Line::from(
         "  Prefix characters are configurable in ~/.config/smarthistory/",
@@ -1495,13 +1478,13 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         "tags",
         qp.tags.to_string(),
-        "list every symbol from the `tags` file (selecting one opens $EDITOR +LINE file)",
+        "list every symbol from the `tags` file (selecting one opens $EDITOR +LINE file); `@lang` filters by file extension and highlights the preview",
     );
     mode_row(
         &mut lines,
         "ag",
         qp.ag.to_string(),
-        "search file contents with ag (The Silver Searcher); `*` tokens restrict file patterns",
+        "search file contents with ag (The Silver Searcher); `*` tokens restrict file patterns, `@lang` filters by language",
     );
 
     lines.push(Line::from(""));
@@ -2175,9 +2158,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     // when the user has
     // chosen a non-default
     // filter.
-    let panes_filter_chip = if app.is_panes_query()
-        && !app.panes_filter.is_default()
-    {
+    let panes_filter_chip = if app.is_panes_query() && !app.panes_filter.is_default() {
         Some(panes_filter_badge(app.panes_filter))
     } else {
         None
@@ -2363,12 +2344,8 @@ fn match_algorithm_badge(algo: crate::tui::state::MatchAlgorithm) -> Option<Span
     }
     let (label, color) = match algo {
         crate::tui::state::MatchAlgorithm::Substring => return None,
-        crate::tui::state::MatchAlgorithm::Fuzzy => {
-            ("FUZZY", Theme::success_color())
-        }
-        crate::tui::state::MatchAlgorithm::Regex => {
-            ("REGEX", Theme::warning_color())
-        }
+        crate::tui::state::MatchAlgorithm::Fuzzy => ("FUZZY", Theme::success_color()),
+        crate::tui::state::MatchAlgorithm::Regex => ("REGEX", Theme::warning_color()),
     };
     Some(Span::styled(
         format!(" {} ", label),
@@ -2627,9 +2604,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // **Panes mode**: data index IS the rendered index (0 = first
     // row at the top). No flip.
     let rendered_idx = if is_panes {
-        app.list_state
-            .selected()
-            .map(|data_idx| data_idx)
+        app.list_state.selected().map(|data_idx| data_idx)
     } else {
         app.list_state
             .selected()
@@ -3570,8 +3545,7 @@ fn is_horizontal_rule(s: &str) -> bool {
     }
     // Every character is either the marker
     // or a space.
-    s.chars()
-        .all(|c| c == first || c.is_whitespace())
+    s.chars().all(|c| c == first || c.is_whitespace())
 }
 
 /// Parse an ordered-list prefix: 1-9
@@ -3611,10 +3585,7 @@ fn render_block(block: MdBlock) -> Line<'static> {
             // (the existing `## ` style)
             // lacks.
             let marker = Span::styled("▸ ", Theme::success());
-            let text = Span::styled(
-                text,
-                Theme::success().add_modifier(Modifier::BOLD),
-            );
+            let text = Span::styled(text, Theme::success().add_modifier(Modifier::BOLD));
             Line::from(vec![marker, text])
         }
         MdBlock::Heading2(text) => {
@@ -3623,10 +3594,7 @@ fn render_block(block: MdBlock) -> Line<'static> {
             // in the JIRA overlay
             // (the section names and
             // per-comment sub-headings).
-            let text = Span::styled(
-                text,
-                Theme::accent().add_modifier(Modifier::BOLD),
-            );
+            let text = Span::styled(text, Theme::accent().add_modifier(Modifier::BOLD));
             Line::from(text)
         }
         MdBlock::Heading3(text) => {
@@ -3638,10 +3606,7 @@ fn render_block(block: MdBlock) -> Line<'static> {
             // doesn't compete with
             // H1 / H2.
             let indent = Span::raw("  ");
-            let text = Span::styled(
-                text,
-                Theme::dim().add_modifier(Modifier::BOLD),
-            );
+            let text = Span::styled(text, Theme::dim().add_modifier(Modifier::BOLD));
             Line::from(vec![indent, text])
         }
         MdBlock::Blockquote(text) => {
@@ -3724,10 +3689,7 @@ fn render_block(block: MdBlock) -> Line<'static> {
             // render time, but the
             // current shape is
             // sufficient.
-            Line::from(Span::styled(
-                "─".repeat(40),
-                Theme::dim(),
-            ))
+            Line::from(Span::styled("─".repeat(40), Theme::dim()))
         }
         MdBlock::Plain(text) => {
             // Unreachable in
@@ -3848,10 +3810,7 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
             Some((close_idx, close_len, _kind)) => {
                 let content = &after_open[..close_idx];
                 if !content.is_empty() {
-                    let style = style_for_marker(
-                        marker_kind,
-                        base,
-                    );
+                    let style = style_for_marker(marker_kind, base);
                     // The content
                     // itself is
                     // recursively
@@ -3859,10 +3818,7 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
                     // (so
                     // `**bold *italic***`
                     // works).
-                    let inner = render_inline(
-                        content,
-                        style,
-                    );
+                    let inner = render_inline(content, style);
                     spans.extend(inner);
                 }
                 rest = &after_open[close_idx + close_len..];
@@ -3881,11 +3837,7 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
                 // text.
                 push_plain_span(
                     &mut spans,
-                    format!(
-                        "{}{}",
-                        marker_str(marker_kind),
-                        after_open
-                    ),
+                    format!("{}{}", marker_str(marker_kind), after_open),
                     base,
                 );
                 rest = "";
@@ -3979,10 +3931,7 @@ fn find_next_marker(s: &str) -> Option<(usize, MarkerKind, usize, char)> {
             // should already have
             // matched Bold above,
             // but be defensive).
-            if kind == MarkerKind::Italic
-                && idx + 1 < s.len()
-                && s.as_bytes()[idx + 1] == b'*'
-            {
+            if kind == MarkerKind::Italic && idx + 1 < s.len() && s.as_bytes()[idx + 1] == b'*' {
                 continue;
             }
             // Don't match a `~`
@@ -4036,9 +3985,7 @@ fn find_close_marker(
             // CommonMark support.
             s.find("**").map(|idx| (idx, 2, MarkerKind::Bold))
         }
-        MarkerKind::Strikethrough => {
-            s.find("~~").map(|idx| (idx, 2, MarkerKind::Strikethrough))
-        }
+        MarkerKind::Strikethrough => s.find("~~").map(|idx| (idx, 2, MarkerKind::Strikethrough)),
         MarkerKind::Italic | MarkerKind::Code => {
             // Single-char close. The
             // italic and code
@@ -4217,9 +4164,7 @@ fn style_for_marker(kind: MarkerKind, base: Style) -> Style {
                 .fg(Theme::warning_color())
                 .add_modifier(Modifier::BOLD)
         }
-        MarkerKind::Strikethrough => {
-            base.add_modifier(Modifier::CROSSED_OUT)
-        }
+        MarkerKind::Strikethrough => base.add_modifier(Modifier::CROSSED_OUT),
         MarkerKind::Link => {
             // Link: accent
             // color +
@@ -4432,7 +4377,11 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
 
     // Ag-mode and tags-mode rows typically have more
     // content worth previewing; give them one extra line.
-    let take_n = if row.mode == "ag" || row.mode == "tags" { 5 } else { 4 };
+    let take_n = if row.mode == "ag" || row.mode == "tags" {
+        5
+    } else {
+        4
+    };
     let is_ansi_ag = row.mode == "ag" && row.output.contains('\x1b');
     let preview_lines: Vec<Line> = if is_ansi_ag {
         row.output
@@ -4513,9 +4462,17 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             // recognises this is a JIRA
             // action, not a local one).
             if app.jira_add_comment_target.is_some() {
-                ("jira> ".to_string(), " jira comment ".to_string(), buf.as_str())
+                (
+                    "jira> ".to_string(),
+                    " jira comment ".to_string(),
+                    buf.as_str(),
+                )
             } else {
-                ("comment> ".to_string(), " comment ".to_string(), buf.as_str())
+                (
+                    "comment> ".to_string(),
+                    " comment ".to_string(),
+                    buf.as_str(),
+                )
             }
         }
         None => {
@@ -4536,19 +4493,39 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 crate::tui::state::MatchAlgorithm::Regex => " · regex",
             };
             if is_output {
-                ("+".to_string(), format!(" output{} ", algo), app.query.as_str())
+                (
+                    "+".to_string(),
+                    format!(" output{} ", algo),
+                    app.query.as_str(),
+                )
             } else if is_llm {
                 ("=".to_string(), " LLM ".to_string(), app.query.as_str())
             } else if is_notes {
-                ("@".to_string(), format!(" notes{} ", algo), app.query.as_str())
+                (
+                    "@".to_string(),
+                    format!(" notes{} ", algo),
+                    app.query.as_str(),
+                )
             } else if is_question {
                 ("%".to_string(), " ? ".to_string(), app.query.as_str())
             } else if is_todo {
-                ("!".to_string(), format!(" todo{} ", algo), app.query.as_str())
+                (
+                    "!".to_string(),
+                    format!(" todo{} ", algo),
+                    app.query.as_str(),
+                )
             } else if is_directories {
-                ("#".to_string(), format!(" directories{} ", algo), app.query.as_str())
+                (
+                    "#".to_string(),
+                    format!(" directories{} ", algo),
+                    app.query.as_str(),
+                )
             } else if app.is_panes_query() {
-                ("*".to_string(), format!(" panes{} ", algo), app.query.as_str())
+                (
+                    "*".to_string(),
+                    format!(" panes{} ", algo),
+                    app.query.as_str(),
+                )
             } else if app.is_jira_query() {
                 let jql_title = app
                     .jira_last_jql
@@ -4556,9 +4533,17 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                     .map_or_else(|| " jira ".to_string(), |j| format!(" jira ({}) ", j));
                 ("-".to_string(), jql_title, app.query.as_str())
             } else if app.is_files_query() {
-                ("~".to_string(), format!(" files{} ", algo), app.query.as_str())
+                (
+                    "~".to_string(),
+                    format!(" files{} ", algo),
+                    app.query.as_str(),
+                )
             } else if app.is_tags_query() {
-                ("$".to_string(), format!(" symbols{} ", algo), app.query.as_str())
+                (
+                    "$".to_string(),
+                    format!(" symbols{} ", algo),
+                    app.query.as_str(),
+                )
             } else if app.is_ag_query() {
                 (",".to_string(), format!(" ag{} ", algo), app.query.as_str())
             } else {
@@ -4799,10 +4784,7 @@ mod tests {
         // herdr backend +
         // Tmux source =
         // `DIR:HERDR`.
-        let chip = super::directory_source_badge(
-            DirectorySource::Tmux,
-            "herdr",
-        );
+        let chip = super::directory_source_badge(DirectorySource::Tmux, "herdr");
         let span: &Span = &chip;
         let text = span.content.to_string();
         assert_eq!(
@@ -4814,10 +4796,7 @@ mod tests {
         // `DIR:TMUX`
         // (historical
         // behaviour).
-        let chip = super::directory_source_badge(
-            DirectorySource::Tmux,
-            "tmux",
-        );
+        let chip = super::directory_source_badge(DirectorySource::Tmux, "tmux");
         let text = chip.content.to_string();
         assert_eq!(
             text, " DIR:TMUX ",
@@ -4827,10 +4806,7 @@ mod tests {
         // ignores the
         // backend (shows
         // every row).
-        let chip = super::directory_source_badge(
-            DirectorySource::All,
-            "herdr",
-        );
+        let chip = super::directory_source_badge(DirectorySource::All, "herdr");
         let text = chip.content.to_string();
         assert_eq!(
             text, " DIR:ALL ",
@@ -4842,10 +4818,7 @@ mod tests {
         // only
         // `sessiondirs=...`
         // rows).
-        let chip = super::directory_source_badge(
-            DirectorySource::Config,
-            "herdr",
-        );
+        let chip = super::directory_source_badge(DirectorySource::Config, "herdr");
         let text = chip.content.to_string();
         assert_eq!(
             text, " DIR:CFG ",
@@ -4970,11 +4943,11 @@ mod tests {
 
     // ---- render_preview_line (the **...** bold parser) ----
 
+    use super::super::theme::Theme;
     /// The helper is in the same module as
     /// the tests, so a single-level `super`
     /// import reaches it.
     use super::render_preview_line;
-    use super::super::theme::Theme;
     use ratatui::style::Modifier;
 
     /// A line with no `**` markers
@@ -4993,10 +4966,7 @@ mod tests {
         // `bitflags!` Modifier field, so we
         // can use its generated `contains`
         // method to check.
-        assert!(!line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// A line with one `**Label**` pair
@@ -5009,17 +4979,11 @@ mod tests {
         // 2 spans: bold "Status" + plain ": Open".
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content, "Status");
-        assert!(line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         // Second span is the trailing text,
         // without BOLD.
         assert_eq!(line.spans[1].content, ": Open");
-        assert!(!line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[1].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// Multiple `**...**` pairs on the
@@ -5041,25 +5005,13 @@ mod tests {
         // + bold "B" + plain ": 2".
         assert_eq!(line.spans.len(), 4);
         assert_eq!(line.spans[0].content, "A");
-        assert!(line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[1].content, ": 1, ");
-        assert!(!line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[1].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[2].content, "B");
-        assert!(line.spans[2]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[3].content, ": 2");
-        assert!(!line.spans[3]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[3].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// An unclosed `**` (one with no
@@ -5076,10 +5028,7 @@ mod tests {
         // line including the literal `**`.
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "**no closer here");
-        assert!(!line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// An empty line produces a
@@ -5129,10 +5078,7 @@ mod tests {
         assert_eq!(line.spans[0].content, "Comments");
         // The heading style is bold and
         // tinted with the accent color.
-        assert!(line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         // The accent color is the
         // foreground (not empty /
         // default).
@@ -5165,10 +5111,7 @@ mod tests {
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "see ## section for details");
         // No BOLD modifier.
-        assert!(!line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// A line that starts with `##` but
@@ -5185,10 +5128,7 @@ mod tests {
         let line = render_preview_line("##tag");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "##tag");
-        assert!(!line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// A line that's just `##` (marker
@@ -5210,10 +5150,7 @@ mod tests {
             // No BOLD modifier on any
             // span — the heading
             // detector didn't fire.
-            assert!(!span
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD));
+            assert!(!span.style.add_modifier.contains(Modifier::BOLD));
         }
     }
 
@@ -5231,14 +5168,8 @@ mod tests {
         assert_eq!(line.spans[1].content, "Big Title");
         // Both spans are bold; the
         // text uses the success color.
-        assert!(line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
-        assert_eq!(
-            line.spans[1].style.fg,
-            Some(Theme::success_color())
-        );
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].style.fg, Some(Theme::success_color()));
     }
 
     /// `## text` is an H2 heading: bold +
@@ -5252,14 +5183,8 @@ mod tests {
         let line = render_preview_line("## Section");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "Section");
-        assert!(line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
-        assert_eq!(
-            line.spans[0].style.fg,
-            Some(Theme::accent_color())
-        );
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[0].style.fg, Some(Theme::accent_color()));
     }
 
     /// `### text` is an H3 heading:
@@ -5273,14 +5198,8 @@ mod tests {
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content, "  ");
         assert_eq!(line.spans[1].content, "Subsection");
-        assert!(line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
-        assert_eq!(
-            line.spans[1].style.fg,
-            Some(Theme::dim_color())
-        );
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].style.fg, Some(Theme::dim_color()));
     }
 
     /// `####` (4+ hashes) is plain text
@@ -5296,17 +5215,11 @@ mod tests {
         // as plain text).
         for span in &line.spans {
             // No BOLD modifier.
-            assert!(!span
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD));
+            assert!(!span.style.add_modifier.contains(Modifier::BOLD));
         }
         // The content includes the
         // `####` prefix.
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.content.contains("####")));
+        assert!(line.spans.iter().any(|s| s.content.contains("####")));
     }
 
     /// `> text` is a blockquote: italic
@@ -5321,16 +5234,10 @@ mod tests {
         assert_eq!(line.spans[0].content, "│ ");
         assert_eq!(line.spans[1].content, "a wise quote");
         // The text is italic.
-        assert!(line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::ITALIC));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::ITALIC));
         // The gutter is the info
         // color.
-        assert_eq!(
-            line.spans[0].style.fg,
-            Some(Theme::info_color())
-        );
+        assert_eq!(line.spans[0].style.fg, Some(Theme::info_color()));
     }
 
     /// `- item` is a bullet list item:
@@ -5342,10 +5249,7 @@ mod tests {
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content, "• ");
         assert_eq!(line.spans[1].content, "first item");
-        assert_eq!(
-            line.spans[0].style.fg,
-            Some(Theme::accent_color())
-        );
+        assert_eq!(line.spans[0].style.fg, Some(Theme::accent_color()));
     }
 
     /// `* item` (asterisk + space) is
@@ -5368,10 +5272,7 @@ mod tests {
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content, "7. ");
         assert_eq!(line.spans[1].content, "seventh item");
-        assert_eq!(
-            line.spans[0].style.fg,
-            Some(Theme::accent_color())
-        );
+        assert_eq!(line.spans[0].style.fg, Some(Theme::accent_color()));
     }
 
     /// `---` (3+ dashes) is a horizontal
@@ -5384,14 +5285,8 @@ mod tests {
         // 40 `─` chars (the
         // renderer's fixed width).
         assert_eq!(line.spans[0].content.chars().count(), 40);
-        assert!(line.spans[0]
-            .content
-            .chars()
-            .all(|c| c == '─'));
-        assert_eq!(
-            line.spans[0].style.fg,
-            Some(Theme::dim_color())
-        );
+        assert!(line.spans[0].content.chars().all(|c| c == '─'));
+        assert_eq!(line.spans[0].style.fg, Some(Theme::dim_color()));
     }
 
     /// `***` (3+ asterisks) is also a
@@ -5400,10 +5295,7 @@ mod tests {
     fn preview_line_three_asterisks_is_horizontal_rule() {
         let line = render_preview_line("***");
         assert_eq!(line.spans.len(), 1);
-        assert!(line.spans[0]
-            .content
-            .chars()
-            .all(|c| c == '─'));
+        assert!(line.spans[0].content.chars().all(|c| c == '─'));
     }
 
     /// A line with only two dashes is
@@ -5414,10 +5306,7 @@ mod tests {
         let line = render_preview_line("--");
         // Treated as plain text; the
         // `--` is preserved verbatim.
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.content.contains("--")));
+        assert!(line.spans.iter().any(|s| s.content.contains("--")));
         // No dim color (the dim color
         // is reserved for the
         // horizontal-rule path).
@@ -5426,10 +5315,7 @@ mod tests {
             // main check is that
             // we're in the Plain
             // path.)
-            assert!(!span
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD));
+            assert!(!span.style.add_modifier.contains(Modifier::BOLD));
         }
     }
 
@@ -5448,10 +5334,7 @@ mod tests {
             .iter()
             .find(|s| s.content == "italic")
             .expect("italic span");
-        assert!(italic_span
-            .style
-            .add_modifier
-            .contains(Modifier::ITALIC));
+        assert!(italic_span.style.add_modifier.contains(Modifier::ITALIC));
     }
 
     /// `_foo_` is italic (alias for
@@ -5464,10 +5347,7 @@ mod tests {
             .iter()
             .find(|s| s.content == "italic")
             .expect("italic span");
-        assert!(italic_span
-            .style
-            .add_modifier
-            .contains(Modifier::ITALIC));
+        assert!(italic_span.style.add_modifier.contains(Modifier::ITALIC));
     }
 
     /// `` `code` `` is inline code:
@@ -5480,14 +5360,8 @@ mod tests {
             .iter()
             .find(|s| s.content == "foo()")
             .expect("code span");
-        assert_eq!(
-            code_span.style.fg,
-            Some(Theme::warning_color())
-        );
-        assert!(code_span
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert_eq!(code_span.style.fg, Some(Theme::warning_color()));
+        assert!(code_span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// `~~strike~~` is strikethrough.
@@ -5499,10 +5373,12 @@ mod tests {
             .iter()
             .find(|s| s.content == "old")
             .expect("strike span");
-        assert!(strike_span
-            .style
-            .add_modifier
-            .contains(Modifier::CROSSED_OUT));
+        assert!(
+            strike_span
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
     }
 
     /// `[text](url)` is a link: accent
@@ -5521,14 +5397,8 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("docs"))
             .expect("link span");
-        assert_eq!(
-            link_span.style.fg,
-            Some(Theme::accent_color())
-        );
-        assert!(link_span
-            .style
-            .add_modifier
-            .contains(Modifier::UNDERLINED));
+        assert_eq!(link_span.style.fg, Some(Theme::accent_color()));
+        assert!(link_span.style.add_modifier.contains(Modifier::UNDERLINED));
         // The URL is hidden (not in
         // any span's content).
         for span in &line.spans {
@@ -5560,10 +5430,7 @@ mod tests {
         let line = render_preview_line("**bold**");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "bold");
-        assert!(line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// `**foo** and **bar**` (two
@@ -5579,20 +5446,11 @@ mod tests {
         let line = render_preview_line("**foo** and **bar**");
         assert_eq!(line.spans.len(), 3);
         assert_eq!(line.spans[0].content, "foo");
-        assert!(line.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[1].content, " and ");
-        assert!(!line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(!line.spans[1].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[2].content, "bar");
-        assert!(line.spans[2]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// An unclosed `` ` `` (inline
@@ -5612,8 +5470,7 @@ mod tests {
         }
         // The literal ` is in the
         // rendered output.
-        let content: String =
-            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(content.contains('`'));
     }
 
@@ -5642,8 +5499,7 @@ mod tests {
         // No `1. ` marker; the
         // content is the original
         // line.
-        let content: String =
-            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(content, "1.no-space");
     }
 
@@ -5659,8 +5515,7 @@ mod tests {
         // there's no text after the
         // space. Falls through to
         // plain text.
-        let content: String =
-            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(content, "1. ");
     }
 
@@ -5688,10 +5543,16 @@ mod ansi_tests {
         let spans = parse_ansi_line(input);
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "fn");
-        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Rgb(102, 217, 239)));
+        assert_eq!(
+            spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(102, 217, 239))
+        );
         assert_eq!(spans[1].content, " ");
         assert_eq!(spans[2].content, "main");
-        assert_eq!(spans[2].style.fg, Some(ratatui::style::Color::Rgb(166, 226, 46)));
+        assert_eq!(
+            spans[2].style.fg,
+            Some(ratatui::style::Color::Rgb(166, 226, 46))
+        );
     }
 
     #[test]
@@ -5718,6 +5579,9 @@ mod ansi_tests {
         let spans = parse_ansi_line(input);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "red");
-        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Rgb(255, 0, 0)));
+        assert_eq!(
+            spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(255, 0, 0))
+        );
     }
 }

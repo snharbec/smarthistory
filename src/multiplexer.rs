@@ -1005,8 +1005,15 @@ impl MultiplexerBackend for TmuxBackend {
         // (e.g. `0`, `1`, or a
         // named session like
         // `work`), and tmux accepts
-        // it directly.
-        Some(format!("tmux switch-client -t {}", session_label))
+        // it directly. Quote the
+        // label defensively so a
+        // name containing spaces or
+        // metacharacters doesn't
+        // break the staged command.
+        Some(format!(
+            "tmux switch-client -t {}",
+            crate::util::shell_quote(session_label)
+        ))
     }
 
     fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
@@ -1268,9 +1275,10 @@ pub fn herdr_pane_cmdline(pane_id: &str) -> Option<String> {
     // user-visible than the
     // OS `name`.
     if let Some(cmd) = first.get("cmdline").and_then(|v| v.as_str())
-        && !cmd.is_empty() {
-            return Some(cmd.to_string());
-        }
+        && !cmd.is_empty()
+    {
+        return Some(cmd.to_string());
+    }
     first
         .get("argv0")
         .and_then(|v| v.as_str())
@@ -1733,7 +1741,7 @@ impl MultiplexerBackend for HerdrBackend {
         }
         Some(format!(
             "herdr workspace focus {} 2>/dev/null",
-            workspace_id
+            crate::util::shell_quote(workspace_id)
         ))
     }
 
@@ -1756,7 +1764,7 @@ impl MultiplexerBackend for HerdrBackend {
         // `herdr workspace focus <id>`).
         Some(format!(
             "herdr workspace focus {} 2>/dev/null",
-            session_label
+            crate::util::shell_quote(session_label)
         ))
     }
 
@@ -1779,10 +1787,11 @@ impl MultiplexerBackend for HerdrBackend {
         if pane_id.is_empty() {
             return None;
         }
+        let quoted = crate::util::shell_quote(pane_id);
         Some(format!(
             "herdr pane zoom {} 2>/dev/null && \
              herdr pane zoom {} --off 2>/dev/null",
-            pane_id, pane_id,
+            quoted, quoted,
         ))
     }
 
@@ -1792,14 +1801,7 @@ impl MultiplexerBackend for HerdrBackend {
             &[std::env::var("HOME").unwrap_or_default()],
         )
         .into_owned();
-        let quoted_path = if path
-            .chars()
-            .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
-        {
-            format!("\"{}\"", path)
-        } else {
-            path
-        };
+        let quoted_path = crate::util::shell_quote(&path);
         // `herdr workspace create
         // --cwd DIR --label NAME
         // --focus` — the
@@ -2110,7 +2112,7 @@ mod tests {
         let cmd = b
             .create_command(std::path::Path::new("/var/tmp/My Work"), "work")
             .unwrap();
-        assert!(cmd.contains("\"/var/tmp/My Work\""), "got: {cmd}");
+        assert!(cmd.contains("'/var/tmp/My Work'"), "got: {cmd}");
     }
 
     #[cfg(feature = "herdr")]

@@ -10,8 +10,8 @@
 //!
 //! ## Search semantics
 //!
-//! The query body is split on whitespace. Tokens are classified
-//! into three categories:
+//! The query body is split on whitespace via the shared
+//! [`crate::highlight::parse_query_tokens`] helper:
 //!
 //! - **Search terms** (no prefix): the first becomes ag's pattern.
 //! - **Glob tokens** (`*`): converted to regex and passed via `-G`.
@@ -21,6 +21,7 @@
 //!   `,result @rust`     -> `ag ... --rust "result"`
 //!   `,tui *.rs @rust`   -> `ag ... -G '.*\.rs$' --rust "tui"`
 
+use crate::highlight::{highlight_with_bat, parse_query_tokens};
 use crate::tui::read_source_context;
 use crate::tui::state::HistoryRow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,42 +153,28 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
         return Vec::new();
     }
 
-    // Split into tokens and classify them into search terms,
-    // file-pattern globs, and language flags.
-    let tokens: Vec<&str> = pattern.split_whitespace().collect();
-
-    let mut globs: Vec<&str> = Vec::new();
-    let mut languages: Vec<&str> = Vec::new();
-    let mut terms: Vec<&str> = Vec::new();
-    for tok in tokens {
-        if tok.contains('*') {
-            globs.push(tok);
-        } else if let Some(lang) = tok.strip_prefix('@') {
-            if !lang.is_empty() {
-                languages.push(lang);
-            }
-        } else {
-            terms.push(tok);
-        }
-    }
+    // Split into search terms, file-pattern globs, and `@lang`
+    // language flags via the shared classifier. See
+    // `crate::highlight::parse_query_tokens` for the rules.
+    let tokens = parse_query_tokens(pattern);
 
     // If there are no search terms at all (only globs and/or
     // languages), we have nothing to search for.
-    if terms.is_empty() {
+    if tokens.terms.is_empty() {
         return Vec::new();
     }
 
     // First term is the primary pattern given to ag.
     // Remaining terms are post-filtered.
-    let primary = terms[0];
-    let post_filter = &terms[1..];
+    let primary = tokens.terms[0].clone();
+    let post_filter = &tokens.terms[1..];
 
     // Build the ag command.
     let mut cmd = std::process::Command::new("ag");
     cmd.arg("--nocolor").arg("--nogroup").arg("--hidden");
 
     // Language flags (@rust -> --rust).
-    for lang in &languages {
+    for lang in &tokens.languages {
         cmd.arg(format!("--{}", lang));
     }
 
@@ -197,7 +184,7 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     // file path. Examples:
     //   *.rs      -> .*\.rs$
     //   bla*.txt  -> bla.*\.txt$
-    for g in &globs {
+    for g in &tokens.globs {
         let regex = glob_to_ag_regex(g);
         cmd.arg("-G").arg(regex);
     }
@@ -235,7 +222,7 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     // to avoid guessing per-file; bat auto-detects from extension
     // when no language is given, but here we prefer the user's
     // explicit choice.
-    let bat_lang = languages.first().copied();
+    let bat_lang = tokens.languages.first().map(String::as_str);
     let mut bat_count = 0usize;
     const BAT_MAX: usize = 50;
 
@@ -363,31 +350,4 @@ mod tests {
     fn glob_to_regex_no_star_is_literal() {
         assert_eq!(glob_to_ag_regex("Makefile"), r"Makefile$");
     }
-}
-
-/// Pipe source context through `bat` for syntax highlighting.
-/// Returns `None` if `bat` is not on PATH or the call fails.
-fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
-    let mut child = std::process::Command::new("bat")
-        .arg("--language")
-        .arg(lang)
-        .arg("--plain")
-        .arg("--color=always")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-
-    {
-        let stdin = child.stdin.as_mut()?;
-        use std::io::Write;
-        let _ = stdin.write_all(context.as_bytes());
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
 }

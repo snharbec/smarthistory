@@ -4,6 +4,17 @@
 
 use chrono::Datelike;
 
+/// Parse a boolean config/session value. Accepts "on", "true", "1",
+/// "yes" (case-insensitive) as true; "off", "false", "0", "no" as
+/// false. Anything else falls back to `default` rather than failing.
+pub fn parse_bool(s: &str, default: bool) -> bool {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => true,
+        "off" | "false" | "0" | "no" => false,
+        _ => default,
+    }
+}
+
 /// Format a Unix epoch (seconds) as "dd.Mon.YYYY HH:MM:SS" in UTC, e.g.
 /// "03.Jun.2026 17:43:01". Returns a placeholder string for invalid
 /// timestamps so that history items with no valid time stamp can still
@@ -241,10 +252,7 @@ pub fn escape_glob(s: &str) -> String {
 /// have to expand `~` ourselves
 /// before passing the path to
 /// `tmux new-session -c`.
-pub fn shorten_home_path<'a>(
-    path: &'a str,
-    homes: &[String],
-) -> std::borrow::Cow<'a, str> {
+pub fn shorten_home_path<'a>(path: &'a str, homes: &[String]) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
     // Sort homes longest-first so
     // the most-specific match
@@ -321,10 +329,9 @@ pub fn shorten_home_path<'a>(
         if path == *home {
             return Cow::Borrowed("~");
         }
-        if let Some(rest) =
-            path.strip_prefix(*home).filter(|r| {
-                r.is_empty() || r.starts_with('/')
-            })
+        if let Some(rest) = path
+            .strip_prefix(*home)
+            .filter(|r| r.is_empty() || r.starts_with('/'))
         {
             return Cow::Owned(format!("~{}", rest));
         }
@@ -365,9 +372,7 @@ pub fn expand_home_with_config<'a>(
     home_map: &[std::path::PathBuf],
 ) -> std::borrow::Cow<'a, str> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut homes: Vec<String> = Vec::with_capacity(
-        home_map.len() + 1,
-    );
+    let mut homes: Vec<String> = Vec::with_capacity(home_map.len() + 1);
     // `home_map` last so `$HOME`
     // wins in a tie (both are
     // present, both the same
@@ -395,9 +400,10 @@ pub fn expand_home_with_config<'a>(
         // without further
         // normalization.
         if let Some(s) = h.to_str()
-            && !s.is_empty() {
-                homes.push(s.to_string());
-            }
+            && !s.is_empty()
+        {
+            homes.push(s.to_string());
+        }
     }
     shorten_home_path(path, &homes)
 }
@@ -454,10 +460,7 @@ pub fn expand_home_with_config<'a>(
 /// paths, paths outside
 /// any home) are
 /// returned verbatim.
-pub fn expand_home_to_absolute<'a>(
-    path: &'a str,
-    homes: &[String],
-) -> std::borrow::Cow<'a, str> {
+pub fn expand_home_to_absolute<'a>(path: &'a str, homes: &[String]) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
     if path.is_empty() {
         return Cow::Borrowed(path);
@@ -555,10 +558,7 @@ pub fn expand_home_to_absolute<'a>(
 /// string, so this is
 /// safe to use as a key in
 /// `tmux_windows.iter().find(...)`.
-pub fn normalize_for_compare(
-    path: &str,
-    homes: &[String],
-) -> String {
+pub fn normalize_for_compare(path: &str, homes: &[String]) -> String {
     if path.is_empty() {
         return String::new();
     }
@@ -708,10 +708,7 @@ pub fn shell_quote(s: &str) -> String {
     }
     if s.chars().all(|c| {
         c.is_ascii_alphanumeric()
-            || matches!(
-                c,
-                '_' | '-' | '.' | '/' | '~' | ':' | ',' | '=' | '+' | '@'
-            )
+            || matches!(c, '_' | '-' | '.' | '/' | '~' | ':' | ',' | '=' | '+' | '@')
     }) {
         return s.to_string();
     }
@@ -787,9 +784,7 @@ pub fn shell_quote(s: &str) -> String {
 /// exist are silently
 /// skipped" contract
 /// (see `Config::session_dirs`).
-pub fn walk_subdirectories(
-    root: &std::path::Path,
-) -> Vec<std::path::PathBuf> {
+pub fn walk_subdirectories(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -849,10 +844,7 @@ fn walk_subdir_recurse(
     // `find` on most
     // filesystems).
     let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect(),
+        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
         Err(_) => return,
     };
     entries.sort();
@@ -936,9 +928,7 @@ fn walk_subdir_recurse(
 /// follow the same path
 /// the user sees, not the
 /// canonicalised one.
-pub fn find_command_file(
-    start: &std::path::Path,
-) -> Option<std::path::PathBuf> {
+pub fn find_command_file(start: &std::path::Path) -> Option<std::path::PathBuf> {
     // Start at the leaf
     // (the directory the user
     // picked) and walk up. If
@@ -986,11 +976,8 @@ pub fn find_command_file(
 #[cfg(test)]
 mod walker_tests {
     use super::*;
-    use std::sync::atomic::{
-        AtomicU64, Ordering,
-    };
-    static COUNTER: AtomicU64 =
-        AtomicU64::new(0);
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Build a unique temp
     /// directory and return
@@ -1002,15 +989,11 @@ mod walker_tests {
     /// the end of each
     /// function).
     fn unique_tempdir(label: &str) -> std::path::PathBuf {
-        let n = COUNTER
-            .fetch_add(1, Ordering::SeqCst);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!(
-            "smarthistory_walker_{label}_{pid}_{n}"
-        ));
+        let dir = std::env::temp_dir().join(format!("smarthistory_walker_{label}_{pid}_{n}"));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir)
-            .expect("create temp dir");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
 
@@ -1030,18 +1013,10 @@ mod walker_tests {
         //   root/a/b/
         //   root/a/c/
         //   root/d/
-        let _ = std::fs::create_dir_all(
-            root.join("a").join("b"),
-        );
-        let _ = std::fs::create_dir_all(
-            root.join("a").join("c"),
-        );
-        let _ =
-            std::fs::create_dir_all(root.join("d"));
-        let _ = std::fs::write(
-            root.join("a").join("file.txt"),
-            "ignore me",
-        );
+        let _ = std::fs::create_dir_all(root.join("a").join("b"));
+        let _ = std::fs::create_dir_all(root.join("a").join("c"));
+        let _ = std::fs::create_dir_all(root.join("d"));
+        let _ = std::fs::write(root.join("a").join("file.txt"), "ignore me");
         let got = walk_subdirectories(&root);
         // The result should
         // contain all four
@@ -1053,9 +1028,7 @@ mod walker_tests {
         // to `/private/tmp`)
         // don't break the
         // assertion.
-        let canonical_root =
-            std::fs::canonicalize(&root)
-                .unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
         let names: std::collections::HashSet<String> = got
             .iter()
             .map(|p| {
@@ -1068,18 +1041,11 @@ mod walker_tests {
                 // break the
                 // relative-path
                 // comparison.
-                let canon = std::fs::canonicalize(p)
-                    .unwrap_or_else(|_| p.clone());
+                let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
                 canon
                     .strip_prefix(&canonical_root)
-                    .map(|r| {
-                        r.to_string_lossy()
-                            .trim_start_matches('/')
-                            .to_string()
-                    })
-                    .unwrap_or_else(|_| {
-                        canon.to_string_lossy().into_owned()
-                    })
+                    .map(|r| r.to_string_lossy().trim_start_matches('/').to_string())
+                    .unwrap_or_else(|_| canon.to_string_lossy().into_owned())
             })
             .collect();
         assert!(names.contains("a"), "missing a, got: {names:?}");
@@ -1116,8 +1082,8 @@ mod walker_tests {
     /// contract.
     #[test]
     fn walk_subdirectories_missing_root_is_empty() {
-        let missing = std::env::temp_dir()
-            .join("smarthistory_walker_definitely_does_not_exist_xyz123");
+        let missing =
+            std::env::temp_dir().join("smarthistory_walker_definitely_does_not_exist_xyz123");
         let _ = std::fs::remove_dir_all(&missing);
         let got = walk_subdirectories(&missing);
         assert!(got.is_empty());
@@ -1135,19 +1101,14 @@ mod walker_tests {
         let _ = std::fs::create_dir_all(&dir);
         let cmd = dir.join(".command");
         let _ = std::fs::write(&cmd, "#!/bin/sh\necho hi\n");
-        let found =
-            find_command_file(&dir).expect("must find .command");
+        let found = find_command_file(&dir).expect("must find .command");
         // The canonical-path
         // comparison avoids
         // macOS `/tmp` vs
         // `/private/tmp`
         // surprises.
-        let canonical_found =
-            std::fs::canonicalize(&found)
-                .unwrap();
-        let canonical_expected =
-            std::fs::canonicalize(&cmd)
-                .unwrap();
+        let canonical_found = std::fs::canonicalize(&found).unwrap();
+        let canonical_expected = std::fs::canonicalize(&cmd).unwrap();
         assert_eq!(canonical_found, canonical_expected);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1164,8 +1125,7 @@ mod walker_tests {
     fn find_command_file_walks_up() {
         let root = unique_tempdir("cmd_walk");
         let project = root.join("project");
-        let nested =
-            project.join("src").join("lib");
+        let nested = project.join("src").join("lib");
         let _ = std::fs::create_dir_all(&nested);
         // Place the
         // `.command` at the
@@ -1173,14 +1133,9 @@ mod walker_tests {
         // in the leaf.
         let cmd = project.join(".command");
         let _ = std::fs::write(&cmd, "echo project-setup\n");
-        let found = find_command_file(&nested)
-            .expect("must walk up to find .command");
-        let canonical_found =
-            std::fs::canonicalize(&found)
-                .unwrap();
-        let canonical_expected =
-            std::fs::canonicalize(&cmd)
-                .unwrap();
+        let found = find_command_file(&nested).expect("must walk up to find .command");
+        let canonical_found = std::fs::canonicalize(&found).unwrap();
+        let canonical_expected = std::fs::canonicalize(&cmd).unwrap();
         assert_eq!(canonical_found, canonical_expected);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1202,23 +1157,12 @@ mod walker_tests {
         // Place two files;
         // both leaves count.
         let ancestor_cmd = project.join(".command");
-        let _ = std::fs::write(
-            &ancestor_cmd,
-            "echo ancestor\n",
-        );
+        let _ = std::fs::write(&ancestor_cmd, "echo ancestor\n");
         let leaf_cmd = leaf.join(".command");
-        let _ = std::fs::write(
-            &leaf_cmd,
-            "echo leaf\n",
-        );
-        let found =
-            find_command_file(&leaf).expect("must find");
-        let canonical_found =
-            std::fs::canonicalize(&found)
-                .unwrap();
-        let canonical_leaf =
-            std::fs::canonicalize(&leaf_cmd)
-                .unwrap();
+        let _ = std::fs::write(&leaf_cmd, "echo leaf\n");
+        let found = find_command_file(&leaf).expect("must find");
+        let canonical_found = std::fs::canonicalize(&found).unwrap();
+        let canonical_leaf = std::fs::canonicalize(&leaf_cmd).unwrap();
         assert_eq!(canonical_found, canonical_leaf);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1230,8 +1174,7 @@ mod walker_tests {
     #[test]
     fn find_command_file_none_returns_none() {
         let root = unique_tempdir("cmd_none");
-        let nested =
-            root.join("a").join("b").join("c");
+        let nested = root.join("a").join("b").join("c");
         let _ = std::fs::create_dir_all(&nested);
         // No .command file
         // anywhere in the
@@ -1267,18 +1210,9 @@ mod walker_tests {
     #[test]
     fn shell_quote_dirty_gets_quoted() {
         assert_eq!(shell_quote(""), "''");
-        assert_eq!(
-            shell_quote("hello world"),
-            "'hello world'"
-        );
-        assert_eq!(
-            shell_quote("a;b"),
-            "'a;b'"
-        );
-        assert_eq!(
-            shell_quote("$VAR"),
-            "'$VAR'"
-        );
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+        assert_eq!(shell_quote("$VAR"), "'$VAR'");
     }
 
     /// Strings with single
@@ -1288,10 +1222,7 @@ mod walker_tests {
     /// close, escape, reopen.
     #[test]
     fn shell_quote_escapes_inner_quotes() {
-        assert_eq!(
-            shell_quote("it's"),
-            "'it'\\''s'"
-        );
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 }
 
@@ -1343,7 +1274,7 @@ mod tests {
         assert_eq!(escape_like("hello world"), "hello world");
         assert_eq!(escape_like(""), "");
         assert_eq!(escape_like("plain text"), "plain text"); // no `_`
-                                                             // `_` is escaped to `\_`.
+        // `_` is escaped to `\_`.
         assert_eq!(escape_like("plain_text"), "plain\\_text");
     }
 
@@ -1747,10 +1678,7 @@ mod tests {
         // are also unchanged —
         // there's no prefix to
         // match against.
-        assert_eq!(
-            expand_home("/Users/har/work").as_ref(),
-            "/Users/har/work"
-        );
+        assert_eq!(expand_home("/Users/har/work").as_ref(), "/Users/har/work");
         // Restore HOME.
         if let Some(h) = saved_home {
             // SAFETY: see
@@ -1788,10 +1716,7 @@ mod tests {
         assert_eq!(
             shorten_home_path(
                 "/Volumes/HUGE/har/work",
-                &[
-                    "/Users/har".to_string(),
-                    "/Volumes/HUGE/har".to_string(),
-                ],
+                &["/Users/har".to_string(), "/Volumes/HUGE/har".to_string(),],
             )
             .as_ref(),
             "~/work"
@@ -1802,10 +1727,7 @@ mod tests {
         assert_eq!(
             shorten_home_path(
                 "/Users/har/Documents",
-                &[
-                    "/Users/har".to_string(),
-                    "/Volumes/HUGE/har".to_string(),
-                ],
+                &["/Users/har".to_string(), "/Volumes/HUGE/har".to_string(),],
             )
             .as_ref(),
             "~/Documents"
@@ -1815,10 +1737,7 @@ mod tests {
         assert_eq!(
             shorten_home_path(
                 "/etc/hosts",
-                &[
-                    "/Users/har".to_string(),
-                    "/Volumes/HUGE/har".to_string(),
-                ],
+                &["/Users/har".to_string(), "/Volumes/HUGE/har".to_string(),],
             )
             .as_ref(),
             "/etc/hosts"
@@ -1840,10 +1759,7 @@ mod tests {
         assert_eq!(
             shorten_home_path(
                 "~",
-                &[
-                    "/Users/har".to_string(),
-                    "/Volumes/HUGE/har".to_string(),
-                ],
+                &["/Users/har".to_string(), "/Volumes/HUGE/har".to_string(),],
             )
             .as_ref(),
             "~"
@@ -1852,25 +1768,11 @@ mod tests {
         // listed wins (sort is
         // stable).
         assert_eq!(
-            shorten_home_path(
-                "/a/foo",
-                &[
-                    "/a".to_string(),
-                    "/b".to_string(),
-                ],
-            )
-            .as_ref(),
+            shorten_home_path("/a/foo", &["/a".to_string(), "/b".to_string(),],).as_ref(),
             "~/foo"
         );
         assert_eq!(
-            shorten_home_path(
-                "/b/foo",
-                &[
-                    "/a".to_string(),
-                    "/b".to_string(),
-                ],
-            )
-            .as_ref(),
+            shorten_home_path("/b/foo", &["/a".to_string(), "/b".to_string(),],).as_ref(),
             "~/foo"
         );
     }
@@ -1893,48 +1795,28 @@ mod tests {
         // `~/x` expands to
         // `<home>/x`.
         assert_eq!(
-            expand_home_to_absolute(
-                "~/work",
-                &homes,
-            )
-            .as_ref(),
+            expand_home_to_absolute("~/work", &homes,).as_ref(),
             "/Users/har/work"
         );
         // `~/a/b/c` expands
         // similarly.
         assert_eq!(
-            expand_home_to_absolute(
-                "~/a/b/c",
-                &homes,
-            )
-            .as_ref(),
+            expand_home_to_absolute("~/a/b/c", &homes,).as_ref(),
             "/Users/har/a/b/c"
         );
         // Bare `~` expands
         // to the first home.
-        assert_eq!(
-            expand_home_to_absolute("~", &homes)
-                .as_ref(),
-            "/Users/har"
-        );
+        assert_eq!(expand_home_to_absolute("~", &homes).as_ref(), "/Users/har");
         // Already-absolute
         // paths pass through
         // unchanged.
         assert_eq!(
-            expand_home_to_absolute(
-                "/etc/hosts",
-                &homes,
-            )
-            .as_ref(),
+            expand_home_to_absolute("/etc/hosts", &homes,).as_ref(),
             "/etc/hosts"
         );
         // Empty input passes
         // through.
-        assert_eq!(
-            expand_home_to_absolute("", &homes)
-                .as_ref(),
-            ""
-        );
+        assert_eq!(expand_home_to_absolute("", &homes).as_ref(), "");
     }
 
     /// The homemap wins in
@@ -1947,16 +1829,9 @@ mod tests {
     /// prefix.
     #[test]
     fn expand_home_to_absolute_picks_most_specific() {
-        let homes = vec![
-            "/Users/har".to_string(),
-            "/Volumes/HUGE/har".to_string(),
-        ];
+        let homes = vec!["/Users/har".to_string(), "/Volumes/HUGE/har".to_string()];
         assert_eq!(
-            expand_home_to_absolute(
-                "~/work",
-                &homes,
-            )
-            .as_ref(),
+            expand_home_to_absolute("~/work", &homes,).as_ref(),
             "/Volumes/HUGE/har/work"
         );
     }
@@ -1989,15 +1864,8 @@ mod tests {
         // `/tmp` because it
         // exists on every
         // Unix).
-        let from_tilde = normalize_for_compare(
-            "~/self_test_norm_dir",
-            &homes,
-        );
-        let from_absolute =
-            normalize_for_compare(
-                "/tmp/self_test_norm_dir",
-                &homes,
-            );
+        let from_tilde = normalize_for_compare("~/self_test_norm_dir", &homes);
+        let from_absolute = normalize_for_compare("/tmp/self_test_norm_dir", &homes);
         // Both should
         // canonicalize to the
         // same value (modulo
@@ -2012,10 +1880,7 @@ mod tests {
     /// `canonicalize_directory`).
     #[test]
     fn normalize_for_compare_empty_input() {
-        assert_eq!(
-            normalize_for_compare("", &[]),
-            ""
-        );
+        assert_eq!(normalize_for_compare("", &[]), "");
     }
 
     /// Paths outside any
@@ -2037,10 +1902,7 @@ mod tests {
         // (but `/etc/hosts`
         // isn't a symlink on
         // most systems).
-        let result = normalize_for_compare(
-            "/etc/hosts",
-            &homes,
-        );
+        let result = normalize_for_compare("/etc/hosts", &homes);
         assert!(
             !result.is_empty(),
             "result must be non-empty for an existing path, got: {result:?}"
@@ -2058,8 +1920,14 @@ mod tests {
         let escaped = escape_field_for_output(cmd);
         // The escaped form must not contain a real newline — that's
         // the whole point: one row fits on one line of CLI output.
-        assert!(!escaped.contains('\n'), "escaped still has newline: {escaped:?}");
-        assert!(!escaped.contains('\r'), "escaped still has carriage return: {escaped:?}");
+        assert!(
+            !escaped.contains('\n'),
+            "escaped still has newline: {escaped:?}"
+        );
+        assert!(
+            !escaped.contains('\r'),
+            "escaped still has carriage return: {escaped:?}"
+        );
         // The backslash-n sequences must be present.
         assert_eq!(escaped, "for i in 1 2 3\\ndo echo $i\\ndone");
     }
