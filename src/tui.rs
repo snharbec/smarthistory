@@ -8607,6 +8607,98 @@ impl App {
         self.select_for_editor(staged);
     }
 
+    /// Download the currently-selected JIRA issue as a
+    /// local markdown note via
+    /// `note_search jira-issue <KEY>`.
+    ///
+    /// The action is intended to be
+    /// invoked only from the JIRA
+    /// search mode (`-...`) where the
+    /// selected row's `command` field
+    /// carries the issue key (e.g.
+    /// `PROJ-42`). The dispatcher
+    /// already gates on
+    /// `is_jira_query`; the helper
+    /// itself also re-checks the mode
+    /// so a stray test or future caller
+    /// can't stage the wrong command
+    /// from outside JIRA mode.
+    ///
+    /// The staged command is the bare
+    /// `note_search jira-issue <KEY>`
+    /// shell line — no path, no flags.
+    /// `note_search` writes the
+    /// markdown into the `notes.dir`
+    /// configured in the same config
+    /// file, picking its own filename
+    /// from the issue summary. The
+    /// TUI exits so the parent shell
+    /// runs the command, which in
+    /// turn shells out to the
+    /// `note_search` binary on `PATH`.
+    ///
+    /// On any no-op (no row selected,
+    /// empty key, not in JIRA mode)
+    /// a status message is surfaced
+    /// and `selection` stays `None`,
+    /// so the TUI remains open and
+    /// the user can react to the
+    /// feedback.
+    fn download_jira_issue(&mut self) {
+        // Re-gate here so a stray
+        // caller can't stage the
+        // wrong command from outside
+        // JIRA mode. The dispatcher
+        // already gates on this, but
+        // the helper defends against
+        // future refactors that might
+        // call it from a different
+        // code path (e.g. a future
+        // command-palette entry that
+        // calls into the helper
+        // directly).
+        if !self.is_jira_query() {
+            self.set_status_message(
+                "Download-JIRA-issue is only available in JIRA search (type `-`)".to_string(),
+            );
+            return;
+        }
+        let Some(row) = self.selected_row().cloned() else {
+            self.set_status_message("No JIRA issue selected".to_string());
+            return;
+        };
+        // The issue key lives in the
+        // row's `command` field (the
+        // JIRA search stores it
+        // there so the column is
+        // visible in the row's
+        // primary slot). Empty
+        // command is a no-op — a
+        // freshly-inserted row that
+        // hasn't been populated yet
+        // could in theory have one,
+        // and staging `note_search
+        // jira-issue ""` would be a
+        // confusing surprise.
+        let key = row.command.trim().to_string();
+        if key.is_empty() {
+            self.set_status_message("Selected JIRA row has no issue key".to_string());
+            return;
+        }
+        // The bare shell line.
+        // `shell_quote` keeps the
+        // staged command safe even if
+        // the key happens to contain
+        // shell metacharacters (it
+        // shouldn't — JIRA keys are
+        // `^[A-Z]+-\d+$` — but
+        // defence in depth costs
+        // nothing here).
+        let staged = format!("note_search jira-issue {}", crate::util::shell_quote(&key));
+        self.selection = Some(staged);
+        self.pick_mode = Some(PickMode::Run);
+    }
+
     /// Mark the currently-selected todo
     /// entry as done by toggling the
     /// checkbox marker on its line in
@@ -10382,6 +10474,42 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         Action::Correct => {
             app.start_correct();
             false
+        }
+        Action::DownloadJiraIssue => {
+            // Downloading a JIRA issue as a
+            // note is only meaningful inside
+            // the JIRA search mode (`-...`)
+            // where the selected row's
+            // `command` field carries the
+            // issue key (e.g. `PROJ-42`).
+            // Outside of JIRA mode the
+            // action is a no-op with a
+            // status message so the user
+            // understands why their key
+            // did nothing — the `Ctrl-M-s`
+            // key fires regardless of mode
+            // (so it's a discoverable key
+            // binding) but the *effect* is
+            // gated. The helper itself
+            // re-checks the mode so a stray
+            // test or future caller can't
+            // stage the wrong command from
+            // outside JIRA mode.
+            if !app.is_jira_query() {
+                app.set_status_message(
+                    "Download-JIRA-issue is only available in JIRA search (type `-`)".to_string(),
+                );
+                return false;
+            }
+            app.download_jira_issue();
+            // Stay in the TUI if no row
+            // was selected / the key was
+            // empty so the user sees the
+            // status message; exit
+            // (returning `true`) once a
+            // command is staged so the
+            // parent shell can run it.
+            app.selection.is_some()
         }
         Action::ToggleSearchMode => {
             app.cycle_search_mode();
@@ -25255,6 +25383,139 @@ mod tests {
         assert!(
             app.jira_add_comment_target.is_none(),
             "non-JIRA edit should NOT set the JIRA target"
+        );
+    }
+
+    /// `Action::DownloadJiraIssue` is bound to
+    /// `Ctrl-M-s` by default. The default key
+    /// mnemonic is "save" (the JIRA issue is
+    /// saved as a local note).
+    #[test]
+    fn download_jira_issue_default_key_routes() {
+        let bindings = KeyBindings::defaults();
+        let key = KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        let action = action_for_key(&bindings, &key).expect("Ctrl-M-s is bound by default");
+        assert_eq!(action, Action::DownloadJiraIssue);
+    }
+
+    /// In JIRA mode, the action stages
+    /// `note_search jira-issue <KEY>` as the
+    /// next selection. The parent shell runs
+    /// the command, which shells out to
+    /// `note_search` (the note_search binary is
+    /// expected on `PATH`).
+    #[test]
+    fn download_jira_issue_stages_command() {
+        use std::sync::Arc;
+        let fake = FakeJira {
+            issues: vec![crate::jira::JiraIssue {
+                key: "PROJ-42".to_string(),
+                summary: "login crash".to_string(),
+                status: "Open".to_string(),
+                ..Default::default()
+            }],
+            recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ..FakeJira::default()
+        };
+        let mut app = directories_test_app(&[]);
+        app.set_jira_client(Arc::new(fake));
+        app.query = String::from("-");
+        app.refresh();
+        app.jira_debounce_started =
+            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        app.jira_maybe_autocall();
+        app.list_state.select(Some(0));
+        // Fire the action. The
+        // selected row's `command`
+        // is the issue key.
+        app.download_jira_issue();
+        assert_eq!(
+            app.selection.as_deref(),
+            Some("note_search jira-issue PROJ-42"),
+            "expected note_search jira-issue <KEY>, got: {:?}",
+            app.selection
+        );
+        assert_eq!(app.pick_mode, Some(PickMode::Run));
+    }
+
+    /// Outside of JIRA mode, the action is a
+    /// no-op with a status message so the
+    /// user understands why their key did
+    /// nothing. The dispatcher gates on
+    /// `is_jira_query`; the helper re-gates as
+    /// a defence-in-depth check.
+    #[test]
+    fn download_jira_issue_outside_jira_mode_is_noop() {
+        let mut app = directories_test_app(&[("ls", "/tmp", 0)]);
+        // `*` triggers panes
+        // mode, not JIRA mode.
+        // (The action is
+        // mode-gated so the
+        // user gets a
+        // no-op + status
+        // message outside
+        // JIRA mode.)
+        app.query = String::from("*");
+        app.refresh();
+        app.download_jira_issue();
+        // Nothing was staged.
+        assert!(
+            app.selection.is_none(),
+            "no command should be staged outside JIRA mode"
+        );
+        // A status message
+        // tells the user
+        // why.
+        let status = app
+            .status_message
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("");
+        assert!(
+            status.contains("JIRA search"),
+            "status should mention JIRA search: {:?}",
+            status
+        );
+    }
+
+    /// With no row selected (e.g. an empty
+    /// JIRA result list), the action is a
+    /// no-op with a status message.
+    #[test]
+    fn download_jira_issue_with_no_row_is_noop() {
+        use std::sync::Arc;
+        let fake = FakeJira {
+            issues: vec![],
+            recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ..FakeJira::default()
+        };
+        let mut app = directories_test_app(&[]);
+        app.set_jira_client(Arc::new(fake));
+        app.query = String::from("-");
+        app.refresh();
+        app.jira_debounce_started =
+            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        app.jira_maybe_autocall();
+        // No list_state.select:
+        // there's nothing to
+        // select.
+        app.download_jira_issue();
+        assert!(
+            app.selection.is_none(),
+            "no command should be staged when no row is selected"
+        );
+        let status = app
+            .status_message
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("");
+        assert!(
+            status.contains("No JIRA issue selected"),
+            "status should mention the missing selection: {:?}",
+            status
         );
     }
 

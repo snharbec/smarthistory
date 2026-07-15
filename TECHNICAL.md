@@ -935,7 +935,7 @@ prefixes shown; rebindable in
 | Todo          | `!`    | List open todos from the note_search database (one per line, not one per file). Selecting a todo opens `$EDITOR <file> +<line>` at the right line. |
 | Directories   | `#`    | List every directory in the global history (sorted by most-recent activity). Selecting a row stages `cd <path>` and exits the TUI. |
 | Panes         | `*`    | List every pane in the current tmux session (excluding the pane the TUI is running in, read from `$TMUX_PANE`). Selecting a pane stages a `select-window` + `select-pane` jump. |
-| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). |
+| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser (`Enter`). `Ctrl-M-s` (the `download-jira-issue` action) stages `note_search jira-issue <KEY>` so the issue is downloaded as a local markdown note. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). |
 
 The `F3` cycle preserves the body of your
 query and only changes the leading prefix

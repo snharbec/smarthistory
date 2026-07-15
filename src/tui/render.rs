@@ -1477,7 +1477,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         "JIRA",
         qp.jira.to_string(),
-        "search JIRA issues (needs JIRA_SERVER + JIRA_API_TOKEN env vars)",
+        "search JIRA issues (needs JIRA_SERVER + JIRA_API_TOKEN env vars); Enter opens the issue in the browser, Ctrl-M-s downloads it as a local note via `note_search jira-issue <KEY>`",
     );
     mode_row(
         &mut lines,
@@ -4774,12 +4774,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // Build the help hint from the actual configured key bindings
     // so it always reflects what the user has configured.
     let help_open = format_key_specs(app.bindings.specs(Action::OpenHelp));
-    let help_del = format_key_specs(app.bindings.specs(Action::DeleteSelected));
-    let help_del_all = format_key_specs(app.bindings.specs(Action::DeleteMatching));
+    let help_palette = format_key_specs(app.bindings.specs(Action::CommandAction));
     let help_clear = format_key_specs(app.bindings.specs(Action::ClearQuery));
     let help = format!(
-        " {} help · {} del · {} del all · {} clear",
-        help_open, help_del, help_del_all, help_clear
+        " {} help · {} palette · {} clear",
+        help_open, help_palette, help_clear
     );
 
     // Active theme badge. Rendered at the right edge of the status

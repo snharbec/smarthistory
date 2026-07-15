@@ -152,6 +152,39 @@ pub enum Action {
     /// other default bindings; rebindable via
     /// `key.correct=...`.
     Correct,
+    /// Download the currently-selected JIRA
+    /// issue as a markdown file via
+    /// `note_search jira-issue <KEY>`.
+    ///
+    /// Only meaningful in the JIRA
+    /// search mode (`-...`) where the
+    /// selected row's `command` field
+    /// carries the issue key (e.g.
+    /// `PROJ-42`). Outside of JIRA mode
+    /// the action is a no-op with a status
+    /// message so the user understands why
+    /// their key did nothing — the
+    /// `Ctrl-M-s` key fires regardless of
+    /// mode (so it's a discoverable key
+    /// binding) but the *effect* is gated.
+    ///
+    /// The staged command is the bare
+    /// `note_search jira-issue <KEY>` shell
+    /// line (no path, no flags); `note_search`
+    /// writes the markdown into the
+    /// `notes.dir` configured in the same
+    /// config file. The TUI exits so the
+    /// parent shell runs the command, which
+    /// in turn shells out to the
+    /// `note_search` binary on `PATH`.
+    ///
+    /// The default key (`Ctrl-M-s`) is
+    /// mnemonic for "Save" (the JIRA
+    /// issue is saved as a local note) and
+    /// is not bound by readline / zsh in any
+    /// common configuration. Rebindable
+    /// via `key.download-jira-issue=...`.
+    DownloadJiraIssue,
     /// Run the selected command (Enter).
     Run,
     /// Prefill the line for editing, cursor at the start (Left).
@@ -326,6 +359,7 @@ impl Action {
             Action::FilterPanesSessions => "filter-panes-sessions",
             Action::Describe => "describe",
             Action::Correct => "correct",
+            Action::DownloadJiraIssue => "download-jira-issue",
             Action::Run => "run",
             Action::EditStart => "edit-start",
             Action::EditEnd => "edit-end",
@@ -371,6 +405,7 @@ impl Action {
             Action::FilterPanesSessions => "Filter panes: sessions only",
             Action::Describe => "Describe selected command",
             Action::Correct => "Correct selected command",
+            Action::DownloadJiraIssue => "Download JIRA issue as note",
             Action::Run => "Run",
             Action::EditStart => "Edit (cursor at start)",
             Action::EditEnd => "Edit (cursor at end)",
@@ -430,6 +465,7 @@ impl Action {
             // together.
             Action::Describe => "llm",
             Action::Correct => "llm",
+            Action::DownloadJiraIssue => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
             // Adding new entries to the config file
             // (session / host). The dialog state
@@ -465,6 +501,7 @@ impl Action {
             Action::CycleDirectorySource => "C-M-g",
             Action::Describe => "C-k",
             Action::Correct => "C-t",
+            Action::DownloadJiraIssue => "C-M-s",
             Action::Run => "Enter",
             Action::EditStart => "Left",
             Action::EditEnd => "Right",
@@ -778,6 +815,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CycleDirectorySource,
     Action::Describe,
     Action::Correct,
+    Action::DownloadJiraIssue,
     Action::Run,
     Action::EditStart,
     Action::EditEnd,

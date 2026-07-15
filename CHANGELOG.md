@@ -39,6 +39,21 @@ All notable changes to this project will be documented in this file.
   keeps that pane and its parent workspace header. The new
   `HistoryRow::workspace_label` field carries the label from
   `fetch_session_panes_impl` to the renderer.
+- New TUI action `Action::DownloadJiraIssue` (default key
+  `Ctrl-M-s`) downloads the selected JIRA issue as a local markdown
+  note by staging `note_search jira-issue <KEY>`. The action is
+  mode-gated to the JIRA search mode (`-...`); outside of JIRA mode
+  it's a no-op with a status message so the user understands why
+  their key did nothing. The bare command line is staged (no path,
+  no flags) so `note_search` writes the markdown into the
+  `notes.dir` configured in the same config file.
+- The status bar (the footer line at the bottom of the TUI) no
+  longer surfaces the two delete actions in its key-binding hints.
+  The `del` and `del all` chips have been replaced with a `palette`
+  chip showing the current `CommandAction` binding (default `:`).
+  The delete actions are still discoverable via the help overlay
+  (`Ctrl-H`) and the command palette itself, which lists every
+  action with its current binding.
 
 ### Fixed
 

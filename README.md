@@ -143,7 +143,7 @@ The first character of the query selects the prefix mode. Each mode answers a di
 | Todo | `!` | List open todos from the note_search database. |
 | Directories | `#` | List every directory in the global history. |
 | Panes | `*` | List all panes across all tmux sessions / herdr workspaces. |
-| JIRA | `-` | Search JIRA issues via REST API. |
+| JIRA | `-` | Search JIRA issues via REST API. Selecting an issue opens it in the browser (Enter); `Ctrl-M-s` downloads it as a local markdown note via `note_search jira-issue <KEY>`. |
 | Files | `~` | List every file in the current directory tree. |
 | Tags | `$` | List every symbol from the `tags` file. Selecting opens `$EDITOR +LINE file`. An optional `@lang` token (e.g. `@rust`) filters by file extension and pipes the preview through `bat` for syntax highlighting. |
 
