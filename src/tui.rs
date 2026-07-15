@@ -14477,118 +14477,156 @@ mod tests {
     #[cfg(feature = "herdr")]
     #[test]
     fn host_row_in_panes_mode_stages_herdr_create_and_ssh() {
-        use crate::tui::state::{HistoryRow, HostDef};
-        // Fake backend with
-        // NO existing
-        // workspace — the
-        // matcher will miss
-        // and we fall into
-        // the create branch.
-        use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
-        struct FakeEmptyHerdrBackend;
-        impl MultiplexerBackend for FakeEmptyHerdrBackend {
-            fn snapshot(&self) -> Vec<ActiveContext> {
-                Vec::new()
+        // `fetch_session_panes` short-circuits when neither
+        // `TMUX_PANE` nor `HERDR_PANE_ID` is set in the
+        // environment (the user isn't inside a multiplexer
+        // pane, so the snapshot would be wasted work). The
+        // test below relies on `app.refresh()` calling that
+        // helper to populate `session_panes` with the host
+        // block, so we have to set one of the env vars.
+        // Without this guard the test passes on developer
+        // machines (where the env var happens to be set) and
+        // fails in CI (where it isn't). Same pattern as the
+        // sibling test `host_row_in_panes_mode_ssh_argv_includes_port_and_identity`
+        // — see that test for the full rationale.
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = lock_or_recover(&ENV_LOCK);
+        let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
+        // SAFETY: no other test in this binary sets
+        // `HERDR_PANE_ID` (guarded by ENV_LOCK, and the
+        // binary is single-process per test thread).
+        unsafe {
+            std::env::set_var("HERDR_PANE_ID", "w0:p0");
+        }
+        let result = std::panic::catch_unwind(|| {
+            use crate::tui::state::{HistoryRow, HostDef};
+            // Fake backend with
+            // NO existing
+            // workspace — the
+            // matcher will miss
+            // and we fall into
+            // the create branch.
+            use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
+            struct FakeEmptyHerdrBackend;
+            impl MultiplexerBackend for FakeEmptyHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    Vec::new()
+                }
+                fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
+                    Vec::new()
+                }
+                fn focus_command(&self, _pane_id: &str) -> Option<String> {
+                    None
+                }
+                fn focus_session(&self, _label: &str) -> Option<String> {
+                    None
+                }
+                fn focus_pane(&self, _pane_id: &str, _tab_id: &str) -> Option<String> {
+                    None
+                }
+                fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
+                    None
+                }
+                fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
+                    None
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
             }
-            fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
-                Vec::new()
-            }
-            fn focus_command(&self, _pane_id: &str) -> Option<String> {
-                None
-            }
-            fn focus_session(&self, _label: &str) -> Option<String> {
-                None
-            }
-            fn focus_pane(&self, _pane_id: &str, _tab_id: &str) -> Option<String> {
-                None
-            }
-            fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
-                None
-            }
-            fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
-                None
-            }
-            fn name(&self) -> &'static str {
-                "herdr"
+            let mut app = directories_test_app(&[]);
+            app.multiplexer = Box::new(FakeEmptyHerdrBackend);
+            // Configure a single
+            // host: Proxmox →
+            // root@pve-1, no
+            // identity, default
+            // port.
+            app.hosts = vec![HistoryRow {
+                id: -25_001, // set by
+                // `Config::hosts`
+                // (placeholder;
+                // `fetch_session_panes_impl`
+                // re-ids).
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+
+                ..Default::default()
+            }];
+            app.host_defs = vec![HostDef {
+                name: String::from("Proxmox"),
+                host: String::from("pve-1"),
+                hostname: String::new(),
+                user: String::from("root"),
+                port: 0,
+                identity: String::new(),
+                dir: String::new(),
+                exec: String::new(),
+            }];
+            // Open the `*` mode.
+            app.query = String::from("*");
+            app.refresh();
+            // Find the host row.
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "host")
+                .expect("host row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for host row");
+            eprintln!("[test] staged host command: {staged}");
+            assert!(
+                staged.contains("herdr workspace create"),
+                "must create a herdr workspace, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("herdr pane run"),
+                "must bootstrap the ssh body via herdr pane run (same technique as named sessions), got: {staged:?}"
+            );
+            assert!(
+                staged.contains("ssh root@pve-1"),
+                "must include the ssh argv (user@host), got: {staged:?}"
+            );
+            // No `-p` flag
+            // (default port 22
+            // is implicit).
+            assert!(
+                !staged.contains(" -p "),
+                "must not include -p flag for default port, got: {staged:?}"
+            );
+            // No `-i` flag
+            // (no identity
+            // configured).
+            assert!(
+                !staged.contains(" -i "),
+                "must not include -i flag when identity is unset, got: {staged:?}"
+            );
+        }); // close the `catch_unwind` opened at the top
+        // Always restore the env var, even on panic,
+        // so a failed test doesn't leak the env to
+        // siblings. The SAFETY comment on the set_var
+        // call at the top of the function explains why
+        // mutation is safe within ENV_LOCK.
+        unsafe {
+            match prev_herdr {
+                Some(v) => std::env::set_var("HERDR_PANE_ID", v),
+                None => std::env::remove_var("HERDR_PANE_ID"),
             }
         }
-        let mut app = directories_test_app(&[]);
-        app.multiplexer = Box::new(FakeEmptyHerdrBackend);
-        // Configure a single
-        // host: Proxmox →
-        // root@pve-1, no
-        // identity, default
-        // port.
-        app.hosts = vec![HistoryRow {
-            id: -25_001, // set by
-            // `Config::hosts`
-            // (placeholder;
-            // `fetch_session_panes_impl`
-            // re-ids).
-            command: String::from("Proxmox"),
-            directory: String::from("root@pve-1"),
-            session_id: String::new(),
-            exit_code: 0,
-            timestamp: 0,
-            comment: String::new(),
-            output: String::new(),
-            mode: String::from("host"),
-            source: String::from("hosts"),
-
-            ..Default::default()
-        }];
-        app.host_defs = vec![HostDef {
-            name: String::from("Proxmox"),
-            host: String::from("pve-1"),
-            hostname: String::new(),
-            user: String::from("root"),
-            port: 0,
-            identity: String::new(),
-            dir: String::new(),
-            exec: String::new(),
-        }];
-        // Open the `*` mode.
-        app.query = String::from("*");
-        app.refresh();
-        // Find the host row.
-        let idx = app
-            .merged_rows()
-            .iter()
-            .position(|r| r.mode == "host")
-            .expect("host row must be in merged_rows");
-        app.list_state.select(Some(idx));
-        app.select_for_run();
-        let staged = app
-            .selection
-            .as_deref()
-            .expect("selection must be set for host row");
-        eprintln!("[test] staged host command: {staged}");
-        assert!(
-            staged.contains("herdr workspace create"),
-            "must create a herdr workspace, got: {staged:?}"
-        );
-        assert!(
-            staged.contains("herdr pane run"),
-            "must bootstrap the ssh body via herdr pane run (same technique as named sessions), got: {staged:?}"
-        );
-        assert!(
-            staged.contains("ssh root@pve-1"),
-            "must include the ssh argv (user@host), got: {staged:?}"
-        );
-        // No `-p` flag
-        // (default port 22
-        // is implicit).
-        assert!(
-            !staged.contains(" -p "),
-            "must not include -p flag for default port, got: {staged:?}"
-        );
-        // No `-i` flag
-        // (no identity
-        // configured).
-        assert!(
-            !staged.contains(" -i "),
-            "must not include -i flag when identity is unset, got: {staged:?}"
-        );
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     /// The same as above but
@@ -14601,101 +14639,141 @@ mod tests {
     #[cfg(feature = "herdr")]
     #[test]
     fn host_row_in_panes_mode_ssh_argv_includes_port_and_identity() {
-        use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
-        use crate::tui::state::{HistoryRow, HostDef};
-        struct FakeEmptyHerdrBackend;
-        impl MultiplexerBackend for FakeEmptyHerdrBackend {
-            fn snapshot(&self) -> Vec<ActiveContext> {
-                Vec::new()
+        // `fetch_session_panes` short-circuits when neither
+        // `TMUX_PANE` nor `HERDR_PANE_ID` is set in the
+        // environment (the user isn't inside a multiplexer
+        // pane, so the snapshot would be wasted work). The
+        // test below relies on `app.refresh()` calling that
+        // helper to populate `session_panes` with the host
+        // block, so we have to set one of the env vars.
+        // Without this guard the test passes on developer
+        // machines (where the env var happens to be set) and
+        // fails in CI (where it isn't) — exactly the flake the
+        // user reported. We use the same `ENV_LOCK` mutex
+        // pattern the JIRA tests use for `JIRA_SERVER` /
+        // `JIRA_API_TOKEN`, so a parallel test that also sets
+        // these env vars doesn't observe a torn state.
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = lock_or_recover(&ENV_LOCK);
+        let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
+        // SAFETY: no other test in this binary sets
+        // `HERDR_PANE_ID` (guarded by ENV_LOCK, and the
+        // binary is single-process per test thread).
+        unsafe {
+            std::env::set_var("HERDR_PANE_ID", "w0:p0");
+        }
+        let result = std::panic::catch_unwind(|| {
+            use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
+            use crate::tui::state::{HistoryRow, HostDef};
+            struct FakeEmptyHerdrBackend;
+            impl MultiplexerBackend for FakeEmptyHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    Vec::new()
+                }
+                fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
+                    Vec::new()
+                }
+                fn focus_command(&self, _pane_id: &str) -> Option<String> {
+                    None
+                }
+                fn focus_session(&self, _label: &str) -> Option<String> {
+                    None
+                }
+                fn focus_pane(&self, _pane_id: &str, _tab_id: &str) -> Option<String> {
+                    None
+                }
+                fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
+                    None
+                }
+                fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
+                    None
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
             }
-            fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
-                Vec::new()
-            }
-            fn focus_command(&self, _pane_id: &str) -> Option<String> {
-                None
-            }
-            fn focus_session(&self, _label: &str) -> Option<String> {
-                None
-            }
-            fn focus_pane(&self, _pane_id: &str, _tab_id: &str) -> Option<String> {
-                None
-            }
-            fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
-                None
-            }
-            fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
-                None
-            }
-            fn name(&self) -> &'static str {
-                "herdr"
+            let mut app = directories_test_app(&[]);
+            app.multiplexer = Box::new(FakeEmptyHerdrBackend);
+            app.hosts = vec![HistoryRow {
+                id: -25_001,
+                command: String::from("custom"),
+                directory: String::from("alice@work:2222"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+
+                ..Default::default()
+            }];
+            app.host_defs = vec![HostDef {
+                name: String::from("custom"),
+                host: String::from("work"),
+                hostname: String::new(),
+                user: String::from("alice"),
+                port: 2222,
+                identity: String::from("~/.ssh/work_ed25519"),
+                dir: String::new(),
+                exec: String::new(),
+            }];
+            app.query = String::from("*");
+            app.refresh();
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "host")
+                .expect("host row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for host row");
+            eprintln!("[test] staged host command: {staged}");
+            assert!(
+                staged.contains(" -p 2222"),
+                "must include the -p flag for the non-default port, got: {staged:?}"
+            );
+            // The identity file
+            // path goes through
+            // `expand_home_to_absolute`
+            // — just assert
+            // that a `-i` flag
+            // is present and
+            // points at the
+            // right file. The
+            // `~` is expanded
+            // to `$HOME/.ssh/...`
+            // so we can't
+            // assert the
+            // literal `~` form
+            // here.
+            assert!(
+                staged.contains(" -i "),
+                "must include the -i flag for the identity file, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("alice@work"),
+                "must include the user@host, got: {staged:?}"
+            );
+        }); // close the `catch_unwind` opened above
+        // Always restore the env var, even on panic,
+        // so a failed test doesn't leak the env to
+        // siblings. The SAFETY comment on the set_var
+        // call above explains why mutation is safe
+        // within ENV_LOCK.
+        unsafe {
+            match prev_herdr {
+                Some(v) => std::env::set_var("HERDR_PANE_ID", v),
+                None => std::env::remove_var("HERDR_PANE_ID"),
             }
         }
-        let mut app = directories_test_app(&[]);
-        app.multiplexer = Box::new(FakeEmptyHerdrBackend);
-        app.hosts = vec![HistoryRow {
-            id: -25_001,
-            command: String::from("custom"),
-            directory: String::from("alice@work:2222"),
-            session_id: String::new(),
-            exit_code: 0,
-            timestamp: 0,
-            comment: String::new(),
-            output: String::new(),
-            mode: String::from("host"),
-            source: String::from("hosts"),
-
-            ..Default::default()
-        }];
-        app.host_defs = vec![HostDef {
-            name: String::from("custom"),
-            host: String::from("work"),
-            hostname: String::new(),
-            user: String::from("alice"),
-            port: 2222,
-            identity: String::from("~/.ssh/work_ed25519"),
-            dir: String::new(),
-            exec: String::new(),
-        }];
-        app.query = String::from("*");
-        app.refresh();
-        let idx = app
-            .merged_rows()
-            .iter()
-            .position(|r| r.mode == "host")
-            .expect("host row must be in merged_rows");
-        app.list_state.select(Some(idx));
-        app.select_for_run();
-        let staged = app
-            .selection
-            .as_deref()
-            .expect("selection must be set for host row");
-        eprintln!("[test] staged host command: {staged}");
-        assert!(
-            staged.contains(" -p 2222"),
-            "must include the -p flag for the non-default port, got: {staged:?}"
-        );
-        // The identity file
-        // path goes through
-        // `expand_home_to_absolute`
-        // — just assert
-        // that a `-i` flag
-        // is present and
-        // points at the
-        // right file. The
-        // `~` is expanded
-        // to `$HOME/.ssh/...`
-        // so we can't
-        // assert the
-        // literal `~` form
-        // here.
-        assert!(
-            staged.contains(" -i "),
-            "must include the -i flag for the identity file, got: {staged:?}"
-        );
-        assert!(
-            staged.contains("alice@work"),
-            "must include the user@host, got: {staged:?}"
-        );
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     /// When a herdr workspace
@@ -14711,112 +14789,148 @@ mod tests {
     #[cfg(feature = "herdr")]
     #[test]
     fn host_row_in_panes_mode_focuses_existing_herdr_workspace() {
-        use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
-        use crate::tui::state::{HistoryRow, HostDef};
-        struct FakeHerdrBackend;
-        impl MultiplexerBackend for FakeHerdrBackend {
-            fn snapshot(&self) -> Vec<ActiveContext> {
-                // One active
-                // pane in
-                // workspace
-                // `wA`, which
-                // is labeled
-                // `Proxmox` —
-                // matching the
-                // host's
-                // display name.
-                vec![ActiveContext {
-                    pane_id: String::from("wA:p1"),
-                    window_id: String::from("wA"),
-                    path: String::new(),
-                    current_command: String::new(),
-                    workspace_label: String::from("Proxmox"),
-                }]
+        // `fetch_session_panes` short-circuits when neither
+        // `TMUX_PANE` nor `HERDR_PANE_ID` is set in the
+        // environment (the user isn't inside a multiplexer
+        // pane, so the snapshot would be wasted work). The
+        // test below relies on `app.refresh()` calling that
+        // helper to populate `session_panes` with the host
+        // block, so we have to set one of the env vars.
+        // Without this guard the test passes on developer
+        // machines (where the env var happens to be set) and
+        // fails in CI (where it isn't). Same pattern as the
+        // sibling host tests.
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = lock_or_recover(&ENV_LOCK);
+        let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
+        // SAFETY: see the set_var comment in the
+        // sibling test for the full rationale.
+        unsafe {
+            std::env::set_var("HERDR_PANE_ID", "w0:p0");
+        }
+        let result = std::panic::catch_unwind(|| {
+            use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
+            use crate::tui::state::{HistoryRow, HostDef};
+            struct FakeHerdrBackend;
+            impl MultiplexerBackend for FakeHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    // One active
+                    // pane in
+                    // workspace
+                    // `wA`, which
+                    // is labeled
+                    // `Proxmox` —
+                    // matching the
+                    // host's
+                    // display name.
+                    vec![ActiveContext {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        path: String::new(),
+                        current_command: String::new(),
+                        workspace_label: String::from("Proxmox"),
+                    }]
+                }
+                fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
+                    vec![CurrentPaneInfo {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        tab_id: String::from("wA:t1"),
+                        session_label: String::from("Proxmox"),
+                        path: String::new(),
+                        current_command: String::from("zsh"),
+                        is_last: false,
+                    }]
+                }
+                fn focus_command(&self, pane_id: &str) -> Option<String> {
+                    let ws = pane_id.split(':').next().unwrap_or(pane_id);
+                    Some(format!("herdr workspace focus {} 2>/dev/null", ws))
+                }
+                fn focus_session(&self, label: &str) -> Option<String> {
+                    Some(format!("herdr workspace focus {} 2>/dev/null", label))
+                }
+                fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
+                    let ws = pane_id.split(':').next().unwrap_or(pane_id);
+                    Some(format!("herdr workspace focus {} 2>/dev/null", ws))
+                }
+                fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
+                    None
+                }
+                fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
+                    None
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
             }
-            fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
-                vec![CurrentPaneInfo {
-                    pane_id: String::from("wA:p1"),
-                    window_id: String::from("wA"),
-                    tab_id: String::from("wA:t1"),
-                    session_label: String::from("Proxmox"),
-                    path: String::new(),
-                    current_command: String::from("zsh"),
-                    is_last: false,
-                }]
-            }
-            fn focus_command(&self, pane_id: &str) -> Option<String> {
-                let ws = pane_id.split(':').next().unwrap_or(pane_id);
-                Some(format!("herdr workspace focus {} 2>/dev/null", ws))
-            }
-            fn focus_session(&self, label: &str) -> Option<String> {
-                Some(format!("herdr workspace focus {} 2>/dev/null", label))
-            }
-            fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
-                let ws = pane_id.split(':').next().unwrap_or(pane_id);
-                Some(format!("herdr workspace focus {} 2>/dev/null", ws))
-            }
-            fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
-                None
-            }
-            fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
-                None
-            }
-            fn name(&self) -> &'static str {
-                "herdr"
+            let mut app = directories_test_app(&[]);
+            app.multiplexer = Box::new(FakeHerdrBackend);
+            app.hosts = vec![HistoryRow {
+                id: -25_001,
+                command: String::from("Proxmox"),
+                directory: String::from("root@pve-1"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("host"),
+                source: String::from("hosts"),
+
+                ..Default::default()
+            }];
+            app.host_defs = vec![HostDef {
+                name: String::from("Proxmox"),
+                host: String::from("pve-1"),
+                hostname: String::new(),
+                user: String::from("root"),
+                port: 0,
+                identity: String::new(),
+                dir: String::new(),
+                exec: String::new(),
+            }];
+            app.query = String::from("*");
+            app.refresh();
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "host")
+                .expect("host row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for host row");
+            eprintln!("[test] staged host command: {staged}");
+            assert!(
+                staged.contains("herdr workspace focus wA"),
+                "must focus the existing workspace wA, got: {staged:?}"
+            );
+            assert!(
+                !staged.contains("herdr workspace create"),
+                "must NOT recreate the workspace, got: {staged:?}"
+            );
+            assert!(
+                !staged.contains("herdr pane send-text"),
+                "must NOT bootstrap a new ssh connection, got: {staged:?}"
+            );
+        }); // close the `catch_unwind` opened at the top
+        // Always restore the env var, even on panic,
+        // so a failed test doesn't leak the env to
+        // siblings. The SAFETY comment on the set_var
+        // call at the top of the function explains why
+        // mutation is safe within ENV_LOCK.
+        unsafe {
+            match prev_herdr {
+                Some(v) => std::env::set_var("HERDR_PANE_ID", v),
+                None => std::env::remove_var("HERDR_PANE_ID"),
             }
         }
-        let mut app = directories_test_app(&[]);
-        app.multiplexer = Box::new(FakeHerdrBackend);
-        app.hosts = vec![HistoryRow {
-            id: -25_001,
-            command: String::from("Proxmox"),
-            directory: String::from("root@pve-1"),
-            session_id: String::new(),
-            exit_code: 0,
-            timestamp: 0,
-            comment: String::new(),
-            output: String::new(),
-            mode: String::from("host"),
-            source: String::from("hosts"),
-
-            ..Default::default()
-        }];
-        app.host_defs = vec![HostDef {
-            name: String::from("Proxmox"),
-            host: String::from("pve-1"),
-            hostname: String::new(),
-            user: String::from("root"),
-            port: 0,
-            identity: String::new(),
-            dir: String::new(),
-            exec: String::new(),
-        }];
-        app.query = String::from("*");
-        app.refresh();
-        let idx = app
-            .merged_rows()
-            .iter()
-            .position(|r| r.mode == "host")
-            .expect("host row must be in merged_rows");
-        app.list_state.select(Some(idx));
-        app.select_for_run();
-        let staged = app
-            .selection
-            .as_deref()
-            .expect("selection must be set for host row");
-        eprintln!("[test] staged host command: {staged}");
-        assert!(
-            staged.contains("herdr workspace focus wA"),
-            "must focus the existing workspace wA, got: {staged:?}"
-        );
-        assert!(
-            !staged.contains("herdr workspace create"),
-            "must NOT recreate the workspace, got: {staged:?}"
-        );
-        assert!(
-            !staged.contains("herdr pane send-text"),
-            "must NOT bootstrap a new ssh connection, got: {staged:?}"
-        );
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     // --- LLM query mode -------------------------------------------------
@@ -22440,38 +22554,59 @@ mod tests {
     /// `$EDITOR +<line> <filepath>`.
     #[test]
     fn select_for_run_in_tags_mode_stages_editor_with_line() {
-        let mut app = directories_test_app(&[]);
-        app.query = String::from("$ssh_config");
-        app.refresh();
-        let rows = app.fetch_tags().unwrap();
-        assert!(!rows.is_empty());
-        // Find the index of
-        // the first row in
-        // merged_rows.
-        let idx = app
-            .merged_rows()
-            .iter()
-            .position(|r| r.mode == "tags")
-            .expect("at least one tags row must be in merged_rows");
-        app.list_state.select(Some(idx));
-        app.select_for_run();
-        let staged = app
-            .selection
-            .as_deref()
-            .expect("selection must be set for tags row");
-        eprintln!("[test] staged tags command: {staged}");
-        // The staged command
-        // must include the
-        // editor, `+<line>`,
-        // and the file path.
-        assert!(
-            staged.contains("+"),
-            "must include +LINE_NUMBER, got: {staged:?}"
-        );
-        assert!(
-            staged.contains(".rs"),
-            "must include a .rs file path, got: {staged:?}"
-        );
+        // `find_tags_file` walks up from CWD looking for a
+        // `tags` file. In CI the working directory may
+        // not be the crate root, so the walker finds
+        // nothing and `fetch_tags` returns an empty
+        // list. The test then fails the
+        // `!rows.is_empty()` assertion. We use the
+        // shared `CWD_LOCK` mutex to guard the chdir
+        // and explicitly restore the previous CWD even
+        // on panic so we don't leak the env to sibling
+        // tests.
+        let _g = lock_or_recover(&CWD_LOCK);
+        let prev_cwd = std::env::current_dir().expect("cwd");
+        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::env::set_current_dir(&crate_root).expect("chdir crate root");
+        let result = std::panic::catch_unwind(|| {
+            let mut app = directories_test_app(&[]);
+            app.query = String::from("$ssh_config");
+            app.refresh();
+            let rows = app.fetch_tags().unwrap();
+            assert!(!rows.is_empty());
+            // Find the index of
+            // the first row in
+            // merged_rows.
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "tags")
+                .expect("at least one tags row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for tags row");
+            eprintln!("[test] staged tags command: {staged}");
+            // The staged command
+            // must include the
+            // editor, `+<line>`,
+            // and the file path.
+            assert!(
+                staged.contains("+"),
+                "must include +LINE_NUMBER, got: {staged:?}"
+            );
+            assert!(
+                staged.contains(".rs"),
+                "must include a .rs file path, got: {staged:?}"
+            );
+        });
+        // Always restore CWD, even on panic.
+        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     /// Selecting a pane in `*` mode stages the

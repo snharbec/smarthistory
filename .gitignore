@@ -1,1 +1,7 @@
 /target
+/.codegraph
+/.pi-loop.json.lock
+/TAGS
+/killall
+.DS_Store
+
