@@ -14276,171 +14276,223 @@ mod tests {
     #[cfg(feature = "herdr")]
     #[test]
     fn session_row_in_panes_mode_focuses_existing_herdr_workspace() {
-        use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
-        use crate::tui::state::HistoryRow;
+        // `fetch_session_panes` short-circuits when
+        // neither `TMUX_PANE` nor `HERDR_PANE_ID`
+        // is set (the user isn't inside a
+        // multiplexer pane, so the snapshot
+        // would be wasted work). The test below
+        // relies on `app.refresh()` calling that
+        // helper to populate `session_panes`
+        // with the `# sessions` block, so we
+        // have to set one of the env vars.
+        // Without this guard the test passes on
+        // developer machines (where the env var
+        // happens to be set) and fails in CI
+        // (where it isn't) — exactly the same
+        // flake as the host-row siblings.
+        // We use the same `ENV_LOCK` mutex
+        // pattern the JIRA tests use for
+        // `JIRA_SERVER` / `JIRA_API_TOKEN`, so a
+        // parallel test that also sets these env
+        // vars doesn't observe a torn state.
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = lock_or_recover(&ENV_LOCK);
+        let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
+        // SAFETY: see the set_var
+        // comment in the
+        // sibling host tests
+        // for the full
+        // rationale.
+        unsafe {
+            std::env::set_var("HERDR_PANE_ID", "w0:p0");
+        }
+        let result = std::panic::catch_unwind(|| {
+            use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
+            use crate::tui::state::HistoryRow;
 
-        /// Deterministic fake
-        /// herdr backend for
-        /// this test. Reports
-        /// one active pane at
-        /// `/tmp` (workspace
-        /// `wA`) from its
-        /// `snapshot()` /
-        /// `snapshot_current_panes()`
-        /// so the matcher in
-        /// `select_for_run_impl`
-        /// finds the existing
-        /// workspace. Stages
-        /// commands with the
-        /// same shape as the
-        /// real herdr backend
-        /// (workspace ids
-        /// stripped from
-        /// `wA:p1` → `wA`).
-        struct FakeHerdrBackend;
-        impl MultiplexerBackend for FakeHerdrBackend {
-            fn snapshot(&self) -> Vec<ActiveContext> {
-                vec![ActiveContext {
-                    pane_id: String::from("wA:p1"),
-                    window_id: String::from("wA"),
-                    path: String::from("/tmp"),
-                    // Fake
-                    // backend
-                    // doesn't
-                    // expose
-                    // foreground
-                    // commands
-                    // (the
-                    // production
-                    // herdr
-                    // backend
-                    // doesn't
-                    // either).
-                    current_command: String::new(),
-                    workspace_label: String::from("tmp session"),
-                }]
-            }
-            fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
-                vec![CurrentPaneInfo {
-                    pane_id: String::from("wA:p1"),
-                    window_id: String::from("wA"),
-                    tab_id: String::from("wA:t1"),
-                    session_label: String::from("wA"),
-                    path: String::from("/tmp"),
-                    current_command: String::from("zsh"),
-                    is_last: false,
-                }]
-            }
-            fn focus_command(&self, pane_id: &str) -> Option<String> {
-                if pane_id.is_empty() {
-                    return None;
+            /// Deterministic fake
+            /// herdr backend for
+            /// this test. Reports
+            /// one active pane at
+            /// `/tmp` (workspace
+            /// `wA`) from its
+            /// `snapshot()` /
+            /// `snapshot_current_panes()`
+            /// so the matcher in
+            /// `select_for_run_impl`
+            /// finds the existing
+            /// workspace. Stages
+            /// commands with the
+            /// same shape as the
+            /// real herdr backend
+            /// (workspace ids
+            /// stripped from
+            /// `wA:p1` → `wA`).
+            struct FakeHerdrBackend;
+            impl MultiplexerBackend for FakeHerdrBackend {
+                fn snapshot(&self) -> Vec<ActiveContext> {
+                    vec![ActiveContext {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        path: String::from("/tmp"),
+                        // Fake
+                        // backend
+                        // doesn't
+                        // expose
+                        // foreground
+                        // commands
+                        // (the
+                        // production
+                        // herdr
+                        // backend
+                        // doesn't
+                        // either).
+                        current_command: String::new(),
+                        workspace_label: String::from("tmp session"),
+                    }]
                 }
-                let ws = pane_id.split(':').next().unwrap_or(pane_id);
-                Some(format!("herdr workspace focus {} 2>/dev/null", ws))
-            }
-            fn focus_session(&self, label: &str) -> Option<String> {
-                if label.is_empty() {
-                    return None;
+                fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
+                    vec![CurrentPaneInfo {
+                        pane_id: String::from("wA:p1"),
+                        window_id: String::from("wA"),
+                        tab_id: String::from("wA:t1"),
+                        session_label: String::from("wA"),
+                        path: String::from("/tmp"),
+                        current_command: String::from("zsh"),
+                        is_last: false,
+                    }]
                 }
-                Some(format!("herdr workspace focus {} 2>/dev/null", label))
-            }
-            fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
-                if pane_id.is_empty() {
-                    return None;
+                fn focus_command(&self, pane_id: &str) -> Option<String> {
+                    if pane_id.is_empty() {
+                        return None;
+                    }
+                    let ws = pane_id.split(':').next().unwrap_or(pane_id);
+                    Some(format!("herdr workspace focus {} 2>/dev/null", ws))
                 }
-                Some(format!(
-                    "herdr pane zoom {} 2>/dev/null && herdr pane zoom {} --off 2>/dev/null",
-                    pane_id, pane_id,
-                ))
-            }
-            fn create_command(&self, dir: &std::path::Path, label: &str) -> Option<String> {
-                Some(format!(
-                    "herdr workspace create --cwd {} --label {} --focus 2>/dev/null",
-                    dir.display(),
-                    label
-                ))
-            }
-            fn send_in_pane_command(&self, pane_id: &str, body: &str) -> Option<String> {
-                if pane_id.is_empty() {
-                    return None;
+                fn focus_session(&self, label: &str) -> Option<String> {
+                    if label.is_empty() {
+                        return None;
+                    }
+                    Some(format!("herdr workspace focus {} 2>/dev/null", label))
                 }
-                Some(format!(
-                    "herdr pane send-text {} {} 2>/dev/null",
-                    pane_id, body
-                ))
+                fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
+                    if pane_id.is_empty() {
+                        return None;
+                    }
+                    Some(format!(
+                        "herdr pane zoom {} 2>/dev/null && herdr pane zoom {} --off 2>/dev/null",
+                        pane_id, pane_id,
+                    ))
+                }
+                fn create_command(&self, dir: &std::path::Path, label: &str) -> Option<String> {
+                    Some(format!(
+                        "herdr workspace create --cwd {} --label {} --focus 2>/dev/null",
+                        dir.display(),
+                        label
+                    ))
+                }
+                fn send_in_pane_command(&self, pane_id: &str, body: &str) -> Option<String> {
+                    if pane_id.is_empty() {
+                        return None;
+                    }
+                    Some(format!(
+                        "herdr pane send-text {} {} 2>/dev/null",
+                        pane_id, body
+                    ))
+                }
+                fn name(&self) -> &'static str {
+                    "herdr"
+                }
             }
-            fn name(&self) -> &'static str {
-                "herdr"
+
+            let mut app = directories_test_app(&[]);
+            // Swap in the fake
+            // herdr backend BEFORE
+            // the first `refresh()`
+            // so `fetch_session_panes`
+            // picks up our fake's
+            // `snapshot_current_panes`.
+            app.multiplexer = Box::new(FakeHerdrBackend);
+            // Configure a session
+            // whose `dir` matches
+            // the fake backend's
+            // reported cwd.
+            app.sessions = vec![HistoryRow {
+                id: -10_002,
+                command: String::from("tmp session"),
+                directory: String::from("/tmp"),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: String::new(),
+                output: String::new(),
+                mode: String::from("session"),
+                source: String::from("sessions"),
+
+                ..Default::default()
+            }];
+            // Open the `*` mode.
+            app.query = String::from("*");
+            app.refresh();
+            // Find the session
+            // row.
+            let idx = app
+                .merged_rows()
+                .iter()
+                .position(|r| r.mode == "session")
+                .expect("session row must be in merged_rows");
+            app.list_state.select(Some(idx));
+            // Pressing Enter on
+            // the session row
+            // must populate
+            // `tmux_windows` (via
+            // the fix in
+            // `select_for_run_impl`)
+            // and find the
+            // existing workspace
+            // — staging
+            // `herdr workspace focus wA`,
+            // NOT
+            // `herdr workspace create`.
+            app.select_for_run();
+            let staged = app
+                .selection
+                .as_deref()
+                .expect("selection must be set for session row");
+            eprintln!("[test] staged command: {staged}");
+            assert!(
+                staged.contains("herdr workspace focus"),
+                "must focus the existing workspace, got: {staged:?}"
+            );
+            assert!(
+                !staged.contains("herdr workspace create"),
+                "must NOT recreate the workspace, got: {staged:?}"
+            );
+            assert!(
+                staged.contains("herdr workspace focus wA"),
+                "must focus workspace wA (the workspace_id portion of pane id wA:p1), got: {staged:?}"
+            );
+        }); // close the `catch_unwind` opened at the top
+        // Always restore the env
+        // var, even on panic, so
+        // a failed test doesn't
+        // leak the env to
+        // siblings. The SAFETY
+        // comment on the set_var
+        // call at the top of the
+        // function explains why
+        // mutation is safe within
+        // ENV_LOCK.
+        unsafe {
+            match prev_herdr {
+                Some(v) => std::env::set_var("HERDR_PANE_ID", v),
+                None => std::env::remove_var("HERDR_PANE_ID"),
             }
         }
-
-        let mut app = directories_test_app(&[]);
-        // Swap in the fake
-        // herdr backend BEFORE
-        // the first `refresh()`
-        // so `fetch_session_panes`
-        // picks up our fake's
-        // `snapshot_current_panes`.
-        app.multiplexer = Box::new(FakeHerdrBackend);
-        // Configure a session
-        // whose `dir` matches
-        // the fake backend's
-        // reported cwd.
-        app.sessions = vec![HistoryRow {
-            id: -10_002,
-            command: String::from("tmp session"),
-            directory: String::from("/tmp"),
-            session_id: String::new(),
-            exit_code: 0,
-            timestamp: 0,
-            comment: String::new(),
-            output: String::new(),
-            mode: String::from("session"),
-            source: String::from("sessions"),
-
-            ..Default::default()
-        }];
-        // Open the `*` mode.
-        app.query = String::from("*");
-        app.refresh();
-        // Find the session
-        // row.
-        let idx = app
-            .merged_rows()
-            .iter()
-            .position(|r| r.mode == "session")
-            .expect("session row must be in merged_rows");
-        app.list_state.select(Some(idx));
-        // Pressing Enter on
-        // the session row
-        // must populate
-        // `tmux_windows` (via
-        // the fix in
-        // `select_for_run_impl`)
-        // and find the
-        // existing workspace
-        // — staging
-        // `herdr workspace focus wA`,
-        // NOT
-        // `herdr workspace create`.
-        app.select_for_run();
-        let staged = app
-            .selection
-            .as_deref()
-            .expect("selection must be set for session row");
-        eprintln!("[test] staged command: {staged}");
-        assert!(
-            staged.contains("herdr workspace focus"),
-            "must focus the existing workspace, got: {staged:?}"
-        );
-        assert!(
-            !staged.contains("herdr workspace create"),
-            "must NOT recreate the workspace, got: {staged:?}"
-        );
-        assert!(
-            staged.contains("herdr workspace focus wA"),
-            "must focus workspace wA (the workspace_id portion of pane id wA:p1), got: {staged:?}"
-        );
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     /// Regression test for the
@@ -22346,28 +22398,112 @@ mod tests {
     /// current directory and returns one row per
     /// symbol entry. Each row carries the display
     /// text, the file path, and the line number.
+    ///
+    /// The tags file used to be the
+    /// real repo `TAGS` / `tags`
+    /// file (1935+ entries,
+    /// generated by `ctags -R`
+    /// during local dev). That
+    /// file is `.gitignore`d —
+    /// it's never committed, so
+    /// CI has no `tags` file to
+    /// read and the test fails.
+    /// Instead, the test now
+    /// creates a self-contained
+    /// `tags` file in a temp dir
+    /// and `chdir`s into it, the
+    /// same pattern
+    /// `fetch_tags_filters_by_at_lang_token`
+    /// uses. This makes the test
+    /// deterministic across
+    /// dev / CI / local-`ctags`
+    /// variations.
     #[test]
     fn fetch_tags_parses_tag_file() {
-        // Guarded by the shared CWD mutex: the
-        // `fetch_tags_filters_by_at_lang_token` test
-        // `chdir`s into a temp directory, and `find_tags_file`
-        // walks up from the current CWD. Without this lock
-        // the two tests race and both can see an empty result.
+        use std::fs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // Shared with the other
+        // tags tests + the
+        // `fetch_tags_filters_by_at_lang_token`
+        // chdir-er, so the
+        // CWD-mutating tests
+        // don't race.
         let _g = lock_or_recover(&CWD_LOCK);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("smarthistory_tags_parse_{pid}_{n}"));
+        fs::create_dir_all(&dir).expect("mkdir temp");
+        // Generate a synthetic
+        // `tags` file with >100
+        // entries so the
+        // `rows.len() > 100`
+        // assertion holds. The
+        // exact content doesn't
+        // matter — we just need
+        // a well-formed file.
+        //
+        // The ctags / etags
+        // `tags` file format is:
+        //   <filename>,<line_count>
+        //   <display>\t<search-pattern>\t<line>,<offset>
+        // The parser walks back
+        // from the end of each
+        // symbol line to find
+        // the trailing digits
+        // (the `line,offset`
+        // pair), so the offset
+        // must be non-empty.
+        // We use a single
+        // section with 150
+        // symbols to keep the
+        // file tiny and the
+        // test fast.
+        let mut tags_contents = String::from("src/lib.rs,150\n");
+        for i in 0..150 {
+            tags_contents.push_str(&format!("fn_{}\t\t{},0\n", i, i + 1));
+        }
+        // The parser calls
+        // `read_source_context`
+        // on every row to
+        // populate the
+        // details / output
+        // pane preview. The
+        // preview is empty
+        // when the source
+        // file doesn't exist,
+        // so we don't need to
+        // create a real
+        // `src/lib.rs` for
+        // the test — the
+        // rows are still
+        // emitted, just
+        // without the
+        // preview text. (This
+        // is a deliberate
+        // test optimization:
+        // writing 150 lines of
+        // Rust just to populate
+        // the preview would
+        // bloat the test
+        // without exercising
+        // anything the
+        // assertion cares
+        // about.)
+        fs::write(dir.join("tags"), &tags_contents).expect("write tags");
+        // chdir into the temp
+        // dir so `find_tags_file`
+        // discovers the file
+        // we just wrote.
         let prev_cwd = std::env::current_dir().expect("cwd");
-        // `cargo test` runs from the crate root, which is
-        // the same directory the real `tags` file lives in.
-        // Restore explicitly in case a previous test left
-        // us elsewhere.
-        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        std::env::set_current_dir(&crate_root).expect("chdir crate root");
+        std::env::set_current_dir(&dir).expect("chdir");
         let result = std::panic::catch_unwind(|| {
             let mut app = directories_test_app(&[]);
             app.query = String::from("$");
             app.refresh();
             let rows = app.fetch_tags().unwrap();
-            // The tags file in the
-            // repo root has 1935+
+            // The synthetic
+            // file has 150
             // entries.
             assert!(
                 rows.len() > 100,
@@ -22404,7 +22540,11 @@ mod tests {
                     .expect("line number must be a valid integer");
             }
         });
+        // Always restore CWD
+        // and clean up, even
+        // on panic.
         std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+        let _ = fs::remove_dir_all(&dir);
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
@@ -22415,16 +22555,57 @@ mod tests {
     /// the filename are matched.
     #[test]
     fn fetch_tags_substring_filter_matches() {
-        // Hold the shared CWD lock: another test
-        // (`fetch_tags_filters_by_at_lang_token`) chdirs
-        // into a temp dir, and this test reads the real
-        // `tags` file from the crate root. Without the
-        // lock the two can race and this one sees an
-        // empty result.
+        use std::fs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // Shared with the other
+        // tags tests; the
+        // CWD-mutating tests
+        // are serialized so
+        // they don't race.
         let _g = lock_or_recover(&CWD_LOCK);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("smarthistory_tags_substr_{pid}_{n}"));
+        fs::create_dir_all(&dir).expect("mkdir temp");
+        // Self-contained
+        // `tags` file with a
+        // `src/ssh_config.rs`
+        // section. The test
+        // searches for
+        // `ssh_config` and
+        // expects at least
+        // one match in the
+        // filename column.
+        //
+        // The ctags / etags
+        // `tags` file format
+        // is:
+        //   <filename>,<line_count>
+        //   <display>\t<search-pattern>\t<line>,<offset>
+        // The parser walks
+        // back from the end
+        // of each symbol
+        // line to find the
+        // trailing digits
+        // (the `line,offset`
+        // pair), so the
+        // offset must be
+        // non-empty.
+        let tags_contents = "\
+src/ssh_config.rs,3\n\
+parse_ssh_config\t\t10,0\n\
+load_ssh_config\t\t20,0\n\
+test_ssh_config\t\t30,0\n";
+        fs::write(dir.join("tags"), tags_contents).expect("write tags");
+        // chdir into the temp
+        // dir so
+        // `find_tags_file`
+        // discovers the
+        // file we just
+        // wrote.
         let prev_cwd = std::env::current_dir().expect("cwd");
-        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        std::env::set_current_dir(&crate_root).expect("chdir crate root");
+        std::env::set_current_dir(&dir).expect("chdir");
         let result = std::panic::catch_unwind(|| {
             let mut app = directories_test_app(&[]);
             app.query = String::from("$ssh_config");
@@ -22449,7 +22630,12 @@ mod tests {
                 );
             }
         });
+        // Always restore
+        // CWD and clean
+        // up, even on
+        // panic.
         std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+        let _ = fs::remove_dir_all(&dir);
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
@@ -22554,20 +22740,58 @@ mod tests {
     /// `$EDITOR +<line> <filepath>`.
     #[test]
     fn select_for_run_in_tags_mode_stages_editor_with_line() {
-        // `find_tags_file` walks up from CWD looking for a
-        // `tags` file. In CI the working directory may
-        // not be the crate root, so the walker finds
-        // nothing and `fetch_tags` returns an empty
-        // list. The test then fails the
-        // `!rows.is_empty()` assertion. We use the
-        // shared `CWD_LOCK` mutex to guard the chdir
-        // and explicitly restore the previous CWD even
-        // on panic so we don't leak the env to sibling
-        // tests.
+        use std::fs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // Self-contained temp `tags`
+        // file: the previous
+        // version of this test
+        // relied on the real
+        // repo `TAGS` / `tags`
+        // file, which is
+        // `.gitignore`d and
+        // therefore absent in
+        // CI. The same
+        // self-contained
+        // pattern is used by
+        // `fetch_tags_parses_tag_file`
+        // and
+        // `fetch_tags_filters_by_at_lang_token`.
         let _g = lock_or_recover(&CWD_LOCK);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("smarthistory_tags_select_{pid}_{n}"));
+        fs::create_dir_all(&dir).expect("mkdir temp");
+        // The staged editor
+        // command is
+        // `<editor> +<line> <path>`,
+        // so the assertion
+        // `staged.contains("+")`
+        // and
+        // `staged.contains(".rs")`
+        // only need a single
+        // `ssh_config` row in
+        // a `.rs` file. The
+        // `select_for_run` path
+        // doesn't read the
+        // source file (it only
+        // uses the row's
+        // `directory` and
+        // `session_id` from
+        // the tag file), so we
+        // don't need to create
+        // a real `ssh_config.rs`.
+        let tags_contents = "\
+src/ssh_config.rs,1\n\
+ssh_config_parse\t\t10,0\n";
+        fs::write(dir.join("tags"), tags_contents).expect("write tags");
+        // chdir into the temp
+        // dir so
+        // `find_tags_file`
+        // discovers the
+        // file.
         let prev_cwd = std::env::current_dir().expect("cwd");
-        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        std::env::set_current_dir(&crate_root).expect("chdir crate root");
+        std::env::set_current_dir(&dir).expect("chdir");
         let result = std::panic::catch_unwind(|| {
             let mut app = directories_test_app(&[]);
             app.query = String::from("$ssh_config");
@@ -22602,8 +22826,12 @@ mod tests {
                 "must include a .rs file path, got: {staged:?}"
             );
         });
-        // Always restore CWD, even on panic.
+        // Always restore
+        // CWD and clean
+        // up, even on
+        // panic.
         std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+        let _ = fs::remove_dir_all(&dir);
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
