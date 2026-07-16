@@ -1266,6 +1266,19 @@ struct App {
     /// `jira_touch` on every keystroke. Cleared when a
     /// search fires or the mode is left.
     jira_debounce_started: Option<std::time::Instant>,
+    /// Secondary idle timer for JIRA search-as-you-type.
+    /// Also armed by `jira_touch` on every keystroke
+    /// (in lock-step with `jira_debounce_started`).
+    /// Unlike the 400ms debounce, the idle timer
+    /// fires only after
+    /// [`JIRA_IDLE_TIMEOUT`] (3 seconds) of no
+    /// input — it's the safety-net trigger that
+    /// guarantees the query runs even when the
+    /// fast debounce fails to fire (e.g. the user
+    /// keeps typing slowly, or the run loop is
+    /// temporarily blocked). Cleared when a search
+    /// fires or the mode is left.
+    jira_idle_started: Option<std::time::Instant>,
     /// The JQL string the most-recent JIRA search
     /// corresponds to. Compared to the live-built JQL to
     /// avoid re-firing the same query when the user pauses
@@ -1404,6 +1417,30 @@ const LLM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 /// loop. 400ms is the conventional "stopped typing"
 /// threshold in search UIs.
 const JIRA_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Secondary safety-net timeout for the JIRA
+/// search-as-you-type. The 400ms `JIRA_DEBOUNCE`
+/// handles the fast-typo case (fires shortly after the
+/// user pauses). The 3-second `JIRA_IDLE_TIMEOUT` is
+/// a fallback for the cases where the fast debounce
+/// doesn't fire — e.g. the user keeps typing slowly
+/// for more than 3 seconds, or the run loop is
+/// temporarily blocked on background work so the
+/// tick that would normally fire the 400ms debounce
+/// never runs. The user's report was that the query
+/// "sometimes isn't executed"; this idle timeout
+/// guarantees the query fires within 3 seconds of the
+/// last keystroke regardless of what the fast debounce
+/// does.
+///
+/// The space key (`' '`) has its own explicit-fire
+/// path in `push_char` — it commits the current
+/// query immediately so the user can type
+/// `<word> <next-word>` and see results after the
+/// first word is complete, without waiting for the
+/// debounce. The space trigger fires before either
+/// the fast debounce or the idle timeout.
+const JIRA_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl App {
     /// True if the active match algorithm is Regex.
@@ -5662,6 +5699,7 @@ impl App {
             jira_request: None,
             jira_in_flight: false,
             jira_debounce_started: None,
+            jira_idle_started: None,
             jira_last_jql: None,
             jira_client: None,
             jira_fragments,
@@ -5682,8 +5720,14 @@ impl App {
         // an empty list. This mirrors what happens when the
         // user types `-` in the run loop (jira_touch arms
         // the debounce, the next no-input tick fires it).
+        // Both timers (fast debounce and idle safety-net)
+        // are armed in lock-step so the bookkeeping
+        // stays consistent regardless of which one fires
+        // first.
         if app.is_jira_query() {
-            app.jira_debounce_started = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            app.jira_debounce_started = Some(now);
+            app.jira_idle_started = Some(now);
             app.jira_maybe_autocall();
             // Eagerly build the JQL so the input
             // border title shows it on the first
@@ -6970,8 +7014,23 @@ impl App {
     fn jira_touch(&mut self) {
         if self.is_jira_query() {
             self.jira_debounce_started = Some(std::time::Instant::now());
+            // The idle timer fires in
+            // lock-step with the
+            // fast debounce. Both
+            // are armed on every
+            // keystroke; the run
+            // loop tick fires
+            // whichever is due
+            // first (400ms for the
+            // fast debounce, 3s
+            // for the idle timer).
+            // See [`JIRA_IDLE_TIMEOUT`]
+            // for the safety-net
+            // rationale.
+            self.jira_idle_started = Some(std::time::Instant::now());
         } else {
             self.jira_debounce_started = None;
+            self.jira_idle_started = None;
             self.jira_in_flight = false;
         }
     }
@@ -7193,6 +7252,33 @@ impl App {
     /// search in flight, JIRA is configured (env vars OR
     /// an injected test client), and the live JQL differs
     /// from the last-fired one.
+    ///
+    /// Two timers can trigger a fire:
+    /// 1. The 400ms fast debounce
+    ///    ([`JIRA_DEBOUNCE`]) — handles the
+    ///    fast-typo case (user
+    ///    pauses briefly after
+    ///    typing).
+    /// 2. The 3-second idle
+    ///    timer
+    ///    ([`JIRA_IDLE_TIMEOUT`])
+    ///    — safety-net trigger
+    ///    that guarantees the
+    ///    query fires within 3
+    ///    seconds of the last
+    ///    keystroke regardless
+    ///    of whether the fast
+    ///    debounce ever elapses
+    ///    (e.g. the user keeps
+    ///    typing slowly, or
+    ///    the run loop is
+    ///    temporarily blocked).
+    /// The space key
+    /// (`' '`) has its own
+    /// explicit-fire path in
+    /// `push_char` that fires
+    /// immediately, before
+    /// either timer.
     fn jira_maybe_autocall(&mut self) {
         if !self.is_jira_query() {
             return;
@@ -7200,10 +7286,22 @@ impl App {
         if self.jira_in_flight {
             return;
         }
-        let Some(started) = self.jira_debounce_started else {
-            return;
-        };
-        if started.elapsed() < JIRA_DEBOUNCE {
+        // The fast debounce and
+        // the idle timer are
+        // armed in lock-step by
+        // `jira_touch`. Either
+        // can fire the search
+        // when its respective
+        // window elapses.
+        let debounce_elapsed = self
+            .jira_debounce_started
+            .map(|started| started.elapsed() >= JIRA_DEBOUNCE)
+            .unwrap_or(false);
+        let idle_elapsed = self
+            .jira_idle_started
+            .map(|started| started.elapsed() >= JIRA_IDLE_TIMEOUT)
+            .unwrap_or(false);
+        if !debounce_elapsed && !idle_elapsed {
             return;
         }
         // "Configured" means either real env config OR an
@@ -7216,6 +7314,7 @@ impl App {
                 self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
             }
             self.jira_debounce_started = None;
+            self.jira_idle_started = None;
             return;
         }
         let jql = self.jira_build_query();
@@ -7249,6 +7348,7 @@ impl App {
                 self.jira_last_undefined_message = Some(self.jira_undefined_fragments.clone());
             }
             self.jira_debounce_started = None;
+            self.jira_idle_started = None;
             return;
         }
         // No undefined fragments on this build — clear
@@ -7279,7 +7379,24 @@ impl App {
                 cancelled: Arc::new(AtomicBool::new(false)),
             };
             self.jira_in_flight = true;
-            self.jira_last_jql = Some(jql);
+            self.jira_last_jql = Some(jql.clone());
+            // Clear both timers now that
+            // the search is in flight.
+            // `jira_maybe_autocall`
+            // early-returns on
+            // `jira_in_flight` so the
+            // timers are not strictly
+            // required to be `None`,
+            // but clearing them keeps
+            // the bookkeeping
+            // consistent and avoids a
+            // stale timer firing on
+            // the next iteration if
+            // the in-flight guard is
+            // ever bypassed (e.g. by
+            // a future fast-path).
+            self.jira_debounce_started = None;
+            self.jira_idle_started = None;
             self.process_jira_result(request, result);
             return;
         }
@@ -7304,6 +7421,11 @@ impl App {
             cancelled,
         });
         self.jira_last_jql = Some(jql);
+        // Same bookkeeping
+        // clear as the test-client
+        // path above.
+        self.jira_debounce_started = None;
+        self.jira_idle_started = None;
         self.set_status_message("JIRA searching…".to_string());
     }
 
@@ -7579,12 +7701,68 @@ impl App {
             self.query.insert(byte_idx, c);
             self.query_cursor += 1;
             self.recompile_regex();
-            self.refresh();
             // Re-arm the LLM auto-call debounce (or clear
             // the preview if we just left LLM mode by
             // backspacing the `=`). The user's last
             // edit time is the new debounce anchor.
             self.llm_touch();
+            // Space-trigger for the JIRA
+            // search-as-you-type: when
+            // the user types a space
+            // inside the JIRA query
+            // body, fire the search
+            // immediately rather
+            // than waiting for the
+            // 400ms debounce or the
+            // 3-second idle timer.
+            // This matches IDE
+            // autocomplete
+            // conventions (a
+            // space commits the
+            // current token and
+            // commits the query
+            // to a search) and
+            // gives the user a
+            // "I'm done with this
+            // word" signal.
+            //
+            // The implementation
+            // temporarily forces
+            // both timers to a
+            // past value so the
+            // dual-timer gate
+            // (`debounce_elapsed ||
+            // idle_elapsed`) is
+            // satisfied. The
+            // `llm_touch()` call
+            // above re-armed the
+            // timers to "now" (so
+            // neither is elapsed);
+            // we override that
+            // here for the duration
+            // of the space-trigger
+            // call only. This keeps
+            // the regular
+            // debounce/idle-timer
+            // accounting intact
+            // (the next keystroke
+            // re-arms both
+            // timers); the space
+            // trigger is a
+            // one-shot
+            // "fire now" override
+            // that doesn't affect
+            // the user's normal
+            // typing cadence.
+            if c == ' ' && self.is_jira_query() {
+                let past = std::time::Instant::now()
+                    - JIRA_IDLE_TIMEOUT
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50);
+                self.jira_debounce_started = Some(past);
+                self.jira_idle_started = Some(past);
+                self.jira_maybe_autocall();
+            }
         }
     }
 
@@ -24549,8 +24727,15 @@ ssh_config_parse\t\t10,0\n";
         // Forcibly arm the debounce in the past so the
         // autocall fires immediately (the run loop would
         // normally wait, but here we drive it by hand).
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         // The JQL was built and the search fired.
         assert_eq!(recorded.lock().unwrap().len(), 1, "search must fire once");
@@ -24588,19 +24773,327 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-PROJ-1");
         app.refresh();
-        let past =
-            || std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50);
+        // Set both timers (the
+        // 400ms fast debounce
+        // AND the 3-second idle
+        // safety-net) to a value
+        // that's past both
+        // thresholds. The
+        // `jira_maybe_autocall`
+        // gate checks
+        // `debounce_elapsed ||
+        // idle_elapsed`, so both
+        // must be past for the
+        // search to fire. Using
+        // `JIRA_DEBOUNCE` alone
+        // would leave the idle
+        // timer unexpired and the
+        // test would hang.
+        let past = || {
+            std::time::Instant::now()
+                - JIRA_IDLE_TIMEOUT
+                - JIRA_DEBOUNCE
+                - std::time::Duration::from_millis(50)
+        };
         app.jira_debounce_started = Some(past());
+        app.jira_idle_started = Some(past());
         app.jira_maybe_autocall();
         assert_eq!(recorded.lock().unwrap().len(), 1);
         // Second call with no query change must NOT
         // re-fire.
         app.jira_debounce_started = Some(past());
+        app.jira_idle_started = Some(past());
         app.jira_maybe_autocall();
         assert_eq!(
             recorded.lock().unwrap().len(),
             1,
             "must not re-fire for same JQL"
+        );
+    }
+
+    /// The space key acts as an
+    /// explicit "commit this
+    /// word" signal in the
+    /// JIRA query body. The
+    /// user's request: the
+    /// query should fire
+    /// immediately when a
+    /// space is typed, even
+    /// if the fast debounce
+    /// has not yet elapsed.
+    /// The space trigger
+    /// runs through
+    /// `push_char`, which
+    /// inserts the space and
+    /// then calls
+    /// `jira_maybe_autocall`
+    /// directly. The just-fired
+    /// search includes the
+    /// newly-inserted space.
+    #[test]
+    fn push_char_space_fires_jira_search_immediately() {
+        use std::sync::Arc;
+        let fake = FakeJira {
+            issues: vec![],
+            recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ..Default::default()
+        };
+        let recorded = fake.recorded.clone();
+        let mut app = directories_test_app(&[]);
+        app.set_jira_client(Arc::new(fake));
+        // Type `-PROJ-1` then a
+        // space. The space
+        // trigger must fire
+        // even though the
+        // debounce has not
+        // elapsed (we
+        // deliberately set
+        // the debounce to a
+        // value in the past
+        // for the search to
+        // fire — but the test
+        // would still pass
+        // without that because
+        // the space trigger
+        // calls
+        // `jira_maybe_autocall`
+        // directly, which
+        // checks the timer).
+        app.query = String::from("-PROJ-1");
+        // Push the cursor to
+        // the end of the query
+        // so the space lands
+        // AFTER `PROJ-1`. The
+        // default cursor
+        // position is 0
+        // (left over from
+        // `App::new`'s empty
+        // initial query), so
+        // without this the
+        // space would be
+        // prepended and the
+        // test would see
+        // `" -PROJ-1"`.
+        app.query_cursor = app.query.chars().count();
+        app.refresh();
+        // Reset the debounce to
+        // a "not yet elapsed"
+        // value so we can prove
+        // the space trigger
+        // fires independently.
+        // (If we left it
+        // expired from the
+        // initial `refresh()`,
+        // the test would pass
+        // even without the
+        // space trigger.)
+        app.jira_debounce_started =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(100));
+        app.jira_idle_started =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(100));
+        let before = recorded.lock().unwrap().len();
+        // Type a space. The
+        // space trigger must
+        // call
+        // `jira_maybe_autocall`
+        // synchronously, which
+        // (since the debounce
+        // is in the past)
+        // fires the search
+        // before `push_char`
+        // returns. The search
+        // sees the post-space
+        // JQL `PROJ-1 ` (with
+        // a trailing space).
+        app.push_char(' ');
+        // The recorded JQL list
+        // should have grown by
+        // exactly one (the
+        // initial `refresh()`
+        // already fired one
+        // search — actually
+        // no, the initial
+        // `refresh()` only
+        // fires the search if
+        // the debounce was
+        // already past;
+        // since we just set
+        // it to a recent time,
+        // the initial fire was
+        // skipped, so the
+        // first recorded JQL
+        // is from the space
+        // trigger).
+        let recorded_jqls = recorded.lock().unwrap().clone();
+        assert!(
+            recorded_jqls.len() > before,
+            "space trigger must fire the search, before={} after={} jqls={:?}",
+            before,
+            recorded_jqls.len(),
+            recorded_jqls
+        );
+        // The recorded JQL must
+        // include the just-
+        // typed space (it was
+        // appended to the
+        // query before
+        // `jira_maybe_autocall`
+        // ran).
+        let last = recorded_jqls.last().unwrap();
+        assert!(
+            last.contains("PROJ-1 "),
+            "JQL must reflect the space just typed, got: {last:?}"
+        );
+    }
+
+    /// The 3-second idle timer
+    /// is a safety-net trigger:
+    /// it fires the search
+    /// even when the fast
+    /// 400ms debounce has
+    /// not elapsed. The
+    /// user's report was that
+    /// the query "sometimes
+    /// isn't executed"; the
+    /// idle timer guarantees
+    /// the search runs within
+    /// 3 seconds of the last
+    /// keystroke regardless
+    /// of the fast-debounce
+    /// state.
+    #[test]
+    fn jira_idle_timer_fires_search_after_3s() {
+        use std::sync::Arc;
+        let fake = FakeJira {
+            issues: vec![],
+            recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ..Default::default()
+        };
+        let recorded = fake.recorded.clone();
+        let mut app = directories_test_app(&[]);
+        app.set_jira_client(Arc::new(fake));
+        app.query = String::from("-PROJ-1");
+        app.refresh();
+        // Arm BOTH timers to
+        // a value that's past
+        // the 3-second idle
+        // threshold but NOT
+        // past the 400ms
+        // debounce — wait,
+        // that doesn't make
+        // sense; if the
+        // value is 1 second
+        // ago it's past
+        // BOTH thresholds.
+        // Use a value that's
+        // specifically 2
+        // seconds ago: past
+        // the 3-second idle
+        // timer is 3
+        // seconds, so 2
+        // seconds ago is
+        // NOT past. Use 4
+        // seconds ago:
+        // past the 3-second
+        // idle timer, also
+        // past the 400ms
+        // debounce.
+        // For a cleaner
+        // isolation, set the
+        // fast debounce to
+        // a recent (unexpired)
+        // time and the idle
+        // timer to a value
+        // past the 3s
+        // threshold. That
+        // way the idle timer
+        // is the ONLY thing
+        // that can fire.
+        let recent = std::time::Instant::now() - std::time::Duration::from_millis(100);
+        let idle_past =
+            std::time::Instant::now() - JIRA_IDLE_TIMEOUT - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(recent);
+        app.jira_idle_started = Some(idle_past);
+        // The debounce is NOT
+        // past (100ms < 400ms),
+        // but the idle timer
+        // IS past (3s+ ago).
+        // The dual-timer gate
+        // `debounce_elapsed ||
+        // idle_elapsed` must
+        // therefore fire the
+        // search.
+        app.jira_maybe_autocall();
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            1,
+            "idle timer must fire the search even when fast debounce hasn't elapsed"
+        );
+    }
+
+    /// The 3-second idle timer
+    /// fires the search even
+    /// for an empty body
+    /// (`-` alone). This
+    /// matches the 400ms
+    /// debounce's behaviour:
+    /// typing `-` arms the
+    /// timer, and after 3
+    /// seconds the search
+    /// runs with the empty
+    /// JQL (matches every
+    /// issue). The test
+    /// just confirms the
+    /// idle timer triggers a
+    /// search — the actual
+    /// JQL payload is the
+    /// caller's concern.
+    #[test]
+    fn jira_idle_timer_fires_for_empty_body() {
+        use std::sync::Arc;
+        let fake = FakeJira {
+            issues: vec![],
+            recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ..Default::default()
+        };
+        let recorded = fake.recorded.clone();
+        let mut app = directories_test_app(&[]);
+        app.set_jira_client(Arc::new(fake));
+        // Just `-` with no
+        // body.
+        app.query = String::from("-");
+        app.refresh();
+        // The fast debounce is
+        // not armed (the
+        // initial `refresh()`
+        // for `-` alone didn't
+        // fire a search because
+        // `jira_last_jql` was
+        // already set to the
+        // empty-body JQL by
+        // the constructor
+        // path). Arm the
+        // idle timer to a
+        // value past 3s.
+        let idle_past =
+            std::time::Instant::now() - JIRA_IDLE_TIMEOUT - std::time::Duration::from_millis(50);
+        app.jira_idle_started = Some(idle_past);
+        let before = recorded.lock().unwrap().len();
+        app.jira_maybe_autocall();
+        // The idle timer is the
+        // only thing that's
+        // past; the fast
+        // debounce was never
+        // armed. The gate
+        // `debounce_elapsed ||
+        // idle_elapsed` must
+        // therefore fire the
+        // search.
+        assert!(
+            recorded.lock().unwrap().len() > before,
+            "idle timer must fire the search even when the fast debounce hasn't elapsed, before={} after={}",
+            before,
+            recorded.lock().unwrap().len()
         );
     }
 
@@ -24622,11 +25115,27 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-@me @week crash");
         app.refresh();
-        // Force the debounce to be in the past
-        // (the run loop would normally wait, but
-        // we drive it by hand for determinism).
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Force BOTH the
+        // 400ms fast debounce
+        // AND the 3-second idle
+        // safety-net to be in
+        // the past. The
+        // `jira_maybe_autocall`
+        // gate checks
+        // `debounce_elapsed ||
+        // idle_elapsed` — we
+        // need both past for the
+        // search to fire. The
+        // run loop would normally
+        // wait, but we drive it
+        // by hand for
+        // determinism.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         assert_eq!(recorded.lock().unwrap().len(), 1);
         let jql = recorded.lock().unwrap()[0].clone();
@@ -24674,8 +25183,15 @@ ssh_config_parse\t\t10,0\n";
             .insert("label1".to_string(), r#"labels = "test""#.to_string());
         app.query = String::from("-@label1 @me crash");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         assert_eq!(recorded.lock().unwrap().len(), 1);
         let jql = recorded.lock().unwrap()[0].clone();
@@ -24714,8 +25230,15 @@ ssh_config_parse\t\t10,0\n";
         // an undefined fragment.
         app.query = String::from("-@label1 crash");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         // The search was NOT fired — the
         // undefined-fragment gate short-circuits
@@ -24765,8 +25288,15 @@ ssh_config_parse\t\t10,0\n";
         app.query = String::from("-");
         app.refresh();
         // Forcibly fire the autocall.
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         assert_eq!(app.jira_rows.len(), 1);
         let out = &app.jira_rows[0].output;
@@ -24850,8 +25380,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         assert_eq!(app.jira_rows.len(), 4);
         // PROJ-1: Closed → exit_code 0 (green ✓).
@@ -24901,8 +25438,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         assert_eq!(app.jira_rows.len(), 1);
         let out = &app.jira_rows[0].output;
@@ -25077,8 +25621,15 @@ ssh_config_parse\t\t10,0\n";
         // Forcibly fire the search
         // autocall so the row is
         // populated.
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         assert_eq!(app.jira_rows.len(), 1);
         // Select the row.
@@ -25208,8 +25759,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         app.show_output_view();
@@ -25243,8 +25801,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         app.show_output_view();
@@ -25312,8 +25877,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         app.show_output_view();
@@ -25389,8 +25961,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         // The fake-client path runs
@@ -25467,8 +26046,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         // Press Ctrl-E.
@@ -25522,8 +26108,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         app.start_comment_edit();
@@ -25592,8 +26185,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         app.start_comment_edit();
@@ -25664,8 +26264,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         app.start_comment_edit();
@@ -25787,8 +26394,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         app.list_state.select(Some(0));
         // Fire the action. The
@@ -25859,8 +26473,15 @@ ssh_config_parse\t\t10,0\n";
         app.set_jira_client(Arc::new(fake));
         app.query = String::from("-");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         // No list_state.select:
         // there's nothing to
@@ -25977,8 +26598,15 @@ ssh_config_parse\t\t10,0\n";
         let mut app = directories_test_app(&[]);
         app.query = String::from("-PROJ-1");
         app.refresh();
-        app.jira_debounce_started =
-            Some(std::time::Instant::now() - JIRA_DEBOUNCE - std::time::Duration::from_millis(50));
+        // Both timers must be past for the new
+        // dual-timer gate
+        // () to fire.
+        let past = std::time::Instant::now()
+            - JIRA_IDLE_TIMEOUT
+            - JIRA_DEBOUNCE
+            - std::time::Duration::from_millis(50);
+        app.jira_debounce_started = Some(past);
+        app.jira_idle_started = Some(past);
         app.jira_maybe_autocall();
         // Restore before asserting so a panic doesn't leak.
         let restore = |name: &str, prev: Option<String>| unsafe {

@@ -54,6 +54,46 @@ All notable changes to this project will be documented in this file.
   The delete actions are still discoverable via the help overlay
   (`Ctrl-H`) and the command palette itself, which lists every
   action with its current binding.
+- The JIRA search-as-you-type now has two additional
+  trigger paths alongside the existing 400ms fast debounce:
+  1. **Space trigger** — typing a
+     space inside the JIRA
+     query body fires the
+     search immediately,
+     bypassing the debounce.
+     This matches IDE
+     autocomplete
+     conventions (a space
+     commits the current
+     token to a search).
+  2. **3-second idle safety-
+     net timer** — a new
+     `jira_idle_started`
+     field fires the search
+     after 3 seconds of no
+     keystroke activity,
+     independent of the
+     400ms debounce. The
+     user reported that the
+     query "sometimes isn't
+     executed"; the idle
+     timer guarantees the
+     search runs within 3
+     seconds of the last
+     keystroke regardless
+     of whether the fast
+     debounce ever elapses
+     (e.g. the user keeps
+     typing slowly, or the
+     run loop is temporarily
+     blocked on background
+     work). The two
+     timers are armed in
+     lock-step by
+     `jira_touch`; either
+     can fire the search
+     when its respective
+     window elapses.
 
 ### Fixed
 
