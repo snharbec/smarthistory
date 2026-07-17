@@ -1,0 +1,14 @@
+name = "poimandres"
+display_name = "Poimandres"
+
+[colors]
+accent = "#5ccfe6"
+secondary = "#f29668"
+bg = "#1b1e28"
+fg = "#e4e4e4"
+muted = "#7a889e"
+selection = "#252a36"
+error = "#d0679d"
+warning = "#ffcc66"
+success = "#95e6cb"
+info = "#5ccfe6"

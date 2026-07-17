@@ -14604,6 +14604,32 @@ fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
+    // Backspace removes the last character from the search
+    // query; the filtered list widens accordingly.
+    if key.code == KeyCode::Backspace {
+        if let Some(picker) = app.theme_picker.as_mut() {
+            picker.backspace();
+            app.theme = picker.current();
+            install_palette(app.theme);
+        }
+        return false;
+    }
+
+    // Printable characters extend the search query. The
+    // filtered list narrows live, matching the command-
+    // palette UX.
+    if !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && let KeyCode::Char(c) = key.code
+    {
+        if let Some(picker) = app.theme_picker.as_mut() {
+            picker.push_char(c);
+            app.theme = picker.current();
+            install_palette(app.theme);
+        }
+        return false;
+    }
+
     // Determine the navigation delta. We treat the same keys as the
     // standalone cycling actions so muscle memory works either way:
     //   Down / C-n  -> next theme
@@ -14625,7 +14651,7 @@ fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::End => {
             if let Some(picker) = app.theme_picker.as_mut() {
-                picker.selected = picker.themes.len().saturating_sub(1);
+                picker.selected = picker.filtered().len().saturating_sub(1);
                 app.theme = picker.current();
                 install_palette(app.theme);
             }
@@ -16513,7 +16539,7 @@ mod tests {
             let s = t.slug();
             assert!(!s.is_empty(), "empty slug for {:?}", t);
             assert!(
-                s.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "slug {:?} not kebab-case",
                 s
             );

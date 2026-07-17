@@ -1,0 +1,14 @@
+name = "vitesse-dark"
+display_name = "Vitesse Dark"
+
+[colors]
+accent = "#a0a0a0"
+secondary = "#7d62f9"
+bg = "#1f1f1f"
+fg = "#dadada"
+muted = "#737373"
+selection = "#2a2a2a"
+error = "#cb0000"
+warning = "#e85500"
+success = "#438958"
+info = "#1e6fd9"

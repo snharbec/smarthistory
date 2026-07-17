@@ -1,0 +1,14 @@
+name = "github-light-high-contrast"
+display_name = "GitHub Light High Contrast"
+
+[colors]
+accent = "#0969da"
+secondary = "#8250df"
+bg = "#ffffff"
+fg = "#0a0c10"
+muted = "#666666"
+selection = "#cedeee"
+error = "#a0111f"
+warning = "#7d4900"
+success = "#0a7d33"
+info = "#0969da"

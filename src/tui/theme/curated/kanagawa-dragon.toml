@@ -1,0 +1,14 @@
+name = "kanagawa-dragon"
+display_name = "Kanagawa Dragon"
+
+[colors]
+accent = "#7e9cd8"
+secondary = "#957fb8"
+bg = "#181616"
+fg = "#c5c5c5"
+muted = "#727169"
+selection = "#1f1f1f"
+error = "#c4746e"
+warning = "#dca561"
+success = "#98bb6c"
+info = "#7e9cd8"

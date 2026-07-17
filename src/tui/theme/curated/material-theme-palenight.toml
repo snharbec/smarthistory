@@ -1,0 +1,14 @@
+name = "material-theme-palenight"
+display_name = "Material Theme Palenight"
+
+[colors]
+accent = "#82aaff"
+secondary = "#c792ea"
+bg = "#292d3e"
+fg = "#a6accd"
+muted = "#676e95"
+selection = "#33364a"
+error = "#f07178"
+warning = "#ffcb6b"
+success = "#c3e88d"
+info = "#82aaff"

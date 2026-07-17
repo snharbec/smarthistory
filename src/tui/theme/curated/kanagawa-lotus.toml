@@ -1,0 +1,14 @@
+name = "kanagawa-lotus"
+display_name = "Kanagawa Lotus"
+
+[colors]
+accent = "#c84053"
+secondary = "#766191"
+bg = "#f2ecbc"
+fg = "#545464"
+muted = "#8a8a8a"
+selection = "#d5d2b8"
+error = "#c84053"
+warning = "#d79922"
+success = "#6a9556"
+info = "#96938b"

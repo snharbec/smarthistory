@@ -1,0 +1,14 @@
+name = "night-owl"
+display_name = "Night Owl"
+
+[colors]
+accent = "#82aaff"
+secondary = "#c792ea"
+bg = "#011627"
+fg = "#d6deeb"
+muted = "#637777"
+selection = "#0b2942"
+error = "#ef5350"
+warning = "#ffcb8b"
+success = "#22da6e"
+info = "#82aaff"

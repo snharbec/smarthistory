@@ -1,0 +1,14 @@
+name = "material-theme-lighter"
+display_name = "Material Theme Lighter"
+
+[colors]
+accent = "#00b8d4"
+secondary = "#c792ea"
+bg = "#fafafa"
+fg = "#37474f"
+muted = "#78909c"
+selection = "#eceff1"
+error = "#ff5370"
+warning = "#f98d3c"
+success = "#91b859"
+info = "#6182b8"

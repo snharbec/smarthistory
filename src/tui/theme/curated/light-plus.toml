@@ -1,0 +1,14 @@
+name = "light-plus"
+display_name = "Light Plus"
+
+[colors]
+accent = "#0000ff"
+secondary = "#af00db"
+bg = "#ffffff"
+fg = "#000000"
+muted = "#7f848e"
+selection = "#cde7fa"
+error = "#cd3131"
+warning = "#795e26"
+success = "#26799e"
+info = "#0000ff"

@@ -1,0 +1,14 @@
+name = "houston"
+display_name = "Houston"
+
+[colors]
+accent = "#6bdfff"
+secondary = "#7c81ff"
+bg = "#111620"
+fg = "#b3b8d2"
+muted = "#5b6394"
+selection = "#1e2640"
+error = "#ff5370"
+warning = "#ffc777"
+success = "#9ce5c0"
+info = "#40d9ff"

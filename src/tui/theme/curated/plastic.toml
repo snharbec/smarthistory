@@ -1,0 +1,14 @@
+name = "plastic"
+display_name = "Plastic"
+
+[colors]
+accent = "#7e57c2"
+secondary = "#e040fb"
+bg = "#1d1f21"
+fg = "#eeffff"
+muted = "#666666"
+selection = "#2a2c2e"
+error = "#ff5370"
+warning = "#ffcb6b"
+success = "#c3e88d"
+info = "#82aaff"

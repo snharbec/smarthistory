@@ -1,0 +1,14 @@
+name = "slack-dark"
+display_name = "Slack Dark"
+
+[colors]
+accent = "#7cb342"
+secondary = "#03a9f4"
+bg = "#222222"
+fg = "#e6e6e6"
+muted = "#888888"
+selection = "#333333"
+error = "#e74c3c"
+warning = "#f39c12"
+success = "#2ecc71"
+info = "#3498db"

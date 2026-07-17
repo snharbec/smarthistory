@@ -1,0 +1,14 @@
+name = "ayu-light"
+display_name = "Ayu Light"
+
+[colors]
+accent = "#ff9940"
+secondary = "#83b9e0"
+bg = "#fafafa"
+fg = "#61676c"
+muted = "#828997"
+selection = "#eaeaea"
+error = "#d95757"
+warning = "#ff9940"
+success = "#86b300"
+info = "#4db5ff"

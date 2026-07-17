@@ -1,0 +1,14 @@
+name = "github-dark"
+display_name = "GitHub Dark"
+
+[colors]
+accent = "#58a6ff"
+secondary = "#bc8cff"
+bg = "#0d1117"
+fg = "#c9d1d9"
+muted = "#8b949e"
+selection = "#161b22"
+error = "#f85149"
+warning = "#d29922"
+success = "#3fb950"
+info = "#58a6ff"

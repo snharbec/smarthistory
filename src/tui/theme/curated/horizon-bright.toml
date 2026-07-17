@@ -1,0 +1,14 @@
+name = "horizon-bright"
+display_name = "Horizon Bright"
+
+[colors]
+accent = "#e95678"
+secondary = "#ee64ae"
+bg = "#1c1e26"
+fg = "#e0e0e0"
+muted = "#6c6f93"
+selection = "#232530"
+error = "#e95678"
+warning = "#f9b83c"
+success = "#29d398"
+info = "#26bbd9"

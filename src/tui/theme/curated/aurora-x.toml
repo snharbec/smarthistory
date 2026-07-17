@@ -1,0 +1,14 @@
+name = "aurora-x"
+display_name = "Aurora X"
+
+[colors]
+accent = "#7ee6ae"
+secondary = "#ff6b9d"
+bg = "#1a1a2e"
+fg = "#e0e0e0"
+muted = "#7a7a9e"
+selection = "#252540"
+error = "#ff6b6b"
+warning = "#ffe66d"
+success = "#7ee6ae"
+info = "#5ec8e5"

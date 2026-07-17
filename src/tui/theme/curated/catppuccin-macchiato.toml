@@ -1,0 +1,14 @@
+name = "catppuccin-macchiato"
+display_name = "Catppuccin Macchiato"
+
+[colors]
+accent = "#8aadf4"
+secondary = "#c6a0f6"
+bg = "#24273a"
+fg = "#cad3f5"
+muted = "#a8aabe"
+selection = "#363a4f"
+error = "#ed8796"
+warning = "#eed49f"
+success = "#a6da95"
+info = "#7dc4e4"

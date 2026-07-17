@@ -1,0 +1,14 @@
+name = "andromeeda"
+display_name = "Andromeeda"
+
+[colors]
+accent = "#ffb47e"
+secondary = "#57d6e4"
+bg = "#232329"
+fg = "#c8c8c8"
+muted = "#7b7b7b"
+selection = "#2a2a30"
+error = "#fc618d"
+warning = "#ffb47e"
+success = "#9ae5b8"
+info = "#57d6e4"

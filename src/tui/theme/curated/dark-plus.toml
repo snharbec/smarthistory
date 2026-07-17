@@ -1,0 +1,14 @@
+name = "dark-plus"
+display_name = "Dark Plus"
+
+[colors]
+accent = "#569cd6"
+secondary = "#c586c0"
+bg = "#1e1e1e"
+fg = "#d4d4d4"
+muted = "#858585"
+selection = "#264f78"
+error = "#f44747"
+warning = "#dcdcaa"
+success = "#6a9955"
+info = "#569cd6"

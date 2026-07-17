@@ -1,0 +1,14 @@
+name = "ayu-mirage"
+display_name = "Ayu Mirage"
+
+[colors]
+accent = "#ffcc66"
+secondary = "#f29668"
+bg = "#1f2430"
+fg = "#cccac2"
+muted = "#707a8c"
+selection = "#252b37"
+error = "#ff3333"
+warning = "#ffcc66"
+success = "#95e6cb"
+info = "#5ccfe6"

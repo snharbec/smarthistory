@@ -1,4 +1,4 @@
-// Theme subsystem: registry of 21 built-in palettes plus the
+// Theme subsystem: registry of 73 built-in palettes plus the
 // runtime palette plumbing (resolve_color, Palette, install_palette).
 
 use crate::Config;
@@ -55,6 +55,60 @@ pub enum BuiltinTheme {
     /// Google Material Design 3-inspired light theme: purple
     /// accents on a soft off-white background.
     MaterialLight,
+
+    // --- additional curated themes (user-requested) ---
+    CatppuccinFrappe,
+    CatppuccinMacchiato,
+    DraculaSoft,
+    EverforestLight,
+    GithubDark,
+    GithubDarkDefault,
+    GithubDarkDimmed,
+    GithubDarkHighContrast,
+    GithubLight,
+    GithubLightDefault,
+    GithubLightHighContrast,
+    GruvboxDarkHard,
+    GruvboxDarkSoft,
+    GruvboxLightHard,
+    GruvboxLightSoft,
+    AyuDark,
+    AyuLight,
+    AyuMirage,
+    RosePineDawn,
+    RosePineMoon,
+    NightOwl,
+    NightOwlLight,
+    Synthwave84,
+    MaterialTheme,
+    MaterialThemeDarker,
+    MaterialThemeLighter,
+    MaterialThemeOcean,
+    MaterialThemePalenight,
+    VitesseBlack,
+    VitesseDark,
+    VitesseLight,
+    Monokai,
+    OneLight,
+    DarkPlus,
+    LightPlus,
+    Horizon,
+    HorizonBright,
+    Laserwave,
+    Houston,
+    Andromeeda,
+    AuroraX,
+    KanagawaDragon,
+    KanagawaLotus,
+    Plastic,
+    Poimandres,
+    Red,
+    SlackDark,
+    SlackOchin,
+    SnazzyLight,
+    Vesper,
+    MinDark,
+    MinLight,
 }
 
 impl BuiltinTheme {
@@ -86,12 +140,64 @@ impl BuiltinTheme {
     /// in the same order as in `all()`.
     pub fn curated() -> &'static [BuiltinTheme] {
         &[
+            BuiltinTheme::Andromeeda,
+            BuiltinTheme::AuroraX,
+            BuiltinTheme::AyuDark,
+            BuiltinTheme::AyuLight,
+            BuiltinTheme::AyuMirage,
+            BuiltinTheme::CatppuccinFrappe,
+            BuiltinTheme::CatppuccinMacchiato,
+            BuiltinTheme::DarkPlus,
             BuiltinTheme::DoomOne,
             BuiltinTheme::DoomSolarizedLight,
-            BuiltinTheme::Plain,
+            BuiltinTheme::DraculaSoft,
+            BuiltinTheme::EverforestLight,
+            BuiltinTheme::GithubDark,
+            BuiltinTheme::GithubDarkDefault,
+            BuiltinTheme::GithubDarkDimmed,
+            BuiltinTheme::GithubDarkHighContrast,
+            BuiltinTheme::GithubLight,
+            BuiltinTheme::GithubLightDefault,
+            BuiltinTheme::GithubLightHighContrast,
+            BuiltinTheme::GruvboxDarkHard,
+            BuiltinTheme::GruvboxDarkSoft,
+            BuiltinTheme::GruvboxLightHard,
+            BuiltinTheme::GruvboxLightSoft,
+            BuiltinTheme::Horizon,
+            BuiltinTheme::HorizonBright,
+            BuiltinTheme::Houston,
+            BuiltinTheme::KanagawaDragon,
+            BuiltinTheme::KanagawaLotus,
+            BuiltinTheme::Laserwave,
             BuiltinTheme::Leuven,
+            BuiltinTheme::LightPlus,
             BuiltinTheme::MaterialDark,
             BuiltinTheme::MaterialLight,
+            BuiltinTheme::MaterialTheme,
+            BuiltinTheme::MaterialThemeDarker,
+            BuiltinTheme::MaterialThemeLighter,
+            BuiltinTheme::MaterialThemeOcean,
+            BuiltinTheme::MaterialThemePalenight,
+            BuiltinTheme::MinDark,
+            BuiltinTheme::MinLight,
+            BuiltinTheme::Monokai,
+            BuiltinTheme::NightOwl,
+            BuiltinTheme::NightOwlLight,
+            BuiltinTheme::OneLight,
+            BuiltinTheme::Plain,
+            BuiltinTheme::Plastic,
+            BuiltinTheme::Poimandres,
+            BuiltinTheme::Red,
+            BuiltinTheme::RosePineDawn,
+            BuiltinTheme::RosePineMoon,
+            BuiltinTheme::SlackDark,
+            BuiltinTheme::SlackOchin,
+            BuiltinTheme::SnazzyLight,
+            BuiltinTheme::Synthwave84,
+            BuiltinTheme::Vesper,
+            BuiltinTheme::VitesseBlack,
+            BuiltinTheme::VitesseDark,
+            BuiltinTheme::VitesseLight,
         ]
     }
 
@@ -131,7 +237,59 @@ impl BuiltinTheme {
             | BuiltinTheme::Plain
             | BuiltinTheme::Leuven
             | BuiltinTheme::MaterialDark
-            | BuiltinTheme::MaterialLight => None,
+            | BuiltinTheme::MaterialLight
+            | BuiltinTheme::CatppuccinFrappe
+            | BuiltinTheme::CatppuccinMacchiato
+            | BuiltinTheme::DraculaSoft
+            | BuiltinTheme::EverforestLight
+            | BuiltinTheme::GithubDark
+            | BuiltinTheme::GithubDarkDefault
+            | BuiltinTheme::GithubDarkDimmed
+            | BuiltinTheme::GithubDarkHighContrast
+            | BuiltinTheme::GithubLight
+            | BuiltinTheme::GithubLightDefault
+            | BuiltinTheme::GithubLightHighContrast
+            | BuiltinTheme::GruvboxDarkHard
+            | BuiltinTheme::GruvboxDarkSoft
+            | BuiltinTheme::GruvboxLightHard
+            | BuiltinTheme::GruvboxLightSoft
+            | BuiltinTheme::AyuDark
+            | BuiltinTheme::AyuLight
+            | BuiltinTheme::AyuMirage
+            | BuiltinTheme::RosePineDawn
+            | BuiltinTheme::RosePineMoon
+            | BuiltinTheme::NightOwl
+            | BuiltinTheme::NightOwlLight
+            | BuiltinTheme::Synthwave84
+            | BuiltinTheme::MaterialTheme
+            | BuiltinTheme::MaterialThemeDarker
+            | BuiltinTheme::MaterialThemeLighter
+            | BuiltinTheme::MaterialThemeOcean
+            | BuiltinTheme::MaterialThemePalenight
+            | BuiltinTheme::VitesseBlack
+            | BuiltinTheme::VitesseDark
+            | BuiltinTheme::VitesseLight
+            | BuiltinTheme::Monokai
+            | BuiltinTheme::OneLight
+            | BuiltinTheme::DarkPlus
+            | BuiltinTheme::LightPlus
+            | BuiltinTheme::Horizon
+            | BuiltinTheme::HorizonBright
+            | BuiltinTheme::Laserwave
+            | BuiltinTheme::Houston
+            | BuiltinTheme::Andromeeda
+            | BuiltinTheme::AuroraX
+            | BuiltinTheme::KanagawaDragon
+            | BuiltinTheme::KanagawaLotus
+            | BuiltinTheme::Plastic
+            | BuiltinTheme::Poimandres
+            | BuiltinTheme::Red
+            | BuiltinTheme::SlackDark
+            | BuiltinTheme::SlackOchin
+            | BuiltinTheme::SnazzyLight
+            | BuiltinTheme::Vesper
+            | BuiltinTheme::MinDark
+            | BuiltinTheme::MinLight => None,
         }
     }
 
@@ -198,6 +356,58 @@ impl BuiltinTheme {
             BuiltinTheme::Leuven => "leuven",
             BuiltinTheme::MaterialDark => "material-dark",
             BuiltinTheme::MaterialLight => "material-light",
+            BuiltinTheme::CatppuccinFrappe => "catppuccin-frappe",
+            BuiltinTheme::CatppuccinMacchiato => "catppuccin-macchiato",
+            BuiltinTheme::DraculaSoft => "dracula-soft",
+            BuiltinTheme::EverforestLight => "everforest-light",
+            BuiltinTheme::GithubDark => "github-dark",
+            BuiltinTheme::GithubDarkDefault => "github-dark-default",
+            BuiltinTheme::GithubDarkDimmed => "github-dark-dimmed",
+            BuiltinTheme::GithubDarkHighContrast => "github-dark-high-contrast",
+            BuiltinTheme::GithubLight => "github-light",
+            BuiltinTheme::GithubLightDefault => "github-light-default",
+            BuiltinTheme::GithubLightHighContrast => "github-light-high-contrast",
+            BuiltinTheme::GruvboxDarkHard => "gruvbox-dark-hard",
+            BuiltinTheme::GruvboxDarkSoft => "gruvbox-dark-soft",
+            BuiltinTheme::GruvboxLightHard => "gruvbox-light-hard",
+            BuiltinTheme::GruvboxLightSoft => "gruvbox-light-soft",
+            BuiltinTheme::AyuDark => "ayu-dark",
+            BuiltinTheme::AyuLight => "ayu-light",
+            BuiltinTheme::AyuMirage => "ayu-mirage",
+            BuiltinTheme::RosePineDawn => "rose-pine-dawn",
+            BuiltinTheme::RosePineMoon => "rose-pine-moon",
+            BuiltinTheme::NightOwl => "night-owl",
+            BuiltinTheme::NightOwlLight => "night-owl-light",
+            BuiltinTheme::Synthwave84 => "synthwave-84",
+            BuiltinTheme::MaterialTheme => "material-theme",
+            BuiltinTheme::MaterialThemeDarker => "material-theme-darker",
+            BuiltinTheme::MaterialThemeLighter => "material-theme-lighter",
+            BuiltinTheme::MaterialThemeOcean => "material-theme-ocean",
+            BuiltinTheme::MaterialThemePalenight => "material-theme-palenight",
+            BuiltinTheme::VitesseBlack => "vitesse-black",
+            BuiltinTheme::VitesseDark => "vitesse-dark",
+            BuiltinTheme::VitesseLight => "vitesse-light",
+            BuiltinTheme::Monokai => "monokai",
+            BuiltinTheme::OneLight => "one-light",
+            BuiltinTheme::DarkPlus => "dark-plus",
+            BuiltinTheme::LightPlus => "light-plus",
+            BuiltinTheme::Horizon => "horizon",
+            BuiltinTheme::HorizonBright => "horizon-bright",
+            BuiltinTheme::Laserwave => "laserwave",
+            BuiltinTheme::Houston => "houston",
+            BuiltinTheme::Andromeeda => "andromeeda",
+            BuiltinTheme::AuroraX => "aurora-x",
+            BuiltinTheme::KanagawaDragon => "kanagawa-dragon",
+            BuiltinTheme::KanagawaLotus => "kanagawa-lotus",
+            BuiltinTheme::Plastic => "plastic",
+            BuiltinTheme::Poimandres => "poimandres",
+            BuiltinTheme::Red => "red",
+            BuiltinTheme::SlackDark => "slack-dark",
+            BuiltinTheme::SlackOchin => "slack-ochin",
+            BuiltinTheme::SnazzyLight => "snazzy-light",
+            BuiltinTheme::Vesper => "vesper",
+            BuiltinTheme::MinDark => "min-dark",
+            BuiltinTheme::MinLight => "min-light",
         }
     }
 
@@ -225,6 +435,58 @@ impl BuiltinTheme {
             BuiltinTheme::Leuven => "Leuven",
             BuiltinTheme::MaterialDark => "Material Dark",
             BuiltinTheme::MaterialLight => "Material Light",
+            BuiltinTheme::CatppuccinFrappe => "Catppuccin Frappe",
+            BuiltinTheme::CatppuccinMacchiato => "Catppuccin Macchiato",
+            BuiltinTheme::DraculaSoft => "Dracula Soft",
+            BuiltinTheme::EverforestLight => "Everforest Light",
+            BuiltinTheme::GithubDark => "GitHub Dark",
+            BuiltinTheme::GithubDarkDefault => "GitHub Dark Default",
+            BuiltinTheme::GithubDarkDimmed => "GitHub Dark Dimmed",
+            BuiltinTheme::GithubDarkHighContrast => "GitHub Dark High Contrast",
+            BuiltinTheme::GithubLight => "GitHub Light",
+            BuiltinTheme::GithubLightDefault => "GitHub Light Default",
+            BuiltinTheme::GithubLightHighContrast => "GitHub Light High Contrast",
+            BuiltinTheme::GruvboxDarkHard => "Gruvbox Dark Hard",
+            BuiltinTheme::GruvboxDarkSoft => "Gruvbox Dark Soft",
+            BuiltinTheme::GruvboxLightHard => "Gruvbox Light Hard",
+            BuiltinTheme::GruvboxLightSoft => "Gruvbox Light Soft",
+            BuiltinTheme::AyuDark => "Ayu Dark",
+            BuiltinTheme::AyuLight => "Ayu Light",
+            BuiltinTheme::AyuMirage => "Ayu Mirage",
+            BuiltinTheme::RosePineDawn => "Rosé Pine Dawn",
+            BuiltinTheme::RosePineMoon => "Rosé Pine Moon",
+            BuiltinTheme::NightOwl => "Night Owl",
+            BuiltinTheme::NightOwlLight => "Night Owl Light",
+            BuiltinTheme::Synthwave84 => "Synthwave 84",
+            BuiltinTheme::MaterialTheme => "Material Theme",
+            BuiltinTheme::MaterialThemeDarker => "Material Theme Darker",
+            BuiltinTheme::MaterialThemeLighter => "Material Theme Lighter",
+            BuiltinTheme::MaterialThemeOcean => "Material Theme Ocean",
+            BuiltinTheme::MaterialThemePalenight => "Material Theme Palenight",
+            BuiltinTheme::VitesseBlack => "Vitesse Black",
+            BuiltinTheme::VitesseDark => "Vitesse Dark",
+            BuiltinTheme::VitesseLight => "Vitesse Light",
+            BuiltinTheme::Monokai => "Monokai",
+            BuiltinTheme::OneLight => "One Light",
+            BuiltinTheme::DarkPlus => "Dark Plus",
+            BuiltinTheme::LightPlus => "Light Plus",
+            BuiltinTheme::Horizon => "Horizon",
+            BuiltinTheme::HorizonBright => "Horizon Bright",
+            BuiltinTheme::Laserwave => "Laserwave",
+            BuiltinTheme::Houston => "Houston",
+            BuiltinTheme::Andromeeda => "Andromeeda",
+            BuiltinTheme::AuroraX => "Aurora X",
+            BuiltinTheme::KanagawaDragon => "Kanagawa Dragon",
+            BuiltinTheme::KanagawaLotus => "Kanagawa Lotus",
+            BuiltinTheme::Plastic => "Plastic",
+            BuiltinTheme::Poimandres => "Poimandres",
+            BuiltinTheme::Red => "Red",
+            BuiltinTheme::SlackDark => "Slack Dark",
+            BuiltinTheme::SlackOchin => "Slack Ochin",
+            BuiltinTheme::SnazzyLight => "Snazzy Light",
+            BuiltinTheme::Vesper => "Vesper",
+            BuiltinTheme::MinDark => "Min Dark",
+            BuiltinTheme::MinLight => "Min Light",
         }
     }
 }
@@ -293,6 +555,26 @@ impl SelectedTheme {
 }
 
 // --- Palette runtime ---
+
+/// Determine if a `Color` is "light" using the ITU-R BT.601
+/// perceived-brightness formula (the same one
+/// `ratatui_themes::ThemePalette::is_light()` uses). This is
+/// used by the `bat` color-highlighting paths to pick
+/// `--theme=light` (for light themes) or `--theme=dark`
+/// (for dark themes) so syntax-highlighted source previews
+/// match the active theme's background.
+fn is_color_light(color: Color) -> bool {
+    if let Color::Rgb(r, g, b) = color {
+        let brightness = (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000;
+        brightness > 127
+    } else {
+        matches!(
+            color,
+            Color::White | Color::LightRed | Color::LightGreen | Color::LightYellow
+                | Color::LightBlue | Color::LightMagenta | Color::LightCyan | Color::Gray
+        )
+    }
+}
 
 fn resolve_color(s: &str) -> Color {
     let s = s.trim();
@@ -390,6 +672,16 @@ pub struct Palette {
     pub(crate) input_bg: Color,
     /// Background color for the status bar.
     pub(crate) status_bg: Color,
+    /// Whether the active theme is a light theme (for
+    /// `bat --theme=light>` / `bat --theme=dark`
+    /// selection in the color-highlighting paths).
+    /// Computed from the theme's `bg` color brightness
+    /// via the ITU-R BT.601 perceived-brightness
+    /// formula, matching the `ratatui-themes`
+    /// `ThemePalette::is_light()` method. Light themes
+    /// (Leuven, Catppuccin Latte, GitHub Light, etc.)
+    /// set this to `true`; dark themes set `false`.
+    pub(crate) is_light_theme: bool,
 }
 
 impl Palette {
@@ -411,6 +703,7 @@ impl Palette {
             details_bg: Color::Black,
             input_bg: Color::Black,
             status_bg: Color::Black,
+            is_light_theme: false,
         }
     }
 
@@ -418,24 +711,28 @@ impl Palette {
     /// "no theme" case. All fallbacks come from the user's own
     /// `tuicolor.*` settings (so the manual-config defaults are
     /// self-consistent even without any user override).
-    fn from_manual(theme: &crate::TuiTheme, cfg: &Config) -> Self {
+    fn from_manual(theme: &crate::TuiTheme, _cfg: &Config) -> Self {
+        let fallback = Palette::builtin();
         Palette {
-            bg: resolve_color(&theme.bg),
-            fg: resolve_color(&theme.fg),
-            accent: resolve_color(&theme.accent),
-            success: resolve_color(&theme.success),
-            error: resolve_color(&theme.error),
-            warning: resolve_color(&theme.warning),
-            dim: resolve_color(&theme.dim),
+            bg: if theme.bg.is_empty() { fallback.bg } else { resolve_color(&theme.bg) },
+            fg: if theme.fg.is_empty() { fallback.fg } else { resolve_color(&theme.fg) },
+            accent: if theme.accent.is_empty() { fallback.accent } else { resolve_color(&theme.accent) },
+            success: if theme.success.is_empty() { fallback.success } else { resolve_color(&theme.success) },
+            error: if theme.error.is_empty() { fallback.error } else { resolve_color(&theme.error) },
+            warning: if theme.warning.is_empty() { fallback.warning } else { resolve_color(&theme.warning) },
+            dim: if theme.dim.is_empty() { fallback.dim } else { resolve_color(&theme.dim) },
             dimmer: Color::DarkGray,
-            highlight: resolve_color(&theme.highlight),
-            info: resolve_color(&theme.info),
-            selection: resolve_color(&cfg.selection(&theme.bg)),
-            badge_fg: resolve_color(&cfg.badge_fg(&theme.bg)),
-            list_bg: resolve_color(&cfg.list_bg(&theme.bg)),
-            details_bg: resolve_color(&cfg.details_bg(&theme.bg)),
-            input_bg: resolve_color(&cfg.input_bg(&theme.bg)),
-            status_bg: resolve_color(&cfg.status_bg(&theme.bg)),
+            highlight: if theme.highlight.is_empty() { fallback.highlight } else { resolve_color(&theme.highlight) },
+            info: if theme.info.is_empty() { fallback.info } else { resolve_color(&theme.info) },
+            selection: if theme.selection.is_empty() { fallback.selection } else { resolve_color(&theme.selection) },
+            badge_fg: if theme.badge_fg.is_empty() { fallback.badge_fg } else { resolve_color(&theme.badge_fg) },
+            list_bg: if theme.list_bg.is_empty() { fallback.list_bg } else { resolve_color(&theme.list_bg) },
+            details_bg: if theme.details_bg.is_empty() { fallback.details_bg } else { resolve_color(&theme.details_bg) },
+            input_bg: if theme.input_bg.is_empty() { fallback.input_bg } else { resolve_color(&theme.input_bg) },
+            status_bg: if theme.status_bg.is_empty() { fallback.status_bg } else { resolve_color(&theme.status_bg) },
+            is_light_theme: is_color_light(
+                if theme.bg.is_empty() { fallback.bg } else { resolve_color(&theme.bg) }
+            ),
         }
     }
 }
@@ -462,27 +759,53 @@ pub fn install_palette(theme: SelectedTheme) {
             // preserved.
             let cfg_theme = cfg.theme();
             Palette {
-                bg: if cfg.has_bg_override() {
-                    resolve_color(&cfg_theme.bg)
-                } else {
+                bg: if cfg_theme.bg.is_empty() {
                     p.bg
-                },
-                fg: if cfg.has_fg_override() {
-                    resolve_color(&cfg_theme.fg)
                 } else {
+                    resolve_color(&cfg_theme.bg)
+                },
+                fg: if cfg_theme.fg.is_empty() {
                     p.fg
-                },
-                accent: resolve_color(&cfg_theme.accent),
-                success: resolve_color(&cfg_theme.success),
-                error: resolve_color(&cfg_theme.error),
-                warning: resolve_color(&cfg_theme.warning),
-                dim: if cfg.has_dim_override() {
-                    resolve_color(&cfg_theme.dim)
                 } else {
+                    resolve_color(&cfg_theme.fg)
+                },
+                accent: if cfg_theme.accent.is_empty() {
+                    p.accent
+                } else {
+                    resolve_color(&cfg_theme.accent)
+                },
+                success: if cfg_theme.success.is_empty() {
+                    p.success
+                } else {
+                    resolve_color(&cfg_theme.success)
+                },
+                error: if cfg_theme.error.is_empty() {
+                    p.error
+                } else {
+                    resolve_color(&cfg_theme.error)
+                },
+                warning: if cfg_theme.warning.is_empty() {
+                    p.warning
+                } else {
+                    resolve_color(&cfg_theme.warning)
+                },
+                dim: if cfg_theme.dim.is_empty() {
                     p.muted
+                } else {
+                    resolve_color(&cfg_theme.dim)
                 },
                 dimmer: Color::DarkGray,
-                highlight: resolve_color(&cfg_theme.highlight),
+                highlight: if cfg_theme.highlight.is_empty() {
+                    // No `tuicolor.highlight=` override.
+                    // Use the theme's own `accent` (there's
+                    // no separate `highlight` slot in
+                    // `ThemePalette`) so highlighted matches
+                    // and the selected-row markers pick up
+                    // the theme's primary accent.
+                    p.accent
+                } else {
+                    resolve_color(&cfg_theme.highlight)
+                },
                 // `info` is sourced from the theme's own
                 // `info` slot when the theme is built-in.
                 // The user's `tuicolor.info=` override wins
@@ -527,6 +850,16 @@ pub fn install_palette(theme: SelectedTheme) {
                     p.bg
                 } else {
                     resolve_color(&cfg_theme.status_bg)
+                },
+                // Use `ThemePalette::is_light()` for the built-in
+                // theme (the crate supplies the classification).
+                // When the user overrides `bg` via `tuicolor.bg=`,
+                // recompute from the resolved `bg` Color
+                // instead.
+                is_light_theme: if cfg_theme.bg.is_empty() {
+                    p.is_light()
+                } else {
+                    is_color_light(resolve_color(&cfg_theme.bg))
                 },
             }
         }

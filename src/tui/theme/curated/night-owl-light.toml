@@ -1,0 +1,14 @@
+name = "night-owl-light"
+display_name = "Night Owl Light"
+
+[colors]
+accent = "#7b66da"
+secondary = "#9e6ffe"
+bg = "#fbfbfb"
+fg = "#403f53"
+muted = "#7a7a7a"
+selection = "#eeeeee"
+error = "#fc618d"
+warning = "#f98d3c"
+success = "#7b66da"
+info = "#4876d6"

@@ -1,0 +1,14 @@
+name = "material-theme-ocean"
+display_name = "Material Theme Ocean"
+
+[colors]
+accent = "#84ffff"
+secondary = "#c792ea"
+bg = "#0f111a"
+fg = "#8e93a5"
+muted = "#3b4048"
+selection = "#1a1c25"
+error = "#f07178"
+warning = "#ffcb6b"
+success = "#c3e88d"
+info = "#89ddff"

@@ -1,0 +1,14 @@
+name = "monokai"
+display_name = "Monokai"
+
+[colors]
+accent = "#a6e22e"
+secondary = "#66d9ef"
+bg = "#272822"
+fg = "#f8f8f2"
+muted = "#75715e"
+selection = "#3e3d32"
+error = "#f92672"
+warning = "#e6db74"
+success = "#a6e22e"
+info = "#66d9ef"

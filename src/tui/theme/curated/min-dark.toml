@@ -1,0 +1,14 @@
+name = "min-dark"
+display_name = "Min Dark"
+
+[colors]
+accent = "#5e8acc"
+secondary = "#a371f7"
+bg = "#1f1f1f"
+fg = "#dadada"
+muted = "#737373"
+selection = "#2a2a2a"
+error = "#cb0000"
+warning = "#e85500"
+success = "#438958"
+info = "#1e6fd9"

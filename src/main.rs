@@ -1244,6 +1244,7 @@ pub struct Config {
 /// built-in `Theme` palette in `src/tui.rs`. Any unrecognized
 /// color falls back to the corresponding default.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct TuiTheme {
     bg: String,
     fg: String,
@@ -1282,27 +1283,6 @@ pub struct TuiTheme {
     status_bg: String,
 }
 
-impl Default for TuiTheme {
-    fn default() -> Self {
-        TuiTheme {
-            bg: "black".to_string(),
-            fg: "gray".to_string(),
-            accent: "cyan".to_string(),
-            success: "green".to_string(),
-            error: "red".to_string(),
-            warning: "yellow".to_string(),
-            dim: "gray".to_string(),
-            highlight: "yellow".to_string(),
-            info: "blue".to_string(),
-            selection: "darkgray".to_string(),
-            badge_fg: String::new(),
-            list_bg: String::new(),
-            details_bg: String::new(),
-            input_bg: String::new(),
-            status_bg: String::new(),
-        }
-    }
-}
 
 impl Config {
     pub fn default() -> Self {

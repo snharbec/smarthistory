@@ -1,0 +1,14 @@
+name = "material-theme-darker"
+display_name = "Material Theme Darker"
+
+[colors]
+accent = "#82aaff"
+secondary = "#c792ea"
+bg = "#1a1a1a"
+fg = "#eeffff"
+muted = "#546e7a"
+selection = "#141414"
+error = "#f07178"
+warning = "#ffcb6b"
+success = "#c3e88d"
+info = "#82aaff"

@@ -1,0 +1,14 @@
+name = "one-light"
+display_name = "One Light"
+
+[colors]
+accent = "#4078f2"
+secondary = "#a626a4"
+bg = "#fafafa"
+fg = "#383a42"
+muted = "#848991"
+selection = "#e5e5e6"
+error = "#e45649"
+warning = "#c18401"
+success = "#50a14f"
+info = "#4078f2"

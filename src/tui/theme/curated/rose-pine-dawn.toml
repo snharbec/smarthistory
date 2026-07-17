@@ -1,0 +1,14 @@
+name = "rose-pine-dawn"
+display_name = "Rosé Pine Dawn"
+
+[colors]
+accent = "#907aa9"
+secondary = "#d7827e"
+bg = "#faf4ed"
+fg = "#575279"
+muted = "#9893a5"
+selection = "#f0e9e0"
+error = "#b4637a"
+warning = "#ea9d34"
+success = "#56949f"
+info = "#286983"

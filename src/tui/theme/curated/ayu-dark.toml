@@ -1,0 +1,14 @@
+name = "ayu-dark"
+display_name = "Ayu Dark"
+
+[colors]
+accent = "#ffb454"
+secondary = "#f29668"
+bg = "#0b0e14"
+fg = "#bfbdb6"
+muted = "#5c6773"
+selection = "#131721"
+error = "#ff6b6b"
+warning = "#ffb454"
+success = "#59c2ff"
+info = "#73b8ff"

@@ -1832,7 +1832,8 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     let highlight_style = Style::default()
         .bg(Theme::selection_color())
         .fg(fg)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
     let dim_style = Style::default().fg(Theme::dim_color());
     let accent_style = Theme::accent();
     let warning_style = Style::default().fg(Theme::warning_color());
@@ -1996,7 +1997,8 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
     let highlight_style = Style::default()
         .bg(Theme::selection_color())
         .fg(fg)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
     let dim_style = Style::default().fg(Theme::dim_color());
     let accent_style = Theme::accent();
 
@@ -2077,7 +2079,7 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("")
+        .highlight_symbol("▌")
         .repeat_highlight_symbol(false);
     let mut list_state = ListState::default();
     if end > start {
@@ -2131,7 +2133,8 @@ fn draw_codegraph_relations_picker(
     let highlight_style = Style::default()
         .bg(Theme::selection_color())
         .fg(fg)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
     let dim_style = Style::default().fg(Theme::dim_color());
     let section_style = Theme::accent();
     let path_style = Style::default().fg(Theme::dim_color());
@@ -2189,7 +2192,7 @@ fn draw_codegraph_relations_picker(
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("")
+        .highlight_symbol("▌")
         .repeat_highlight_symbol(false);
     f.render_widget(list, inner);
 }
@@ -2227,28 +2230,73 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(format!(" Theme picker  Enter commits / {} ", revert_hint))
+        .title(format!(
+            " Theme picker{}  Enter commits / {} ",
+            if picker.query.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}/{}]", picker.filtered().len(), picker.themes.len())
+            },
+            revert_hint
+        ))
         .title_style(Theme::accent())
         .border_style(Theme::dim())
         .style(Style::default().bg(bg));
     let inner = block.inner(outer);
     f.render_widget(block, outer);
 
-    let inner = Layout::default()
+    let inner_horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)].as_ref())
         .split(inner);
 
-    // ---- Theme list (left column) ----
-    let highlight_style = Style::default()
+    let dim_style = Style::default().fg(Theme::dim_color());
+    let _highlight_style = Style::default()
         .bg(Theme::selection_color())
         .fg(fg)
         .add_modifier(Modifier::BOLD);
+
+    // Split the left column: a 1-line search box on top, then
+    // the theme list underneath.
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Fill(1)].as_ref())
+        .split(inner_horizontal[0]);
+
+    // ---- Search box (left top) ----
+    let search_text = format!("filter: {}", picker.query);
+    let search = Paragraph::new(Line::from(vec![
+        Span::styled("filter: ", dim_style),
+        Span::styled(&picker.query, Style::default().fg(fg)),
+    ]))
+    .style(Style::default().bg(bg));
+    f.render_widget(search, left_chunks[0]);
+    // Position the cursor at the end of the query text.
+    let cursor_x = left_chunks[0].x + 8 + picker.query.chars().count() as u16;
+    let cursor_y = left_chunks[0].y;
+    f.set_cursor_position((
+        cursor_x.min(left_chunks[0].x + left_chunks[0].width.saturating_sub(1)),
+        cursor_y,
+    ));
+
+    // ---- Theme list (left bottom) ----
+    let _ = search_text; // kept for future debug output
+
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .fg(fg)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
     let dim_style = Style::default().fg(Theme::dim_color());
 
+    use super::SelectedTheme;
+    // The filtered list — the user may have typed a search
+    // query that narrows the full `picker.themes` list.
+    let filtered: Vec<&SelectedTheme> = picker.filtered();
+    let total = filtered.len();
+
     // Scroll so the selected row stays visible.
-    let visible_rows = inner[0].height as usize;
-    let total = picker.themes.len();
+    let visible_rows = left_chunks[1].height as usize;
     let start = picker
         .selected
         .saturating_sub(visible_rows.saturating_sub(1))
@@ -2256,15 +2304,14 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
     let end = (start + visible_rows).min(total);
 
     let mut items: Vec<ListItem> = Vec::new();
-    for (row_pos, theme) in picker
-        .themes
+    for (row_pos, theme) in filtered
         .iter()
         .enumerate()
         .skip(start)
         .take(end.saturating_sub(start))
     {
         let is_selected = row_pos == picker.selected;
-        let is_original = *theme == picker.original;
+        let is_original = **theme == picker.original;
         let mut spans = Vec::new();
         // Selection marker.
         spans.push(Span::styled(
@@ -2304,13 +2351,13 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("")
+        .highlight_symbol("▌")
         .repeat_highlight_symbol(false);
     let mut list_state = ListState::default();
     if end > start {
         list_state.select(Some(picker.selected.saturating_sub(start)));
     }
-    f.render_stateful_widget(list, inner[0], &mut list_state);
+    f.render_stateful_widget(list, left_chunks[1], &mut list_state);
 
     // ---- Preview pane (right column) ----
     // The preview shows the *active* palette colors (the live
@@ -2379,7 +2426,7 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
                 .style(Style::default().bg(bg)),
         )
         .wrap(Wrap { trim: false });
-    f.render_widget(preview, inner[1]);
+    f.render_widget(preview, inner_horizontal[1]);
 }
 
 /// Render the tab-completion
@@ -2457,7 +2504,8 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
     let highlight_style = Style::default()
         .bg(Theme::selection_color())
         .fg(fg)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
     let dim_style = Style::default().fg(Theme::dim_color());
 
     // Scroll so the
@@ -2506,7 +2554,7 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("")
+        .highlight_symbol("▌")
         .repeat_highlight_symbol(false);
     let mut list_state = ListState::default();
     if end > start {
@@ -3115,37 +3163,19 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg))),
         )
         .highlight_style(
-            // Make the selected row stand out more
-            // than the original muted gray did, but
-            // lighter than a full-on accent-color
-            // background (which the user found too
-            // bright). The balance: the
-            // accent-tinted `selection_color`
-            // palette slot for the row background
-            // (it's still theme-following and
-            // noticeably color-tinted, but
-            // it's the palette's dedicated
-            // "selection" color so it sits
-            // lighter on the eye than the
-            // saturated accent color). The
-            // FOREGROUND flips to the
-            // highlight color slot so the
-            // command text reads in a brighter
-            // shade than the surrounding rows
-            // (without going all the way to
-            // invert/contrast against an
-            // accent background). Bold +
-            // UNDERLINED text modifiers for
-            // the rest of the visual weight —
-            // those plus thevivid
-            // `▌` left-edge bar in the accent
-            // color (see `highlight_symbol`
-            // below) carry the selection
-            // obviousness without the full row
-            // being a colored slab.
+            // Selected row: the theme's `selection` color
+            // for the background, the theme's own `fg` color
+            // (not `highlight_color`) for the foreground so
+            // the text always has maximum contrast with the
+            // theme-designed selection background. Bold +
+            // underline + the `▌` left-edge bar add
+            // visual weight without relying on color
+            // contrast alone (important on light themes
+            // where the selection background is close to
+            // the app background).
             Style::default()
                 .bg(Theme::selection_color())
-                .fg(Theme::highlight_color())
+                .fg(PALETTE.with(|p| p.borrow().fg))
                 .add_modifier(Modifier::BOLD)
                 .add_modifier(Modifier::UNDERLINED),
         )
@@ -3913,7 +3943,24 @@ fn render_preview_line(line: &str) -> Line<'static> {
             // the marker, so we can't
             // pass `text` here — we
             // need the full line).
-            let base = Theme::default();
+            //
+            // Use a foreground-only style
+            // (no background) so the
+            // paragraph's own
+            // `.bg(details_bg)` / `.bg(list_bg)`
+            // is the final authority on the
+            // cell background. Using
+            // `Theme::default()` here would
+            // override the pane's background
+            // with the app's main `bg`, which
+            // produces a visually wrong
+            // background when the user has
+            // a `tuicolor.detailsbg=` setting
+            // or a theme with a different
+            // details-bg color.
+            let base = Style::default().fg(
+                PALETTE.with(|c| c.borrow().fg),
+            );
             let spans = render_inline(line, base);
             let spans = if spans.is_empty() {
                 vec![Span::styled(String::new(), base)]
@@ -4102,7 +4149,22 @@ fn parse_ordered_prefix(s: &str) -> Option<(u32, &str)> {
 /// (heading level, list marker, blockquote
 /// gutter, etc.) that's applied here.
 fn render_block(block: MdBlock) -> Line<'static> {
-    let base = Theme::default();
+    // Foreground-only base style (no
+    // background) so the paragraph's
+    // own `.bg(details_bg)` is the
+    // final authority on the cell
+    // background. Using
+    // `Theme::default()` here would
+    // override the pane's background
+    // with the app's main `bg`, which
+    // produces a visually wrong
+    // background when the user has a
+    // `tuicolor.detailsbg=` setting or
+    // a theme with a different
+    // details-bg color.
+    let base = Style::default().fg(
+        PALETTE.with(|c| c.borrow().fg),
+    );
     match block {
         MdBlock::Heading1(text) => {
             // H1: a `▸ ` glyph in the

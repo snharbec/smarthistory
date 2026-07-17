@@ -1,0 +1,14 @@
+name = "dracula-soft"
+display_name = "Dracula Soft"
+
+[colors]
+accent = "#8be9fd"
+secondary = "#bd93f9"
+bg = "#21212c"
+fg = "#f8f8f2"
+muted = "#6272a4"
+selection = "#313140"
+error = "#ffb86c"
+warning = "#f1fa8c"
+success = "#50fa7b"
+info = "#8be9fd"

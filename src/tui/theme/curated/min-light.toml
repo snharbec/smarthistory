@@ -1,0 +1,14 @@
+name = "min-light"
+display_name = "Min Light"
+
+[colors]
+accent = "#1e40af"
+secondary = "#7d62f9"
+bg = "#ffffff"
+fg = "#393a34"
+muted = "#a0a0a0"
+selection = "#eeeeee"
+error = "#cb0000"
+warning = "#e85500"
+success = "#438958"
+info = "#1e6fd9"

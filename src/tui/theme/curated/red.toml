@@ -1,0 +1,14 @@
+name = "red"
+display_name = "Red"
+
+[colors]
+accent = "#ff5151"
+secondary = "#ff9e64"
+bg = "#1a1a1a"
+fg = "#e0e0e0"
+muted = "#888888"
+selection = "#2a2a2a"
+error = "#ff5151"
+warning = "#ffb454"
+success = "#4fbf67"
+info = "#5d8fbd"

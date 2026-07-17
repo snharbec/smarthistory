@@ -1,0 +1,14 @@
+name = "snazzy-light"
+display_name = "Snazzy Light"
+
+[colors]
+accent = "#3a51c2"
+secondary = "#ff4081"
+bg = "#f8f8f8"
+fg = "#282a36"
+muted = "#6c6c6c"
+selection = "#e8e8e8"
+error = "#ff5c57"
+warning = "#f3f99d"
+success = "#5af78e"
+info = "#9aedfe"

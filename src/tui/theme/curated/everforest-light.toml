@@ -1,0 +1,14 @@
+name = "everforest-light"
+display_name = "Everforest Light"
+
+[colors]
+accent = "#a7c080"
+secondary = "#d699b6"
+bg = "#fdf6e3"
+fg = "#5c6168"
+muted = "#93991f"
+selection = "#eee8d5"
+error = "#f85552"
+warning = "#dfa000"
+success = "#8da101"
+info = "#3a94c5"

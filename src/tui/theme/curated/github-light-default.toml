@@ -1,0 +1,14 @@
+name = "github-light-default"
+display_name = "GitHub Light Default"
+
+[colors]
+accent = "#0969da"
+secondary = "#8250df"
+bg = "#ffffff"
+fg = "#24292f"
+muted = "#57606a"
+selection = "#e8e8e8"
+error = "#cf222e"
+warning = "#bf8700"
+success = "#1a7f37"
+info = "#0969da"

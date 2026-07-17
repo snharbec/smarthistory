@@ -1,0 +1,14 @@
+name = "gruvbox-light-hard"
+display_name = "Gruvbox Light Hard"
+
+[colors]
+accent = "#af3a03"
+secondary = "#8f3f71"
+bg = "#f9f5d7"
+fg = "#3c3836"
+muted = "#7c6f64"
+selection = "#ebdbb2"
+error = "#cc241d"
+warning = "#d65d0e"
+success = "#79740e"
+info = "#076678"

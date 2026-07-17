@@ -1,0 +1,14 @@
+name = "synthwave-84"
+display_name = "Synthwave 84"
+
+[colors]
+accent = "#ff7edb"
+secondary = "#fede5d"
+bg = "#262335"
+fg = "#e4e4e4"
+muted = "#7a7aab"
+selection = "#34294f"
+error = "#fe4450"
+warning = "#fede5d"
+success = "#72f1b8"
+info = "#03e1ff"

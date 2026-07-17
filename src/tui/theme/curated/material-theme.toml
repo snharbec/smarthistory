@@ -1,0 +1,14 @@
+name = "material-theme"
+display_name = "Material Theme"
+
+[colors]
+accent = "#82aaff"
+secondary = "#c792ea"
+bg = "#263238"
+fg = "#eeffff"
+muted = "#546e7a"
+selection = "#1e272c"
+error = "#f07178"
+warning = "#ffcb6b"
+success = "#c3e88d"
+info = "#82aaff"

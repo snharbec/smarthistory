@@ -69,15 +69,32 @@ pub fn parse_query_tokens(pattern: &str) -> QueryTokens {
 ///
 /// `lang` is forwarded as `bat --language <lang>`. When `lang` is
 /// empty the caller should not invoke this function at all.
+///
+/// The active TUI theme's light/dark classification is read
+/// from the `PALETTE` thread-local (populated by
+/// `install_palette`) so `bat` uses the matching `--theme=light`
+/// or `--theme=dark` for syntax colors that contrast with the
+/// TUI's background.
+fn bat_theme_arg() -> &'static str {
+    if crate::tui::theme::palette_storage::PALETTE.with(|p| p.borrow().is_light_theme) {
+        "light"
+    } else {
+        "dark"
+    }
+}
+
 pub fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
     if lang.is_empty() {
         return None;
     }
+    let theme_arg = bat_theme_arg();
     let mut child = Command::new("bat")
         .arg("--language")
         .arg(lang)
         .arg("--plain")
         .arg("--color=always")
+        .arg("--theme")
+        .arg(theme_arg)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -107,11 +124,14 @@ pub fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
 /// `bat` is unavailable, exits non-zero, or emits non-UTF8 —
 /// the caller falls back to the unhighlighted text.
 pub fn highlight_with_bat_auto(context: &str, filepath: &str) -> Option<String> {
+    let theme_arg = bat_theme_arg();
     let mut child = Command::new("bat")
         .arg("--plain")
         .arg("--color=always")
         .arg("--file-name")
         .arg(filepath)
+        .arg("--theme")
+        .arg(theme_arg)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

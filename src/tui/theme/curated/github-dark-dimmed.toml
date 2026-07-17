@@ -1,0 +1,14 @@
+name = "github-dark-dimmed"
+display_name = "GitHub Dark Dimmed"
+
+[colors]
+accent = "#539bf5"
+secondary = "#a371f7"
+bg = "#22272e"
+fg = "#adbac7"
+muted = "#768390"
+selection = "#2d333b"
+error = "#e5534b"
+warning = "#c69026"
+success = "#57ab5a"
+info = "#4493f8"

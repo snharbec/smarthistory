@@ -1,0 +1,14 @@
+name = "vesper"
+display_name = "Vesper"
+
+[colors]
+accent = "#ff8288"
+secondary = "#ffb47e"
+bg = "#101010"
+fg = "#ffffff"
+muted = "#8e8e8e"
+selection = "#101010"
+error = "#ff8288"
+warning = "#ffae58"
+success = "#88c192"
+info = "#9999ff"

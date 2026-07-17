@@ -1,0 +1,14 @@
+name = "gruvbox-dark-soft"
+display_name = "Gruvbox Dark Soft"
+
+[colors]
+accent = "#fe8019"
+secondary = "#b16286"
+bg = "#32302f"
+fg = "#ebdbb2"
+muted = "#928374"
+selection = "#3c3836"
+error = "#fb4934"
+warning = "#fabd2f"
+success = "#b8bb26"
+info = "#83a598"

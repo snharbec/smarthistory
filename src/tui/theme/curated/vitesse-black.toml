@@ -1,0 +1,14 @@
+name = "vitesse-black"
+display_name = "Vitesse Black"
+
+[colors]
+accent = "#a0a0a0"
+secondary = "#7d62f9"
+bg = "#000000"
+fg = "#dadada"
+muted = "#737373"
+selection = "#1a1a1a"
+error = "#cb0000"
+warning = "#e85500"
+success = "#438958"
+info = "#1e6fd9"
