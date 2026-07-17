@@ -187,6 +187,44 @@ All notable changes to this project will be documented in this file.
   `crate::jira::jira_field_complete`
   / `jira_field_complete_with_value`,
   both unit-tested.
+- **JIRA `@` alias tab-completion**
+  — the same `Tab` key
+  also expands `@`
+  aliases and user-
+  defined fragments
+  inside `-` mode:
+  - `@mo<TAB>` →
+    `@month` (built-in
+    alias with trailing
+    space)
+  - `@sp<TAB>` →
+    `@sprint` (user-
+    defined fragment
+    from
+    `jira.search.sprint=...`)
+  - `@me<TAB>` → `@me`
+    (exact match)
+  - `@xyz<TAB>` → no-op +
+    status message (no
+    match)
+  The alias list is the
+  four built-ins (`me`,
+  `today`, `week`,
+  `month`) plus every
+  `jira.search.<name>`
+  entry from the config
+  file. The same LCP
+  logic as field
+  completion applies to
+  ambiguous prefixes.
+  The completion code
+  detects the `@`
+  character immediately
+  before the cursor and
+  routes to
+  `jira_alias_complete`
+  / `jira_alias_complete_with_space`
+  (both unit-tested).
 - The search now fires
   immediately on every
   text-mutating action in

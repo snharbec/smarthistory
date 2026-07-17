@@ -8470,60 +8470,80 @@ impl App {
             self.set_status_message("jira-field-complete: no field name to expand".to_string());
             return;
         }
-        // Run the completion. The
-        // function returns:
-        // - `None` if no field
-        //   starts with the
-        //   prefix.
-        // - `Some("labels=")` if
-        //   the prefix matches
-        //   exactly one field
-        //   (with trailing `=`
-        //   per the
-        //   `_with_value`
-        //   variant).
-        // - `Some("lab")` if
-        //   the prefix matches
-        //   multiple fields
-        //   (longest common
-        //   prefix, no
-        //   trailing `=`).
-        let completion = match crate::jira::jira_field_complete_with_value(prefix_str) {
-            Some(c) => c,
-            None => {
-                // No field starts with
-                // the prefix. Don't
-                // silently destroy
-                // text; surface a
-                // status message.
-                self.set_status_message(format!(
-                    "jira-field-complete: no JIRA field starts with `{}`",
-                    prefix_str
-                ));
-                return;
-            }
+        // Detect `@` alias / fragment
+        // completion. If the
+        // character immediately
+        // before the alphanumeric
+        // word is `@`, the user is
+        // typing an alias like
+        // `@me` or `@today`. We
+        // include the `@` in the
+        // replacement range and
+        // route to the alias
+        // completion path (built-in
+        // aliases + user-defined
+        // fragments from
+        // `jira.search.<name>=...`
+        // config entries).
+        let is_alias = start_char > prefix_len
+            && self.query.as_bytes()[char_to_byte_index(&self.query, start_char - 1)] == b'@';
+        let (completion, _kind) = if is_alias {
+            let alias_prefix = prefix_str; // alphanumeric part after @
+            let result = match crate::jira::jira_alias_complete_with_space(
+                alias_prefix,
+                &self.jira_fragments,
+            ) {
+                Some(c) => c,
+                None => {
+                    self.set_status_message(format!(
+                        "jira-alias-complete: no alias starts with `{}`",
+                        alias_prefix
+                    ));
+                    return;
+                }
+            };
+            // Include the `@` in the
+            // replacement: the result
+            // is just the alias name
+            // (e.g. `"me "`), so we
+            // prepend `@`.
+            let mut full = String::from("@");
+            full.push_str(&result);
+            (full, "alias")
+        } else {
+            let result = match crate::jira::jira_field_complete_with_value(prefix_str) {
+                Some(c) => c,
+                None => {
+                    // No field starts with
+                    // the prefix. Don't
+                    // silently destroy
+                    // text; surface a
+                    // status message.
+                    self.set_status_message(format!(
+                        "jira-field-complete: no JIRA field starts with `{}`",
+                        prefix_str
+                    ));
+                    return;
+                }
+            };
+            (result, "field")
         };
-        // The completion has the
-        // form `<field>[=]`. We
-        // want to replace the
-        // prefix at `start_byte`
-        // with the completion
-        // string, and move the
-        // cursor to the end of
-        // the replacement. Use
-        // `replace_range` so we
-        // do exactly one
-        // allocation.
+        // For alias completions, the `@`
+        // is part of the replacement range.
+        let (replace_start_byte, replace_start_char) = if is_alias {
+            let at_char = start_char - 1;
+            let at_byte = char_to_byte_index(&self.query, at_char);
+            (at_byte, at_char)
+        } else {
+            (start_byte, start_char)
+        };
+        // Replace the prefix with the
+        // completion string and move
+        // the cursor to the end.
         self.query
-            .replace_range(start_byte..cursor_byte, &completion);
-        // The new cursor position
-        // is the start of the
-        // replacement (in
-        // characters) plus the
-        // completion's character
-        // count.
+            .replace_range(replace_start_byte..cursor_byte, &completion);
         let completion_chars = completion.chars().count();
-        self.query_cursor = start_char + completion_chars;
+        self.query_cursor = replace_start_char + completion_chars;
         // Re-arm the debounce/idle
         // timers so the JIRA
         // search fires on the
@@ -26556,6 +26576,98 @@ ssh_config_parse\t\t10,0\n";
         // of the `e`
         // (position 6).
         assert_eq!(app.query_cursor, 6);
+    }
+
+    /// `@` alias expansion:
+    /// `@mo<TAB>` inside JIRA mode expands to `@month `
+    /// (with trailing space so the user can type the
+    /// next token immediately).
+    #[test]
+    fn jira_tab_completion_alias_expands_to_alias_with_space() {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-@mo");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-@month ",
+            "@mo should expand to @month with trailing space, got: {:?}",
+            app.query
+        );
+        assert_eq!(app.query_cursor, 8);
+    }
+
+    /// `@` alias with user-defined fragment:
+    /// `@sp<TAB>` expands to `@sprint ` when the
+    /// fragment is defined in the config.
+    #[test]
+    fn jira_tab_completion_alias_includes_user_fragments() {
+        let mut app = directories_test_app(&[]);
+        app.jira_fragments
+            .insert("sprint".to_string(), "sprint = \"42\"".to_string());
+        app.query = String::from("-@sp");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-@sprint ",
+            "fragment alias should expand with trailing space, got: {:?}",
+            app.query
+        );
+        assert_eq!(app.query_cursor, 9);
+    }
+
+    /// Ambiguous `@` alias: `@me<TAB>` when both
+    /// `me` (builtin) and a `meeting` fragment exist
+    /// should extend to the LCP `@me`.
+    #[test]
+    fn jira_tab_completion_alias_ambiguous_returns_lcp() {
+        let mut app = directories_test_app(&[]);
+        app.jira_fragments
+            .insert("meeting".to_string(), "summary ~ meeting".to_string());
+        app.query = String::from("-@me");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        // `me` matches both `me` and `meeting`; LCP is `me`.
+        assert_eq!(
+            app.query, "-@me",
+            "ambiguous alias should not change query (LCP equals prefix), got: {:?}",
+            app.query
+        );
+    }
+
+    /// No-match `@` alias: `@xyz<TAB>` leaves the
+    /// query unchanged and surfaces a status message.
+    #[test]
+    fn jira_tab_completion_alias_no_match_leaves_unchanged() {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-@xyz");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-@xyz",
+            "no-match alias must NOT modify query, got: {:?}",
+            app.query
+        );
+        let status = app.status_message.as_ref().map(|(m, _)| m.clone());
+        assert!(
+            status.as_deref().unwrap_or("").contains("xyz"),
+            "status should mention unknown alias, got: {status:?}"
+        );
+    }
+
+    /// Field completion still works when the word
+    /// does NOT start with `@`. `proj<TAB>` should
+    /// still expand to `project=`.
+    #[test]
+    fn jira_tab_completion_field_still_works_without_at() {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-proj");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-project=",
+            "field completion without @ should still work, got: {:?}",
+            app.query
+        );
     }
 
     /// The user's request: in

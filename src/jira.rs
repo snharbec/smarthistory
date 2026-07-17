@@ -1393,6 +1393,103 @@ pub fn jira_field_complete_with_value(prefix: &str) -> Option<String> {
     }
 }
 
+/// Tab-completion for JIRA `@` aliases and
+/// user-defined fragments. When the user types
+/// `@m<TAB>` inside `-` mode, this function
+/// expands the prefix to the matching alias or
+/// fragment name.
+///
+/// The known names are the four built-in aliases
+/// (`me`, `today`, `week`, `month`) plus every
+/// key in the user-supplied `fragments` map
+/// ( loaded from `jira.search.<name>=...`
+/// config entries). Matching is case-insensitive
+/// on the prefix.
+///
+/// Returns:
+/// - `None` if no alias/fragment starts with the
+///   prefix.
+/// - `Some("me ")` if the prefix matches exactly
+///   one name (trailing space so the user can
+///   immediately type the next token).
+/// - `Some("m")` if multiple names share a
+///   longest-common-prefix that extends the
+///   user's input.
+///
+/// The caller ( `jira_field_complete_at_cursor`)
+/// prepends the `@` back onto the result.
+pub fn jira_alias_complete(
+    prefix: &str,
+    fragments: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let lower = prefix.to_ascii_lowercase();
+    let mut names: Vec<&str> = Vec::new();
+    // Built-in aliases.
+    for alias in ["me", "today", "week", "month"] {
+        if alias.to_ascii_lowercase().starts_with(&lower) {
+            names.push(alias);
+        }
+    }
+    // User-defined fragments (keys are already
+    // lowercased by `Config::assign_jira_fragment`).
+    for key in fragments.keys() {
+        if key.to_ascii_lowercase().starts_with(&lower) {
+            names.push(key);
+        }
+    }
+    match names.len() {
+        0 => None,
+        1 => Some(names[0].to_string()),
+        _ => {
+            // Longest common prefix.
+            let first = names[0];
+            let mut end = prefix.len();
+            while end < first.len() {
+                let candidate = &first[..end + 1];
+                if names.iter().all(|m| {
+                    m.to_ascii_lowercase()
+                        .starts_with(&candidate.to_ascii_lowercase())
+                }) {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Some(first[..end].to_string())
+        }
+    }
+}
+
+/// Convenience wrapper: appends a trailing space
+/// when the prefix matches exactly one name, so
+/// the cursor lands after the space and the user
+/// can type the next token immediately.
+pub fn jira_alias_complete_with_space(
+    prefix: &str,
+    fragments: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let lower = prefix.to_ascii_lowercase();
+    let mut names: Vec<&str> = Vec::new();
+    for alias in ["me", "today", "week", "month"] {
+        if alias.to_ascii_lowercase().starts_with(&lower) {
+            names.push(alias);
+        }
+    }
+    for key in fragments.keys() {
+        if key.to_ascii_lowercase().starts_with(&lower) {
+            names.push(key);
+        }
+    }
+    match names.len() {
+        0 => None,
+        1 => Some(format!("{} ", names[0])),
+        _ => jira_alias_complete(prefix, fragments),
+    }
+}
+
 /// Build a JQL string from the `-`-mode query body. The body
 /// is tokenized on whitespace; each token is classified:
 ///
@@ -3438,6 +3535,121 @@ mod tests {
             jira_field_complete_with_value("s").as_deref(),
             Some("s"),
             "ambiguous prefix in `_with_value` does NOT append `=`"
+        );
+    }
+
+    // ---- jira_alias_complete ----
+
+    #[test]
+    fn jira_alias_complete_single_match_returns_name() {
+        let fragments = empty_fragments();
+        // `mo` matches only `month`.
+        assert_eq!(
+            jira_alias_complete("mo", &fragments).as_deref(),
+            Some("month"),
+            "`mo` matches only `month`"
+        );
+    }
+
+    #[test]
+    fn jira_alias_complete_with_space_appends_trailing_space() {
+        let fragments = empty_fragments();
+        // `mo` matches only `month`.
+        assert_eq!(
+            jira_alias_complete_with_space("mo", &fragments).as_deref(),
+            Some("month "),
+            "single match gets trailing space"
+        );
+    }
+
+    #[test]
+    fn jira_alias_complete_ambiguous_returns_longest_common_prefix() {
+        let fragments = empty_fragments();
+        // `m` matches both `me` and `month`;
+        // longest common prefix is `m`.
+        assert_eq!(
+            jira_alias_complete("m", &fragments).as_deref(),
+            Some("m"),
+            "`m` matches `me` and `month`; LCP is `m`"
+        );
+        // `mo` matches only `month`.
+        assert_eq!(
+            jira_alias_complete_with_space("mo", &fragments).as_deref(),
+            Some("month "),
+            "`mo` matches only `month`"
+        );
+    }
+
+    #[test]
+    fn jira_alias_complete_no_match_returns_none() {
+        let fragments = empty_fragments();
+        assert_eq!(jira_alias_complete("xyz", &fragments), None);
+        assert_eq!(jira_alias_complete_with_space("xyz", &fragments), None);
+    }
+
+    #[test]
+    fn jira_alias_complete_empty_prefix_returns_none() {
+        let fragments = empty_fragments();
+        assert_eq!(jira_alias_complete("", &fragments), None);
+        assert_eq!(jira_alias_complete_with_space("", &fragments), None);
+    }
+
+    #[test]
+    fn jira_alias_complete_is_case_insensitive() {
+        let fragments = empty_fragments();
+        // `mo` matches `month` regardless of case.
+        assert_eq!(
+            jira_alias_complete("MO", &fragments).as_deref(),
+            Some("month"),
+            "uppercase prefix matches lowercase alias"
+        );
+        assert_eq!(
+            jira_alias_complete_with_space("TO", &fragments).as_deref(),
+            Some("today "),
+            "mixed-case prefix matches"
+        );
+    }
+
+    #[test]
+    fn jira_alias_complete_includes_user_fragments() {
+        let mut fragments = std::collections::HashMap::new();
+        fragments.insert("sprint".to_string(), "sprint = \"42\"".to_string());
+        fragments.insert("blocked".to_string(), "resolution = Unresolved".to_string());
+        // `sp` matches `sprint` (fragment) and `status` is not an alias.
+        assert_eq!(
+            jira_alias_complete_with_space("sp", &fragments).as_deref(),
+            Some("sprint "),
+            "fragment `sprint` is included in completion"
+        );
+        // `b` matches `blocked` (fragment).
+        assert_eq!(
+            jira_alias_complete_with_space("b", &fragments).as_deref(),
+            Some("blocked "),
+            "fragment `blocked` is included"
+        );
+        // `bl` also matches only `blocked`.
+        assert_eq!(
+            jira_alias_complete_with_space("bl", &fragments).as_deref(),
+            Some("blocked "),
+        );
+    }
+
+    #[test]
+    fn jira_alias_complete_fragments_and_builtins_together() {
+        let mut fragments = std::collections::HashMap::new();
+        fragments.insert("meeting".to_string(), "summary ~ meeting".to_string());
+        // `me` matches BOTH `me` (built-in) and `meeting` (fragment).
+        // Longest common prefix is `me`.
+        assert_eq!(
+            jira_alias_complete("me", &fragments).as_deref(),
+            Some("me"),
+            "ambiguous between builtin and fragment returns LCP"
+        );
+        // `mee` matches only `meeting`.
+        assert_eq!(
+            jira_alias_complete_with_space("mee", &fragments).as_deref(),
+            Some("meeting "),
+            "disambiguated prefix matches fragment only"
         );
     }
 }
