@@ -466,6 +466,25 @@ pub enum Action {
     /// the selected row carries a CodeGraph node id; otherwise a
     /// no-op with a status message.
     CodegraphRelations,
+    /// Navigate to the previous (older) entry in the current
+    /// mode's input history. Default `C-p` (readline /
+    /// bash `previous-history`). Scoped to the active
+    /// prefix mode (`+`, `=`, `%`, `@`, `!`, `#`, `*`,
+    /// `~`, `$`, `&`, `,`, `-`, or plain no-prefix), so
+    /// pressing it in `&` mode recalls past `&` queries
+    /// only, not all-mode history. Readline-style
+    /// semantics: pressing C-p from the live query saves
+    /// the in-progress query as a "draft" and shows the
+    /// most recent entry; further C-p presses move toward
+    /// older entries; pressing C-n past the newest
+    /// restores the draft; any keystroke that edits the
+    /// recalled query commits it.
+    PreviousHistory,
+    /// Navigate to the next (newer) entry in the current
+    /// mode's input history. Default `C-n` (readline /
+    /// bash `next-history`). Mirror of
+    /// [`Action::PreviousHistory`].
+    NextHistory,
     /// Context-aware "dive" key: a single binding (default
     /// `C-]`, ASCII GS 0x1D — chosen over `S-Return` because
     /// many terminals emit Shift-Return as a non-standard
@@ -535,6 +554,8 @@ impl Action {
             Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
             Action::CodegraphRelations => "codegraph-relations",
+            Action::PreviousHistory => "previous-history",
+            Action::NextHistory => "next-history",
             Action::SmartOpen => "smart-open",
         }
     }
@@ -587,6 +608,8 @@ impl Action {
             Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
             Action::CodegraphRelations => "Browse callers / callees",
+            Action::PreviousHistory => "Previous history entry",
+            Action::NextHistory => "Next history entry",
             Action::SmartOpen => "Smart open (context dive)",
         }
     }
@@ -636,6 +659,8 @@ impl Action {
             Action::Correct => "llm",
             Action::DownloadJiraIssue => "tools",
             Action::CodegraphRelations => "codegraph",
+            Action::PreviousHistory => "navigation",
+            Action::NextHistory => "navigation",
             Action::SmartOpen => "tools",
             Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
@@ -688,8 +713,17 @@ impl Action {
             Action::Cancel => "C-c",
             Action::CycleMode => "C-g",
             Action::ToggleDuplicateFilter => "none",
-            Action::CycleThemeNext => "C-n",
-            Action::CycleThemePrev => "C-p",
+            // C-n / C-p were previously the defaults for
+            // CycleThemeNext / CycleThemePrev. They're now
+            // claimed by NextHistory / PreviousHistory (the
+            // per-mode query-history recall) so theme cycling
+            // ships unbound by default. Users who want keyboard
+            // theme cycling can rebind via
+            // `key.cycle-theme-next=...` / `key.cycle-theme-prev=...`
+            // (e.g. `M-n` / `M-p` are free and a natural
+            // mnemonic for "next / previous").
+            Action::CycleThemeNext => "none",
+            Action::CycleThemePrev => "none",
             Action::EditComment => "C-e",
             Action::ShowOutput => "C-o",
             Action::YankSelection => "C-y",
@@ -730,6 +764,8 @@ impl Action {
             Action::JiraFieldComplete => "Tab",
             Action::PickPrefix => "F1",
             Action::CodegraphRelations => "C-r",
+            Action::PreviousHistory => "C-p",
+            Action::NextHistory => "C-n",
             // `C-]` (ASCII GS, 0x1D) instead of the more semantic
             // `S-Return`: many terminals either emit Shift-Return
             // as a non-standard `ESC[27;5;13~` sequence that
@@ -1134,6 +1170,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::JiraFieldComplete,
     Action::PickPrefix,
     Action::CodegraphRelations,
+    Action::PreviousHistory,
+    Action::NextHistory,
     Action::SmartOpen,
 ];
 

@@ -1954,10 +1954,32 @@ pub fn build_jql(
     // diagnostic noise, so we only report it once.
     let mut undefined_fragments: Vec<String> = Vec::new();
     for tok in body.split_whitespace() {
-        // Strip a leading `@` so the alias is matched
-        // on the bare keyword. This matches the
-        // notes-mode parser convention: `@me` and `me`
-        // both work.
+        // Strip a leading `@` so the built-in aliases
+        // (`me` / `today` / `week` / `month`) are matched
+        // on the bare keyword — this matches the notes-mode
+        // parser convention: `@me` and `me` both work.
+        //
+        // The user-defined fragment lookup below, however,
+        // requires the token to be `@`-prefixed. An
+        // unprefixed token (e.g. `kramfors` when
+        // `jira.search.kramfors=...` is defined) is NOT
+        // expanded — it's treated as plain text. The `@` is
+        // a deliberate invocation, not an alias the parser
+        // silently resolves. This is the user-visible
+        // "define a search pattern in config, only expand
+        // it when prefixed by `@`" contract.
+        //
+        // The asymmetry between built-ins (permissive)
+        // and user-defined fragments (strict) is
+        // deliberate: `me` and `today` are common words
+        // and the historical permissive matching is
+        // preserved for muscle memory; user-defined
+        // patterns are typically named after project
+        // words (labels, epics, etc.) that would collide
+        // with free-text searches if expanded
+        // unprefixed. If you'd rather require `@` for
+        // everything, swap the order of the match arms
+        // so the built-ins also check `tok.starts_with('@')`.
         //
         // NOTE: only the alias-match path uses the
         // stripped `bare`. Non-matching tokens fall
@@ -1981,41 +2003,78 @@ pub fn build_jql(
             "week" => date_filter = Some(DateAlias::Week),
             "month" => date_filter = Some(DateAlias::Month),
             _ => {
-                // Not a built-in alias. Check if it's a
-                // user-defined fragment (case-insensitive
-                // lookup). The fragment's JQL is trusted
-                // verbatim — the user wrote it in their
-                // config — so we wrap it in parens
-                // defensively to keep any internal
-                // `AND` / `OR` operators from breaking
-                // the top-level AND-join.
-                if let Some(fragment_jql) = fragments.get(&lower) {
-                    fragment_clauses.push(format!("({})", fragment_jql));
-                } else {
-                    // Not a recognised fragment. We
-                    // record the original-case name
-                    // for the diagnostic (preserves
-                    // the user's casing in the
-                    // status message) but only
-                    // record the first occurrence
-                    // to avoid spamming the user
-                    // with duplicates of the same
-                    // typo.
-                    if !is_built_in_alias(&lower) && tok.starts_with('@') {
-                        let original = bare.to_string();
-                        if !undefined_fragments
-                            .iter()
-                            .any(|n| n.eq_ignore_ascii_case(&original))
-                        {
-                            undefined_fragments.push(original);
+                // User-defined fragment lookup. The
+                // gate on `tok.starts_with('@')` is
+                // the bug fix: without it, an
+                // unprefixed token would match a
+                // fragment with the same name (the
+                // `bare` variable above already had
+                // the `@` stripped, so the lookup
+                // key is identical either way). The
+                // gate makes `@kramfors` expand to
+                // `(labels in ("KR"))` while
+                // `kramfors` is a free-text search
+                // for the description / summary.
+                if tok.starts_with('@') {
+                    if let Some(fragment_jql) = fragments.get(&lower) {
+                        fragment_clauses.push(format!("({})", fragment_jql));
+                    } else {
+                        // Not a recognised fragment. We
+                        // record the original-case name
+                        // for the diagnostic (preserves
+                        // the user's casing in the
+                        // status message) but only
+                        // record the first occurrence
+                        // to avoid spamming the user
+                        // with duplicates of the same
+                        // typo. The `is_built_in_alias`
+                        // check filters out the four
+                        // built-in aliases — typing
+                        // `@me` is never a typo.
+                        if !is_built_in_alias(&lower) {
+                            let original = bare.to_string();
+                            if !undefined_fragments
+                                .iter()
+                                .any(|n| n.eq_ignore_ascii_case(&original))
+                            {
+                                undefined_fragments.push(original);
+                            }
+                        }
+                        // Not an alias; fall through to
+                        // the existing key /
+                        // field-value / free-text
+                        // classifier. Push the
+                        // ORIGINAL token (with the
+                        // leading `@` preserved) per
+                        // the comment above.
+                        if key_re.is_match(tok) {
+                            keys.push(tok);
+                        } else if let Some(caps) = kv_re.captures(tok) {
+                            let field = caps.get(1).unwrap().as_str();
+                            let value = caps.get(2).unwrap().as_str();
+                            if field.eq_ignore_ascii_case("project") {
+                                explicit_project = Some(value);
+                            } else {
+                                kvs.push((field, value));
+                            }
+                        } else {
+                            text.push(tok);
                         }
                     }
-                    // Not an alias; fall through to the
-                    // existing key / field-value /
-                    // free-text classifier. Push the
-                    // ORIGINAL token (with the leading
-                    // `@` preserved) per the comment
-                    // above.
+                } else {
+                    // Unprefixed token — not a
+                    // fragment, not a built-in alias.
+                    // Run the key / field-value /
+                    // free-text classifier directly.
+                    // This is the `kramfors` (no `@`)
+                    // case: the user's config has
+                    // `jira.search.kramfors=labels in
+                    // ("KR")`, but `kramfors` is a
+                    // free-text search for the
+                    // description / summary, not a
+                    // fragment expansion. Users invoke
+                    // the fragment explicitly as
+                    // `@kramfors`.
                     if key_re.is_match(tok) {
                         keys.push(tok);
                     } else if let Some(caps) = kv_re.captures(tok) {
@@ -2940,6 +2999,127 @@ mod tests {
             jql,
             r#"(labels = "test") AND (sprint = "Sprint 42") ORDER BY updated DESC"#
         );
+    }
+
+    /// Unprefixed tokens (e.g. `kramfors` when
+    /// `jira.search.kramfors=...` is defined) are
+    /// treated as plain text — they do NOT expand
+    /// the fragment. The `@` is a deliberate
+    /// invocation. The user reported this as a
+    /// bug: typing `-kramfors` (no `@`) in JIRA
+    /// mode was silently expanding the `kramfors`
+    /// fragment even when the user just wanted a
+    /// free-text search. With this fix, the user
+    /// must type `-@kramfors` to expand the
+    /// fragment; `-kramfors` searches the
+    /// description / summary for the literal
+    /// string.
+    #[test]
+    fn build_jql_unprefixed_fragment_name_is_free_text() {
+        // `label1` is defined as a fragment
+        // (labels = "test") in `fragments_with_labels`.
+        // Typing it without `@` must NOT expand the
+        // fragment — it must fall through to the
+        // free-text classifier.
+        let (jql, undefined) = build_jql(
+            "label1",
+            None,
+            TEST_NOW_EPOCH,
+            &fragments_with_labels(),
+        );
+        // The JQL is a free-text search for the
+        // literal `label1`, NOT the fragment's JQL.
+        assert!(jql.contains(r#"(description ~ "label1" OR summary ~ "label1")"#));
+        assert!(
+            !jql.contains(r#"labels = "test""#),
+            "unprefixed `label1` must NOT expand the fragment; got: {}",
+            jql
+        );
+        // No undefined fragment: the token was
+        // handled as free text, not as a
+        // fragment-name lookup that failed.
+        assert!(
+            undefined.is_empty(),
+            "unprefixed `label1` is free text, not an unknown fragment; got: {:?}",
+            undefined
+        );
+    }
+
+    /// The same query, prefixed with `@`, expands
+    /// the fragment. This is the contract: `@`
+    /// is a deliberate invocation, unprefixed is
+    /// free text. The two behaviours co-exist
+    /// cleanly in one parser.
+    #[test]
+    fn build_jql_prefixed_fragment_name_expands() {
+        let (jql, undefined) = build_jql(
+            "@label1",
+            None,
+            TEST_NOW_EPOCH,
+            &fragments_with_labels(),
+        );
+        assert!(jql.contains(r#"(labels = "test")"#));
+        assert!(undefined.is_empty());
+    }
+
+    /// Mixed query: `@label1` expands the
+    /// fragment; the bare `label1` (no `@`)
+    /// elsewhere in the body is free text. The
+    /// two are AND-joined in the JQL.
+    #[test]
+    fn build_jql_mixed_prefixed_and_unprefixed_fragment_name() {
+        let (jql, undefined) = build_jql(
+            "@label1 label1",
+            None,
+            TEST_NOW_EPOCH,
+            &fragments_with_labels(),
+        );
+        // The fragment expansion appears in the
+        // JQL.
+        assert!(
+            jql.contains(r#"(labels = "test")"#),
+            "expected fragment expansion for `@label1`; got: {}",
+            jql
+        );
+        // The unprefixed token is in the free-text
+        // path (description / summary).
+        assert!(
+            jql.contains(r#"(description ~ "label1" OR summary ~ "label1")"#),
+            "expected free-text for unprefixed `label1`; got: {}",
+            jql
+        );
+        // No undefined diagnostics: the
+        // unprefixed token is free text, not a
+        // typo.
+        assert!(
+            undefined.is_empty(),
+            "unprefixed `label1` is free text, not a typo; got: {:?}",
+            undefined
+        );
+    }
+
+    /// The built-in aliases (`me`, `today`, `week`,
+    /// `month`) keep their permissive matching —
+    /// typing `me` (no `@`) still triggers the
+    /// `@me` alias. The asymmetry with
+    /// user-defined fragments is deliberate: the
+    /// built-ins are short common words where
+    /// requiring `@` would be friction, while
+    /// user-defined patterns are typically
+    /// project words (labels, epics) that would
+    /// collide with free-text searches if
+    /// expanded unprefixed.
+    #[test]
+    fn build_jql_built_in_aliases_still_work_without_at() {
+        // `me` (no `@`) still sets `me_alias`.
+        let (jql, undefined) = build_jql(
+            "me",
+            None,
+            TEST_NOW_EPOCH,
+            &empty_fragments(),
+        );
+        assert!(jql.contains("assignee = currentUser()"));
+        assert!(undefined.is_empty());
     }
 
     #[test]

@@ -1239,15 +1239,21 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         binding_for(Action::CycleSortOrder),
         "cycle sort order: AGE (newest first) → FREQ (most-run first) → AGE",
     );
+    // Theme cycling used to default to C-n / C-p; those keys
+    // are now claimed by per-mode query-history recall
+    // (PreviousHistory / NextHistory), so theme cycling ships
+    // unbound by default. Users who want keyboard theme
+    // cycling can rebind it (e.g. `M-n` / `M-p`) in the config
+    // file.
     row(
         &mut lines,
-        binding_for(Action::CycleThemeNext),
-        "cycle to the next theme",
+        binding_for(Action::PreviousHistory),
+        "previous history entry for the current mode (readline `previous-history`)",
     );
     row(
         &mut lines,
-        binding_for(Action::CycleThemePrev),
-        "cycle to the previous theme",
+        binding_for(Action::NextHistory),
+        "next history entry for the current mode (readline `next-history`)",
     );
 
     lines.push(Line::from(""));

@@ -1472,6 +1472,33 @@ struct App {
     /// a clean no-op in repos without CodeGraph.
     codegraph_client: Option<crate::codegraph::CodeGraphClient>,
 
+    /// Per-mode input query history. Keyed by the
+    /// leading `char` of the query (the prefix char,
+    /// e.g. `&` for codegraph mode, or `MODE_NONE`
+    /// for plain no-prefix history). Each value is
+    /// the list of past queries the user typed in
+    /// that mode, **newest first**. Persisted across
+    /// TUI sessions to `<db_dir>/query_history.json`
+    /// so the recall state survives restarts.
+    mode_query_history:
+        std::collections::HashMap<char, Vec<String>>,
+
+    /// Per-mode in-progress "draft" query saved when
+    /// the user starts history recall (C-p from the
+    /// live query). Restored on C-n past the newest
+    /// entry so the user can resume typing where they
+    /// left off. Session-local — not persisted, so
+    /// fresh TUI sessions always start with the live
+    /// query and no draft.
+    mode_query_drafts: std::collections::HashMap<char, String>,
+
+    /// Per-mode recall position. `None` means "at the
+    /// live query" (the current `self.query` IS the
+    /// user's in-progress text); `Some(0)` means "at
+    /// the newest history entry"; `Some(N-1)` means
+    /// "at the oldest". Session-local — not persisted.
+    mode_query_history_index: std::collections::HashMap<char, Option<usize>>,
+
     /// Aggregated files-mode state:
     /// debounce timer, in-flight walk
     /// request, last walked pattern,
@@ -1543,6 +1570,54 @@ const JIRA_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400)
 /// debounce. The space trigger fires before either
 /// the fast debounce or the idle timeout.
 const JIRA_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Sentinel for the plain (no-prefix) mode in the per-mode
+/// query-history maps. Real prefix chars (`+`, `=`, `%`, `@`,
+/// `!`, `#`, `*`, `~`, `$`, `&`, `,`, `-`) are all printable;
+/// `'\0'` can't be one, so it uniquely identifies "the query
+/// has no leading prefix char" without colliding with a real
+/// mode. Used as the `char` key in
+/// [`App::mode_query_history`] / `mode_query_drafts` /
+/// `mode_query_history_index` for the plain-mode slot.
+const MODE_NONE: char = '\0';
+
+/// The mode char (or `MODE_NONE` for plain) of a given query,
+/// decided by the leading `char`. An empty query returns
+/// `MODE_NONE` so the plain-history slot is the default
+/// destination for empty / pre-mode queries (e.g. before the
+/// user has typed their first prefix char).
+///
+/// Centralising this here (rather than replicating the
+/// prefix-character table inside `App`) keeps the mode
+/// detection consistent with the per-mode history bookkeeping
+/// and the existing `is_<mode>_query` predicates, and makes
+/// it straightforward to add a new prefix by extending
+/// `QueryPrefixes` (the function reads the configured
+/// prefixes, not a hard-coded list).
+fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
+    let Some(c) = query.chars().next() else {
+        return MODE_NONE;
+    };
+    let known: [char; 12] = [
+        prefixes.output,
+        prefixes.llm,
+        prefixes.question,
+        prefixes.notes,
+        prefixes.todo,
+        prefixes.directories,
+        prefixes.panes,
+        prefixes.jira,
+        prefixes.files,
+        prefixes.tags,
+        prefixes.codegraph,
+        prefixes.ag,
+    ];
+    if known.contains(&c) {
+        c
+    } else {
+        MODE_NONE
+    }
+}
 
 impl App {
     /// True if the active match algorithm is Regex.
@@ -6801,6 +6876,9 @@ impl App {
             jira_add_comment_in_flight: false,
             tags_source_cache: std::collections::HashMap::new(),
             codegraph_client: None,
+            mode_query_history: std::collections::HashMap::new(),
+            mode_query_drafts: std::collections::HashMap::new(),
+            mode_query_history_index: std::collections::HashMap::new(),
         };
         app.recompile_regex();
         app.refresh();
@@ -7836,6 +7914,24 @@ impl App {
     }
 
     fn select_for_run(&mut self) {
+        // Record the current query (with its leading prefix
+        // char) into the active mode's history before
+        // dispatching. Run is the natural "the user is done
+        // with this query, remember it" moment: the in-memory
+        // history is persisted to disk at TUI exit, so the
+        // entry survives across sessions. Empty queries
+        // are skipped inside `record_to_mode_history`.
+        //
+        // We extract the mode char + query up front so the
+        // immutable borrow of `self` (needed to read
+        // `self.query` and compute the mode) is released
+        // before the `&mut self` call into
+        // `record_to_mode_history`. (Same borrow-ordering
+        // pattern as `open_codegraph_relations`: the
+        // borrow checker disallows the chained immutable/
+        // mutable borrow of the same `self`.)
+        let (mode_char, query_snapshot) = (self.current_mode_char(), self.query.clone());
+        self.record_to_mode_history(mode_char, &query_snapshot);
         self.select_for_run_dispatch()
     }
 
@@ -8804,6 +8900,17 @@ impl App {
                 // the new character lands at position 0.
                 self.query_cursor = 0;
             }
+            // Snapshot the query before the mutation. We use
+            // it for two things: (a) commit the per-mode history
+            // recall session — any keystroke that mutates the
+            // query exits recall mode so the user's edits
+            // become the live query; (b) record the OLD query
+            // into the OLD mode's history if the leading
+            // prefix char is about to change (rare, but
+            // happens in LLM mode when the user inserts at
+            // position 0, overwriting the leading `=`).
+            let old_query = self.query.clone();
+            self.history_exit_recall();
             self.query_touched = true;
             // Insert the new character at the current cursor
             // position rather than unconditionally appending.
@@ -8815,6 +8922,19 @@ impl App {
             let byte_idx = char_to_byte_index(&self.query, self.query_cursor);
             self.query.insert(byte_idx, c);
             self.query_cursor += 1;
+            // Leading-char change detection. In non-LLM
+            // modes the cursor is always at the end, so
+            // `push_char` never changes the leading char; the
+            // check is a no-op there. In LLM mode the user
+            // can move the cursor anywhere, so inserting at
+            // position 0 replaces the leading `=` with a new
+            // character — when that happens, record the OLD
+            // LLM query into LLM mode's history.
+            if query_mode_char(&old_query, &self.query_prefixes)
+                != query_mode_char(&self.query, &self.query_prefixes)
+            {
+                self.on_query_mode_change(&old_query);
+            }
             self.recompile_regex();
             // Re-arm the LLM auto-call debounce (or clear
             // the preview if we just left LLM mode by
@@ -8962,6 +9082,16 @@ impl App {
             // an empty, prefilled query still leaves the prefilled
             // value alone until the user starts typing).
             if self.query_cursor > 0 {
+                // Snapshot the query BEFORE the mutation so we
+                // can (a) record it into its old mode's history
+                // if the leading prefix char is about to change,
+                // and (b) commit the per-mode history recall
+                // session if the user is currently navigating
+                // with C-p / C-n. Any keystroke that mutates
+                // the query should commit the recall (the
+                // user's edits become the "live" query).
+                let old_query = self.query.clone();
+                self.history_exit_recall();
                 self.query_touched = true;
                 // Delete the character to the LEFT of the
                 // cursor. The cursor is always >= 1 here (the
@@ -8973,6 +9103,20 @@ impl App {
                 let byte_idx = char_to_byte_index(&self.query, self.query_cursor - 1);
                 self.query.remove(byte_idx);
                 self.query_cursor -= 1;
+                // If the leading char changed (e.g. the user
+                // backspaced through their prefix `&` and is
+                // now in plain mode, or backspaced the entire
+                // query down to a different prefix char), record
+                // the OLD query into the OLD mode's history
+                // and reset the new mode's recall state. The
+                // `on_query_mode_change` helper handles both
+                // sides: it records `old_query` and clears the
+                // recall state for the mode we're now in.
+                if query_mode_char(&old_query, &self.query_prefixes)
+                    != query_mode_char(&self.query, &self.query_prefixes)
+                {
+                    self.on_query_mode_change(&old_query);
+                }
                 self.recompile_regex();
                 self.refresh();
                 // Mirror of `push_char`: re-arm the LLM
@@ -9698,6 +9842,14 @@ impl App {
             // position 0" contract.
             return;
         }
+        // Snapshot the query before the mutation so
+        // we can record the OLD query into the OLD
+        // mode's history if the leading prefix char
+        // is about to change, and commit any
+        // in-progress per-mode history recall
+        // session. Same pattern as `backspace`.
+        let old_query = self.query.clone();
+        self.history_exit_recall();
         self.query_touched = true;
         // Walk left in *characters*, counting how
         // many we delete. The cursor is in
@@ -9717,6 +9869,16 @@ impl App {
         let end_byte = char_to_byte_index(&self.query, self.query_cursor);
         self.query.replace_range(start_byte..end_byte, "");
         self.query_cursor = start_of_word;
+        // Leading-char change detection (same as
+        // `backspace`): if the deletion crossed the
+        // mode boundary (e.g. C-w deleted the prefix
+        // char), record the OLD query into the OLD
+        // mode's history.
+        if query_mode_char(&old_query, &self.query_prefixes)
+            != query_mode_char(&self.query, &self.query_prefixes)
+        {
+            self.on_query_mode_change(&old_query);
+        }
         self.recompile_regex();
         self.refresh();
         self.llm_touch();
@@ -9738,6 +9900,16 @@ impl App {
         if let Some(ref mut buf) = self.comment_edit {
             buf.clear();
         } else {
+            // Clear-input is a user edit. Exit any
+            // in-progress per-mode history recall (the
+            // user's typing intent is "blank slate", not
+            // "edit the recalled entry"), but do NOT
+            // record the cleared query to history —
+            // empty queries are skipped by
+            // `record_to_mode_history` anyway, and
+            // recording just before clearing would
+            // capture the about-to-be-discarded text.
+            self.history_exit_recall();
             self.query.clear();
             self.query_touched = true;
             self.query_regex = None;
@@ -11363,6 +11535,323 @@ impl App {
         self.codegraph_relations_picker = None;
     }
 
+    /// The mode char of the current `self.query` (or
+    /// `MODE_NONE` for plain no-prefix). The leading char is
+    /// the mode identity — every prefix mode owns a
+    /// `Vec<String>` of past queries in
+    /// [`App::mode_query_history`], and the plain history lives
+    /// under the `MODE_NONE` key. The empty query is treated
+    /// as plain (no mode) so the "no history yet" case doesn't
+    /// accidentally claim a mode.
+    fn current_mode_char(&self) -> char {
+        query_mode_char(&self.query, &self.query_prefixes)
+    }
+
+    /// Record `query` into the history of the given mode char.
+    /// The query is recorded as-is (preserving its leading
+    /// prefix char) so recalling it later puts the user back
+    /// in the same mode. Empty / whitespace-only queries are
+    /// skipped (no point recalling them). Consecutive
+    /// duplicates are skipped so rapid re-runs of the same
+    /// command don't bloat the history. The history is capped
+    /// at 100 entries per mode; older entries are dropped
+    /// from the tail (oldest end).
+    ///
+    /// Called from three places:
+    /// 1. **Mode transition** (the leading char of the query
+    ///    changed via backspace or push_char) — the OLD query
+    ///    is recorded to the OLD mode's history via
+    ///    [`App::on_query_mode_change`].
+    /// 2. **Run** (the user picked a row and is exiting) — the
+    ///    final query (with its prefix) is recorded to the
+    ///    current mode's history.
+    /// 3. **Tests** directly.
+    fn record_to_mode_history(&mut self, mode_char: char, query: &str) {
+        if query.trim().is_empty() {
+            return;
+        }
+        let entry = self.mode_query_history.entry(mode_char).or_default();
+        // Consecutive dedup: skip if the query is identical
+        // to the most recent entry. Without this, the user
+        // picking the same row three times in a row would
+        // add three identical copies to the history and
+        // the C-p recall would feel broken (cycling through
+        // duplicates to get to the actual previous query).
+        if entry.first().map(String::as_str) == Some(query) {
+            return;
+        }
+        entry.insert(0, query.to_string());
+        // Cap at 100 entries per mode so a long-lived TUI
+        // session can't grow the JSON file unbounded.
+        const MAX: usize = 100;
+        if entry.len() > MAX {
+            entry.truncate(MAX);
+        }
+    }
+
+    /// Call when the leading char of `self.query` is about to
+    /// change (e.g. user backspaced the prefix and is now in
+    /// plain mode, or typed a new prefix over the leading
+    /// char in LLM mode). Records the OLD query (with its
+    /// previous mode) into the old mode's history, and
+    /// resets the recall state for the new mode so the new
+    /// mode starts at "live" (no draft, no recalled entry).
+    ///
+    /// The OLD query is passed in by the caller because by the
+    /// time the leading char has actually changed, the OLD
+    /// query is gone from `self.query` (it was mutated to
+    /// the new form). Callers compute the OLD query before
+    /// the mutation, then call this helper after.
+    fn on_query_mode_change(&mut self, old_query: &str) {
+        let old_mode = query_mode_char(old_query, &self.query_prefixes);
+        self.record_to_mode_history(old_mode, old_query);
+        // Reset the NEW mode's recall state. The user just
+        // switched modes; their prior recall session (in the
+        // old mode) is implicitly dropped. The new mode
+        // starts at "live" so the first C-p recalls the new
+        // mode's own history, not a leftover from the old
+        // mode.
+        let new_mode = self.current_mode_char();
+        self.mode_query_history_index.insert(new_mode, None);
+        self.mode_query_drafts.remove(&new_mode);
+    }
+
+    /// Exit recall mode (if active) and discard the saved
+    /// draft. Called by `push_char`, `backspace`, and
+    /// `clear_query`: any keystroke that mutates the query
+    /// commits the recall session, so the user's edits become
+    /// the "live" query and the next C-p starts a fresh
+    /// recall cycle.
+    fn history_exit_recall(&mut self) {
+        let mode = self.current_mode_char();
+        if self
+            .mode_query_history_index
+            .get(&mode)
+            .copied()
+            .flatten()
+            .is_some()
+        {
+            self.mode_query_history_index.insert(mode, None);
+            // The draft was the user's pre-recall
+            // in-progress text. They've now edited the
+            // recalled entry (or the live query) and
+            // diverged from it, so the draft is no
+            // longer relevant. Dropping it here means a
+            // later C-n past the newest history entry
+            // lands on an empty query (rather than
+            // restoring a stale draft the user
+            // intentionally diverged from).
+            self.mode_query_drafts.remove(&mode);
+        }
+    }
+
+    /// Move to the previous (older) entry in the current
+    /// mode's history. Readline `previous-history`
+    /// semantics:
+    /// - From the live query (history_index = None): save
+    ///   the in-progress query as a "draft" and load the
+    ///   newest history entry.
+    /// - From a recalled entry: move one step older
+    ///   (index + 1, clamped at the oldest).
+    /// - At the oldest entry: stay.
+    /// - No history for this mode: no-op.
+    fn history_previous(&mut self) {
+        let mode = self.current_mode_char();
+        let n = self
+            .mode_query_history
+            .get(&mode)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let idx = self
+            .mode_query_history_index
+            .get(&mode)
+            .copied()
+            .flatten();
+        match idx {
+            None => {
+                // Save the current in-progress query as
+                // the draft for this mode (only the first
+                // time we enter recall — re-recalling after
+                // C-n back to draft is a no-op for the
+                // draft, which `history_exit_recall`
+                // would have already cleared).
+                if !self.mode_query_drafts.contains_key(&mode) {
+                    self.mode_query_drafts.insert(mode, self.query.clone());
+                }
+                let entry = self
+                    .mode_query_history
+                    .get(&mode)
+                    .and_then(|v| v.first().cloned());
+                if let Some(q) = entry {
+                    self.query = q;
+                    self.query_cursor = self.query.chars().count();
+                    self.query_touched = true;
+                    self.recompile_regex();
+                    self.mode_query_history_index.insert(mode, Some(0));
+                    self.refresh();
+                }
+            }
+            Some(i) => {
+                if i + 1 < n {
+                    let next_i = i + 1;
+                    let entry = self
+                        .mode_query_history
+                        .get(&mode)
+                        .and_then(|v| v.get(next_i).cloned());
+                    if let Some(q) = entry {
+                        self.query = q;
+                        self.query_cursor = self.query.chars().count();
+                        self.query_touched = true;
+                        self.recompile_regex();
+                        self.mode_query_history_index.insert(mode, Some(next_i));
+                        self.refresh();
+                    }
+                }
+                // else: at oldest, stay
+            }
+        }
+    }
+
+    /// Move to the next (newer) entry in the current mode's
+    /// history. Readline `next-history` semantics:
+    /// - From the live query (history_index = None): no-op.
+    /// - From the newest entry (index = 0): restore the
+    ///   saved draft (or empty if no draft) and exit recall.
+    /// - From a recalled entry: move one step newer
+    ///   (index - 1).
+    fn history_next(&mut self) {
+        let mode = self.current_mode_char();
+        let Some(i) = self
+            .mode_query_history_index
+            .get(&mode)
+            .copied()
+            .flatten()
+        else {
+            return; // already at the live query
+        };
+        if i == 0 {
+            // Restore the draft and exit recall mode. The
+            // draft is the in-progress query the user had
+            // before they started recalling; clearing the
+            // `mode_query_history_index` means subsequent
+            // C-p starts a fresh recall cycle.
+            let draft = self.mode_query_drafts.remove(&mode);
+            self.query = draft.unwrap_or_default();
+            self.query_cursor = self.query.chars().count();
+            self.query_touched = true;
+            self.recompile_regex();
+            self.mode_query_history_index.insert(mode, None);
+            self.refresh();
+        } else {
+            let next_i = i - 1;
+            let entry = self
+                .mode_query_history
+                .get(&mode)
+                .and_then(|v| v.get(next_i).cloned());
+            if let Some(q) = entry {
+                self.query = q;
+                self.query_cursor = self.query.chars().count();
+                self.query_touched = true;
+                self.recompile_regex();
+                self.mode_query_history_index.insert(mode, Some(next_i));
+                self.refresh();
+            }
+        }
+    }
+
+    /// True if the user is currently recalling a history
+    /// entry in the active mode (i.e. the live `self.query`
+    /// was loaded by C-p / C-n, not typed). Used by the
+    /// status bar to show "N/M" or similar so the user
+    /// knows they're in recall mode. Currently unconsumed;
+    /// retained for the future status-bar integration. Marked
+    /// `#[allow(dead_code)]` so the public-but-unused method
+    /// doesn't trip the unused-warning lint.
+    #[allow(dead_code)]
+    fn history_is_recalling(&self) -> bool {
+        self.mode_query_history_index
+            .get(&self.current_mode_char())
+            .copied()
+            .flatten()
+            .is_some()
+    }
+
+    /// Load the per-mode query history from
+    /// `<db_dir>/query_history.json` if it exists. Called
+    /// once at TUI start (from `run_tui_to_stdout`) so the
+    /// user's recall state survives across sessions.
+    /// Missing / malformed / unreadable files are silently
+    /// treated as "no history" — a corrupt sidecar must
+    /// never block the TUI from launching.
+    fn load_mode_history_from_disk(&mut self) {
+        let Some(path) = self.mode_history_path() else {
+            return;
+        };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        match serde_json::from_str::<std::collections::HashMap<char, Vec<String>>>(&contents) {
+            Ok(map) => {
+                self.mode_query_history = map;
+            }
+            Err(_) => {
+                // Corrupt file (e.g. hand-edited, partial
+                // write, schema mismatch). Drop it and
+                // start fresh so the user isn't stuck in a
+                // broken state. Future writes overwrite
+                // the bad file.
+                self.mode_query_history.clear();
+            }
+        }
+    }
+
+    /// Persist the current per-mode query history to
+    /// `<db_dir>/query_history.json`. Called at TUI exit
+    /// (from `run_tui_to_stdout`, near the session file
+    /// save). Sessions/drafts/history_index are NOT
+    /// persisted — only the history vectors — so the user
+    /// always starts the next session in a clean
+    /// "live query" state.
+    fn persist_mode_history_to_disk(&self) {
+        let Some(path) = self.mode_history_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&self.mode_query_history) {
+            Ok(s) => {
+                let _ = std::fs::write(&path, s);
+            }
+            Err(_) => {
+                // Serialization failed (shouldn't happen
+                // for `HashMap<char, Vec<String>>`); skip
+                // the write. The user's history is lost
+                // for this session, but the TUI continues
+                // to work.
+            }
+        }
+    }
+
+    /// Resolve `<db_dir>/query_history.json`. Returns
+    /// `None` if `HOME` is unset (so the path is
+    /// unresolvable). The directory is shared with the
+    /// smarthistory database (`~/.local/cache/smarthistory/`).
+    fn mode_history_path(&self) -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("cache")
+                .join("smarthistory")
+                .join("query_history.json"),
+        )
+    }
+
+
     /// True when the tab-completion
     /// menu is open. The completion
     /// menu is a sibling of the
@@ -12222,6 +12711,16 @@ pub fn run_tui_to_stdout(
         app.panes_filter = pf;
     }
 
+    // Load the per-mode query history from
+    // `<db_dir>/query_history.json` (if it exists). Done
+    // AFTER all `App::new` / config-merge / CLI-override
+    // steps so the loaded entries are the final state the
+    // user will navigate. A missing or corrupt file is a
+    // no-op (handled inside `load_mode_history_from_disk`)
+    // so a partial write from a previous crash never
+    // blocks the TUI from launching.
+    app.load_mode_history_from_disk();
+
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
@@ -12317,6 +12816,14 @@ pub fn run_tui_to_stdout(
         },
     };
     session.save();
+
+    // Persist the per-mode query history to
+    // `<db_dir>/query_history.json`. Done AFTER
+    // `session.save()` so a write failure on one doesn't
+    // block the other. Only the history vectors are
+    // persisted — drafts and recall positions are
+    // session-local and reset on the next launch.
+    app.persist_mode_history_to_disk();
 
     Ok(selection)
 }
@@ -13162,7 +13669,7 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::SmartOpen => {
-            // Context-aware "dive" key (default Shift-Return):
+            // Context-aware "dive" key (default C-]):
             // adapt to the active prefix mode. In `&` / `$`
             // (codegraph-backed) symbol mode, open the
             // callers/callees picker (same as CodegraphRelations).
@@ -13171,7 +13678,7 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // as pressing Enter, but spawned detached so the TUI
             // stays open). Everywhere else, fall through to the
             // normal `Run` action (select row / open editor /
-            // fire LLM), so Shift-Return is an ergonomic Enter
+            // fire LLM), so the key is an ergonomic Enter
             // replacement across all modes.
             if app.is_codegraph_query() || app.is_tags_query() {
                 app.open_codegraph_relations();
@@ -13183,6 +13690,23 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 app.select_for_run();
                 app.selection.is_some()
             }
+        }
+        Action::PreviousHistory => {
+            // Per-mode input-history recall (readline
+            // `previous-history`). No-op outside the query
+            // input state (comment edit, add-entry dialog,
+            // overlays, help view, etc. all have their own
+            // key handling routed earlier in `handle_key`,
+            // so we only land here on the bare-query path).
+            app.history_previous();
+            false
+        }
+        Action::NextHistory => {
+            // Mirror of PreviousHistory. `app.history_next()`
+            // restores the saved draft when navigating past
+            // the newest entry (i.e. back to "live" mode).
+            app.history_next();
+            false
         }
     }
 }
@@ -31958,5 +32482,289 @@ ssh_config_parse\t\t10,0\n";
             app.pick_mode, None,
             "SmartOpen in JIRA mode must NOT set pick_mode (Run fallback would have)"
         );
+    }
+
+    // ---- Per-mode query history (C-p / C-n) ----
+
+    /// `record_to_mode_history` should skip empty /
+    /// whitespace-only queries (no point recalling them),
+    /// dedup consecutive duplicates (so rapid re-runs of the
+    /// same query don't bloat the history), and cap at 100
+    /// entries per mode (so a long-lived session can't grow
+    /// the JSON file unbounded).
+    #[test]
+    fn record_to_mode_history_skips_empty_dedups_and_caps() {
+        let mut app = global_test_app(&[]);
+        let mode = app.query_prefixes.codegraph; // `&`
+
+        // Empty / whitespace queries are skipped.
+        app.record_to_mode_history(mode, "");
+        app.record_to_mode_history(mode, "   ");
+        assert!(
+            app.mode_query_history.is_empty(),
+            "empty / whitespace queries must not be recorded"
+        );
+
+        // Distinct queries are recorded (newest first).
+        app.record_to_mode_history(mode, "&foo");
+        app.record_to_mode_history(mode, "&bar");
+        let entries = app.mode_query_history.get(&mode).unwrap();
+        assert_eq!(
+            entries,
+            &vec!["&bar".to_string(), "&foo".to_string()],
+            "newer entries must come first"
+        );
+
+        // Consecutive duplicates are skipped. Without this,
+        // pressing Enter on the same row three times would
+        // add three identical copies and break C-p recall.
+        app.record_to_mode_history(mode, "&bar");
+        assert_eq!(
+            app.mode_query_history.get(&mode).unwrap().len(),
+            2,
+            "consecutive duplicate must not be re-recorded"
+        );
+
+        // A different entry is recorded (consecutive-dedup is
+        // strict — only the immediate previous is compared).
+        app.record_to_mode_history(mode, "&baz");
+        assert_eq!(
+            app.mode_query_history.get(&mode).unwrap()[0],
+            "&baz"
+        );
+
+        // Cap at 100 entries per mode.
+        for i in 0..150 {
+            app.record_to_mode_history(mode, &format!("&entry{i}"));
+        }
+        let entries = app.mode_query_history.get(&mode).unwrap();
+        assert_eq!(entries.len(), 100, "history must be capped at 100");
+        assert_eq!(entries[0], "&entry149", "newest entry must be first");
+    }
+
+    /// `history_previous` and `history_next` follow readline
+    /// semantics: C-p from the live query saves the
+    /// in-progress query as a "draft" and loads the newest
+    /// history entry; further C-p moves older; C-n moves
+    /// newer; C-n at the newest restores the draft; C-n at
+    /// the live query is a no-op. All scoped to the current
+    /// mode only.
+    #[test]
+    fn history_previous_next_navigates_in_readline_order() {
+        let mut app = global_test_app(&[]);
+        let codegraph = app.query_prefixes.codegraph; // `&`
+        let tags = app.query_prefixes.tags;            // `$`
+
+        // Pre-seed two modes' histories. Newest first.
+        app.mode_query_history.insert(
+            codegraph,
+            vec!["&newest".to_string(), "&older".to_string()],
+        );
+        app.mode_query_history.insert(
+            tags,
+            vec!["$newest".to_string()],
+        );
+
+        // Start in codegraph mode, live query = "&live".
+        app.query = "&live".to_string();
+        app.query_cursor = app.query.chars().count();
+
+        // C-p from the live query saves the draft and
+        // loads the newest entry. history_index = Some(0).
+        app.history_previous();
+        assert_eq!(app.query, "&newest", "C-p must load the newest entry");
+        assert_eq!(
+            app.mode_query_drafts.get(&codegraph).map(String::as_str),
+            Some("&live"),
+            "C-p must save the in-progress query as the draft"
+        );
+
+        // C-p again: move one step older. history_index = Some(1).
+        app.history_previous();
+        assert_eq!(app.query, "&older");
+        assert_eq!(
+            app.mode_query_history_index.get(&codegraph).copied().flatten(),
+            Some(1)
+        );
+
+        // C-p at the oldest entry: stay.
+        app.history_previous();
+        assert_eq!(app.query, "&older", "C-p at oldest must stay");
+
+        // C-n back to the newest: history_index = Some(0).
+        app.history_next();
+        assert_eq!(app.query, "&newest");
+
+        // C-n at the newest: restore the draft. history_index = None.
+        app.history_next();
+        assert_eq!(app.query, "&live", "C-n past newest must restore the draft");
+        assert_eq!(
+            app.mode_query_history_index.get(&codegraph).copied().flatten(),
+            None
+        );
+
+        // C-n at the live query: no-op.
+        app.history_next();
+        assert_eq!(app.query, "&live", "C-n at live query must be a no-op");
+
+        // History navigation is scoped to the active mode.
+        // Switch to the tags mode (which has its own history)
+        // and confirm C-p recalls from the tags list, not the
+        // codegraph list.
+        app.query = "$live".to_string();
+        app.query_cursor = app.query.chars().count();
+        app.history_previous();
+        assert_eq!(
+            app.query, "$newest",
+            "C-p must recall from the current mode's history only"
+        );
+    }
+
+    /// Any keystroke that mutates the query (push_char,
+    /// backspace, delete_word_backward, clear_query) must
+    /// commit the per-mode history recall session. The
+    /// recalled entry diverges from the recalled text the
+    /// instant the user edits, so history_index is reset
+    /// to None and the saved draft is discarded.
+    #[test]
+    fn keystroke_while_recalling_exits_recall_and_drops_draft() {
+        let mut app = global_test_app(&[]);
+        let codegraph = app.query_prefixes.codegraph;
+        app.mode_query_history
+            .insert(codegraph, vec!["&recalled".to_string()]);
+
+        // Enter recall mode.
+        app.query = "&live".to_string();
+        app.query_cursor = app.query.chars().count();
+        app.history_previous();
+        assert_eq!(app.query, "&recalled");
+        assert!(
+            app.mode_query_drafts.contains_key(&codegraph),
+            "draft must be saved when entering recall"
+        );
+
+        // Any text mutation (push_char) exits recall.
+        app.push_char('x');
+        assert_eq!(
+            app.mode_query_history_index.get(&codegraph).copied().flatten(),
+            None,
+            "push_char while recalling must exit recall mode"
+        );
+        assert!(
+            !app.mode_query_drafts.contains_key(&codegraph),
+            "push_char while recalling must drop the draft"
+        );
+
+        // Re-enter recall and exercise backspace /
+        // clear_query the same way.
+        app.query = "&live".to_string();
+        app.query_cursor = app.query.chars().count();
+        app.history_previous();
+        app.backspace();
+        assert_eq!(
+            app.mode_query_history_index.get(&codegraph).copied().flatten(),
+            None,
+            "backspace while recalling must exit recall mode"
+        );
+
+        app.query = "&live".to_string();
+        app.query_cursor = app.query.chars().count();
+        app.history_previous();
+        app.clear_query();
+        assert_eq!(
+            app.mode_query_history_index.get(&codegraph).copied().flatten(),
+            None,
+            "clear_query while recalling must exit recall mode"
+        );
+    }
+
+    /// Backspacing the leading prefix char (e.g. backspacing
+    /// the `&` of an `&query` to land in plain mode) must
+    /// record the OLD query into the OLD mode's history.
+    /// This is the natural "the user is done with mode X,
+    /// remember it" trigger: the next C-p in plain mode
+    /// recalls the just-finished query.
+    #[test]
+    fn backspacing_prefix_records_into_old_mode_history() {
+        let mut app = global_test_app(&[]);
+        let codegraph = app.query_prefixes.codegraph;
+        // Simulate a fully-typed `&foo` query the user is
+        // about to switch out of. Cursor is at the end
+        // (so a single backspace deletes the trailing `o`,
+        // leaving `&fo` — the leading char still `&`, so
+        // this is NOT a mode change). We then backspace
+        // again to `&f`, then to `&`, then once more to
+        // land in plain mode (`"f"`). That last backspace
+        // is the leading-char-change event: it must record
+        // the OLD query `&` into codegraph history. Then
+        // we continue backspacing to `""` (plain-mode
+        // empty) and confirm the history was recorded at
+        // the crossing, not at the subsequent backspaces.
+        app.query = "&foo".to_string();
+        app.query_cursor = 4;
+        app.backspace();
+        app.backspace();
+        app.backspace();
+        // After three backspaces: query is `&`. Cursor at 1.
+        assert_eq!(app.query, "&");
+        assert!(
+            app.mode_query_history.get(&codegraph).is_none(),
+            "backspacing within the same mode must NOT record (the query is non-empty but the mode is unchanged)"
+        );
+
+        // Fourth backspace crosses the mode boundary.
+        app.backspace();
+        assert_eq!(app.query, "");
+        let entries = app
+            .mode_query_history
+            .get(&codegraph)
+            .expect("leading-char crossing must record the old query into the old mode's history");
+        assert_eq!(
+            entries,
+            &vec!["&".to_string()],
+            "the just-backspaced query (with its prefix) is the recorded entry"
+        );
+
+        // Subsequent backspaces within the new (plain) mode
+        // must NOT re-record into the old codegraph mode.
+        // (The user is now in plain mode; the empty query
+        // is also skipped by `record_to_mode_history`.)
+        app.query = "foo".to_string();
+        app.query_cursor = 3;
+        app.backspace();
+        app.backspace();
+        app.backspace();
+        assert_eq!(app.query, "");
+        let entries = app.mode_query_history.get(&codegraph).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "subsequent backspaces in a different mode must not re-record into the old mode"
+        );
+    }
+
+    /// `select_for_run` records the current query (with its
+    /// leading prefix char) into the active mode's history
+    /// before dispatching to the per-mode handler. This is
+    /// the "Run is the natural 'remember this query' moment"
+    /// trigger that complements the leading-char-change
+    /// trigger from `backspace`.
+    #[test]
+    fn select_for_run_records_current_query_into_active_mode() {
+        let mut app = global_test_app(&[("ls -la", 1)]);
+        let codegraph = app.query_prefixes.codegraph;
+
+        // Type a codegraph query, then run it. The query
+        // (with the `&` prefix) must land in codegraph
+        // history before the dispatch proceeds.
+        app.query = "&getSymbol".to_string();
+        app.query_cursor = app.query.chars().count();
+        app.list_state.select(Some(0));
+        let _ = app.select_for_run();
+        let entries = app
+            .mode_query_history
+            .get(&codegraph)
+            .expect("Run in codegraph mode must record the query into codegraph history");
+        assert_eq!(entries, &vec!["&getSymbol".to_string()]);
     }
 }
