@@ -106,6 +106,22 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_prefix_picker(f, app, picker);
     }
 
+    // The completion menu is a
+    // third overlay picker
+    // (sibling to the command
+    // menu and prefix picker).
+    // It is drawn after the
+    // prefix picker so it can
+    // "nest" on top if both
+    // are open (though that
+    // only happens if an action
+    // opens the prefix picker
+    // while the completion
+    // menu is also open).
+    if let Some(menu) = app.completion_menu.as_ref() {
+        draw_completion_menu(f, app, menu);
+    }
+
     if let Some(picker) = app.theme_picker.as_ref() {
         draw_theme_picker(f, app, picker);
     }
@@ -2207,6 +2223,148 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
         )
         .wrap(Wrap { trim: false });
     f.render_widget(preview, inner[1]);
+}
+
+/// Render the tab-completion
+/// menu. The menu is a small
+/// centred popup that shows the
+/// list of candidates when the
+/// user presses `Tab` and the
+/// completion is ambiguous. The
+/// user navigates with `Up`/
+/// `Down` and commits with
+/// `Enter`; the title always
+/// shows the `Cancel` binding
+/// for dismissal.
+fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) {
+    use ratatui::widgets::List;
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
+    // The menu is a small
+    // centred popup. The list
+    // is short (typically 2-10
+    // candidates) so a 50%
+    // × 40% popup is plenty.
+    let outer = centered_rect(50, 40, f.area());
+    f.render_widget(ratatui::widgets::Clear, outer);
+
+    // The title shows the
+    // `Cancel` binding(s) so
+    // the user always knows
+    // how to dismiss the
+    // menu.
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        format!("{} close", cancel_keys)
+    };
+    // The "kind" label
+    // describes what kind of
+    // completion the menu
+    // is showing. The raw
+    // kind enum isn't
+    // user-facing, so we
+    // map it to a label.
+    let kind_label = match menu.kind {
+        super::CompletionKind::JiraField => "JIRA field",
+        super::CompletionKind::JiraAlias => "JIRA alias",
+        super::CompletionKind::NotesTag => "tag",
+        super::CompletionKind::NotesLink => "link",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(format!(
+            " {} candidates  Enter apply / {} ",
+            kind_label, close_hint
+        ))
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+    let inner = block.inner(outer);
+    f.render_widget(block, outer);
+
+    // Reserve the last line
+    // for a footer hint so
+    // the user sees the
+    // navigation keys
+    // (Up/Down + Enter).
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Fill(1), Constraint::Length(1)].as_ref())
+        .split(inner);
+
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .fg(fg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(Theme::dim_color());
+
+    // Scroll so the
+    // selected row stays
+    // visible (in the
+    // unlikely event the
+    // terminal is so short
+    // the list doesn't
+    // fit).
+    let visible_rows = chunks[0].height as usize;
+    let total = menu.candidates.len();
+    let start = menu
+        .selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(total.saturating_sub(visible_rows));
+    let end = (start + visible_rows).min(total);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (row_pos, candidate) in menu
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
+        let is_selected = row_pos == menu.selected;
+        let mut spans = vec![Span::styled(
+            if is_selected { " > " } else { "   " },
+            if is_selected {
+                highlight_style
+            } else {
+                dim_style
+            },
+        )];
+        spans.push(Span::styled(
+            candidate.as_str(),
+            if is_selected {
+                highlight_style
+            } else {
+                Style::default().fg(fg)
+            },
+        ));
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    let list = List::new(items)
+        .style(Style::default().bg(bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("")
+        .repeat_highlight_symbol(false);
+    let mut list_state = ListState::default();
+    if end > start {
+        list_state.select(Some(menu.selected.saturating_sub(start)));
+    }
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    // Footer with
+    // navigation hint.
+    let footer = Line::from(vec![
+        Span::styled(format!(" {}/{} ", menu.selected + 1, total), dim_style),
+        Span::styled("  up/down move  Enter apply  ", dim_style),
+    ]);
+    let footer_para = Paragraph::new(footer).style(Style::default().bg(bg));
+    f.render_widget(footer_para, chunks[1]);
 }
 
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {

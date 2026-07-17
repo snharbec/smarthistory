@@ -1490,6 +1490,161 @@ pub fn jira_alias_complete_with_space(
     }
 }
 
+/// Return all JIRA field names that start with
+/// `prefix` (case-insensitive). Used by the
+/// completion menu to show candidates when the
+/// user presses Tab and there are multiple matches.
+/// Returns the matches in their canonical casing
+/// (the order from `JIRA_FIELDS`, which is
+/// alphabetical). Empty vector means no match.
+pub fn jira_field_matches(prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let lower = prefix.to_ascii_lowercase();
+    JIRA_FIELDS
+        .iter()
+        .copied()
+        .filter(|f| f.to_ascii_lowercase().starts_with(&lower))
+        .map(|f| f.to_string())
+        .collect()
+}
+
+/// Return all JIRA alias / fragment names that
+/// start with `prefix` (case-insensitive). Used by
+/// the completion menu. Built-in aliases come
+/// first (`me`, `today`, `week`, `month`), then
+/// user-defined fragments in alphabetical order.
+pub fn jira_alias_matches(
+    prefix: &str,
+    fragments: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let lower = prefix.to_ascii_lowercase();
+    let mut names: Vec<String> = Vec::new();
+    for alias in ["me", "today", "week", "month"] {
+        if alias.to_ascii_lowercase().starts_with(&lower) {
+            names.push(alias.to_string());
+        }
+    }
+    let mut fragment_names: Vec<String> = fragments
+        .keys()
+        .filter(|k| k.to_ascii_lowercase().starts_with(&lower))
+        .cloned()
+        .collect();
+    fragment_names.sort();
+    names.extend(fragment_names);
+    names
+}
+
+/// Return all note tag names that start with
+/// `prefix` (case-insensitive). The completion menu
+/// uses this to show candidates when the user
+/// presses Tab and there are multiple tag matches.
+pub fn notes_tag_matches(db_path: &std::path::Path, prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let tags = match note_search::commands::metadata::get_unique_values(db_path, "tag") {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let lower = prefix.to_ascii_lowercase();
+    tags.iter()
+        .filter(|t| t.to_ascii_lowercase().starts_with(&lower))
+        .cloned()
+        .collect()
+}
+
+/// Return all note link names that start with
+/// `prefix` (case-insensitive). The `.md` suffix is
+/// stripped from each link before matching (matching
+/// the behaviour of `notes_link_complete`). The
+/// completion menu uses this to show candidates
+/// when the user presses Tab and there are
+/// multiple link matches.
+///
+/// Link targets in Obsidian are
+/// case-insensitive — `Project` and `project`
+/// refer to the same note. When the database
+/// contains multiple casings of the same link
+/// (e.g. `Project.md` and `project.md`), this
+/// function deduplicates by lowercased form and
+/// returns the lowercase version. This prevents
+/// the completion menu from opening for the
+/// trivial case where the matches only differ
+/// by case. The user always gets the
+/// lowercase expansion, matching Obsidian's
+/// case-insensitive convention.
+pub fn notes_link_matches(db_path: &std::path::Path, prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let links = match note_search::commands::metadata::get_unique_values(db_path, "link") {
+        Ok(l) => l,
+        Err(_) => return Vec::new(),
+    };
+    let lower = prefix.to_ascii_lowercase();
+    let matches: Vec<String> = links
+        .iter()
+        .filter(|l| l.to_ascii_lowercase().starts_with(&lower))
+        .map(|l| l.strip_suffix(".md").unwrap_or(l).to_string())
+        .collect();
+    // Deduplicate by lowercased
+    // form. If all matches
+    // lowercase to the same
+    // value, return just the
+    // lowercase version (a
+    // single-element list) so
+    // the TUI's `>= 2` menu
+    // check doesn't fire. The
+    // user gets the lowercase
+    // expansion directly
+    // without a menu flash.
+    dedupe_case_insensitive(&matches)
+}
+
+/// Deduplicate a list of strings by
+/// their lowercased form. Links
+/// that only differ by case
+/// (`Project` vs `project`) are
+/// treated as the same link and
+/// collapsed to the lowercase
+/// version. Genuinely different
+/// links (e.g. `project` vs
+/// `projects`) are preserved. The
+/// order of first occurrence is
+/// kept so the TUI's menu shows
+/// candidates in a stable order.
+///
+/// This prevents the completion
+/// menu from opening when the
+/// only differences between
+/// matches are casing — the user
+/// always gets the lowercase
+/// expansion without a menu
+/// flash.
+fn dedupe_case_insensitive(matches: &[String]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<String> = Vec::new();
+    for m in matches {
+        let lower = m.to_ascii_lowercase();
+        if seen.insert(lower) {
+            // First time seeing
+            // this lowercase
+            // form. Keep the
+            // lowercase version
+            // (Obsidian's
+            // case-insensitive
+            // convention).
+            result.push(m.to_ascii_lowercase());
+        }
+    }
+    result
+}
+
 /// Tab-completion for note tags inside the notes (`@`)
 /// and todos (`!`) prefixes. The completion list is
 /// the set of unique tags stored in the `note_search`
@@ -1570,7 +1725,24 @@ pub fn notes_link_complete(db_path: &std::path::Path, prefix: &str) -> Option<St
         .iter()
         .map(|n| n.strip_suffix(".md").unwrap_or(n).to_string())
         .collect();
-    let bare = notes_complete_inner(&stripped, prefix)?;
+    // Link targets in Obsidian
+    // are case-insensitive —
+    // `Project` and `project`
+    // refer to the same note.
+    // Deduplicate by lowercased
+    // form before passing to
+    // `notes_complete_inner` so
+    // the expansion is always
+    // the lowercase version
+    // (matching Obsidian's
+    // convention) and the
+    // single-match path
+    // produces a clean
+    // result even when the
+    // DB has multiple casings
+    // of the same link.
+    let deduped = dedupe_case_insensitive(&stripped);
+    let bare = notes_complete_inner(&deduped, prefix)?;
     // `notes_complete_inner` returns
     // the completion with a trailing
     // space (for the unique-match
@@ -3910,11 +4082,19 @@ mod tests {
 
     #[test]
     fn notes_link_complete_unique_match_returns_name_with_space() {
+        // Link targets are
+        // case-insensitive in
+        // Obsidian — the
+        // expansion always uses
+        // the lowercase form
+        // regardless of how the
+        // link is stored in the
+        // database.
         let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["NeovimNote.md", "RustBook.md"]);
         assert_eq!(
             notes_link_complete(&db, "Neo").as_deref(),
-            Some("[[NeovimNote]] "),
-            "unique link match gets [[...]] syntax and .md suffix is stripped"
+            Some("[[neovimnote]] "),
+            "unique link match gets [[...]] syntax and .md suffix is stripped (lowercase)"
         );
     }
 
@@ -3922,11 +4102,15 @@ mod tests {
     fn notes_link_complete_ambiguous_returns_lcp() {
         let (_dir, db) =
             make_notes_db_with_tags_and_links(&[], &["NeovimNote.md", "NeovimConfig.md"]);
-        // `Neo` matches both; LCP is `Neovim`.
+        // `Neo` matches both; LCP
+        // is `Neovim`. The LCP is
+        // computed case-insensitively
+        // and returned in lowercase
+        // (Obsidian convention).
         assert_eq!(
             notes_link_complete(&db, "Neo").as_deref(),
-            Some("[[Neovim]]"),
-            "ambiguous link prefix returns [[...]] LCP (without .md suffix)"
+            Some("[[neovim]]"),
+            "ambiguous link prefix returns [[...]] LCP (lowercase)"
         );
     }
 
@@ -3938,11 +4122,19 @@ mod tests {
 
     #[test]
     fn notes_link_complete_is_case_insensitive() {
+        // Link targets are
+        // case-insensitive in
+        // Obsidian — the
+        // expansion always uses
+        // the lowercase form
+        // regardless of how the
+        // link is stored in the
+        // database.
         let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["NeovimNote.md"]);
         assert_eq!(
             notes_link_complete(&db, "neo").as_deref(),
-            Some("[[NeovimNote]] "),
-            "case-insensitive prefix matches link (without .md suffix)"
+            Some("[[neovimnote]] "),
+            "case-insensitive prefix matches link (lowercase expansion)"
         );
     }
 
@@ -3997,5 +4189,71 @@ mod tests {
             Some("[[my note]] "),
             "link with space should be wrapped in [[...]] without additional quotes"
         );
+    }
+
+    /// Link targets in Obsidian
+    /// are case-insensitive. When
+    /// the database contains
+    /// multiple casings of the
+    /// same link (e.g. `Project.md`
+    /// and `project.md`), the
+    /// completion should
+    /// deduplicate by lowercased
+    /// form and return just the
+    /// lowercase version. This
+    /// prevents the menu from
+    /// opening for the trivial
+    /// case where matches only
+    /// differ by case.
+    #[test]
+    fn notes_link_matches_deduplicates_by_case() {
+        let (_dir, db) =
+            make_notes_db_with_tags_and_links(&[], &["Project.md", "project.md", "PROJECT.md"]);
+        let matches = notes_link_matches(&db, "proj");
+        // All three casings
+        // collapse to one
+        // lowercase match.
+        assert_eq!(matches, vec!["project".to_string()]);
+    }
+
+    /// `notes_link_complete` also
+    /// returns the lowercase
+    /// version when the database
+    /// has multiple casings of
+    /// the same link.
+    #[test]
+    fn notes_link_complete_lowercases_duplicate_casings() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["Project.md", "project.md"]);
+        assert_eq!(
+            notes_link_complete(&db, "proj").as_deref(),
+            Some("[[project]] "),
+            "duplicate casings should collapse to lowercase"
+        );
+    }
+
+    /// Genuinely different links
+    /// (not just case variants)
+    /// still trigger the menu.
+    /// `Project` and `project`
+    /// collapse to one match, but
+    /// `Project` and `Projects` are
+    /// different and should both
+    /// appear.
+    #[test]
+    fn notes_link_matches_keeps_genuinely_different_links() {
+        let (_dir, db) =
+            make_notes_db_with_tags_and_links(&[], &["Project.md", "project.md", "Projects.md"]);
+        let matches = notes_link_matches(&db, "proj");
+        // `Project` and
+        // `project` collapse to
+        // one (lowercase
+        // `project`), but
+        // `Projects` is genuinely
+        // different (lowercase
+        // `projects`). So we get
+        // two matches.
+        assert_eq!(matches.len(), 2);
+        assert!(matches.contains(&"project".to_string()));
+        assert!(matches.contains(&"projects".to_string()));
     }
 }

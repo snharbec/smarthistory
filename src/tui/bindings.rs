@@ -990,8 +990,10 @@ impl KeyBindings {
                 continue;
             }
             let specs: Vec<KeySpec> = if extra.is_empty() {
-                vec![parse_key_spec(a.default_key())
-                    .expect("default key bindings must always parse")]
+                vec![
+                    parse_key_spec(a.default_key())
+                        .expect("default key bindings must always parse"),
+                ]
             } else {
                 extra
                     .iter()
