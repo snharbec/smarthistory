@@ -110,7 +110,7 @@ own config.
 | `Ctrl+A` | Open the help overlay. |
 | `Ctrl+Q` | Open the command palette. |
 | `T` | Open the theme picker. |
-| `F5` | Add the selected directory as a new named session (`*` mode). |
+| `F1` | Open the prefix picker to choose a query mode (history, output, LLM, …). |
 | `F6` | Add the selected directory as a new host (`*` mode). |
 | `F10` | Toggle pane visibility: BOTH → Details → Output Preview → BOTH. |
 | `F7` | Panes filter: show only live multiplexer windows (`*` mode). |

@@ -18,7 +18,7 @@ use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
     AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView,
-    HelpView, NotesDateFilter, OutputView, QuestionView, format_diff, format_time,
+    HelpView, NotesDateFilter, OutputView, PrefixPicker, QuestionView, format_diff, format_time,
 };
 use regex::Regex;
 
@@ -90,6 +90,20 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(menu) = app.command_menu.as_ref() {
         draw_command_menu(f, app, menu);
+    }
+
+    // The prefix picker is
+    // another overlay picker
+    // (sibling to the command
+    // menu). It is drawn after
+    // the command menu so it
+    // can "nest" on top if both
+    // are open (though that
+    // only happens if an action
+    // opens the prefix picker
+    // from the command menu).
+    if let Some(picker) = app.prefix_picker.as_ref() {
+        draw_prefix_picker(f, app, picker);
     }
 
     if let Some(picker) = app.theme_picker.as_ref() {
@@ -1882,6 +1896,129 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     ]);
     let footer_para = Paragraph::new(footer).style(Style::default().bg(bg));
     f.render_widget(footer_para, chunks[2]);
+}
+
+fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
+    use ratatui::widgets::List;
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
+    // The picker is a small
+    // centred popup — the
+    // list has only 12
+    // entries so it doesn't
+    // need to be huge.
+    let area = centered_rect(60, 40, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        format!("{} close", cancel_keys)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(format!(" Select mode  Enter apply / {} ", close_hint))
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .fg(fg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(Theme::dim_color());
+    let accent_style = Theme::accent();
+
+    // Scroll so the selected
+    // row stays visible (in
+    // the unlikely event the
+    // terminal is so short
+    // 12 rows don't fit).
+    let visible_rows = inner.height as usize;
+    let total = picker.options.len();
+    let start = picker
+        .selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(total.saturating_sub(visible_rows));
+    let end = (start + visible_rows).min(total);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (row_pos, opt) in picker
+        .options
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
+        let is_selected = row_pos == picker.selected;
+        let prefix_label = match opt.prefix {
+            Some(c) => format!("  {} ", c),
+            None => "    ".to_string(),
+        };
+        let spans = vec![
+            Span::styled(
+                if is_selected { " > " } else { "   " },
+                if is_selected {
+                    highlight_style
+                } else {
+                    dim_style
+                },
+            ),
+            Span::styled(
+                format!("{:>14}", opt.label),
+                if is_selected {
+                    highlight_style
+                } else {
+                    Style::default().fg(fg)
+                },
+            ),
+            Span::styled(
+                prefix_label,
+                if is_selected {
+                    highlight_style
+                } else {
+                    accent_style
+                },
+            ),
+            Span::styled(
+                format!("{}  ", opt.description),
+                if is_selected {
+                    highlight_style
+                } else {
+                    dim_style
+                },
+            ),
+        ];
+        // "(current)" marker when
+        // the row matches the
+        // query's actual leading
+        // char (or lack thereof)
+        // when the picker opened.
+        // We don't track the
+        // original theme here like
+        // the theme picker does —
+        // we just show where the
+        // user was at open time by
+        // pre-selecting that row.
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    let list = List::new(items)
+        .style(Style::default().bg(bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("")
+        .repeat_highlight_symbol(false);
+    let mut list_state = ListState::default();
+    if end > start {
+        list_state.select(Some(picker.selected.saturating_sub(start)));
+    }
+    f.render_stateful_widget(list, inner, &mut list_state);
 }
 
 fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {

@@ -274,7 +274,7 @@ All notable changes to this project will be documented in this file.
     the debounce was
     designed to
     prevent.
-  - **Empty queries**
+- **Empty queries**
     (just-cleared
     box): the
     helper short-
@@ -287,6 +287,22 @@ All notable changes to this project will be documented in this file.
     rows query the
     user just had
     on screen.
+- Replaced `CyclePrefix` with `PickPrefix` (`F1`). Instead of cycling
+    blindly through prefixes, the action now opens a **prefix picker**
+    overlay — a centred list of every configured mode (History, Output,
+    LLM, Question, Notes, Todos, Directories, Panes, JIRA, Files, Tags,
+    ag).
+    The list pre-selects the entry that matches the current query's
+    leading char (or "History" for a plain text query), so pressing
+    `Enter` with no movement is a no-op. `Up` / `Down` (or `Ctrl-N` /
+    `Ctrl-P`) navigate the list; `Enter` applies the selected prefix
+    (body preserved); `Esc` / the user's `Cancel` binding dismisses
+    the picker without changing the query. The new `PrefixPicker` /
+    `PrefixOption` structs and `handle_prefix_picker_key` /
+    `draw_prefix_picker` functions are modelled on the command palette
+    and theme picker so muscle memory transfers across all overlays.
+    15 new unit tests cover `apply_prefix`, `PrefixPicker::new`, and
+    picker key handling.
 
 ### Fixed
 

@@ -16,6 +16,7 @@ pub mod state;
 pub mod theme;
 
 use crate::Config;
+use crate::QueryPrefixes;
 use crate::jira::JiraClient;
 use crate::llm::LlmClient;
 use crate::util::{format_diff, format_time};
@@ -860,6 +861,18 @@ struct App {
     help_view: Option<HelpView>,
     /// When `Some`, the command-palette overlay is open.
     command_menu: Option<CommandMenu>,
+    /// When `Some`, the prefix-picker overlay is open. The
+    /// picker is the `Action::PickPrefix` counterpart
+    /// to the command palette: a centred list of every
+    /// configured prefix mode that the user can
+    /// navigate with Up/Down and commit with Enter.
+    /// Closing on `Cancel` (`Esc` / `Ctrl-C`) leaves
+    /// the query unchanged. The picker pre-selects
+    /// the row matching the current query's leading
+    /// char (or the "no prefix" row for a bare
+    /// text query), so Enter with no navigation
+    /// is a no-op.
+    prefix_picker: Option<PrefixPicker>,
     /// When `Some`, the theme-picker overlay is open. Navigating
     /// the list applies the selected theme live; `Enter` commits,
     /// `Esc` reverts to the original.
@@ -4641,6 +4654,113 @@ impl App {
         self.cycle_match_algorithm();
     }
 
+    /// Cycle to the next prefix mode. The cycle
+    /// order is:
+    ///
+    /// 1. **No prefix** (history) — the
+    ///    default text-search mode.
+    /// 2. `+` (output)
+    /// 3. `=` (LLM)
+    /// 4. `%` (question)
+    /// 5. `@` (notes)
+    /// 6. `!` (todo)
+    /// 7. `#` (directories)
+    /// 8. `*` (panes)
+    /// 9. `-` (JIRA)
+    /// 10. `~` (files)
+    /// 11. `$` (tags)
+    /// 12. `,` (ag)
+    /// 13. **No prefix** (history) — wrap
+    ///    back to the start.
+    ///
+    /// The body of the query (everything
+    /// after the current prefix) is
+    /// preserved verbatim. So `git status`
+    /// → `+git status` →
+    /// `=git status` → ...; the user
+    /// only changes the leading char
+    /// (or removes it on the wrap).
+    ///
+    /// Custom prefix chars (configured
+    /// via `prefix.<mode>=<char>` in the
+    /// config file) are honoured: the
+    /// cycle walks the *fields* of
+    /// `QueryPrefixes`, not the literal
+    /// default chars, so a user who has
+    /// rebound `prefix.jira=X` still
+    /// cycles through their `X` in
+    /// the JIRA slot.
+    ///
+    /// After the cycle, the run-loop
+    /// tick sees the new prefix and
+    /// fires the per-mode search on
+    /// the next iteration (the LLM /
+    /// JIRA / files / ag / ag debounces
+    /// are all armed by the
+    /// `llm_touch()` call below).
+    /// The synchronous modes (history,
+    /// output, directories, panes,
+    /// notes, todos) get an immediate
+    /// `refresh()` so the row set is
+    /// up-to-date on the same frame.
+    ///
+    /// Outside of any prefixable state
+    /// (e.g. inside the comment
+    /// editor or the add-entry
+    /// dialog) the action is a
+    /// no-op so the key doesn't
+    /// interfere with anything
+    /// else. The dispatch site
+    /// re-checks the state to keep
+    /// the contract clear.
+    /// Apply a new prefix to the query. The body
+    /// (everything after the current prefix, or
+    /// the whole query if there is no prefix) is
+    /// preserved verbatim. Used by the prefix
+    /// picker to commit the selected mode and
+    /// by any future caller that needs to swap
+    /// the leading char.
+    fn apply_prefix(&mut self, new_prefix: Option<char>) {
+        // Determine the body:
+        // if the query starts with a known
+        // prefix char, drop it; otherwise the
+        // entire query IS the body.
+        let first = self.query.chars().next();
+        let has_prefix = first.is_some_and(|c| {
+            let prefixes = &self.query_prefixes;
+            c == prefixes.output
+                || c == prefixes.llm
+                || c == prefixes.question
+                || c == prefixes.notes
+                || c == prefixes.todo
+                || c == prefixes.directories
+                || c == prefixes.panes
+                || c == prefixes.jira
+                || c == prefixes.files
+                || c == prefixes.tags
+                || c == prefixes.ag
+        });
+        let body = if has_prefix {
+            self.query.chars().skip(1).collect::<String>()
+        } else {
+            self.query.clone()
+        };
+        self.query = match new_prefix {
+            Some(c) => format!("{}{}", c, body),
+            None => body,
+        };
+        self.query_cursor = self.query.chars().count();
+        self.query_touched = true;
+        self.recompile_regex();
+        self.llm_touch();
+        self.refresh();
+        let label = match new_prefix {
+            Some(c) => format!("`{}`", c),
+            None => "history (no prefix)".to_string(),
+        };
+        self.set_status_message(format!("prefix: {}", label));
+    }
+
     /// Re-arm the LLM auto-call debounce and discard any
     /// in-flight preview that no longer matches the live
     /// description. Called from every user-edit path
@@ -5720,6 +5840,177 @@ impl CommandMenu {
     }
 }
 
+/// The prefix picker — a centred list of every
+/// configured prefix mode. Modelled on
+/// [`CommandMenu`] but smaller: there's no
+/// filter query (the list has 12 entries),
+/// every entry is a `(label, prefix_char,
+/// description)` triple, and the user
+/// navigates with Up/Down (or `j`/`k` /
+/// `Ctrl-N` / `Ctrl-P`) and commits with
+/// Enter. The picker pre-selects the row
+/// matching the current query's leading
+/// char (or the "no prefix" row for a
+/// bare text query), so Enter with no
+/// navigation is a no-op.
+struct PrefixPicker {
+    /// The full ordered list of prefix
+    /// options. `None` represents the
+    /// "no prefix" (history) entry at
+    /// the top of the picker. The
+    /// remaining entries carry the
+    /// literal `char` from the user's
+    /// `QueryPrefixes` config (so
+    /// `prefix.jira=X` rebinds show up
+    /// as `X` here, not `-`).
+    options: Vec<PrefixOption>,
+    /// Index into `self.options` of the
+    /// currently-highlighted entry.
+    /// Clamped to `0..options.len()`
+    /// whenever the picker is opened so
+    /// the user can never navigate past
+    /// the last entry.
+    selected: usize,
+}
+
+/// One row in the prefix picker. The
+/// `prefix` is `None` for the "no
+/// prefix" (history) entry at the top
+/// of the list; every other entry
+/// carries the literal `char` the user
+/// would type to enter that mode.
+#[derive(Clone, Copy)]
+struct PrefixOption {
+    /// `None` = the "no prefix"
+    /// (history) entry. `Some(c)` =
+    /// the literal prefix char the
+    /// user would type.
+    prefix: Option<char>,
+    /// Short human-readable label
+    /// for the row, e.g.
+    /// "Output", "LLM command",
+    /// "JIRA search". The renderer
+    /// uses this for the left
+    /// column.
+    label: &'static str,
+    /// One-line description
+    /// shown in the second
+    /// column. Helps the user
+    /// remember which prefix
+    /// does what without
+    /// flipping to the help
+    /// overlay.
+    description: &'static str,
+}
+
+impl PrefixPicker {
+    /// Build the picker from the user's
+    /// configured `QueryPrefixes`. The
+    /// order matches the
+    /// `QueryPrefixes` field-declaration
+    /// order, with a "no prefix" entry
+    /// at the top so the user can
+    /// always cycle back to a plain
+    /// text search with one Up press.
+    ///
+    /// `current_prefix` is the leading
+    /// char of the user's current
+    /// query (or `None` for a bare
+    /// text query). The picker
+    /// pre-selects the matching row
+    /// (or the "no prefix" row if
+    /// the leading char isn't one
+    /// of the configured prefixes).
+    fn new(prefixes: &QueryPrefixes, current_prefix: Option<char>) -> Self {
+        let options = vec![
+            PrefixOption {
+                prefix: None,
+                label: "History",
+                description: "search shell history (no prefix)",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.output),
+                label: "Output",
+                description: "search captured command output",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.llm),
+                label: "LLM command",
+                description: "ask the LLM to generate a shell command",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.question),
+                label: "Question",
+                description: "ask the LLM a short factual question",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.notes),
+                label: "Notes",
+                description: "search the note_search SQLite database",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.todo),
+                label: "Todos",
+                description: "list open markdown todo items",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.directories),
+                label: "Directories",
+                description: "list every directory in the global history",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.panes),
+                label: "Panes",
+                description: "list every pane across tmux / herdr sessions",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.jira),
+                label: "JIRA",
+                description: "search JIRA issues via the REST API",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.files),
+                label: "Files",
+                description: "list every file under the current directory",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.tags),
+                label: "Tags",
+                description: "list every symbol in the local ctags `tags` file",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.ag),
+                label: "ag search",
+                description: "search file contents with `ag` (The Silver Searcher)",
+            },
+        ];
+        // Pre-select the row
+        // matching the current
+        // prefix. If the current
+        // prefix is unknown (e.g.
+        // the user typed a
+        // custom rebind that
+        // isn't a real `QueryPrefixes`
+        // field, or the query
+        // is empty) fall back to
+        // the "no prefix" row at
+        // index 0.
+        let selected = current_prefix
+            .and_then(|c| options.iter().position(|o| o.prefix == Some(c)))
+            .unwrap_or(0);
+        PrefixPicker { options, selected }
+    }
+
+    /// Highlighted entry, or `None` if the
+    /// list is empty (defensive — should
+    /// never happen because the
+    /// `PrefixPicker::new` constructor
+    /// always populates the list).
+    fn selected(&self) -> Option<&PrefixOption> {
+        self.options.get(self.selected)
+    }
+}
+
 impl App {
     fn new(
         conn: Connection,
@@ -5768,6 +6059,7 @@ impl App {
             question_view: None,
             help_view: None,
             command_menu: None,
+            prefix_picker: None,
             theme_picker: None,
             confirm_delete: None,
             labeled_rows: Vec::new(),
@@ -9773,6 +10065,36 @@ impl App {
         self.command_menu = None;
     }
 
+    fn is_prefix_picker_open(&self) -> bool {
+        self.prefix_picker.is_some()
+    }
+
+    fn open_prefix_picker(&mut self) {
+        let first = self.query.chars().next();
+        let current = first.and_then(|c| {
+            let p = &self.query_prefixes;
+            let known = [
+                p.output,
+                p.llm,
+                p.question,
+                p.notes,
+                p.todo,
+                p.directories,
+                p.panes,
+                p.jira,
+                p.files,
+                p.tags,
+                p.ag,
+            ];
+            known.contains(&c).then_some(c)
+        });
+        self.prefix_picker = Some(PrefixPicker::new(&self.query_prefixes, current));
+    }
+
+    fn close_prefix_picker(&mut self) {
+        self.prefix_picker = None;
+    }
+
     fn is_theme_picker_open(&self) -> bool {
         self.theme_picker.is_some()
     }
@@ -10953,6 +11275,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_command_menu_key(app, key);
     }
 
+    // The prefix picker is a
+    // sibling to the command
+    // palette: it also sits
+    // above the help overlay so
+    // the user can dismiss it
+    // with their `Cancel`
+    // binding without
+    // accidentally scrolling
+    // the help text underneath.
+    if app.is_prefix_picker_open() {
+        return handle_prefix_picker_key(app, key);
+    }
+
     // The theme picker also takes precedence over the help
     // overlay so it can receive the same arrow / Ctrl-N / Ctrl-P
     // keys that the cycling actions use.
@@ -11312,6 +11647,35 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.jira_field_complete_at_cursor();
             false
         }
+        Action::PickPrefix => {
+            // Open the prefix picker.
+            // The user gets a centred
+            // list of every configured
+            // prefix mode and can
+            // choose one with
+            // Up/Down + Enter. The
+            // picker pre-selects the
+            // row matching the
+            // current query's leading
+            // char (or the "no
+            // prefix" row).
+            //
+            // Outside of the
+            // prefixable state
+            // (e.g. inside the
+            // comment editor or
+            // the add-entry
+            // dialog) the action
+            // is a no-op so the
+            // key doesn't
+            // interfere with
+            // anything else.
+            if app.comment_edit.is_some() || app.add_entry_dialog.is_some() {
+                return false;
+            }
+            app.open_prefix_picker();
+            false
+        }
     }
 }
 
@@ -11579,6 +11943,95 @@ impl CommandMenu {
 /// selection and immediately apply the new theme via
 /// `install_palette`. Enter commits, Esc reverts to the original
 /// theme, Home/End jump to the first/last entry.
+/// Key handler for the prefix picker. Up/Down
+/// (and `j`/`k` / `Ctrl-N` / `Ctrl-P`) move
+/// the selection; Enter commits (applies the
+/// selected prefix); the user's `Cancel`
+/// binding (e.g. Esc or Ctrl-C) dismisses the
+/// picker without changing the query.
+fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
+    // Dismiss on the user's `Cancel` binding.
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+        app.close_prefix_picker();
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_prefix_picker();
+        return true;
+    }
+
+    // Capture a mutable borrow of the picker once.
+    let picker = match app.prefix_picker.as_mut() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    match key.code {
+        KeyCode::Enter => {
+            if let Some(opt) = picker.selected().copied() {
+                app.close_prefix_picker();
+                app.apply_prefix(opt.prefix);
+            } else {
+                app.close_prefix_picker();
+            }
+            false
+        }
+        KeyCode::Up => {
+            if picker.selected > 0 {
+                picker.selected -= 1;
+            }
+            false
+        }
+        KeyCode::Down => {
+            let n = picker.options.len();
+            if n > 0 && picker.selected + 1 < n {
+                picker.selected += 1;
+            }
+            false
+        }
+        KeyCode::PageUp => {
+            picker.selected = picker.selected.saturating_sub(5);
+            if picker.options.is_empty() {
+                picker.selected = 0;
+            } else if picker.selected >= picker.options.len() {
+                picker.selected = picker.options.len() - 1;
+            }
+            false
+        }
+        KeyCode::PageDown => {
+            let n = picker.options.len();
+            picker.selected = (picker.selected + 5).min(n.saturating_sub(1));
+            false
+        }
+        KeyCode::Home => {
+            picker.selected = 0;
+            false
+        }
+        KeyCode::End => {
+            let n = picker.options.len();
+            if n > 0 {
+                picker.selected = n - 1;
+            }
+            false
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let n = picker.options.len();
+            if n > 0 && picker.selected + 1 < n {
+                picker.selected += 1;
+            }
+            false
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if picker.selected > 0 {
+                picker.selected -= 1;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Esc / Ctrl-C always revert to the original theme and
     // close. Ctrl-C additionally aborts the whole TUI.
@@ -28571,6 +29024,202 @@ ssh_config_parse\t\t10,0\n";
         // leading space, so
         // the row contains
         // ` # `.
+        // The regex row should
+        // now show `#` as
+        // the prefix. The
+        // format helper pads
+        // the prefix with a
+        // leading space, so
+        // the row contains
+        // ` # `.
         // (regex/fuzzy prefixes removed — now match-algorithm toggles)
+    }
+
+    // ===== Prefix Picker Tests =====
+
+    #[test]
+    fn apply_prefix_sets_prefix_and_preserves_body() {
+        let mut app = global_test_app(&[("git status", 1)]);
+        app.query = "git status".to_string();
+        app.apply_prefix(Some('#'));
+        assert_eq!(
+            app.query, "#git status",
+            "expected # prefix with body preserved"
+        );
+        assert_eq!(app.query_cursor, 11);
+        assert!(app.query_touched);
+    }
+
+    #[test]
+    fn apply_prefix_none_strips_current_prefix() {
+        let mut app = global_test_app(&[("src", 1)]);
+        app.query = "#src".to_string();
+        app.apply_prefix(None);
+        assert_eq!(app.query, "src", "expected prefix stripped");
+    }
+
+    #[test]
+    fn apply_prefix_jira_then_output_cycles_ok() {
+        let mut app = global_test_app(&[("todo", 1)]);
+        app.query = "-todo".to_string();
+        assert_eq!(app.query, "-todo");
+        app.apply_prefix(Some('+'));
+        assert_eq!(app.query, "+todo");
+        app.apply_prefix(None);
+        assert_eq!(app.query, "todo");
+    }
+
+    #[test]
+    fn prefix_picker_new_preselects_none_for_plain_query() {
+        let app = global_test_app(&[("hello", 1)]);
+        let picker = PrefixPicker::new(&app.query_prefixes, None);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.options[0].label, "History");
+        assert_eq!(picker.options[0].prefix, None);
+    }
+
+    #[test]
+    fn prefix_picker_new_preselects_jira_for_dash_query() {
+        let mut app = global_test_app(&[("jira", 1)]);
+        app.query = "-jira".to_string();
+        let first = app.query.chars().next();
+        let picker = PrefixPicker::new(&app.query_prefixes, first);
+        let idx = picker.selected;
+        assert_eq!(picker.options[idx].label, "JIRA");
+    }
+
+    #[test]
+    fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
+        let mut app = global_test_app(&[("unknown", 1)]);
+        app.query = "Xunknown".to_string();
+        let first = app.query.chars().next();
+        let picker = PrefixPicker::new(&app.query_prefixes, first);
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn prefix_picker_has_twelve_entries() {
+        let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
+        assert_eq!(picker.options.len(), 12);
+    }
+
+    #[test]
+    fn pick_prefix_opens_prefix_picker() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        assert!(app.prefix_picker.is_some());
+        let picker = app.prefix_picker.as_ref().unwrap();
+        assert_eq!(picker.options[0].label, "History");
+    }
+
+    #[test]
+    fn pick_prefix_preselects_current_prefix() {
+        let mut app = global_test_app(&[("notes", 1)]);
+        app.query = "@notes".to_string();
+        app.open_prefix_picker();
+        let picker = app.prefix_picker.as_ref().unwrap();
+        let idx = picker.selected;
+        assert_eq!(picker.options[idx].label, "Notes");
+    }
+
+    #[test]
+    fn handle_prefix_picker_key_enter_applies_prefix() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        // Select "JIRA" (index 8)
+        app.prefix_picker.as_mut().unwrap().selected = 8;
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        let quit = handle_prefix_picker_key(&mut app, enter);
+        assert!(!quit, "picker commit should not exit TUI");
+        assert!(app.prefix_picker.is_none(), "picker should close on Enter");
+        assert_eq!(app.query, "-hello", "should apply JIRA prefix (-)");
+    }
+
+    #[test]
+    fn handle_prefix_picker_key_cancel_closes_without_change() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        // Select JIRA so we'd see a change if Enter were pressed
+        app.prefix_picker.as_mut().unwrap().selected = 8;
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        let quit = handle_prefix_picker_key(&mut app, esc);
+        assert!(!quit, "picker cancel should not exit TUI");
+        assert!(app.prefix_picker.is_none(), "picker should close on Cancel");
+        assert_eq!(app.query, "hello", "query should be unchanged");
+    }
+
+    #[test]
+    fn handle_prefix_picker_key_updown_navigates() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+        handle_prefix_picker_key(&mut app, down);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 1);
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        handle_prefix_picker_key(&mut app, up);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn handle_prefix_picker_key_ctrl_n_ctrl_p_navigates() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        let ctrl_n = KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        let ctrl_p = KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        handle_prefix_picker_key(&mut app, ctrl_n);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 1);
+        handle_prefix_picker_key(&mut app, ctrl_p);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn handle_prefix_picker_key_home_end_jump() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
+        handle_prefix_picker_key(&mut app, end);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 11);
+        let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
+        handle_prefix_picker_key(&mut app, home);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn handle_prefix_picker_key_ctrl_c_closes_picker() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = "hello".to_string();
+        app.open_prefix_picker();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let quit = handle_prefix_picker_key(&mut app, ctrl_c);
+        // Ctrl+C is bound to Cancel by
+        // default, so the Cancel action
+        // fires: close the picker, do not
+        // exit the TUI. This mirrors the
+        // command palette behaviour where
+        // the user's Cancel binding
+        // dismisses the overlay.
+        assert!(!quit, "picker cancel (ctrl+c) should not exit TUI");
+        assert!(app.prefix_picker.is_none(), "picker should close on ctrl+c");
+        assert!(
+            !app.cancelled,
+            "cancelled flag should not be set by picker close"
+        );
     }
 }

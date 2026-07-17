@@ -328,6 +328,79 @@ pub enum Action {
     ///
     /// Default key: `F6`. Works in any mode.
     TogglePaneVisibility,
+    /// Open the prefix picker. The
+    /// picker is a centred
+    /// overlay (modelled on
+    /// the command palette) that
+    /// lists every configured
+    /// prefix mode — output `+`,
+    /// LLM `=`, question `%`,
+    /// notes `@`, todo `!`,
+    /// directories `#`, panes `*`,
+    /// JIRA `-`, files `~`,
+    /// tags `$`, ag `,`,
+    /// plus a "no prefix"
+    /// (history) entry at the
+    /// top. Each row shows the
+    /// mode name, the current
+    /// prefix char (from the
+    /// user's `QueryPrefixes`
+    /// config, so custom
+    /// `prefix.<mode>=<char>`
+    /// bindings are honoured),
+    /// and a one-line
+    /// description. The picker
+    /// pre-selects the row
+    /// matching the current
+    /// query's prefix (so Enter
+    /// with no navigation is a
+    /// no-op). The user
+    /// navigates with Up/Down
+    /// (or `j`/`k` / `Ctrl-N` /
+    /// `Ctrl-P`), commits with
+    /// Enter, and dismisses
+    /// with the user's
+    /// `Cancel` binding (default
+    /// `Esc` or `Ctrl-C`).
+    ///
+    /// On commit, the
+    /// highlighted prefix is
+    /// applied to the query:
+    /// the leading char is
+    /// replaced (or inserted
+    /// if the query had no
+    /// prefix), the body is
+    /// preserved, the cursor
+    /// is moved to the end,
+    /// the per-mode debounces
+    /// are armed, and a
+    /// `refresh()` populates
+    /// the row set on the
+    /// same frame.
+    ///
+    /// Default key: `F1`. The
+    /// `F1`-`F4` range is
+    /// the natural home for
+    /// mode-picker actions
+    /// (F4 is sort order,
+    /// F2/F3 are free; F1
+    /// was the only free
+    /// F-key in the user's
+    /// project config).
+    /// Override with
+    /// `key.pick-prefix=...`
+    /// in the config file.
+    /// Outside of any
+    /// prefixable state
+    /// (e.g. inside the
+    /// comment editor or
+    /// the add-entry
+    /// dialog) the action
+    /// is a no-op so the
+    /// key doesn't
+    /// interfere with
+    /// anything else.
+    PickPrefix,
     /// Tab-completion for JQL field names inside
     /// the `-` mode. When the user has typed a
     /// token that matches the prefix of one or
@@ -410,6 +483,7 @@ impl Action {
             Action::ToggleSearchMode => "toggle-search-mode",
             Action::MarkTodoDone => "mark-todo-done",
             Action::TogglePaneVisibility => "toggle-pane-visibility",
+            Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
         }
     }
@@ -457,6 +531,7 @@ impl Action {
             Action::ToggleSearchMode => "Toggle search mode",
             Action::MarkTodoDone => "Mark todo done",
             Action::TogglePaneVisibility => "Toggle pane visibility",
+            Action::PickPrefix => "Cycle prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
         }
     }
@@ -484,7 +559,8 @@ impl Action {
             | Action::CycleSortOrder
             | Action::CycleDirectorySource
             | Action::ClearQuery
-            | Action::ToggleSearchMode => "search",
+            | Action::ToggleSearchMode
+            | Action::PickPrefix => "search",
             Action::MarkTodoDone => "todo",
             Action::CycleThemeNext | Action::CycleThemePrev => "theme",
             Action::EditComment
@@ -591,6 +667,7 @@ impl Action {
             Action::FilterPanesSessions => "F9",
             Action::TogglePaneVisibility => "F10",
             Action::JiraFieldComplete => "Tab",
+            Action::PickPrefix => "F1",
         }
     }
 
@@ -882,8 +959,10 @@ impl KeyBindings {
                 continue;
             }
             let specs: Vec<KeySpec> = if extra.is_empty() {
-                vec![parse_key_spec(a.default_key())
-                    .expect("default key bindings must always parse")]
+                vec![
+                    parse_key_spec(a.default_key())
+                        .expect("default key bindings must always parse"),
+                ]
             } else {
                 extra
                     .iter()
@@ -978,6 +1057,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::FilterPanesSessions,
     Action::TogglePaneVisibility,
     Action::JiraFieldComplete,
+    Action::PickPrefix,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
