@@ -195,6 +195,29 @@ pub enum Action {
     Up,
     /// Move the cursor down in the list (Down).
     Down,
+    /// Move the cursor one character to the
+    /// left inside the search query (Left).
+    /// The query string itself is unchanged;
+    /// only the cursor position moves. The
+    /// cursor is clamped at position 0 (the
+    /// mode-prefix character) so pressing
+    /// Left at the very start of the query
+    /// is a no-op. The cursor is measured in
+    /// UTF-8 characters (matching the rest
+    /// of the query editing logic), so
+    /// multi-byte characters are stepped
+    /// over as single units.
+    MoveCursorLeft,
+    /// Move the cursor one character to the
+    /// right inside the search query
+    /// (Right). The query string itself is
+    /// unchanged; only the cursor position
+    /// moves. The cursor is clamped at the
+    /// end of the query so pressing Right
+    /// past the last character is a no-op.
+    /// Measured in UTF-8 characters, same
+    /// as `MoveCursorLeft`.
+    MoveCursorRight,
     /// Jump 10 rows up (PageUp).
     PageUp,
     /// Jump 10 rows down (PageDown).
@@ -472,6 +495,8 @@ impl Action {
             Action::EditEnd => "edit-end",
             Action::Up => "up",
             Action::Down => "down",
+            Action::MoveCursorLeft => "move-cursor-left",
+            Action::MoveCursorRight => "move-cursor-right",
             Action::PageUp => "page-up",
             Action::PageDown => "page-down",
             Action::Home => "home",
@@ -520,6 +545,8 @@ impl Action {
             Action::EditEnd => "Edit (cursor at end)",
             Action::Up => "Up",
             Action::Down => "Down",
+            Action::MoveCursorLeft => "Move cursor left",
+            Action::MoveCursorRight => "Move cursor right",
             Action::PageUp => "Page up",
             Action::PageDown => "Page down",
             Action::Home => "Home",
@@ -531,7 +558,7 @@ impl Action {
             Action::ToggleSearchMode => "Toggle search mode",
             Action::MarkTodoDone => "Mark todo done",
             Action::TogglePaneVisibility => "Toggle pane visibility",
-            Action::PickPrefix => "Cycle prefix mode",
+            Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
         }
     }
@@ -547,6 +574,8 @@ impl Action {
             | Action::EditEnd
             | Action::Up
             | Action::Down
+            | Action::MoveCursorLeft
+            | Action::MoveCursorRight
             | Action::PageUp
             | Action::PageDown
             | Action::Home
@@ -646,10 +675,12 @@ impl Action {
             Action::Correct => "C-t",
             Action::DownloadJiraIssue => "C-M-s",
             Action::Run => "Enter",
-            Action::EditStart => "Left",
-            Action::EditEnd => "Right",
+            Action::EditStart => "none",
+            Action::EditEnd => "none",
             Action::Up => "Up",
             Action::Down => "Down",
+            Action::MoveCursorLeft => "Left",
+            Action::MoveCursorRight => "Right",
             Action::PageUp => "PageUp",
             Action::PageDown => "PageDown",
             Action::Home => "Home",
@@ -959,10 +990,8 @@ impl KeyBindings {
                 continue;
             }
             let specs: Vec<KeySpec> = if extra.is_empty() {
-                vec![
-                    parse_key_spec(a.default_key())
-                        .expect("default key bindings must always parse"),
-                ]
+                vec![parse_key_spec(a.default_key())
+                    .expect("default key bindings must always parse")]
             } else {
                 extra
                     .iter()
@@ -1040,6 +1069,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::EditEnd,
     Action::Up,
     Action::Down,
+    Action::MoveCursorLeft,
+    Action::MoveCursorRight,
     Action::PageUp,
     Action::PageDown,
     Action::Home,

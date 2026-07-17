@@ -442,6 +442,35 @@ All notable changes to this project will be documented in this file.
   returns the full `[[...]]`
   expansion; the TUI uses the result
   directly without re-wrapping.
+- New TUI actions `Action::MoveCursorLeft`
+  (default key `Left`) and
+  `Action::MoveCursorRight` (default key
+  `Right`) move the cursor one
+  character at a time inside the
+  search query. The query string is
+  unchanged; only the cursor position
+  moves. The cursor saturates at
+  position 0 (Left) and at the end of
+  the query (Right), and is measured
+  in UTF-8 characters so multi-byte
+  characters are stepped over as
+  single units. The new actions work
+  in every mode (LLM, JIRA, notes,
+  todos, or plain text search) since
+  the cursor lives on `self.query`
+  in all of them. To make room for the
+  new default bindings, `EditStart`
+  and `EditEnd` ship unbound by
+  default (the `"none"` sentinel) —
+  users who want the old "stage row
+  for editing at cursor start/end"
+  behaviour can rebind via
+  `key.edit-start=...` /
+  `key.edit-end=...` in their config.
+  Five new unit tests cover the
+  cursor-movement helpers
+  (one-step, saturation at boundaries,
+  multi-byte handling).
 
 ### Fixed
 

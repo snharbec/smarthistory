@@ -8299,6 +8299,57 @@ impl App {
         }
     }
 
+    /// Move the cursor one
+    /// character to the left
+    /// inside the search query.
+    /// The cursor is measured in
+    /// UTF-8 characters (matching
+    /// the rest of the query
+    /// editing logic), so
+    /// multi-byte characters are
+    /// stepped over as single
+    /// units. Saturates at
+    /// position 0 so pressing
+    /// Left at the very start of
+    /// the query is a no-op. The
+    /// query string is unchanged;
+    /// only the cursor position
+    /// moves. In comment-edit mode
+    /// the cursor lives on the
+    /// edit buffer, not on
+    /// `self.query`, so the action
+    /// is a no-op there (the
+    /// comment editor handles its
+    /// own Left/Right).
+    fn move_query_cursor_left(&mut self) {
+        if self.comment_edit.is_some() {
+            return;
+        }
+        if self.query_cursor > 0 {
+            self.query_cursor -= 1;
+        }
+    }
+
+    /// Move the cursor one
+    /// character to the right
+    /// inside the search query.
+    /// Saturates at the end of
+    /// the query so pressing
+    /// Right past the last
+    /// character is a no-op.
+    /// See `move_query_cursor_left`
+    /// for the comment-edit branch
+    /// rationale.
+    fn move_query_cursor_right(&mut self) {
+        if self.comment_edit.is_some() {
+            return;
+        }
+        let len = self.query.chars().count();
+        if self.query_cursor < len {
+            self.query_cursor += 1;
+        }
+    }
+
     fn backspace(&mut self) {
         if let Some(ref mut buf) = self.comment_edit {
             buf.pop();
@@ -11869,6 +11920,31 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         Action::Down => {
             app.move_selection(-1);
             app.query_prefilled = false;
+            false
+        }
+        Action::MoveCursorLeft => {
+            // Move the cursor one
+            // character to the left
+            // inside the search query.
+            // Saturates at position
+            // 0 so pressing Left at
+            // the very start of the
+            // query is a no-op. The
+            // query string is
+            // unchanged; only the
+            // cursor position moves.
+            app.move_query_cursor_left();
+            false
+        }
+        Action::MoveCursorRight => {
+            // Move the cursor one
+            // character to the right
+            // inside the search query.
+            // Saturates at the end of
+            // the query so pressing
+            // Right past the last
+            // character is a no-op.
+            app.move_query_cursor_right();
             false
         }
         Action::PageUp => {
@@ -17111,6 +17187,84 @@ mod tests {
         app.select_for_edit_end();
         assert_eq!(app.query_cursor, len);
         assert!(app.selection.is_none());
+    }
+
+    /// `MoveCursorLeft` (the Left key in non-LLM
+    /// modes) moves the cursor one character toward
+    /// the start of the query. The query string is
+    /// unchanged; only the cursor position moves.
+    /// Works in any mode — LLM, JIRA, notes, todos,
+    /// or plain text search — since the cursor lives
+    /// on `self.query` in all of them.
+    #[test]
+    fn move_cursor_left_moves_one_char_left() {
+        let mut app = global_test_app(&[("a", 1)]);
+        app.query = String::from("git status");
+        app.query_cursor = app.query.chars().count();
+        let end = app.query_cursor;
+        app.move_query_cursor_left();
+        assert_eq!(app.query_cursor, end - 1);
+        assert_eq!(app.query, "git status", "query should be unchanged");
+    }
+
+    /// `MoveCursorRight` moves the cursor one
+    /// character toward the end of the query. Mirror
+    /// of the Left test.
+    #[test]
+    fn move_cursor_right_moves_one_char_right() {
+        let mut app = global_test_app(&[("a", 1)]);
+        app.query = String::from("git status");
+        app.query_cursor = 4; // between "git" and " status"
+        app.move_query_cursor_right();
+        assert_eq!(app.query_cursor, 5);
+        assert_eq!(app.query, "git status", "query should be unchanged");
+    }
+
+    /// Pressing Left at position 0 is a no-op
+    /// (saturating subtraction). Prevents underflow
+    /// panic on repeated presses at the start of
+    /// the query.
+    #[test]
+    fn move_cursor_left_at_position_zero_is_noop() {
+        let mut app = global_test_app(&[("a", 1)]);
+        app.query = String::from("git status");
+        app.query_cursor = 0;
+        app.move_query_cursor_left();
+        assert_eq!(app.query_cursor, 0);
+    }
+
+    /// Pressing Right at the end of the query is a
+    /// no-op. Prevents the cursor from running past
+    /// the last character.
+    #[test]
+    fn move_cursor_right_at_end_is_noop() {
+        let mut app = global_test_app(&[("a", 1)]);
+        app.query = String::from("git status");
+        let len = app.query.chars().count();
+        app.query_cursor = len;
+        app.move_query_cursor_right();
+        assert_eq!(app.query_cursor, len);
+    }
+
+    /// Cursor movement is measured in UTF-8
+    /// characters, not bytes, so multi-byte
+    /// characters like `é` count as a single step.
+    /// This matches the rest of the query editing
+    /// logic and prevents the cursor from landing
+    /// in the middle of a multi-byte codepoint.
+    #[test]
+    fn move_cursor_handles_multibyte() {
+        let mut app = global_test_app(&[("a", 1)]);
+        app.query = String::from("café");
+        let end = app.query.chars().count();
+        assert_eq!(end, 4);
+        app.query_cursor = end;
+        app.move_query_cursor_left();
+        // One step back, regardless of `é`'s 2-byte
+        // UTF-8 encoding.
+        assert_eq!(app.query_cursor, 3);
+        app.move_query_cursor_left();
+        assert_eq!(app.query_cursor, 2);
     }
 
     /// Character-by-character navigation works for
