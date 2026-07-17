@@ -10760,6 +10760,56 @@ impl App {
         self.pick_mode = Some(PickMode::Run);
     }
 
+    /// Open the selected JIRA issue's browse URL in the system
+    /// browser **in the background** — the same action as pressing
+    /// `Enter` on the row (`select_for_run_impl`), but spawned as a
+    /// detached child process so the TUI stays open. Used by the
+    /// [`Action::SmartOpen`] dive key in `-` (JIRA) mode.
+    ///
+    /// The opener is `open` on macOS and `xdg-open` on other
+    /// Unixes (matching `select_for_run_impl`). The process is
+    /// spawned on a short-lived thread that calls `.status()`
+    /// (blocking wait + reap) so the child doesn't become a
+    /// zombie; the TUI never blocks on the browser-launch call.
+    fn open_jira_in_background(&mut self) {
+        // Same gates as `select_for_run_impl`'s JIRA branch.
+        if !self.is_jira_query() {
+            self.set_status_message(
+                "JIRA open is only available in JIRA search (type `-`)".to_string(),
+            );
+            return;
+        }
+        let key: String = match self.selected_row() {
+            Some(r) => r.command.clone(),
+            None => {
+                self.set_status_message("No JIRA issue selected".to_string());
+                return;
+            }
+        };
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            self.set_status_message("Selected JIRA row has no issue key".to_string());
+            return;
+        }
+        let Some(cfg) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            return;
+        };
+        let url = cfg.browse_url(&key);
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        }
+        .to_string();
+        // Spawn a thread that runs the opener and reaps the child.
+        // The TUI thread never blocks on the browser launch.
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new(&opener).arg(&url).status();
+        });
+        self.set_status_message(format!("Opened {} in browser", key));
+    }
+
     /// Mark the currently-selected todo
     /// entry as done by toggling the
     /// checkbox marker on its line in
@@ -12414,38 +12464,66 @@ fn run_loop(
         // current snapshot.
         app.process_pane_cmdlines();
 
-        if !crossterm::event::poll(Duration::from_millis(100))? {
-            // No input ready. Still a chance to drive the
-            // LLM auto-call debounce: if the user is in LLM
-            // mode and has paused typing for at least
-            // `LLM_DEBOUNCE`, this is when the suggestion
-            // gets generated. We deliberately do this on the
-            // "no event" path (rather than only after a
-            // keypress) so the debounce works even if the
-            // user just stares at the screen after typing
-            // their last character — the worst case is that
-            // we wait one extra 100ms tick before firing.
-            app.llm_maybe_autocall();
-            // Same debounce drive for JIRA search-as-you-
-            // type: fires the JQL query after
-            // `JIRA_DEBOUNCE` of quiet typing in `-` mode.
-            app.jira_maybe_autocall();
-            // Same debounce drive for files-mode
-            // walks: spawns the background
-            // directory walk after
-            // `FILES_DEBOUNCE` of quiet typing
-            // in `~` mode. Without this the
-            // walk would never fire (no other
-            // edit path arms the debounce).
-            app.files_maybe_autocall();
-            // Same debounce drive for ag-mode
-            // searches: spawns the background
-            // ag search after `AG_DEBOUNCE` of
-            // quiet typing in `,` mode.
-            app.ag_maybe_autocall();
-            continue;
+        // Drive the various debounce timers (LLM / JIRA / files / ag
+        // auto-calls) on the no-input path.
+        // crossterm 0.29 can return `Err` from `event::poll` / `event::read`
+        // for sequences it doesn't recognise — notably the malformed
+        // Shift+Return encoding `ESC[27;5;13~` some terminals emit
+        // (first param `27` isn't in crossterm's legacy `~`-terminated
+        // special-key table, so the parser raises
+        // `could_not_parse_event_error`). `?` would propagate that out
+        // and the TUI would exit; instead we surface a status message
+        // so the user can see their key wasn't decodable and rebind via
+        // `key.<action>=<spec>` in the config file.
+        let poll_result = crossterm::event::poll(Duration::from_millis(100));
+        match poll_result {
+            Ok(false) => {
+                // No input ready. Still a chance to drive the
+                // LLM auto-call debounce: if the user is in LLM
+                // mode and has paused typing for at least
+                // `LLM_DEBOUNCE`, this is when the suggestion
+                // gets generated. We deliberately do this on the
+                // "no event" path (rather than only after a
+                // keypress) so the debounce works even if the
+                // user just stares at the screen after typing
+                // their last character — the worst case is that
+                // we wait one extra 100ms tick before firing.
+                app.llm_maybe_autocall();
+                // Same debounce drive for JIRA search-as-you-
+                // type: fires the JQL query after
+                // `JIRA_DEBOUNCE` of quiet typing in `-` mode.
+                app.jira_maybe_autocall();
+                // Same debounce drive for files-mode
+                // walks: spawns the background
+                // directory walk after
+                // `FILES_DEBOUNCE` of quiet typing
+                // in `~` mode. Without this the
+                // walk would never fire (no other
+                // edit path arms the debounce).
+                app.files_maybe_autocall();
+                // Same debounce drive for ag-mode
+                // searches: spawns the background
+                // ag search after `AG_DEBOUNCE` of
+                // quiet typing in `,` mode.
+                app.ag_maybe_autocall();
+                continue;
+            }
+            Ok(true) => {}
+            Err(e) => {
+                app.set_status_message(format!("input poll error: {e}"));
+                continue;
+            }
         }
-        let Event::Key(key) = event::read()? else {
+        let event = match event::read() {
+            Ok(ev) => ev,
+            Err(e) => {
+                app.set_status_message(format!(
+                    "unrecognised key sequence (crossterm parse error: {e}); rebind via key.<action>=<spec> in config"
+                ));
+                continue;
+            }
+        };
+        let Event::Key(key) = event else {
             continue;
         };
 
@@ -13082,6 +13160,29 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // open file + exit) or cancels (Esc → close overlay).
             app.open_codegraph_relations();
             false
+        }
+        Action::SmartOpen => {
+            // Context-aware "dive" key (default Shift-Return):
+            // adapt to the active prefix mode. In `&` / `$`
+            // (codegraph-backed) symbol mode, open the
+            // callers/callees picker (same as CodegraphRelations).
+            // In `-` (JIRA) mode, open the selected issue's browse
+            // URL in the system browser **in the background** (same
+            // as pressing Enter, but spawned detached so the TUI
+            // stays open). Everywhere else, fall through to the
+            // normal `Run` action (select row / open editor /
+            // fire LLM), so Shift-Return is an ergonomic Enter
+            // replacement across all modes.
+            if app.is_codegraph_query() || app.is_tags_query() {
+                app.open_codegraph_relations();
+                false
+            } else if app.is_jira_query() {
+                app.open_jira_in_background();
+                false
+            } else {
+                app.select_for_run();
+                app.selection.is_some()
+            }
         }
     }
 }
@@ -15058,6 +15159,28 @@ mod tests {
         assert_eq!(
             format_key_specs(bindings.specs(Action::DeleteSelected)),
             "C-d".to_string()
+        );
+    }
+
+    /// Pin the SmartOpen default to `C-]`. The binding must be a
+    /// single-byte ASCII control char that every terminal emits
+    /// reliably — `S-Return` was the original default but many
+    /// terminals emit it as a non-standard `ESC[27;5;13~` sequence
+    /// crossterm 0.29 can't decode. If this default ever drifts
+    /// back to `S-Return`, users on those terminals lose the dive
+    /// key out-of-the-box.
+    #[test]
+    fn smart_open_default_binding_is_ctrl_right_bracket() {
+        assert_eq!(
+            Action::SmartOpen.default_key(),
+            "C-]",
+            "SmartOpen default must stay C-] (S-Return is undecodable on many terminals)"
+        );
+        let bindings = bindings::KeyBindings::defaults();
+        assert_eq!(
+            format_key_specs(bindings.specs(Action::SmartOpen)),
+            "C-]",
+            "defaults() must install C-] for SmartOpen"
         );
     }
 
@@ -31703,6 +31826,137 @@ ssh_config_parse\t\t10,0\n";
         assert_eq!(
             app.codegraph_relations_picker.as_ref().unwrap().selected,
             0
+        );
+    }
+
+    /// `SmartOpen` in `&` (codegraph) mode opens the callers/callees
+    /// picker. It can't get a real `.codegraph` index in a unit
+    /// test, so the opener surfaces a status message ("No .codegraph
+    /// index found") instead of opening the picker — but the
+    /// dispatch must still branch into the codegraph path rather
+    /// than falling through to `Run`. We assert that branch by
+    /// checking it did NOT stage a selection (Run would have, for a
+    /// row with a real command).
+    #[test]
+    fn smart_open_in_codegraph_mode_takes_codegraph_branch() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        // Enter `&` (codegraph) prefix mode with a query body.
+        app.query = format!("{}getSymbol", app.query_prefixes.codegraph);
+        app.query_cursor = app.query.chars().count();
+        app.refresh();
+        // Select the first row (the history row "hello") so the
+        // codegraph opener has a selected row to inspect; its mode
+        // is "command", so `open_codegraph_relations` will surface
+        // a status message and NOT open the picker.
+        app.list_state.select(Some(0));
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(!quit, "SmartOpen must not exit the TUI in codegraph mode");
+        assert!(
+            app.codegraph_relations_picker.is_none(),
+            "no real .codegraph index in the test env → opener must not construct the picker"
+        );
+        assert!(
+            app.selection.is_none(),
+            "codegraph branch must not fall through to Run (which would stage a selection)"
+        );
+    }
+
+    /// `SmartOpen` in `$` (tags) mode takes the same codegraph branch.
+    #[test]
+    fn smart_open_in_tags_mode_takes_codegraph_branch() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.query = format!("{}getSymbol", app.query_prefixes.tags);
+        app.query_cursor = app.query.chars().count();
+        app.refresh();
+        app.list_state.select(Some(0));
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(!quit, "SmartOpen must not exit the TUI in tags mode");
+        assert!(
+            app.selection.is_none(),
+            "tags branch must not fall through to Run"
+        );
+    }
+
+    /// `SmartOpen` outside the special modes falls through to `Run`:
+    /// selecting a history row stages its command and the dispatch
+    /// returns `true` (TUI exits). This pins the ergonomic
+    /// "Shift-Return = Enter" fallback.
+    #[test]
+    fn smart_open_in_history_mode_falls_through_to_run() {
+        let mut app = global_test_app(&[("ls -la", 1)]);
+        app.list_state.select(Some(0));
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(quit, "SmartOpen in history mode must exit the TUI like Run");
+        assert_eq!(
+            app.selection.as_deref(),
+            Some("ls -la"),
+            "SmartOpen fallback must stage the selected row's command"
+        );
+    }
+
+    /// `SmartOpen` in `-` (JIRA) mode must take the background-open
+    /// branch, NOT the `Run` fallback. The `Run` fallback would
+    /// stage `open "<URL>"` as `selection` and exit the TUI;
+    /// the background branch stages nothing and stays open. To
+    /// avoid launching a real browser during the test, we exercise
+    /// the not-configured path (no JIRA env vars) and assert that
+    /// the dispatch took the JIRA branch at all — i.e. it did NOT
+    /// stage a selection (Run would have) and did NOT exit.
+    #[test]
+    fn smart_open_in_jira_mode_does_not_stage_or_exit() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap();
+        // Explicitly clear the JIRA env vars so `from_env()` returns
+        // None → the background opener surfaces a "not configured"
+        // status message instead of actually launching a browser.
+        let prev_server = std::env::var("JIRA_SERVER").ok();
+        let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+        let prev_url = std::env::var("JIRA_URL").ok();
+        unsafe {
+            std::env::remove_var("JIRA_SERVER");
+            std::env::remove_var("JIRA_API_TOKEN");
+            std::env::remove_var("JIRA_URL");
+        }
+        let restore = |name: &str, prev: Option<String>| unsafe {
+            match prev {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        };
+        let mut app = directories_test_app(&[]);
+        app.jira_rows.push(crate::tui::state::HistoryRow {
+            id: -1,
+            command: "PROJ-42".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: "summary".to_string(),
+            output: String::new(),
+            mode: "jira".to_string(),
+            source: "jira".to_string(),
+            ..Default::default()
+        });
+        app.query = String::from("-");
+        app.refresh();
+        app.list_state.select(Some(0));
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        restore("JIRA_SERVER", prev_server);
+        restore("JIRA_API_TOKEN", prev_token);
+        restore("JIRA_URL", prev_url);
+        assert!(
+            !quit,
+            "SmartOpen in JIRA mode must NOT exit the TUI (background open)"
+        );
+        assert!(
+            app.selection.is_none(),
+            "SmartOpen in JIRA mode must NOT stage a selection (Run fallback would have): {:?}",
+            app.selection
+        );
+        assert_eq!(
+            app.pick_mode, None,
+            "SmartOpen in JIRA mode must NOT set pick_mode (Run fallback would have)"
         );
     }
 }

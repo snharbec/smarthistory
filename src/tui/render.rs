@@ -1280,6 +1280,11 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
     row(
         &mut lines,
+        binding_for(Action::SmartOpen),
+        "context dive: & / $ opens callers/callees; - opens the JIRA issue in the browser (background); else selects the row",
+    );
+    row(
+        &mut lines,
         binding_for(Action::Describe),
         "ask the LLM what the selected command does (4-sentence summary)",
     );

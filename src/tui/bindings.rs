@@ -466,6 +466,22 @@ pub enum Action {
     /// the selected row carries a CodeGraph node id; otherwise a
     /// no-op with a status message.
     CodegraphRelations,
+    /// Context-aware "dive" key: a single binding (default
+    /// `C-]`, ASCII GS 0x1D — chosen over `S-Return` because
+    /// many terminals emit Shift-Return as a non-standard
+    /// sequence crossterm 0.29 can't decode; rebind to
+    /// `S-Return` on kitty-protocol terminals) that adapts to
+    /// the active mode. In `&` / `$` (codegraph-backed) symbol
+    /// mode it opens the callers/callees picker
+    /// ([`Action::CodegraphRelations]); in `-` (JIRA) mode it
+    /// opens the selected issue's browse URL in the system
+    /// browser in the background (`open_jira_in_background`,
+    /// same as `select_for_run_impl`'s JIRA branch but spawned
+    /// detached so the TUI stays open); in every other mode it
+    /// falls through to the normal `Run` action (select the
+    /// row / open the editor / fire the LLM), so the key works
+    /// as an ergonomic Enter replacement everywhere.
+    SmartOpen,
 }
 
 impl Action {
@@ -519,6 +535,7 @@ impl Action {
             Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
             Action::CodegraphRelations => "codegraph-relations",
+            Action::SmartOpen => "smart-open",
         }
     }
 
@@ -570,6 +587,7 @@ impl Action {
             Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
             Action::CodegraphRelations => "Browse callers / callees",
+            Action::SmartOpen => "Smart open (context dive)",
         }
     }
 
@@ -618,6 +636,7 @@ impl Action {
             Action::Correct => "llm",
             Action::DownloadJiraIssue => "tools",
             Action::CodegraphRelations => "codegraph",
+            Action::SmartOpen => "tools",
             Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
             // Adding new entries to the config file
@@ -711,6 +730,19 @@ impl Action {
             Action::JiraFieldComplete => "Tab",
             Action::PickPrefix => "F1",
             Action::CodegraphRelations => "C-r",
+            // `C-]` (ASCII GS, 0x1D) instead of the more semantic
+            // `S-Return`: many terminals either emit Shift-Return
+            // as a non-standard `ESC[27;5;13~` sequence that
+            // crossterm 0.29 can't decode (first param `27` isn't
+            // in the legacy `~`-terminated special-key table), or
+            // merge it into a plain `Enter` with no SHIFT bit.
+            // `C-]` is a single-byte ASCII control char every
+            // terminal emits reliably, so the dive key works
+            // out-of-the-box everywhere. Users on kitty-protocol
+            // terminals (Kitty / WezTerm / Alacritty / iTerm2+CSI-u)
+            // who prefer Shift-Return can rebind via
+            // `key.smart-open=S-Return` in the config file.
+            Action::SmartOpen => "C-]",
         }
     }
 
@@ -1102,6 +1134,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::JiraFieldComplete,
     Action::PickPrefix,
     Action::CodegraphRelations,
+    Action::SmartOpen,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
