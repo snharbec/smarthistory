@@ -24,6 +24,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 
 Some flows span multiple modes. These are documented as standalone pages:
 
+- **[`actions.md`](actions.md)** — every TUI action (all 48 in `ALL_ACTIONS`), grouped by category, with config keys, default keys, and mode-specific behavior. The canonical reference for `key.<action>=<spec>` config-file bindings. Read this when you want to rebind a key, find a key you've forgotten, or understand which actions are mode-specific (e.g. `MarkTodoDone` is a no-op outside `!` mode).
 - **[`multiplexer.md`](multiplexer.md)** — tmux + herdr support: backend selection, building with the herdr feature, setup guides, troubleshooting. Required reading for anyone who uses `#` or `*` mode (the backend is what produces the `T` marker and what handles the focus / create staging).
 
 ## How the prefix is selected
@@ -82,6 +83,26 @@ The substring / fuzzy / regex algorithms apply to most modes. Toggle with `Ctrl-
 | `F1` | Pick prefix | Open the prefix-mode picker. |
 | `Ctrl-A` | Help | Open this help overlay (see also the standalone docs in this directory). |
 | `Ctrl-Q` | Command palette | Search every action by name. |
+
+## Privacy convention (space prefix)
+
+The TUI honors zsh's `HIST_NO_STORE` convention: **any command whose first character is whitespace is treated as "do not record".** This applies in two places:
+
+1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `~` / `@` / `!` / `-` / `,` / `=` / `%` / `#` / `*`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
+2. **User-typed space-prefixed commands** get the same treatment. Type `git push` (with a leading space) and the precmd hook skips the DB write; `git push` (no space) is recorded normally.
+
+The convention is also honored by the `Ctrl-S` (next-probable-command) widget: a space-prefixed command is deliberately NOT remembered as `_smarthistory_last_cmd`, so the widget will not suggest a sensitive command as the "next probable" one. The cycle index is still reset so the next `Ctrl-S` press starts with the most probable candidate from the (non-sensitive) recent past.
+
+Implementation:
+
+- TUI side: `maybe_prefix_selection_with_space` in [`src/tui.rs`](../../src/tui.rs) — a mode-aware helper called from `run_tui_to_stdout`'s exit path. The helper checks the active mode char: `MODE_NONE` (history, no prefix) → return the selection unchanged; any other prefix char → prepend a single space via [`prefix_selection_with_space`]. The mode char is computed from `app.query` *before* `app.selection.take()` so the borrow checker is happy.
+- zsh side: `_smarthistory_precmd` in [`src/init.zsh`](../../src/init.zsh) — the `[[ "$_smarthistory_cmd" == [[:space:]]* ]]` guard early-returns before the `smarthistory add` / `capture-*` calls.
+
+### When you want the TUI selection recorded
+
+If you want a staged command (from a non-history mode) to land in the smarthistory DB (e.g. you're staging a command you want to recommend later via `Ctrl-S`), you can strip the leading space before pressing `Enter` — but the convention is intentional: the smarthistory DB accumulates commands you'd want to search for later, and TUI picks from prefix modes are usually "look at this once" reads (`bat README.md`, `xdg-open photo.png`) rather than commands worth recording. The space prefix keeps the DB focused. Replaying from history (no prefix) is the canonical "record this" path and is never space-prefixed.
+
+The convention is symmetric: typing a leading space yourself produces the same result as picking a command from a (non-history) TUI mode.
 
 ## Where the help text comes from
 

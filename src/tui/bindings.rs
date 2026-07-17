@@ -501,10 +501,16 @@ pub enum Action {
     /// [`Action::MarkTodoDone`], reusing the shared
     /// `App::mark_todo_done` helper so the behaviour is
     /// identical to `Ctrl-X` — `C-]` is just an ergonomic
-    /// alternative); in every other mode it falls through to
-    /// the normal `Run` action (select the row / open the
-    /// editor / fire the LLM), so the key works as an
-    /// ergonomic Enter replacement everywhere.
+    /// alternative); in `~` (Files) mode it opens the selected
+    /// file with a per-extension shell command configured
+    /// via `smart-open.<ext>=<cmd>` lines in the config
+    /// file (with an optional `smart-open.default` fallback
+    /// for unrecognised extensions — see
+    /// [`crate::Config::smart_open_file_commands`]);
+    /// in every other mode it falls through to the normal
+    /// `Run` action (select the row / open the editor / fire
+    /// the LLM), so the key works as an ergonomic Enter
+    /// replacement everywhere.
     SmartOpen,
 }
 

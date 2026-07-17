@@ -1382,6 +1382,21 @@ struct App {
     /// overridden — the config loader silently drops
     /// them.
     jira_fragments: std::collections::HashMap<String, String>,
+    /// Per-extension shell commands invoked by
+    /// `Action::SmartOpen` in `~` (files) mode.
+    /// Loaded from the config file's
+    /// `smart-open.<ext>=<cmd>` lines. The TUI's
+    /// `~`-mode SmartOpen dispatch looks up the
+    /// selected file's extension (lowercase, no
+    /// leading `.`) in this map; the matched
+    /// command is staged with the file path
+    /// appended. The reserved key `default` is
+    /// the fallback for any extension without an
+    /// explicit mapping. See
+    /// [`crate::Config::smart_open_file_commands`]
+    /// for the matching / fallback semantics and
+    /// parsing rules.
+    smart_open_file_commands: std::collections::HashMap<String, String>,
     /// The fragment names that were unresolved on the
     /// most recent `jira_build_query` call. Set by
     /// `jira_build_query` after every build; read by
@@ -6725,6 +6740,7 @@ impl App {
         _todo_line_option: String,
         jira_fragments: std::collections::HashMap<String, String>,
         files_ignores: Vec<String>,
+        smart_open_file_commands: std::collections::HashMap<String, String>,
         multiplexer: Box<dyn crate::multiplexer::MultiplexerBackend>,
         pane_visibility: crate::tui::state::PaneVisibility,
     ) -> Self {
@@ -6874,6 +6890,7 @@ impl App {
             jira_add_comment_target: None,
             jira_add_comment_request: None,
             jira_add_comment_in_flight: false,
+            smart_open_file_commands,
             tags_source_cache: std::collections::HashMap::new(),
             codegraph_client: None,
             mode_query_history: std::collections::HashMap::new(),
@@ -11299,6 +11316,135 @@ impl App {
         self.refresh();
     }
 
+    /// File-type-aware file open for the `~` (files)
+    /// mode's `SmartOpen` dispatch. Returns `Some((staged
+    /// command, exit))` if the selected file's
+    /// extension (lowercase, no leading `.`) maps to a
+    /// configured `smart-open.<ext>` entry (or the
+    /// `smart-open.default` fallback). Returns
+    /// `None` if no row is selected, the row isn't a
+    /// file (it's a directory or some other non-file
+    /// mode), the file has no extension, or no mapping
+    /// is configured for any extension — in which
+    /// case the dispatch falls back to the default
+    /// `Run` action (open in `$EDITOR`).
+    ///
+    /// The command is the user-configured shell
+    /// command with the file's absolute path
+    /// appended (POSIX single-quote escaped) so
+    /// paths with spaces / shell metacharacters
+    /// can't break the staged command. The
+    /// `exit = true` signals the dispatch site to
+    /// terminate the TUI (the parent shell then
+    /// runs the staged command).
+    fn smart_open_for_file(&mut self) -> Option<(String, bool)> {
+        // Re-gate on `~` mode so a
+        // stray caller can't stage
+        // a `bat README.md` (etc.)
+        // from a different mode.
+        if !self.is_files_query() {
+            return None;
+        }
+        let Some(row) = self.selected_row() else {
+            // No row selected —
+            // surface a soft
+            // diagnostic rather than
+            // staging a wrong
+            // command. The dispatch
+            // site falls through to
+            // `select_for_run` if
+            // we return `None`, but
+            // `select_for_run` is
+            // also a no-op on an
+            // empty list (it
+            // surfaces "no row
+            // selected" itself). To
+            // avoid two status
+            // messages, we just
+            // fall through.
+            return None;
+        };
+        // Only files trigger the
+        // extension lookup —
+        // directories fall through
+        // to the default
+        // (cd / workspace
+        // create).
+        if row.mode != "file" {
+            return None;
+        }
+        // Extract the extension.
+        // `Path::extension()` returns
+        // the part after the last
+        // `.` of the file name, or
+        // `None` for dotfiles
+        // (which the files-mode
+        // walk skips by default
+        // anyway) and files with
+        // no extension.
+        let ext = std::path::Path::new(&row.directory)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        // Look up the command:
+        // 1. exact extension
+        //    match (case-
+        //    insensitive) if
+        //    the file has one,
+        // 2. `default` fallback
+        //    otherwise.
+        //
+        // A file without an extension
+        // (e.g. a `Makefile`,
+        // `LICENSE`) is matched
+        // against `default` only,
+        // not the empty-string
+        // mapping. The user who
+        // wants "all extensionless
+        // files use `bat`" writes
+        // `smart-open.default=bat`
+        // — they don't need to
+        // add a separate empty-key
+        // mapping.
+        let cmd = ext
+            .as_ref()
+            .and_then(|e| self.smart_open_file_commands.get(e))
+            .or_else(|| self.smart_open_file_commands.get("default"))
+            .cloned();
+        let Some(cmd) = cmd else {
+            // No mapping for this
+            // extension and no
+            // `default` fallback —
+            // fall through to
+            // `Run` (open in
+            // editor).
+            return None;
+        };
+        // Stage the command with
+        // the file's absolute path
+        // appended. The command
+        // is taken verbatim (the
+        // user owns the formatting
+        // — `bat --style=plain`
+        // works as expected) and
+        // the path is POSIX-
+        // single-quote escaped so
+        // paths with spaces,
+        // quotes, or backslashes
+        // can't break the staged
+        // command.
+        let quoted = crate::util::shell_quote(&row.directory);
+        let staged = format!("{} {}", cmd.trim(), quoted);
+        // Set pick_mode so the run-
+        // loop treats this as a
+        // normal `Run`-equivalent
+        // selection (the parent's
+        // exit code maps through).
+        self.selection = Some(staged.clone());
+        self.pick_mode = Some(PickMode::Run);
+        Some((staged, true))
+    }
+
     /// Set the transient status message. The status bar shows
     /// it for a few seconds and then it's automatically cleared
     /// by `tick_status_message`.
@@ -12558,6 +12704,68 @@ pub fn read_source_context_with_cache(
     out.join("\n")
 }
 
+/// Prepend a single space to a TUI-staged selection
+/// before it runs in the parent shell. Zsh's
+/// `HIST_NO_STORE` (default-on) treats any command
+/// whose first character is whitespace as "do not
+/// save to the shell history" — the canonical
+/// convention for "this command shouldn't be
+/// persisted". The TUI honours the same convention
+/// by prepending a space to every staged selection, so
+/// the user's shell history doesn't accumulate
+/// `bat README.md` (etc.) entries that the TUI
+/// picked. The smarthistory DB also honours the same
+/// convention (see `_smarthistory_precmd` in
+/// `init.zsh`) — a space-prefixed command is
+/// sensitive (a credential, a destructive op, a
+/// private URL) and must not be persisted in either
+/// place.
+///
+/// The space is prepended unconditionally (even on
+/// already-space-prefixed commands — the user might
+/// have set the selection themselves; the double-space
+/// is harmless). An empty selection becomes `" "`,
+/// which the parent shell will reject as an empty
+/// command — the same as before this helper existed;
+/// we're not changing the contract, just normalising
+/// the format.
+fn prefix_selection_with_space(sel: String) -> String {
+    format!(" {}", sel)
+}
+
+/// Mode-aware wrapper around [`prefix_selection_with_space`].
+/// Returns the selection unchanged when `mode_char` is
+/// [`MODE_NONE`] (the plain no-prefix history mode);
+/// otherwise prepends a single space so the parent
+/// shell treats the command as "do not save to shell
+/// history" (zsh `HIST_NO_STORE`) and the smarthistory
+/// `init.zsh` precmd hook skips the DB write.
+///
+/// The history-mode exception is the user's
+/// explicit request: replaying a row from history is a
+/// command they *want* recorded — recording it keeps
+/// the frequency stats accurate (so `Ctrl-S` next-
+/// probable-command suggestions stay useful) and lets
+/// the same command surface in future searches. Every
+/// other mode (`+`, `=`, `%`, `@`, `!`, `#`, `*`, `-`,
+/// `~`, `$`, `&`, `,`) stages a one-shot read (`bat
+/// README.md`, `note_search edit-note <id>`, `open
+/// <jira-url>`, etc.) that the user typically doesn't
+/// want cluttering the DB — the space prefix keeps the
+/// DB focused on commands worth recalling.
+///
+/// `mode_char` is the result of [`query_mode_char`] on
+/// the current `app.query`; the caller computes it once
+/// before taking the selection so the borrow of `app`
+/// is released by the time `app.selection.take()` runs.
+fn maybe_prefix_selection_with_space(sel: String, mode_char: char) -> String {
+    if mode_char == MODE_NONE {
+        sel
+    } else {
+        prefix_selection_with_space(sel)
+    }
+}
+
 pub fn run_tui_to_stdout(
     initial_mode: String,
     initial_query: String,
@@ -12660,6 +12868,7 @@ pub fn run_tui_to_stdout(
         app_cfg.todo_line_option().to_string(),
         app_cfg.jira_fragments().clone(),
         app_cfg.files_ignores().to_vec(),
+        app_cfg.smart_open_file_commands().clone(),
         crate::multiplexer::backend_for(app_cfg.multiplexer()),
         initial_pane_visibility,
     );
@@ -12741,11 +12950,31 @@ pub fn run_tui_to_stdout(
     let _ = crossterm::terminal::disable_raw_mode();
 
     result?;
+    // Compute the active mode char BEFORE taking the
+    // selection so the immutable borrow of `app.query` /
+    // `app.query_prefixes` is released before the
+    // `&mut self`-style `app.selection.take()` call.
+    // `MODE_NONE` (`'\0'`) means the no-prefix history
+    // mode — the only case where we DON'T prepend a space
+    // (see `maybe_prefix_selection_with_space`).
+    let mode_char = query_mode_char(&app.query, &app.query_prefixes);
     let selection = if app.cancelled {
         None
     } else if let Some(sel) = app.selection.take() {
         let pm = app.pick_mode.unwrap_or(PickMode::Run).exit_code();
-        Some((sel, pm))
+        // Mode-aware space prefixing. In history mode
+        // (no leading prefix char) the selection is
+        // returned unchanged so the command IS recorded
+        // in the smarthistory DB (it's a history replay —
+        // recording it keeps the frequency stats and
+        // `Ctrl-S` next-probable-command suggestions
+        // accurate). Every other mode prepends a single
+        // space (zsh `HIST_NO_STORE` convention) so the
+        // command stays out of both the shell history
+        // and the smarthistory DB. See
+        // [`maybe_prefix_selection_with_space`] for the
+        // full rationale.
+        Some((maybe_prefix_selection_with_space(sel, mode_char), pm))
     } else {
         None
     };
@@ -13681,9 +13910,14 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // `Action::MarkTodoDone` / `Ctrl-X`) — a "smart"
             // companion to the existing "open the file at
             // the line" behaviour of `Enter` (which the
-            // fallback also handles). Everywhere else, fall
-            // through to the normal `Run` action (select row /
-            // open editor / fire LLM), so the key is an
+            // fallback also handles). In `~` (Files) mode,
+            // open the selected file with a per-extension
+            // shell command configured via
+            // `smart-open.<ext>=<cmd>` in the config file
+            // (with an optional `smart-open.default` fallback
+            // for unrecognised extensions). Everywhere else,
+            // fall through to the normal `Run` action (select
+            // row / open editor / fire LLM), so the key is an
             // ergonomic Enter replacement across all modes.
             if app.is_codegraph_query() || app.is_tags_query() {
                 app.open_codegraph_relations();
@@ -13711,6 +13945,30 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 // can keep navigating.
                 app.mark_todo_done();
                 false
+            } else if app.is_files_query() {
+                // File-type-aware open. Looks up the
+                // selected file's extension in
+                // `app.smart_open_file_commands`
+                // (populated from
+                // `smart-open.<ext>=<cmd>` config
+                // lines) and stages the configured
+                // command with the file path appended.
+                // Returns `Some((staged, true))` on a
+                // match (we exit so the parent shell
+                // runs the staged command) or `None`
+                // on no match / no row / non-file
+                // (the caller falls through to the
+                // `Run` action — open in `$EDITOR`).
+                let (exited, quit) = match app.smart_open_for_file() {
+                    Some((_, quit)) => (true, quit),
+                    None => (false, false),
+                };
+                if !exited {
+                    app.select_for_run();
+                    app.selection.is_some()
+                } else {
+                    quit
+                }
             } else {
                 app.select_for_run();
                 app.selection.is_some()
@@ -16384,6 +16642,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -16457,6 +16717,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         )
@@ -16528,6 +16790,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         )
@@ -16770,6 +17034,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -17388,6 +17654,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -17509,6 +17777,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -18647,6 +18917,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         )
@@ -18849,6 +19121,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -19713,6 +19987,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         )
@@ -21382,6 +21658,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -21496,6 +21774,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -21619,6 +21899,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -21747,6 +22029,8 @@ mod tests {
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -23543,6 +23827,8 @@ mod tests {
             // formal setter).
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -29738,6 +30024,8 @@ ssh_config_parse\t\t10,0\n";
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -29858,6 +30146,8 @@ ssh_config_parse\t\t10,0\n";
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -29965,6 +30255,8 @@ ssh_config_parse\t\t10,0\n";
             String::from("+$LINE"),
             std::collections::HashMap::new(),
             Vec::new(),
+            std::collections::HashMap::new(),
+
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
         );
@@ -32882,6 +33174,338 @@ ssh_config_parse\t\t10,0\n";
                 || status.contains("Mark-todo-done"),
             "expected the mark-todo-done status message; got: {:?}",
             status
+        );
+    }
+
+    // ---- Files-mode SmartOpen (per-extension shell command) ----
+
+    /// Helper: build a minimal `App` in `~` (files) mode
+    /// with one selected file row. The file's `directory`
+    /// field holds the absolute path; the `mode` is
+    /// `"file"`. The `merged_rows` slot is set so
+    /// `selected_row()` returns the row.
+    fn files_test_app(path: &str) -> App {
+        let mut app = global_test_app(&[]);
+        app.query = format!("{}README", app.query_prefixes.files);
+        app.query_cursor = app.query.chars().count();
+        app.refresh();
+        // Inject a file row. The files-mode walk would
+        // normally produce a row with `command = relative
+        // display path` and `directory = absolute path`,
+        // but for the SmartOpen dispatch the only fields
+        // we read are `mode` and `directory`, so we keep
+        // the test fixture minimal.
+        let row = crate::tui::state::HistoryRow {
+            id: -1,
+            command: path.to_string(),
+            directory: path.to_string(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: String::new(),
+            output: String::new(),
+            mode: "file".to_string(),
+            source: String::new(),
+            ..Default::default()
+        };
+        app.merged_rows.insert(0, row);
+        app.list_state.select(Some(0));
+        app
+    }
+
+    /// Files-mode SmartOpen with a configured per-
+    /// extension command stages `<cmd> <quoted-path>`
+    /// and exits so the parent shell runs it. The
+    /// dispatch takes the `~` branch (not the `Run`
+    /// fallback) — `Enter` would stage
+    /// `$EDITOR <path>`; `SmartOpen` stages the
+    /// per-extension command instead.
+    #[test]
+    fn smart_open_in_files_mode_uses_configured_extension_command() {
+        let mut app = files_test_app("/home/user/notes/README.md");
+        // Configure: `.md` files → `leaf`.
+        app.smart_open_file_commands
+            .insert("md".to_string(), "leaf".to_string());
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(quit, "SmartOpen must exit the TUI after staging");
+        let staged = app
+            .selection
+            .as_deref()
+            .expect("SmartOpen must stage a selection when a per-extension command is configured");
+        // The path is POSIX single-quote escaped; verify
+        // the command, the path, and the spacing.
+        assert!(
+            staged.starts_with("leaf "),
+            "staged command must start with `leaf `; got: {:?}",
+            staged
+        );
+        assert!(
+            staged.contains("/home/user/notes/README.md"),
+            "staged command must include the absolute file path; got: {:?}",
+            staged
+        );
+        assert_eq!(
+            app.pick_mode,
+            Some(PickMode::Run),
+            "pick_mode must be set so the run-loop treats this as a Run-equivalent selection"
+        );
+    }
+
+    /// Lookup is case-insensitive: a file named
+    /// `README.MD` matches the `md` mapping.
+    #[test]
+    fn smart_open_extension_lookup_is_case_insensitive() {
+        let mut app = files_test_app("/home/user/notes/README.MD");
+        app.smart_open_file_commands
+            .insert("md".to_string(), "leaf".to_string());
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(quit);
+        let staged = app.selection.as_deref().unwrap();
+        assert!(
+            staged.starts_with("leaf "),
+            "case-insensitive lookup must still match `md` for `README.MD`; got: {:?}",
+            staged
+        );
+    }
+
+    /// Without a per-extension mapping, the
+    /// `smart-open.default` fallback is used. This is
+    /// the common case for "all text files get `bat`"
+    /// workflows where the user wants a single
+    /// fallback for every unrecognised extension.
+    #[test]
+    fn smart_open_falls_back_to_default_for_unrecognised_extension() {
+        let mut app = files_test_app("/home/user/notes/script.brainfuck");
+        app.smart_open_file_commands
+            .insert("md".to_string(), "leaf".to_string());
+        app.smart_open_file_commands
+            .insert("default".to_string(), "bat".to_string());
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(quit);
+        let staged = app.selection.as_deref().unwrap();
+        assert!(
+            staged.starts_with("bat "),
+            "unrecognised extension must fall back to `smart-open.default`; got: {:?}",
+            staged
+        );
+    }
+
+    /// With no per-extension mapping AND no
+    /// `smart-open.default`, SmartOpen falls through
+    /// to the `Run` action: open in `$EDITOR` at the
+    /// file's path. This is the safe default that
+    /// never loses the user's selection to a wrong
+    /// command.
+    #[test]
+    fn smart_open_in_files_mode_falls_through_to_run_when_unconfigured() {
+        let mut app = files_test_app("/home/user/notes/script.brainfuck");
+        // No entries in `smart_open_file_commands`.
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        // The Run fallback stages `$EDITOR <path>` and
+        // exits.
+        assert!(quit, "Run fallback must exit the TUI");
+        let staged = app.selection.as_deref().unwrap();
+        assert!(
+            staged.contains("$EDITOR")
+                || staged.contains("/home/user/notes/script.brainfuck"),
+            "Run fallback must stage the standard editor command; got: {:?}",
+            staged
+        );
+    }
+
+    /// A file without an extension (e.g. a `Makefile`)
+    /// has no `extension()` to look up; the
+    /// `smart-open.default` fallback is the right way
+    /// to handle these (the per-extension path is
+    /// skipped because `Path::extension()` returns
+    /// `None` for dotfiles / extensionless files).
+    #[test]
+    fn smart_open_extensionless_file_falls_through_to_default() {
+        let mut app = files_test_app("/home/user/project/Makefile");
+        app.smart_open_file_commands
+            .insert("default".to_string(), "bat".to_string());
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(quit);
+        let staged = app.selection.as_deref().unwrap();
+        assert!(
+            staged.starts_with("bat "),
+            "extensionless file must fall through to the default; got: {:?}",
+            staged
+        );
+    }
+
+    /// A directory row in `~` mode is NOT a file — the
+    /// `mode == "file"` guard rejects it and the
+    /// dispatch falls through to `Run` (the user-
+    /// defined default for a directory row, which
+    /// creates / focuses a workspace rooted there).
+    /// Files-mode SmartOpen must not stage a `bat
+    /// <dir-path>` command — that would be a wrong
+    /// path-take to the user.
+    #[test]
+    fn smart_open_in_files_mode_skips_directory_rows() {
+        let mut app = global_test_app(&[]);
+        app.query = format!("{}work", app.query_prefixes.files);
+        app.query_cursor = app.query.chars().count();
+        app.refresh();
+        // Inject a directory row.
+        let row = crate::tui::state::HistoryRow {
+            id: -1,
+            command: "work".to_string(),
+            directory: "/home/user/project/work".to_string(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: String::new(),
+            output: String::new(),
+            // `mode = "directory"` is the files-mode
+            // walk's signal that this is a directory
+            // row, not a file.
+            mode: "directory".to_string(),
+            source: String::new(),
+            ..Default::default()
+        };
+        app.merged_rows.insert(0, row);
+        app.list_state.select(Some(0));
+        // Configure: a default that would misfire on
+        // directories if the mode guard were missing.
+        app.smart_open_file_commands
+            .insert("default".to_string(), "bat".to_string());
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        // The Run fallback fires: SmartOpen falls
+        // through because the row isn't a file. (The
+        // Run path in files mode stages
+        // `cd <abs-path>` and exits — see
+        // `select_for_run_impl`.)
+        assert!(quit, "directory row must fall through to Run");
+        let staged = app.selection.as_deref().unwrap();
+        assert!(
+            !staged.starts_with("bat "),
+            "directory row must NOT trigger the per-extension `bat` command; got: {:?}",
+            staged
+        );
+    }
+
+    /// A configured command with extra flags (e.g.
+    /// `bat --style=plain`) is taken verbatim and the
+    /// file path is appended at the end. This is the
+    /// `command args...` pattern users expect from
+    /// shell command templates.
+    #[test]
+    fn smart_open_passes_extra_flags_through() {
+        let mut app = files_test_app("/home/user/notes/trace.log");
+        app.smart_open_file_commands
+            .insert("log".to_string(), "bat --style=plain".to_string());
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(quit);
+        let staged = app.selection.as_deref().unwrap();
+        assert!(
+            staged.starts_with("bat --style=plain "),
+            "configured flags must be preserved; got: {:?}",
+            staged
+        );
+        assert!(
+            staged.ends_with("trace.log"),
+            "file path must be appended at the end; got: {:?}",
+            staged
+        );
+    }
+
+    /// Every TUI-staged selection is space-prefixed
+    /// before running in the parent shell. This is
+    /// the TUI side of the "space prefix = sensitive"
+    /// convention: zsh's `HIST_NO_STORE` treats any
+    /// command whose first character is whitespace as
+    /// "do not save to shell history", and the
+    /// smarthistory `init.zsh` precmd hook treats the
+    /// same prefix as "do not record in the DB".
+    /// Prepending the space centrally in the exit
+    /// path (rather than at every staging site) means
+    /// the contract is uniform: every command the TUI
+    /// runs — `Enter` (history, notes, todos, files,
+    /// tags, codegraph), `Ctrl-]` (SmartOpen in every
+    /// mode), `Ctrl-V` (EditFileReference), `Ctrl-M-s`
+    /// (DownloadJiraIssue), etc. — is space-prefixed.
+    #[test]
+    fn prefix_selection_with_space_prepends_a_single_space() {
+        assert_eq!(
+            prefix_selection_with_space("ls -la".to_string()),
+            " ls -la",
+            "non-empty selection must be prefixed with exactly one space"
+        );
+        assert_eq!(
+            prefix_selection_with_space("vim /etc/hosts".to_string()),
+            " vim /etc/hosts",
+            "selections with shell metacharacters are prefixed the same way (no quoting)"
+        );
+        assert_eq!(
+            prefix_selection_with_space(String::new()),
+            " ",
+            "empty selection becomes a single space (the parent shell will reject the empty command as before)"
+        );
+        // Idempotent in the "any leading whitespace is fine" sense:
+        // prepending to an already-space-prefixed string
+        // produces a leading double-space, which zsh's
+        // `HIST_NO_STORE` still treats as "don't save"
+        // (the rule is "first char is whitespace", not
+        // "exactly one space"). The DB-recorder side
+        // (`[[:space:]]*` glob) also matches multiple
+        // leading whitespace. So the helper is
+        // double-prefix-safe.
+        assert_eq!(
+            prefix_selection_with_space(" ls".to_string()),
+            "  ls",
+            "double-prefix is harmless — both the shell and the smarthistory DB recorder treat any leading whitespace as the sensitive marker"
+        );
+    }
+
+    /// The mode-aware wrapper skips the space prefix in
+    /// history mode (the no-prefix / `MODE_NONE` case)
+    /// because replaying a row from history is a command
+    /// the user explicitly wants recorded — recording it
+    /// keeps the frequency stats accurate and the `Ctrl-S`
+    /// next-probable-command suggestions useful. Every
+    /// other mode (every `char` that's not `MODE_NONE`)
+    /// still gets the space prefix (one-shot reads like
+    /// `bat README.md` shouldn't clutter the DB).
+    #[test]
+    fn maybe_prefix_selection_with_space_skips_in_history_mode() {
+        // History mode (no prefix) → returned unchanged.
+        assert_eq!(
+            maybe_prefix_selection_with_space("ls -la".to_string(), MODE_NONE),
+            "ls -la",
+            "history mode (MODE_NONE) must NOT prepend a space — the user wants the command recorded"
+        );
+        // Every real prefix char → space-prefixed.
+        let prefixes = crate::QueryPrefixes::default();
+        for (label, mode_char) in [
+            ("output", prefixes.output),
+            ("llm", prefixes.llm),
+            ("question", prefixes.question),
+            ("notes", prefixes.notes),
+            ("todo", prefixes.todo),
+            ("directories", prefixes.directories),
+            ("panes", prefixes.panes),
+            ("jira", prefixes.jira),
+            ("files", prefixes.files),
+            ("tags", prefixes.tags),
+            ("codegraph", prefixes.codegraph),
+            ("ag", prefixes.ag),
+        ] {
+            assert_eq!(
+                maybe_prefix_selection_with_space("cmd".to_string(), mode_char),
+                " cmd",
+                "{} mode (prefix `{}`) must prepend a space — one-shot reads stay out of the DB",
+                label,
+                mode_char
+            );
+        }
+        // History mode with an empty selection stays empty
+        // (no space prepended).
+        assert_eq!(
+            maybe_prefix_selection_with_space(String::new(), MODE_NONE),
+            "",
+            "empty selection in history mode must stay empty (no space added)"
         );
     }
 }

@@ -1098,6 +1098,47 @@ pub struct Config {
     /// `~/...` so the user sees
     /// a consistent short form.
     home_map: Vec<std::path::PathBuf>,
+    /// Per-extension shell commands invoked by the
+    /// [`Action::SmartOpen`] "dive" key (`Ctrl-]` by
+    /// default) when the active mode is `~` (files) and
+    /// the selected row is a regular file. Configured
+    /// via `smart-open.<ext>=<cmd>` lines in the
+    /// config file, where `<ext>` is the file
+    /// extension **without** the leading `.` (e.g.
+    /// `md`, `rs`, `py`), and `<cmd>` is the shell
+    /// command to run. The selected file's absolute
+    /// path is appended to `<cmd>` (with POSIX
+    /// single-quote escaping so paths with spaces or
+    /// shell metacharacters can't break the staged
+    /// command) and the TUI exits so the parent shell
+    /// runs it. The optional key
+    /// `smart-open.default=<cmd>` is the fallback
+    /// for any extension without an explicit mapping;
+    /// absent both, [`Action::SmartOpen`] falls
+    /// through to the default `Run` action (open in
+    /// `$EDITOR`) so the file-type config is purely
+    /// additive.
+    ///
+    /// Examples:
+    /// ```ini
+    /// smart-open.md=leaf          # markdown files → `leaf README.md`
+    /// smart-open.rs=bat           # rust code → `bat src/main.rs`
+    /// smart-open.default=bat      # any other text → `bat README`
+    /// smart-open.png=xdg-open     # images → `xdg-open photo.png`
+    /// ```
+    ///
+    /// The key prefix is `smart-open.` (NOT `key.`) so
+    /// the existing `key.smart-open=<spec>` binding
+    /// parser doesn't try to interpret `<ext>=<cmd>`
+    /// as a `parse_key_spec_opt` value. Reserved
+    /// `<ext>` names: the single key `default` is
+    /// special (the fallback); any other key is taken
+    /// verbatim as the file extension to match (case-
+    /// insensitive at lookup time). Empty `<cmd>`
+    /// values are silently dropped so a typo like
+    /// `smart-open.rs=` doesn't bind to an empty
+    /// command.
+    smart_open_file_commands: std::collections::HashMap<String, String>,
     /// User-configured
     /// "session dirs". Each
     /// entry is a directory
@@ -1319,6 +1360,11 @@ impl Config {
             multiplexer: crate::multiplexer::MultiplexerKind::default(),
             sessions: Vec::new(),
             hosts: Vec::new(),
+            // Empty by default — populated from
+            // `smart-open.<ext>=<cmd>` lines in the
+            // config file. See the field doc for the
+            // matching / fallback semantics.
+            smart_open_file_commands: std::collections::HashMap::new(),
         }
     }
 
@@ -1595,6 +1641,40 @@ impl Config {
                         && !name.is_empty()
                     {
                         Self::assign_jira_fragment(&mut self.jira_fragments, name, value);
+                    } else if let Some(ext) = other.strip_prefix("smart-open.") {
+                        // Per-extension shell command for the
+                        // `~` (files) mode's SmartOpen
+                        // dispatch. The key is
+                        // `smart-open.<ext>=<cmd>` (NOT
+                        // `key.<action>=<spec>`) so the
+                        // action-binding parser doesn't
+                        // try to parse `<ext>=<cmd>` as a
+                        // `parse_key_spec_opt` value. The
+                        // special name `default` is the
+                        // fallback for any extension
+                        // without an explicit mapping.
+                        //
+                        // Empty / whitespace-only values
+                        // are silently dropped (a typo
+                        // like `smart-open.rs=` shouldn't
+                        // bind to an empty command). The
+                        // key after `smart-open.` is taken
+                        // verbatim as the extension to
+                        // match; lookup at the call site is
+                        // case-insensitive, so
+                        // `smart-open.MD=leaf` and
+                        // `smart-open.md=leaf` are the
+                        // same entry. Empty extensions
+                        // (e.g. `smart-open.=bat`) are
+                        // also dropped so a bare `=`
+                        // separator can't smuggle a
+                        // fallthrough.
+                        let cmd = value.trim();
+                        let key = ext.trim();
+                        if !key.is_empty() && !cmd.is_empty() {
+                            self.smart_open_file_commands
+                                .insert(key.to_string(), cmd.to_string());
+                        }
                     } else if other == "files.ignore" {
                         for name in value.split_whitespace() {
                             if !name.is_empty() {
@@ -2096,6 +2176,20 @@ impl Config {
     /// at walk time.
     pub fn files_ignores(&self) -> &[String] {
         &self.files_ignores
+    }
+
+    /// Per-extension shell commands invoked by
+    /// [`Action::SmartOpen`] in `~` (files) mode.
+    /// Configured via `smart-open.<ext>=<cmd>`
+    /// lines in the config file (see the
+    /// [`Config`] doc for the matching / fallback
+    /// semantics). The returned map is a
+    /// case-preserved snapshot — lookup at the
+    /// call site is case-insensitive.
+    pub fn smart_open_file_commands(
+        &self,
+    ) -> &std::collections::HashMap<String, String> {
+        &self.smart_open_file_commands
     }
 
     /// Which terminal

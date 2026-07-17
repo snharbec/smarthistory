@@ -1287,7 +1287,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         binding_for(Action::SmartOpen),
-        "context dive: & / $ opens callers/callees; - opens the JIRA issue in the browser (background); ! toggles the selected todo's checkbox; else selects the row",
+        "context dive: & / $ opens callers/callees; - opens the JIRA issue in the browser (background); ! toggles the selected todo's checkbox; ~ opens the selected file via the per-extension command from `smart-open.<ext>` in the config; else selects the row",
     );
     row(
         &mut lines,

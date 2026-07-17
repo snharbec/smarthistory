@@ -106,7 +106,9 @@ own config.
 | `Ctrl+E` | Edit the selected row's comment. |
 | `Ctrl+O` | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
 | `Ctrl+D` | Delete the selected entry (with confirmation). |
-| `Ctrl+X` | Mark a todo as done (in `!` mode). |
+| `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `~`, else runs the selected row. |
+| `Ctrl+R` | Open the callers / callees picker for the selected `&` / `$` symbol. |
+| `Ctrl+P` / `Ctrl+N` | Per-mode query history recall (readline `previous-history` / `next-history`). |
 | `Ctrl+A` | Open the help overlay. |
 | `Ctrl+Q` | Open the command palette. |
 | `T` | Open the theme picker. |
@@ -124,7 +126,7 @@ ship **unbound** by default (set them via
 `key.delete-matching=...` in your config to
 re-enable them).
 
-All keybindings are user-configurable via `key.<action>=<spec>` in the config file. See [TECHNICAL.md](TECHNICAL.md) for the full reference.
+All keybindings are user-configurable via `key.<action>=<spec>` in the config file. See [docs/actions.md](docs/actions.md) for the full reference (all 48 actions, grouped by category, with config keys and default keys); see [TECHNICAL.md](TECHNICAL.md) for the deeper implementation reference.
 
 ## Match algorithm
 

@@ -24,6 +24,36 @@ _smarthistory_precmd() {
     local exit_code=$?
     # Skip empty command lines (e.g. bare Enter presses).
     [ -n "$_smarthistory_cmd" ] || return 0
+    # Skip space-prefixed command lines. Zsh's
+    # HIST_NO_STORE (default-on) treats any command
+    # whose first character is whitespace as "do not
+    # save to the shell history" — the canonical
+    # convention for "this command shouldn't be
+    # persisted". We honour the same convention for
+    # the smarthistory database: a space-prefixed
+    # command is sensitive (a credential, a
+    # destructive op, a private URL) and must not be
+    # recorded. The TUI also prepends a space to every
+    # staged selection (see `prefix_selection_with_space`
+    # in src/tui.rs) so this single guard handles
+    # both paths: user-typed space-prefixed commands
+    # AND TUI-staged selections stay out of the DB.
+    #
+    # The pattern `[[:space:]]*` matches any leading
+    # whitespace character (space, tab, NBSP, etc.).
+    # zsh's `[[ str == pattern ]]` supports POSIX
+    # character classes directly. We also clear the
+    # captured command and reset the Ctrl-S cycle
+    # index, but deliberately do NOT update
+    # `_smarthistory_last_cmd` — the Ctrl-S "next
+    # probable command" widget should not suggest a
+    # command the user explicitly asked not to
+    # record.
+    if [[ "$_smarthistory_cmd" == [[:space:]]* ]]; then
+        _smarthistory_next_index=0
+        _smarthistory_cmd=""
+        return 0
+    fi
     # When running inside a herdr workspace pane, read the
     # pane scrollback via `herdr pane read` and extract
     # the command line + output automatically.
@@ -54,7 +84,11 @@ _smarthistory_precmd() {
     fi
     # Remember the most recently executed command for the Ctrl-S
     # "next probable command" widget. Reset the cycle index so the
-    # next press starts with the most probable candidate.
+    # next press starts with the most probable candidate. The
+    # space-prefixed case (above) early-returns before this point,
+    # so `_smarthistory_last_cmd` is only updated for commands
+    # the user wants recorded — Ctrl-S will not suggest a
+    # sensitive command.
     _smarthistory_last_cmd="$_smarthistory_cmd"
     _smarthistory_next_index=0
     _smarthistory_cmd=""
