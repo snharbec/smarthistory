@@ -341,6 +341,107 @@ All notable changes to this project will be documented in this file.
     and theme picker so muscle memory transfers across all overlays.
     15 new unit tests cover `apply_prefix`, `PrefixPicker::new`, and
     picker key handling.
+- The notes (`@`) and todos (`!`) prefixes now
+  support **tag and link search** in addition
+  to plain text. The query parser recognizes
+  three token shapes:
+  - `#TAG` → passed through to the
+    `note_search` query parser as a tag
+    filter. The parser already supports
+    `#tagname` syntax, so no conversion is
+    needed.
+  - `@LINK` → converted to `[[LINK]]` (the
+    `note_search` wiki-link syntax) for link
+    search. The link name preserves the
+    user's original casing (link targets are
+    case-sensitive in Obsidian).
+  - `TEXT` → passed through as a plain text
+    term (AND-matched against the note/todo
+    body).
+  All three are AND-joined: `#TAG1 #TAG2 @LINK TEXT`
+  finds notes that are tagged `TAG1` and
+  `TAG2`, have a link to `LINK`, and contain
+  `TEXT` in their body. The date aliases
+  (`@today`, `@week`, `@month`, `@year`) are
+  still extracted as a filter and applied
+  post-query. The `@` prefix for link search
+  replaces the old behavior where `@foo` was
+  stripped to plain text — that stripping
+  was a workaround for the `note_search`
+  link-tokenizer, but it prevented users
+  from actually searching by link. Users who
+  want to search for the literal word
+  `@foo` in note text can now do so (the
+  token is no longer silently rewritten).
+  The change is implemented in
+  `parse_notes_query` in `src/tui.rs`; two
+  new unit tests cover the tag and link
+  tokenization, and the existing
+  `fetch_todos_at_prefix_matches_text` test
+  was updated to use plain text (without
+  `@`) since `@` now means link search.
+- The notes (`@`) and todos (`!`) prefixes
+  now support **tab-completion of tags
+  and links** sourced from the
+  `note_search` database. Pressing
+  `Tab` after `#feat` expands to
+  `#feature` (unique tag match, trailing
+  space); `@Neo` expands to `@NeovimNote`
+  (unique link match). Ambiguous prefixes
+  extend to the longest common prefix so
+  the user can keep typing to
+  disambiguate. The completion list is
+  queried via
+  `note_search::commands::metadata::get_unique_values`,
+  which reads the union of tags and
+  links from every indexed note. The
+  `Action::JiraFieldComplete` action (bound
+  to `Tab` by default) now routes to
+  `notes_tab_complete_at_cursor` when the
+  query is in notes or todos mode — the
+  same `Tab` key serves JQL field
+  completion in JIRA mode and tag / link
+  completion in notes / todos mode. Two
+  helper functions in `src/jira.rs`
+  (`notes_tag_complete` /
+  `notes_link_complete`) provide the pure
+  completion logic, unit-tested with
+  in-memory `note_search` databases. Seven
+  TUI-level tests cover the end-to-end
+  behaviour (unique match, LCP, no-match,
+  todos mode, no-op outside notes/todos).
+- Link expansion now wraps the link
+  target in `[[...]]` syntax (the
+  Obsidian wiki-link form) instead of
+  the `@` shorthand, and strips the
+  `.md` extension from the target.
+  The `[[...]]` syntax is required
+  because the `@` tokenizer in
+  `note_search` only accepts
+  alphanumeric / underscore / slash
+  / hyphen / period characters and
+  cannot represent link names with
+  spaces. `@Neo<TAB>` now expands to
+  `[[NeovimNote]]` (the `@` is
+  consumed as the notes-mode prefix
+  and the `@Neo` word is replaced
+  with the full `[[...]]` form);
+  `@my<TAB>` expands to
+  `[[my note]]` for link names that
+  contain spaces — the `[[...]]`
+  brackets serve as the delimiter
+  so no additional quoting is
+  needed. The `.md` suffix is
+  stripped from every link before
+  matching (matching Obsidian's
+  bare-name reference convention);
+  non-`.md` extensions are preserved
+  since those are actual reference
+  targets (e.g. `.org` notes).
+  `notes_link_complete` in `src/jira.rs`
+  returns the full `[[...]]`
+  expansion; the TUI uses the result
+  directly without re-wrapping.
 
 ### Fixed
 

@@ -1490,6 +1490,151 @@ pub fn jira_alias_complete_with_space(
     }
 }
 
+/// Tab-completion for note tags inside the notes (`@`)
+/// and todos (`!`) prefixes. The completion list is
+/// the set of unique tags stored in the `note_search`
+/// database (queried via
+/// `note_search::commands::metadata::get_unique_values`).
+/// Matching is case-insensitive on the prefix; the
+/// returned name preserves the canonical casing from
+/// the database (tags are stored as-is in the indexer,
+/// so a tag defined as `MyTag` in a note file
+/// surfaces here as `MyTag`).
+///
+/// Returns:
+/// - `None` if no tag starts with the prefix.
+/// - `Some("tagname ")` if the prefix matches exactly
+///   one tag (trailing space so the user can type
+///   the next token immediately).
+/// - `Some("tagname")` if multiple tags share a
+///   longest-common-prefix that extends the user's
+///   input.
+pub fn notes_tag_complete(db_path: &std::path::Path, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let tags = note_search::commands::metadata::get_unique_values(db_path, "tag").ok()?;
+    notes_complete_inner(&tags, prefix)
+}
+
+/// Tab-completion for note links inside the notes
+/// (`@`) and todos (`!`) prefixes. The completion
+/// list is the set of unique wiki-link targets stored
+/// in the `note_search` database. Matching is
+/// case-insensitive on the prefix; the returned name
+/// preserves the canonical casing (link targets are
+/// case-sensitive in Obsidian, so `MyNote` and
+/// `mynote` are different links).
+///
+/// `[[link]]` wiki-link search
+/// (Obsidian syntax), which
+/// supports link names with
+/// spaces. The link name is
+/// wrapped in double quotes
+/// when it contains a space
+/// (e.g. `[["my note"]]`) so
+/// the boundary between the
+/// link name and the rest of
+/// the query is unambiguous.
+///
+/// Returns the full wiki-link
+/// expansion with a trailing
+/// space (e.g. `[[bernd_matthiesen]] `),
+/// or just the LCP (e.g.
+/// `[[bernd]]`) for ambiguous
+/// prefixes.
+pub fn notes_link_complete(db_path: &std::path::Path, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let links = note_search::commands::metadata::get_unique_values(db_path, "link").ok()?;
+    // The database stores link targets
+    // with their `.md` file extension
+    // (e.g. `bernd_matthiesen.md`). The
+    // user types `@bernd` and expects
+    // the expansion to be
+    // `[[bernd_matthiesen]]` (no
+    // extension), matching the
+    // Obsidian convention of
+    // referencing notes by their bare
+    // name. Strip the `.md` suffix
+    // from every link before matching
+    // so both the LCP and the
+    // unique-match paths produce the
+    // bare-name form. Other
+    // extensions are left intact
+    // (`.txt`, `.org`, etc.) since
+    // the user might have indexed
+    // non-markdown notes.
+    let stripped: Vec<String> = links
+        .iter()
+        .map(|n| n.strip_suffix(".md").unwrap_or(n).to_string())
+        .collect();
+    let bare = notes_complete_inner(&stripped, prefix)?;
+    // `notes_complete_inner` returns
+    // the completion with a trailing
+    // space (for the unique-match
+    // case). Strip it before the
+    // wrapping, then re-add it
+    // after the `[[...]]` so the
+    // trailing space lives outside
+    // the brackets.
+    let (name, trailing_space) = if let Some(stripped) = bare.strip_suffix(' ') {
+        (stripped, " ")
+    } else {
+        (bare.as_str(), "")
+    };
+    // Wrap the link name in `[[...]]`
+    // (Obsidian wiki-link syntax).
+    // The brackets unambiguously
+    // delimit the link target even
+    // when it contains spaces, so
+    // no additional quoting is
+    // needed: `[[my note]]` is
+    // already a single link
+    // reference as far as the
+    // `note_search` tokenizer is
+    // concerned.
+    Some(format!("[[{}]]{}", name, trailing_space))
+}
+
+/// Shared LCP / single-match logic for tag and link
+/// completion. Extracted so the two functions stay
+/// one-liners and the matching semantics are
+/// identical.
+fn notes_complete_inner(names: &[String], prefix: &str) -> Option<String> {
+    let lower = prefix.to_ascii_lowercase();
+    let matches: Vec<&str> = names
+        .iter()
+        .filter(|n| n.to_ascii_lowercase().starts_with(&lower))
+        .map(|s| s.as_str())
+        .collect();
+    match matches.len() {
+        0 => None,
+        1 => Some(format!("{} ", matches[0])),
+        _ => {
+            // Longest common prefix of all matches.
+            // `starts_with` guarantees every match
+            // begins with `prefix`, so the LCP is at
+            // least `prefix` long.
+            let first = matches[0];
+            let mut end = prefix.len();
+            while end < first.len() {
+                let candidate = &first[..end + 1];
+                if matches.iter().all(|m| {
+                    m.to_ascii_lowercase()
+                        .starts_with(&candidate.to_ascii_lowercase())
+                }) {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Some(first[..end].to_string())
+        }
+    }
+}
+
 /// Build a JQL string from the `-`-mode query body. The body
 /// is tokenized on whitespace; each token is classified:
 ///
@@ -3650,6 +3795,207 @@ mod tests {
             jira_alias_complete_with_space("mee", &fragments).as_deref(),
             Some("meeting "),
             "disambiguated prefix matches fragment only"
+        );
+    }
+
+    // ---- notes_tag_complete / notes_link_complete ----
+
+    /// Build a note_search database with the given
+    /// tag / link names and return the path. The
+    /// tags and links are inserted directly into the
+    /// `todo_entries` and `markdown_data` tables
+    /// (the tables `get_unique_values` reads from for
+    /// tags and links). One row per tag/link is
+    /// enough to populate the unique-value set.
+    fn make_notes_db_with_tags_and_links(
+        tags: &[&str],
+        links: &[&str],
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use rusqlite::Connection;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory-completetest-{}-{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let db_path = dir.join("notes.sqlite");
+        let conn = Connection::open(&db_path).expect("open db");
+        note_search::init_database_schema(&conn).expect("schema");
+        // Insert a `markdown_data` row first
+        // (the `todo_entries` table has a
+        // foreign key to it).
+        let tags_json = serde_json::Value::Array(
+            tags.iter()
+                .map(|t| serde_json::Value::String(t.to_string()))
+                .collect(),
+        );
+        let links_json = serde_json::Value::Array(
+            links
+                .iter()
+                .map(|l| serde_json::Value::String(l.to_string()))
+                .collect(),
+        );
+        conn.execute(
+            "INSERT INTO markdown_data \
+             (filename, title, tags, links) \
+             VALUES ('test.md', 'test', ?1, ?2)",
+            rusqlite::params![
+                serde_json::to_string(&tags_json).unwrap(),
+                serde_json::to_string(&links_json).unwrap(),
+            ],
+        )
+        .expect("insert markdown_data");
+        // Insert one synthetic todo row
+        // referencing the markdown_data row.
+        conn.execute(
+            "INSERT INTO todo_entries (filename, text, tags, links) \
+             VALUES ('test.md', 'test', ?1, ?2)",
+            rusqlite::params![
+                serde_json::to_string(&tags_json).unwrap(),
+                serde_json::to_string(&links_json).unwrap(),
+            ],
+        )
+        .expect("insert todo");
+        drop(conn);
+        (dir, db_path)
+    }
+
+    #[test]
+    fn notes_tag_complete_unique_match_returns_name_with_space() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&["feature", "bug", "urgent"], &[]);
+        assert_eq!(
+            notes_tag_complete(&db, "feat").as_deref(),
+            Some("feature "),
+            "unique tag match gets trailing space"
+        );
+    }
+
+    #[test]
+    fn notes_tag_complete_ambiguous_returns_lcp() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&["feature", "feat-list"], &[]);
+        // `feat` matches both `feature` and `feat-list`.
+        // LCP is `feat`.
+        assert_eq!(
+            notes_tag_complete(&db, "feat").as_deref(),
+            Some("feat"),
+            "ambiguous tag prefix returns LCP without trailing space"
+        );
+    }
+
+    #[test]
+    fn notes_tag_complete_no_match_returns_none() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&["feature"], &[]);
+        assert_eq!(notes_tag_complete(&db, "xyz"), None);
+    }
+
+    #[test]
+    fn notes_tag_complete_empty_prefix_returns_none() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&["feature"], &[]);
+        assert_eq!(notes_tag_complete(&db, ""), None);
+    }
+
+    #[test]
+    fn notes_tag_complete_is_case_insensitive() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&["Feature"], &[]);
+        assert_eq!(
+            notes_tag_complete(&db, "feat").as_deref(),
+            Some("Feature "),
+            "case-insensitive prefix matches tag (preserves canonical casing)"
+        );
+    }
+
+    #[test]
+    fn notes_link_complete_unique_match_returns_name_with_space() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["NeovimNote.md", "RustBook.md"]);
+        assert_eq!(
+            notes_link_complete(&db, "Neo").as_deref(),
+            Some("[[NeovimNote]] "),
+            "unique link match gets [[...]] syntax and .md suffix is stripped"
+        );
+    }
+
+    #[test]
+    fn notes_link_complete_ambiguous_returns_lcp() {
+        let (_dir, db) =
+            make_notes_db_with_tags_and_links(&[], &["NeovimNote.md", "NeovimConfig.md"]);
+        // `Neo` matches both; LCP is `Neovim`.
+        assert_eq!(
+            notes_link_complete(&db, "Neo").as_deref(),
+            Some("[[Neovim]]"),
+            "ambiguous link prefix returns [[...]] LCP (without .md suffix)"
+        );
+    }
+
+    #[test]
+    fn notes_link_complete_no_match_returns_none() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["NeovimNote.md"]);
+        assert_eq!(notes_link_complete(&db, "xyz"), None);
+    }
+
+    #[test]
+    fn notes_link_complete_is_case_insensitive() {
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["NeovimNote.md"]);
+        assert_eq!(
+            notes_link_complete(&db, "neo").as_deref(),
+            Some("[[NeovimNote]] "),
+            "case-insensitive prefix matches link (without .md suffix)"
+        );
+    }
+
+    #[test]
+    fn notes_link_complete_strips_md_suffix() {
+        // The database stores link targets
+        // with their `.md` extension. The
+        // completion should strip it so the
+        // user gets the bare note name
+        // (matching Obsidian's
+        // `[[NoteName]]` convention).
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["bernd_matthiesen.md"]);
+        assert_eq!(
+            notes_link_complete(&db, "bernd").as_deref(),
+            Some("[[bernd_matthiesen]] "),
+            ".md suffix should be stripped from link expansion"
+        );
+    }
+
+    #[test]
+    fn notes_link_complete_preserves_non_md_extensions() {
+        // Non-`.md` extensions (e.g. `.org`,
+        // `.txt`) are left intact since the
+        // user might have indexed
+        // non-markdown notes and those
+        // names are the actual reference
+        // targets.
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["todo_list.org"]);
+        assert_eq!(
+            notes_link_complete(&db, "todo").as_deref(),
+            Some("[[todo_list.org]] "),
+            "non-.md extensions should be preserved"
+        );
+    }
+
+    #[test]
+    fn notes_link_complete_handles_link_names_with_spaces() {
+        // Link names with spaces are
+        // wrapped in `[[...]]` brackets
+        // which unambiguously delimit
+        // the link target. The brackets
+        // already serve as a delimiter,
+        // so no additional quoting is
+        // needed: `[[my note]]` is
+        // already a single link
+        // reference as far as the
+        // `note_search` tokenizer is
+        // concerned.
+        let (_dir, db) = make_notes_db_with_tags_and_links(&[], &["my note.md"]);
+        assert_eq!(
+            notes_link_complete(&db, "my").as_deref(),
+            Some("[[my note]] "),
+            "link with space should be wrapped in [[...]] without additional quotes"
         );
     }
 }

@@ -382,38 +382,83 @@ fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
     let mut filter = NotesDateFilter::All;
     let mut cleaned_tokens: Vec<String> = Vec::new();
     for token in pattern.split_whitespace() {
-        // The user types `@today` (or
-        // `today`); both should be
-        // recognised as the date alias.
-        // We strip a leading `@` so the
-        // alias is matched on the bare
-        // keyword.
+        // Date-alias path. The user types
+        // `@today` (or `today`); both
+        // should be recognised as the
+        // date alias. We strip a leading
+        // `@` so the alias is matched on
+        // the bare keyword. Date aliases
+        // are extracted as a filter
+        // rather than passed through to
+        // the search query (the
+        // `note_search` library doesn't
+        // know about them — we apply the
+        // cutoff post-query in
+        // `fetch_notes`).
         let candidate = token.strip_prefix('@').unwrap_or(token);
         match candidate.to_ascii_lowercase().as_str() {
-            "today" => filter = NotesDateFilter::Today,
-            "week" => filter = NotesDateFilter::Week,
-            "month" => filter = NotesDateFilter::Month,
-            "year" => filter = NotesDateFilter::Year,
-            // The non-alias path. We push
-            // the *stripped* token (without
-            // the leading `@`) so the
-            // downstream
-            // `note_search::parse_query`
-            // sees a plain word rather than
-            // `@word` — the library's
-            // tokenizer treats `@foo` as a
-            // `Link` reference, which would
-            // match against `t.links` /
-            // `m.links` and never against
-            // the todo text. The user's
-            // intent is the opposite: a
-            // `@` prefix is their ad-hoc
-            // shorthand for "search the
-            // word", not "search the link".
-            // We honour that by stripping
-            // the `@` here.
-            _ => cleaned_tokens.push(candidate.to_string()),
+            "today" => {
+                filter = NotesDateFilter::Today;
+                continue;
+            }
+            "week" => {
+                filter = NotesDateFilter::Week;
+                continue;
+            }
+            "month" => {
+                filter = NotesDateFilter::Month;
+                continue;
+            }
+            "year" => {
+                filter = NotesDateFilter::Year;
+                continue;
+            }
+            _ => {}
         }
+        // `#TAG` — search for notes
+        // tagged `TAG`. The
+        // `note_search` query parser
+        // already handles `#tagname`
+        // syntax, so we pass the token
+        // through unchanged. This lets
+        // the user combine tag and text
+        // search: `#feature rust` finds
+        // notes tagged `feature` that
+        // also mention `rust`.
+        if let Some(tag) = token.strip_prefix('#') {
+            if !tag.is_empty() {
+                cleaned_tokens.push(format!("#{}", tag));
+            }
+            continue;
+        }
+        // `@LINK` — search for notes
+        // that have a link to `LINK`.
+        // The `note_search` query parser
+        // uses `[[linkname]]` (wiki-link
+        // syntax) for link search, so
+        // we convert the user's `@LINK`
+        // shorthand to `[[LINK]]`. The
+        // link name preserves the
+        // user's original casing
+        // (link targets are
+        // case-sensitive in Obsidian).
+        if let Some(link) = token.strip_prefix('@') {
+            if !link.is_empty() {
+                cleaned_tokens.push(format!("[[{}]]", link));
+            }
+            continue;
+        }
+        // Plain text: push the token
+        // verbatim. We no longer strip
+        // `@` here because the date-
+        // alias path above already
+        // consumed the four known
+        // aliases; any remaining `@foo`
+        // is the user's intent for
+        // `@foo` (e.g. searching for
+        // the literal word `@foo` in
+        // note text).
+        cleaned_tokens.push(token.to_string());
     }
     (cleaned_tokens.join(" "), filter)
 }
@@ -8589,6 +8634,260 @@ impl App {
         }
     }
 
+    /// Tab-completion for notes (`@`) and todos (`!`)
+    /// modes. The completion targets are tags (the
+    /// `#TAG` token) and wiki-link targets (the
+    /// `@LINK` token). Both completion lists come
+    /// from the `note_search` database via
+    /// `note_search::commands::metadata::get_unique_values`.
+    ///
+    /// Behaviour:
+    /// - `#feat<TAB>` → `#feature ` (unique tag
+    ///   match, trailing space)
+    /// - `#f<TAB>` → `#feature` (LCP when multiple
+    ///   tags share the prefix)
+    /// - `@Neo<TAB>` → `@NeovimNote ` (unique link
+    ///   match)
+    /// - `@xyz<TAB>` → no-op + status message (no
+    ///   match)
+    /// - Outside notes/todos mode, or when the word
+    ///   before the cursor doesn't start with `#`
+    ///   or `@`, the function is a no-op so the
+    ///   `Tab` key doesn't interfere with any other
+    ///   mode.
+    fn notes_tab_complete_at_cursor(&mut self) {
+        // Only active in notes (`@`) or
+        // todos (`!`) mode. The notes
+        // and todos prefixes are both
+        // single chars (the `query_prefixes.notes`
+        // and `query_prefixes.todo` fields).
+        let prefix_len: usize = 1;
+        if self.query_cursor < prefix_len {
+            return;
+        }
+        // Check the query's leading char.
+        // The first char after the
+        // prefix must be `#` (tag) or
+        // `@` (link) for the completion
+        // to be meaningful; otherwise
+        // the user is just typing plain
+        // text and Tab should not
+        // interfere.
+        let first = self
+            .query
+            .chars()
+            .next()
+            .expect("query_cursor >= 1 implies non-empty");
+        if first != self.query_prefixes.notes && first != self.query_prefixes.todo {
+            return;
+        }
+        // Walk left from the cursor
+        // (character indices), stopping
+        // at the first character that
+        // is NOT alphanumeric or
+        // underscore. Same walk as
+        // JIRA field completion, but
+        // applied to the notes/todos
+        // body (after the single-char
+        // prefix).
+        let mut start_char = self.query_cursor;
+        while start_char > prefix_len {
+            let prev = start_char - 1;
+            let ch = self.query[char_to_byte_index(&self.query, prev)
+                ..char_to_byte_index(&self.query, start_char)]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                start_char = prev;
+            } else {
+                break;
+            }
+        }
+        // After the walk, `start_char`
+        // points to the first
+        // alphanumeric character of
+        // the word. If the character
+        // immediately before is `#`
+        // (tag prefix) or `@` (link
+        // prefix), include it in the
+        // word by decrementing
+        // `start_char`. This handles
+        // `#feat` and `@Neo` where the
+        // walk would otherwise stop
+        // before the prefix char.
+        if start_char > prefix_len {
+            let prev_char_byte = char_to_byte_index(&self.query, start_char - 1);
+            let curr_char_byte = char_to_byte_index(&self.query, start_char);
+            let prev_ch = self.query[prev_char_byte..curr_char_byte]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if prev_ch == '#' || prev_ch == '@' {
+                start_char -= 1;
+            }
+        }
+        let start_byte = char_to_byte_index(&self.query, start_char);
+        let cursor_byte = char_to_byte_index(&self.query, self.query_cursor);
+        let word = &self.query[start_byte..cursor_byte];
+        if word.is_empty() {
+            self.set_status_message(
+                "notes-tab-complete: no tag or link name to expand".to_string(),
+            );
+            return;
+        }
+        // Determine whether the word
+        // is a tag (starts with `#`)
+        // or a link (starts with `@`).
+        // The prefix char of the word
+        // is the char at
+        // `start_char` in the query
+        // (or one position back if the
+        // word is just `#` or `@`
+        // with no alphanumeric
+        // characters).
+        let first_char_of_word = self.query[char_to_byte_index(&self.query, start_char)
+            ..char_to_byte_index(&self.query, start_char + 1)]
+            .chars()
+            .next()
+            .expect("start_char < cursor_byte");
+        let Some(db_path) = self.notes_database.clone() else {
+            // No notes database
+            // configured; the
+            // completion is a
+            // no-op. The user
+            // needs `notes.database`
+            // in their config
+            // for tag/link
+            // completion to work.
+            self.set_status_message(
+                "notes-tab-complete: notes.database is not configured".to_string(),
+            );
+            return;
+        };
+        let (name_prefix, completion, kind) = match first_char_of_word {
+            '#' => {
+                // Tag completion: strip
+                // the leading `#` and
+                // query the DB for tags
+                // starting with the
+                // remainder. The
+                // completion result from
+                // `notes_tag_complete` is
+                // the bare tag name
+                // (e.g. `"feature "`); we
+                // prepend `#` so the
+                // replacement includes
+                // the tag prefix.
+                let name = &word[1..];
+                let result = crate::jira::notes_tag_complete(&db_path, name);
+                let result = match result {
+                    Some(r) => r,
+                    None => {
+                        self.set_status_message(format!(
+                            "notes-tab-complete: no tag starts with `#{}`",
+                            name
+                        ));
+                        return;
+                    }
+                };
+                // Prepend `#` to the
+                // completion so the
+                // replacement includes
+                // the tag prefix.
+                let mut with_hash = String::from("#");
+                with_hash.push_str(&result);
+                (name.to_string(), with_hash, "tag")
+            }
+            '@' => {
+                // Link completion: strip
+                // the leading `@` and
+                // query the DB for links
+                // starting with the
+                // remainder. The
+                // completion result from
+                // `notes_link_complete`
+                // is the full `[[...]]`
+                // expansion (e.g.
+                // `[[NeovimNote]] ` or
+                // `[["my note"]] ` for
+                // links with spaces),
+                // including the brackets
+                // and a trailing space.
+                // We use the result as-is
+                // since the user typed
+                // `@` to trigger the
+                // completion but the
+                // expansion uses the
+                // `[[...]]` syntax (which
+                // supports link names
+                // with spaces, unlike
+                // the `@` syntax in
+                // `note_search`).
+                let name = &word[1..];
+                let result = crate::jira::notes_link_complete(&db_path, name);
+                let result = match result {
+                    Some(r) => r,
+                    None => {
+                        self.set_status_message(format!(
+                            "notes-tab-complete: no link starts with `@{}`",
+                            name
+                        ));
+                        return;
+                    }
+                };
+                (name.to_string(), result, "link")
+            }
+            _ => {
+                // Plain text: no
+                // completion. The user
+                // is just typing a
+                // word; Tab should
+                // not interfere.
+                return;
+            }
+        };
+        let _ = name_prefix; // silence unused warning; kept for future diagnostics
+        // The completion string already
+        // includes the leading `#` or
+        // `@` and the trailing space
+        // (when unique). Replace the
+        // word at `start_byte` with
+        // the completion.
+        self.query
+            .replace_range(start_byte..cursor_byte, &completion);
+        let completion_chars = completion.chars().count();
+        self.query_cursor = start_char + completion_chars;
+        // Re-arm the debounce/idle
+        // timers and refresh so the
+        // new query fires its search
+        // immediately. This mirrors
+        // the JIRA path.
+        self.llm_touch();
+        self.recompile_regex();
+        self.refresh();
+        // Surface a status message
+        // for the unique-match case
+        // (the user can see the
+        // expanded query in the
+        // input line, but a
+        // confirmation is useful
+        // for the tag/link case
+        // where the result has
+        // many characters). We
+        // don't surface a message
+        // for the LCP case (no
+        // trailing space) because
+        // that fires every time
+        // the user presses Tab to
+        // disambiguate, and the
+        // flash would be
+        // distracting.
+        if completion.ends_with(' ') {
+            self.set_status_message(format!("expanded {} `{}`", kind, completion.trim_end()));
+        }
+    }
+
     fn delete_word_backward(&mut self) {
         if let Some(ref mut buf) = self.comment_edit {
             // The comment-edit buffer has no cursor
@@ -11654,17 +11953,22 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         Action::JiraFieldComplete => {
             // Tab-completion of JQL field
             // names inside the JIRA
-            // search mode. Outside of
-            // JIRA mode, Tab does
-            // nothing — the add-entry
+            // search mode AND tag / link
+            // names inside the notes
+            // (`@`) and todos (`!`)
+            // modes. The add-entry
             // dialog handles its own
             // Tab as field-next INSIDE
             // the dialog, so the two
             // paths never collide.
-            if !app.is_jira_query() {
-                return false;
+            if app.is_jira_query() {
+                app.jira_field_complete_at_cursor();
+            } else if app.is_notes_query() || app.is_todo_query() {
+                app.notes_tab_complete_at_cursor();
             }
-            app.jira_field_complete_at_cursor();
+            // Outside all three
+            // modes, Tab is a
+            // no-op.
             false
         }
         Action::PickPrefix => {
@@ -19471,8 +19775,11 @@ mod tests {
     /// branch.
     #[test]
     fn parse_notes_query_with_search_terms() {
+        // `@reference` is now a link search (`[[reference]]`),
+        // not a plain text search. The date alias `@today` is
+        // still extracted as a filter.
         let (pattern, filter) = parse_notes_query("test @reference @today");
-        assert_eq!(pattern, "test reference");
+        assert_eq!(pattern, "test [[reference]]");
         assert_eq!(filter, NotesDateFilter::Today);
     }
 
@@ -19519,8 +19826,13 @@ mod tests {
     /// sees a plain word.
     #[test]
     fn parse_notes_query_alias_must_be_whole_token() {
+        // `@todayfile` is NOT a date alias (the alias is
+        // only matched as a whole token). With the new
+        // behavior, `@todayfile` is treated as a link
+        // search `[[todayfile]]` (the user's `@LINK`
+        // shorthand) rather than stripped to plain text.
         let (pattern, filter) = parse_notes_query("@todayfile");
-        assert_eq!(pattern, "todayfile");
+        assert_eq!(pattern, "[[todayfile]]");
         assert_eq!(filter, NotesDateFilter::All);
     }
 
@@ -19541,14 +19853,26 @@ mod tests {
     /// when todos contain the word
     /// "orchard") — the regression
     /// test for that bug.
+    /// `@LINK` — search for notes that
+    /// have a link to `LINK`. The
+    /// `note_search` query parser uses
+    /// `[[linkname]]` (wiki-link syntax)
+    /// for link search, so we convert
+    /// the user's `@LINK` shorthand to
+    /// `[[LINK]]`. The original casing
+    /// is preserved (link targets are
+    /// case-sensitive in Obsidian).
     #[test]
-    fn parse_notes_query_strips_at_from_non_alias_tokens() {
-        assert_eq!(parse_notes_query("@orchard").0, "orchard");
+    fn parse_notes_query_link_search() {
+        assert_eq!(parse_notes_query("@orchard").0, "[[orchard]]");
         assert_eq!(parse_notes_query("@orchard").1, NotesDateFilter::All);
-        // Multiple `@` terms.
-        assert_eq!(parse_notes_query("@orchard @apple").0, "orchard apple");
-        // Mixed: alias + non-alias.
-        assert_eq!(parse_notes_query("@today @orchard").0, "orchard");
+        // Multiple `@` terms are all links.
+        assert_eq!(
+            parse_notes_query("@orchard @apple").0,
+            "[[orchard]] [[apple]]"
+        );
+        // Mixed: alias + link.
+        assert_eq!(parse_notes_query("@today @orchard").0, "[[orchard]]");
         assert_eq!(
             parse_notes_query("@today @orchard").1,
             NotesDateFilter::Today
@@ -19557,8 +19881,42 @@ mod tests {
         assert_eq!(parse_notes_query("orchard apple").0, "orchard apple");
         // `@` in the middle of a word
         // is preserved (only leading
-        // `@` is stripped).
+        // `@` is treated as the link
+        // prefix).
         assert_eq!(parse_notes_query("foo@bar").0, "foo@bar");
+    }
+
+    /// `#TAG` — search for notes
+    /// tagged `TAG`. The
+    /// `note_search` query parser
+    /// already handles `#tagname`
+    /// syntax, so we pass the token
+    /// through unchanged.
+    #[test]
+    fn parse_notes_query_tag_search() {
+        assert_eq!(parse_notes_query("#feature").0, "#feature");
+        assert_eq!(parse_notes_query("#feature").1, NotesDateFilter::All);
+        // Multiple tags are AND-joined.
+        assert_eq!(parse_notes_query("#feature #bug").0, "#feature #bug");
+        // Combined: tag + link + text.
+        assert_eq!(
+            parse_notes_query("#feature @orchard rust").0,
+            "#feature [[orchard]] rust"
+        );
+        // Combined with date alias: the
+        // alias is extracted as a filter
+        // and the rest is passed through.
+        assert_eq!(
+            parse_notes_query("#feature @orchard @today rust").0,
+            "#feature [[orchard]] rust"
+        );
+        assert_eq!(
+            parse_notes_query("#feature @orchard @today rust").1,
+            NotesDateFilter::Today
+        );
+        // A bare `#` with no tag name is
+        // dropped (not a valid tag).
+        assert_eq!(parse_notes_query("#").0, "");
     }
 
     /// The `NotesDateFilter::cutoff(now)` math
@@ -20596,10 +20954,16 @@ mod tests {
         app.notes_dir = Some(dir.clone());
         app.notes_database = Some(db_path.clone());
         // The user's exact bug report
-        // query: `!@orchard` should
+        // query: `!orchard` should
         // return the two todos that
         // mention "orchard", not zero.
-        app.query = "!@orchard".to_string();
+        // (Previously this was `!@orchard`
+        // — the `@` was stripped as a
+        // convenience prefix. Now `@`
+        // means link search, so plain
+        // text search uses just the
+        // word without `@`.)
+        app.query = "!orchard".to_string();
         app.refresh();
         let cmds: Vec<&str> = app
             .merged_rows()
@@ -20612,16 +20976,17 @@ mod tests {
         // Sanity: a query that doesn't
         // appear in any todo returns
         // empty.
+        app.query = "!nonexistent".to_string();
+        app.refresh();
+        assert_eq!(app.merged_rows().len(), 0);
+        // `@` in todo mode now means
+        // link search, not text search.
+        // A link-search query for a
+        // link that doesn't exist
+        // returns empty.
         app.query = "!@nonexistent".to_string();
         app.refresh();
         assert_eq!(app.merged_rows().len(), 0);
-        // And the unprefixed form
-        // works the same way (the
-        // `@` is purely a
-        // user-convenience prefix).
-        app.query = "!orchard".to_string();
-        app.refresh();
-        assert_eq!(app.merged_rows().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_file(&db_path);
     }
@@ -26667,6 +27032,245 @@ ssh_config_parse\t\t10,0\n";
             app.query, "-project=",
             "field completion without @ should still work, got: {:?}",
             app.query
+        );
+    }
+
+    /// Build a minimal notes database
+    /// with the given tags and links,
+    /// wire it into a fresh app, and
+    /// return both. Used by the
+    /// notes tab-completion tests
+    /// below.
+    fn notes_tab_complete_test_app(tags: &[&str], links: &[&str]) -> (App, std::path::PathBuf) {
+        use rusqlite::Connection;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory-notes-tab-{}-{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let db_path = dir.join("notes.sqlite");
+        let conn = Connection::open(&db_path).expect("open db");
+        note_search::init_database_schema(&conn).expect("schema");
+        let tags_json = serde_json::Value::Array(
+            tags.iter()
+                .map(|t| serde_json::Value::String(t.to_string()))
+                .collect(),
+        );
+        let links_json = serde_json::Value::Array(
+            links
+                .iter()
+                .map(|l| serde_json::Value::String(l.to_string()))
+                .collect(),
+        );
+        conn.execute(
+            "INSERT INTO markdown_data \
+             (filename, title, tags, links) \
+             VALUES ('test.md', 'test', ?1, ?2)",
+            rusqlite::params![
+                serde_json::to_string(&tags_json).unwrap(),
+                serde_json::to_string(&links_json).unwrap(),
+            ],
+        )
+        .expect("insert markdown_data");
+        conn.execute(
+            "INSERT INTO todo_entries (filename, text, tags, links) \
+             VALUES ('test.md', 'test', ?1, ?2)",
+            rusqlite::params![
+                serde_json::to_string(&tags_json).unwrap(),
+                serde_json::to_string(&links_json).unwrap(),
+            ],
+        )
+        .expect("insert todo");
+        drop(conn);
+        let mut app = global_test_app(&[("a", 1)]);
+        app.notes_database = Some(db_path.clone());
+        (app, db_path)
+    }
+
+    /// `#feat<TAB>` inside notes mode
+    /// expands to `#feature ` (unique
+    /// tag match, trailing space).
+    #[test]
+    fn notes_tab_completion_tag_unique_match_expands_with_space() {
+        let (mut app, _db) = notes_tab_complete_test_app(&["feature", "bug"], &[]);
+        app.query = String::from("@#feat");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@#feature ",
+            "#feat should expand to #feature with trailing space, got: {:?}",
+            app.query
+        );
+        assert_eq!(app.query_cursor, 10);
+    }
+
+    /// `@Neo<TAB>` inside notes mode
+    /// expands to `[[NeovimNote]] `
+    /// (unique link match with
+    /// `[[...]]` syntax, trailing
+    /// space). The user types `@` to
+    /// enter notes mode, then
+    /// `@Neo` to start a link
+    /// reference; the completion
+    /// replaces the `@Neo` word
+    /// with the full `[[...]]`
+    /// expansion (which supports
+    /// link names with spaces).
+    #[test]
+    fn notes_tab_completion_link_unique_match_expands_with_space() {
+        let (mut app, _db) = notes_tab_complete_test_app(&[], &["NeovimNote.md", "RustBook.md"]);
+        app.query = String::from("@@Neo");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@[[NeovimNote]] ",
+            "@Neo should expand to [[NeovimNote]] with trailing space, got: {:?}",
+            app.query
+        );
+        // Cursor lands at the end:
+        // @[[NeovimNote]]<space> = 16 chars.
+        assert_eq!(app.query_cursor, 16);
+    }
+
+    /// Ambiguous tag prefix returns
+    /// the LCP without trailing
+    /// space (the user keeps typing
+    /// to disambiguate).
+    #[test]
+    fn notes_tab_completion_tag_ambiguous_returns_lcp() {
+        let (mut app, _db) = notes_tab_complete_test_app(&["feature", "feat-list"], &[]);
+        app.query = String::from("@#feat");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@#feat",
+            "ambiguous tag prefix returns LCP (no change), got: {:?}",
+            app.query
+        );
+    }
+
+    /// Ambiguous link prefix returns
+    /// the LCP.
+    #[test]
+    fn notes_tab_completion_link_ambiguous_returns_lcp() {
+        let (mut app, _db) =
+            notes_tab_complete_test_app(&[], &["NeovimNote.md", "NeovimConfig.md"]);
+        app.query = String::from("@@Neo");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@[[Neovim]]",
+            "ambiguous link prefix returns [[...]] LCP (no .md suffix), got: {:?}",
+            app.query
+        );
+    }
+
+    /// Link expansion strips the
+    /// `.md` suffix from the
+    /// database's link target and
+    /// wraps the result in
+    /// `[[...]]` syntax. The user
+    /// types `@bernd` and gets
+    /// `[[bernd_matthiesen]] ` (no
+    /// extension), matching
+    /// Obsidian's `[[NoteName]]`
+    /// convention.
+    #[test]
+    fn notes_tab_completion_link_strips_md_suffix() {
+        let (mut app, _db) = notes_tab_complete_test_app(&[], &["bernd_matthiesen.md"]);
+        app.query = String::from("@@bernd");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@[[bernd_matthiesen]] ",
+            ".md suffix should be stripped and wrapped in [[...]], got: {:?}",
+            app.query
+        );
+    }
+
+    /// Link names with spaces are
+    /// wrapped in double quotes
+    /// inside the `[[...]]` syntax:
+    /// `@my` expands to
+    /// `[["my note"]] ` so the link
+    /// target is unambiguously
+    /// delimited.
+    #[test]
+    fn notes_tab_completion_link_handles_link_names_with_spaces() {
+        // Link names with spaces are
+        // wrapped in `[[...]]` brackets
+        // which unambiguously delimit
+        // the link target. No
+        // additional quotes are needed
+        // since the brackets already
+        // serve as a delimiter.
+        let (mut app, _db) = notes_tab_complete_test_app(&[], &["my note.md"]);
+        app.query = String::from("@@my");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@[[my note]] ",
+            "link with space should be wrapped in [[...]] without quotes, got: {:?}",
+            app.query
+        );
+    }
+
+    /// No-match prefix leaves the
+    /// query unchanged and surfaces
+    /// a status message.
+    #[test]
+    fn notes_tab_completion_no_match_leaves_unchanged() {
+        let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+        app.query = String::from("@#xyz");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "@#xyz",
+            "no-match tag must NOT modify query, got: {:?}",
+            app.query
+        );
+        let status = app.status_message.as_ref().map(|(m, _)| m.clone());
+        assert!(
+            status.as_deref().unwrap_or("").contains("xyz"),
+            "status should mention unknown tag, got: {status:?}"
+        );
+    }
+
+    /// Tag completion also works in
+    /// todos mode (`!` prefix).
+    #[test]
+    fn notes_tab_completion_works_in_todo_mode() {
+        let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+        app.query = String::from("!#feat");
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, "!#feature ",
+            "tag completion should work in todo mode, got: {:?}",
+            app.query
+        );
+    }
+
+    /// Outside notes and todos
+    /// modes, the completion is a
+    /// no-op (the user is just
+    /// typing plain text).
+    #[test]
+    fn notes_tab_completion_outside_notes_todo_mode_is_noop() {
+        let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+        // GLOBAL mode (no `@` or `!` prefix).
+        app.query = String::from("git status");
+        let original = app.query.clone();
+        app.query_cursor = app.query.chars().count();
+        app.notes_tab_complete_at_cursor();
+        assert_eq!(
+            app.query, original,
+            "non-notes/todo query must be unchanged"
         );
     }
 
