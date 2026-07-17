@@ -94,6 +94,152 @@ All notable changes to this project will be documented in this file.
      can fire the search
      when its respective
      window elapses.
+- The JIRA search mode now
+  supports **tab-completion
+  of JQL field names**.
+  Inside `-` mode, pressing
+  `Tab` expands the
+  field-name prefix
+  immediately before the
+  cursor:
+  - `proj<TAB>` → `project=`
+    (single match; cursor
+    lands right after the
+    `=`)
+  - `lab<TAB>` → `label`
+    (multiple matches —
+    `label` and `labels`;
+    extends to the longest
+    common prefix with no
+    `=`, then a second
+    Tab on `labels<TAB>`
+    → `labels=`)
+  - `xyz<TAB>` → no-op +
+    status message
+    (no match; query
+    unchanged)
+  The completion list is
+  the standard JQL system
+  field set (`assignee`,
+  `reporter`, `status`,
+  `priority`, `labels`,
+  `summary`, …) plus a few
+  common custom-field
+  conventions (`sprint`,
+  `epic`, `parent`,
+  `storyPoints`, `rank`).
+  Outside of JIRA mode
+  `Tab` is a no-op, so the
+  key doesn't interfere
+  with any other mode. The
+  action is the new
+  `Action::JiraFieldComplete`
+  (default key `Tab`); the
+  core completion logic
+  lives in
+  `crate::jira::jira_field_complete`
+  / `jira_field_complete_with_value`,
+  both unit-tested.
+- The search now fires
+  immediately on every
+  text-mutating action in
+  every mode except JIRA.
+  The user reported that
+  the JIRA search
+  "sometimes isn't
+  executed" (which we
+  fixed with the 400ms
+  debounce / 3s idle
+  safety-net / space
+  trigger) and the
+  corresponding complaint
+  for the in-process
+  search modes is "the
+  list lags my typing".
+  The new
+  `App::trigger_text_change_search`
+  helper is called from
+  `push_char`,
+  `backspace`,
+  `delete_word_backward`,
+  `clear_query`, and the
+  JIRA tab-completion
+  path. Behaviour by mode:
+  - **Synchronous modes**
+    (SESS, DIR, GLOBAL,
+    STATS, panes `*`,
+    directories `#`,
+    symbols `$`, todos
+    `!`, notes `@`,
+    tags `$`, ag `,`,
+    files `~`): the
+    helper calls
+    `self.refresh()`
+    directly, so the
+    row set is
+    re-fetched on the
+    same frame as
+    the keystroke.
+    The SQL fetch is
+    a constant-time
+    operation, so
+    there's no
+    frame-budget
+    concern.
+  - **LLM (`=`)**: the
+    helper bypasses
+    the 1s LLM
+    debounce by
+    temporarily
+    setting
+    `llm_debounce_started`
+    to a past value
+    and calling
+    `llm_maybe_autocall()`.
+    The user has
+    typed a
+    description; they
+    want a preview
+    now, not after
+    1s of typing
+    latency. (The
+    `llm_in_flight`
+    short-circuit
+    still prevents
+    duplicate
+    concurrent
+    LLM calls.)
+  - **JIRA (`-`)**: the
+    helper is a
+    no-op for JIRA
+    mode. The JIRA-
+    specific
+    debounce/idle
+    /space-trigger
+    paths remain in
+    effect; mixing
+    in a per-
+    keystroke fire
+    would defeat the
+    debounce and
+    re-introduce the
+    JIRA-server spam
+    the debounce was
+    designed to
+    prevent.
+  - **Empty queries**
+    (just-cleared
+    box): the
+    helper short-
+    circuits before
+    reaching the
+    fetch path, so
+    we don't waste
+    time re-running
+    the same all-
+    rows query the
+    user just had
+    on screen.
 
 ### Fixed
 

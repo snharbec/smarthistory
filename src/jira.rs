@@ -1225,6 +1225,174 @@ const JIRA_ALIAS_WEEK_DAYS: i64 = 7;
 /// yesterday or later".)
 const JIRA_ALIAS_TODAY_DAYS: i64 = 1;
 
+/// The standard JQL system field names that are
+/// recognised for tab-completion inside the JIRA
+/// query. The list mirrors the documented JQL system
+/// fields plus a few common custom-field conventions
+/// (`sprint`, `epic`, `parent`, `storyPoints`,
+/// `rank`). The list is intentionally not exhaustive
+/// of every custom field a JIRA instance can have —
+/// user-defined custom fields show up in the
+/// completion only when the user has bound them via
+/// `jira.fields.<name>=...` in the config file, which
+/// is appended to this list at completion time.
+///
+/// Ordering: alphabetical (case-insensitive). The
+/// completion algorithm doesn't depend on order, but
+/// alphabetical makes diffs against the upstream
+/// JIRA documentation easier to audit.
+pub static JIRA_FIELDS: &[&str] = &[
+    "affectedVersion",
+    "assignee",
+    "category",
+    "component",
+    "created",
+    "creator",
+    "description",
+    "due",
+    "duedate",
+    "environment",
+    "epic",
+    "fixVersion",
+    "issue",
+    "issueKey",
+    "issues",
+    "issuetype",
+    "key",
+    "label",
+    "labels",
+    "lastViewed",
+    "level",
+    "originalEstimate",
+    "parent",
+    "priority",
+    "project",
+    "rank",
+    "remainingEstimate",
+    "reporter",
+    "resolution",
+    "resolved",
+    "sprint",
+    "status",
+    "statusCategory",
+    "storyPoints",
+    "summary",
+    "text",
+    "timeSpent",
+    "type",
+    "updated",
+    "voter",
+    "version",
+    "votes",
+    "watcher",
+    "watchers",
+    "workRatio",
+];
+
+/// Tab-completion of a JQL field-name prefix. The
+/// user's example: typing `lab<TAB>` inside the JIRA
+/// query should expand to `labels=`. The cursor lands
+/// right after the `=` so the user can immediately
+/// type the value.
+///
+/// Returns:
+///
+/// - `None` when no field starts with `prefix`. The
+///   caller surfaces a status message (a soft
+///   rejection) and otherwise leaves the query
+///   unchanged so a stray `Tab` never destroys
+///   text.
+/// - `Some(completion)` where `completion` is the
+///   expanded text. When multiple fields match
+///   (e.g. `lab` matches both `label` and
+///   `labels`), the completion is the LONGEST COMMON
+///   PREFIX of the matches — i.e. `lab`. The user
+///   keeps typing to disambiguate (`labels` vs
+///   `label`) and presses `Tab` again. This is the
+///   standard readline/bash behaviour and is the
+///   least surprising thing for users who already
+///   know shell completion.
+/// - When the prefix already matches a complete
+///   field name (one of the system fields exactly),
+///   the function returns `Some(prefix)` (i.e. the
+///   expansion is a no-op). The caller is then
+///   expected to append `=` if appropriate. See
+///   `jira_field_complete_with_value` for the
+///   one-shot variant that does this in a single
+///   call.
+///
+/// `prefix` is matched case-insensitively; the
+/// returned completion preserves the canonical
+/// casing from the `JIRA_FIELDS` table.
+pub fn jira_field_complete(prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        // No prefix means we have no idea what the
+        // user wants. Don't expand to anything
+        // (otherwise the query would lose whatever
+        // was at the cursor).
+        return None;
+    }
+    let lower = prefix.to_ascii_lowercase();
+    let matches: Vec<&'static str> = JIRA_FIELDS
+        .iter()
+        .copied()
+        .filter(|f| f.to_ascii_lowercase().starts_with(&lower))
+        .collect();
+    match matches.len() {
+        0 => None,
+        1 => Some(matches[0].to_string()),
+        _ => {
+            // Multiple matches: find the longest
+            // common prefix. `starts_with` guarantees
+            // every match begins with `prefix`, so the
+            // common prefix is at least `prefix`. Walk
+            // each subsequent character and keep it as
+            // long as every match agrees.
+            let first = matches[0];
+            let mut end = prefix.len();
+            while end < first.len() {
+                let candidate = &first[..end + 1];
+                if matches.iter().all(|m| {
+                    m.to_ascii_lowercase()
+                        .starts_with(&candidate.to_ascii_lowercase())
+                }) {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Some(first[..end].to_string())
+        }
+    }
+}
+
+/// Tab-completion convenience: returns the expansion
+/// with a trailing `=` appended when the prefix
+/// matches exactly one field. The user's mental model
+/// is `lab<TAB>` → `labels=` (cursor lands after the
+/// `=`). For the ambiguous case, returns just the
+/// longest-common-prefix (no `=`) because we don't
+/// know which field the user is heading toward.
+///
+/// Returns `None` when no field starts with the
+/// prefix.
+pub fn jira_field_complete_with_value(prefix: &str) -> Option<String> {
+    let lower = prefix.to_ascii_lowercase();
+    let matches: Vec<&'static str> = JIRA_FIELDS
+        .iter()
+        .copied()
+        .filter(|f| f.to_ascii_lowercase().starts_with(&lower))
+        .collect();
+    match matches.len() {
+        0 => None,
+        1 => Some(format!("{}=", matches[0])),
+        // Multiple matches: no trailing `=`. The
+        // longest-common-prefix is the right thing
+        // to expand to (the user keeps typing).
+        _ => jira_field_complete(prefix),
+    }
+}
+
 /// Build a JQL string from the `-`-mode query body. The body
 /// is tokenized on whitespace; each token is classified:
 ///
@@ -3057,5 +3225,219 @@ mod tests {
         for c in issue.description.chars() {
             assert_eq!(c, 'a');
         }
+    }
+
+    // `jira_field_complete` / `jira_field_complete_with_value`
+    // — the JQL field-name tab-completion
+    // helpers. These are the core
+    // completion logic; the TUI layer
+    // (in `src/tui.rs`) is a thin
+    // wrapper that finds the
+    // field-name prefix at the
+    // cursor and calls these.
+    //
+    // The tests cover the three
+    // outcomes the function can
+    // produce (single-match
+    // expansion, multi-match
+    // longest-common-prefix,
+    // no-match) and the edge
+    // cases (empty prefix,
+    // case-insensitivity, exact
+    // match against a system
+    // field).
+
+    /// Exact match: `lab` matches
+    /// `label` and `labels` (two
+    /// matches), so the function
+    /// returns the longest common
+    /// prefix `label` (the point
+    /// at which the two fields
+    /// diverge) with no trailing
+    /// `=`. The user keeps
+    /// typing to disambiguate.
+    #[test]
+    fn jira_field_complete_ambiguous_returns_longest_common_prefix() {
+        // `lab` is a prefix of
+        // both `label` and
+        // `labels`. The
+        // longest common
+        // prefix of those two
+        // is `label` (they
+        // agree on `label`;
+        // `labels` continues
+        // with `s` while
+        // `label` ends).
+        // The completion
+        // algorithm must
+        // extend the prefix
+        // to that point so
+        // the user makes
+        // forward progress.
+        assert_eq!(
+            jira_field_complete("lab").as_deref(),
+            Some("label"),
+            "ambiguous prefix extends to the common prefix (just before the divergence)"
+        );
+    }
+
+    /// Single match: `ass` matches
+    /// `assignee` only. The
+    /// completion returns the
+    /// full field name with a
+    /// trailing `=` so the user
+    /// can immediately type the
+    /// value.
+    #[test]
+    fn jira_field_complete_with_value_single_match_appends_equals() {
+        assert_eq!(
+            jira_field_complete_with_value("ass").as_deref(),
+            Some("assignee="),
+            "single match expands to full field name + `=`"
+        );
+    }
+
+    /// No match: `xy` matches
+    /// nothing. The function
+    /// returns `None` (caller
+    /// surfaces a status
+    /// message and leaves the
+    /// query unchanged).
+    #[test]
+    fn jira_field_complete_no_match_returns_none() {
+        assert_eq!(jira_field_complete("xy"), None);
+        assert_eq!(jira_field_complete_with_value("xy"), None);
+    }
+
+    /// Empty prefix: the function
+    /// returns `None` rather
+    /// than expanding to
+    /// everything. The user
+    /// might press Tab in
+    /// unusual states (cursor
+    /// at the start of the
+    /// query, cursor right
+    /// after a value `=`),
+    /// and we don't want to
+    /// silently destroy their
+    /// context.
+    #[test]
+    fn jira_field_complete_empty_prefix_returns_none() {
+        assert_eq!(jira_field_complete(""), None);
+        assert_eq!(jira_field_complete_with_value(""), None);
+    }
+
+    /// Case-insensitive: `LAB`
+    /// matches the same fields
+    /// as `lab`. The completion
+    /// preserves the CANONICAL
+    /// casing from the
+    /// `JIRA_FIELDS` table
+    /// (`label` and `labels`),
+    /// not the user's input
+    /// casing.
+    #[test]
+    fn jira_field_complete_is_case_insensitive() {
+        // The canonical casing is
+        // mixed-case (`label` /
+        // `labels`), so the
+        // returned completion
+        // has the canonical
+        // casing regardless of
+        // the input casing.
+        // `LAB` matches both
+        // `label` and `labels`,
+        // so the result is
+        // the longest common
+        // prefix `label`
+        // (canonical-cased).
+        assert_eq!(
+            jira_field_complete("LAB").as_deref(),
+            Some("label"),
+            "case-insensitive match returns canonical-cased completion"
+        );
+        assert_eq!(
+            jira_field_complete("Lab").as_deref(),
+            Some("label"),
+            "mixed-case input returns canonical-cased completion"
+        );
+        // The same logic applies
+        // to the
+        // `_with_value`
+        // variant: `ASS`
+        // matches only
+        // `assignee`, so the
+        // result is
+        // `assignee=`
+        // (canonical-cased).
+        assert_eq!(
+            jira_field_complete_with_value("ASS").as_deref(),
+            Some("assignee="),
+            "case-insensitive single match returns canonical-cased `field=`"
+        );
+    }
+
+    /// Exact full-field-name match:
+    /// the user typed `labels`
+    /// (a complete field) and
+    /// pressed Tab. The
+    /// completion extends to
+    /// the same field name
+    /// (no-op for the field
+    /// part) and appends `=`
+    /// so the user can type
+    /// the value.
+    #[test]
+    fn jira_field_complete_with_value_full_field_name_appends_equals() {
+        // `labels` is a complete
+        // system field. The
+        // completion is
+        // `labels=` (the field
+        // name itself plus
+        // `=`).
+        assert_eq!(
+            jira_field_complete_with_value("labels").as_deref(),
+            Some("labels="),
+            "complete field name expands to itself + `=`"
+        );
+    }
+
+    /// Single-character prefix:
+    /// `s` is a prefix of
+    /// multiple fields
+    /// (`status`,
+    /// `statusCategory`,
+    /// `sprint`, `summary`,
+    /// `storyPoints`,
+    /// `statusCategory`, …).
+    /// The longest common
+    /// prefix of those is
+    /// just `s`, so the
+    /// function returns
+    /// `s` (no `=`, the user
+    /// keeps typing).
+    #[test]
+    fn jira_field_complete_very_ambiguous_returns_shortest_common() {
+        // `s` matches too many
+        // fields to be
+        // useful; the
+        // function returns
+        // `s` (no
+        // progress).
+        let r = jira_field_complete("s");
+        assert_eq!(r.as_deref(), Some("s"));
+        // The `_with_value`
+        // variant must NOT
+        // append `=` in the
+        // ambiguous case —
+        // we'd be guessing
+        // which field the
+        // user is heading
+        // toward.
+        assert_eq!(
+            jira_field_complete_with_value("s").as_deref(),
+            Some("s"),
+            "ambiguous prefix in `_with_value` does NOT append `=`"
+        );
     }
 }

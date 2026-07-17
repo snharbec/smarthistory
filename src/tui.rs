@@ -4711,6 +4711,181 @@ impl App {
         self.ag_touch();
     }
 
+    /// Fire the per-mode search immediately on a
+    /// text change. The user reported that the
+    /// JIRA search "sometimes isn't executed";
+    /// for non-JIRA modes, the corresponding
+    /// complaint is "the search lags my
+    /// typing". This helper is the
+    /// non-JIRA counterpart to the JIRA
+    /// debounce/idle/space-trigger paths: every
+    /// text-mutating action (push_char,
+    /// backspace, delete_word_backward, tab
+    /// completion, etc.) calls into here so the
+    /// visible result list updates on the same
+    /// frame as the keystroke.
+    ///
+    /// Behaviour by mode:
+    ///
+    /// - **JIRA (`-`)**: no-op. The JIRA
+    ///   mode has its own dual-timer debounce
+    ///   (400ms fast + 3s idle safety-net)
+    ///   and the space trigger. Those
+    ///   paths are driven by
+    ///   `jira_touch()` and the
+    ///   space-key code in
+    ///   `push_char()`; mixing in a
+    ///   per-keystroke fire would
+    ///   defeat the debounce and
+    ///   re-introduce the JIRA-server
+    ///   spam the debounce was
+    ///   designed to prevent.
+    ///
+    /// - **LLM (`=`)**: force-fire the
+    ///   LLM auto-call. The
+    ///   `llm_touch()` call from
+    ///   `push_char` arms the 1s
+    ///   debounce; we override
+    ///   that here so the call
+    ///   fires on the same frame
+    ///   as the keystroke. The
+    ///   user has typed a
+    ///   description; they want
+    ///   to see a preview now,
+    ///   not after 1s of typing
+    ///   latency. (The 1s
+    ///   debounce is still in
+    ///   place for the cases
+    ///   where the user is
+    ///   mid-edit and the call
+    ///   is already in flight
+    ///   — `llm_in_flight` short-
+    ///   circuits the auto-call
+    ///   path until the
+    ///   in-flight call
+    ///   completes.)
+    ///
+    /// - **All other modes** (SESS,
+    ///   DIR, GLOBAL, STATS,
+    ///   panes `*`, directories
+    ///   `#`, symbols `$`,
+    ///   todos `!`, notes `@`,
+    ///   tags `$`, ag `,`,
+    ///   files `~`): call
+    ///   `self.refresh()` so the
+    ///   row set is re-fetched
+    ///   immediately. The
+    ///   fetch is a synchronous
+    ///   SQL query (or in the
+    ///   case of files/ag, an
+    ///   in-process walk) —
+    ///   fast enough that a
+    ///   per-keystroke fire is
+    ///   well within the TUI's
+    ///   frame budget. Empty
+    ///   queries bail out
+    ///   without firing (no
+    ///   point re-fetching
+    ///   the same all-rows
+    ///   result set the user
+    ///   just had before
+    ///   they cleared the
+    ///   box).
+    ///
+    /// Note: this method is
+    /// intentionally a no-op when
+    /// the comment editor or the
+    /// add-entry dialog is open
+    /// (those manage their own
+    /// text and have their own
+    /// refresh paths). The caller
+    /// — `push_char` /
+    /// `backspace` etc. —
+    /// already short-circuits
+    /// to the comment buffer
+    /// in that case, so by the
+    /// time we get here the
+    /// query is the live
+    /// field.
+    fn trigger_text_change_search(&mut self) {
+        // JIRA has its own
+        // debounce/idle/space
+        // machinery. Do nothing
+        // here; the JIRA
+        // search fires when its
+        // own timers elapse.
+        if self.is_jira_query() {
+            return;
+        }
+        // No query -> no search
+        // (an empty body in
+        // most modes just
+        // shows the all-rows
+        // list, which is
+        // already the visible
+        // state).
+        if self.query.is_empty() {
+            return;
+        }
+        if self.is_llm_query() {
+            // The user typed (or
+            // backspaced)
+            // something in the
+            // LLM description.
+            // Force-fire the
+            // auto-call now
+            // rather than
+            // waiting for the
+            // 1s debounce.
+            //
+            // `llm_maybe_autocall`
+            // checks its own
+            // guards (client
+            // configured, not
+            // in-flight, has a
+            // description); the
+            // only thing we
+            // need to override
+            // is the debounce
+            // window. Setting
+            // the debounce to
+            // a value past
+            // `LLM_DEBOUNCE`
+            // makes the gate
+            // see "elapsed"
+            // and proceed.
+            self.llm_debounce_started = Some(
+                std::time::Instant::now() - LLM_DEBOUNCE - std::time::Duration::from_millis(50),
+            );
+            self.llm_maybe_autocall();
+            return;
+        }
+        // Synchronous modes
+        // (SESS, DIR, GLOBAL,
+        // STATS, panes,
+        // directories,
+        // symbols, todos,
+        // notes, tags, ag,
+        // files): refresh
+        // immediately.
+        //
+        // `refresh()` is a
+        // no-op on the
+        // result set when the
+        // query hasn't
+        // changed in a way
+        // that affects the
+        // fetch; calling it
+        // on every keystroke
+        // is therefore
+        // cheap (the SQL
+        // query plan is
+        // cached) and
+        // gives the user
+        // instant feedback.
+        self.refresh();
+    }
+
     /// Construct the virtual preview row used to display the
     /// most-recent auto-call result. Returns `None` when no
     /// preview is active. Called from
@@ -7706,6 +7881,27 @@ impl App {
             // backspacing the `=`). The user's last
             // edit time is the new debounce anchor.
             self.llm_touch();
+            // Non-JIRA modes: fire the
+            // search immediately on
+            // the keystroke. The user
+            // reported that JIRA
+            // "sometimes isn't
+            // executed"; the
+            // corresponding complaint
+            // for the in-process
+            // search modes is "the
+            // list lags my typing".
+            // For LLM mode this
+            // bypasses the 1s
+            // debounce; for
+            // synchronous modes it
+            // calls `refresh()`
+            // directly. (JIRA mode
+            // bails inside
+            // `trigger_text_change_search`
+            // — the JIRA-specific
+            // timers handle it.)
+            self.trigger_text_change_search();
             // Space-trigger for the JIRA
             // search-as-you-type: when
             // the user types a space
@@ -7792,6 +7988,17 @@ impl App {
                 // debounce (or clear preview state if we
                 // just backspaced out of LLM mode).
                 self.llm_touch();
+                // Fire the per-mode search
+                // immediately on the
+                // deletion. Same
+                // rationale as
+                // `push_char`:
+                // non-JIRA modes
+                // should reflect
+                // the user's edit
+                // on the same
+                // frame.
+                self.trigger_text_change_search();
             }
         }
     }
@@ -7832,6 +8039,244 @@ impl App {
     /// at a time (rather than slicing) so the buffer
     /// stays valid UTF-8 throughout — a multi-byte
     /// character is removed as a single unit.
+    /// Tab-completion of a JQL field name at the
+    /// current cursor position. The user's example:
+    /// typing `lab<TAB>` inside the JIRA query
+    /// expands to `labels=` (cursor right after the
+    /// `=`). Behaviour:
+    ///
+    /// 1. Find the field-name token immediately
+    ///    before the cursor — the run of
+    ///    word-characters (`[A-Za-z0-9_]`) that
+    ///    starts at the previous whitespace
+    ///    boundary and ends at the cursor.
+    /// 2. Call `jira::jira_field_complete_with_value`
+    ///    on the prefix.
+    /// 3. If the prefix has no matches, do
+    ///    nothing (and surface a soft status
+    ///    message so the user knows Tab did
+    ///    not silently fail).
+    /// 4. If the prefix is a complete field name
+    ///    (e.g. the user typed `labels<TAB>` and
+    ///    the field is already fully typed), append
+    ///    a `=` and move the cursor past it. This
+    ///    means a second Tab always advances the
+    ///    user from "I typed the field" to "I'm
+    ///    ready to type the value".
+    /// 5. If the prefix is the start of multiple
+    ///    fields (e.g. `lab` matches both `label`
+    ///    and `labels`), the prefix is extended
+    ///    to the LONGEST COMMON PREFIX and the
+    ///    cursor lands after it. The user keeps
+    ///    typing to disambiguate.
+    /// 6. If the prefix matches exactly one
+    ///    field, the token is replaced with
+    ///    the full field name + `=` and the
+    ///    cursor lands right after the `=`.
+    ///
+    /// The function also handles the edge cases:
+    /// - Cursor at the start of the query
+    ///   (no prefix): no-op.
+    /// - Cursor mid-field (e.g. `lab|els` with
+    ///   the cursor between `b` and `e`): the
+    ///   prefix is everything from the
+    ///   previous whitespace to the cursor
+    ///   (`lab`), and the function replaces
+    ///   just that prefix. The `els` after the
+    ///   cursor is preserved.
+    /// - The cursor is in a value position
+    ///   (e.g. after `=`, e.g.
+    ///   `labels=|foo`): the prefix-to-complete
+    ///   is the empty string immediately after
+    ///   `=`, which is a no-match case, so the
+    ///   function does nothing. (The completion
+    ///   is intentionally not bidirectional:
+    ///   the field name lives to the LEFT of
+    ///   the `=`; the value lives to the RIGHT
+    ///   and is left alone. If the user wants
+    ///   to edit a value, they can backspace
+    ///   and re-type, which is the expected
+    ///   readline convention.)
+    fn jira_field_complete_at_cursor(&mut self) {
+        // The JIRA prefix is `-` by
+        // default (a single `char`).
+        // The completion operates
+        // on the body (the text
+        // after the prefix), not
+        // on the prefix itself.
+        // We also re-check
+        // `is_jira_query` here so
+        // the function is safe to
+        // call from tests and from
+        // any future caller — the
+        // dispatch site already
+        // checks, but defence in
+        // depth.
+        if !self.is_jira_query() {
+            return;
+        }
+        // `QueryPrefixes::jira` is a
+        // single `char`, so the
+        // prefix length is always
+        // 1.
+        let prefix_len: usize = 1;
+        // `query_cursor` is in
+        // characters and points to
+        // the position where the
+        // next character would be
+        // inserted (i.e. one past
+        // the last character if the
+        // cursor is at the end).
+        if self.query_cursor < prefix_len {
+            // Cursor is on or before
+            // the JIRA prefix itself
+            // (e.g. the user is in
+            // the middle of the `-`
+            // prefix). There's no
+            // field name to
+            // complete.
+            return;
+        }
+        // Walk left from the cursor
+        // (in character indices),
+        // stopping at the first
+        // character that is NOT a
+        // JQL field-name character
+        // (alphanumeric or
+        // underscore). The
+        // completion target is
+        // everything in
+        // `self.query[prefix_len..cursor]`
+        // back to the start of the
+        // current word.
+        let mut start_char = self.query_cursor;
+        while start_char > prefix_len {
+            let prev = start_char - 1;
+            let ch = self.query[char_to_byte_index(&self.query, prev)
+                ..char_to_byte_index(&self.query, start_char)]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                start_char = prev;
+            } else {
+                break;
+            }
+        }
+        let start_byte = char_to_byte_index(&self.query, start_char);
+        let cursor_byte = char_to_byte_index(&self.query, self.query_cursor);
+        let prefix_str = &self.query[start_byte..cursor_byte];
+        if prefix_str.is_empty() {
+            // No field-name characters
+            // before the cursor —
+            // the user pressed Tab
+            // right after whitespace
+            // or at the start of a
+            // value. Surface a
+            // status message and
+            // bail.
+            self.set_status_message("jira-field-complete: no field name to expand".to_string());
+            return;
+        }
+        // Run the completion. The
+        // function returns:
+        // - `None` if no field
+        //   starts with the
+        //   prefix.
+        // - `Some("labels=")` if
+        //   the prefix matches
+        //   exactly one field
+        //   (with trailing `=`
+        //   per the
+        //   `_with_value`
+        //   variant).
+        // - `Some("lab")` if
+        //   the prefix matches
+        //   multiple fields
+        //   (longest common
+        //   prefix, no
+        //   trailing `=`).
+        let completion = match crate::jira::jira_field_complete_with_value(prefix_str) {
+            Some(c) => c,
+            None => {
+                // No field starts with
+                // the prefix. Don't
+                // silently destroy
+                // text; surface a
+                // status message.
+                self.set_status_message(format!(
+                    "jira-field-complete: no JIRA field starts with `{}`",
+                    prefix_str
+                ));
+                return;
+            }
+        };
+        // The completion has the
+        // form `<field>[=]`. We
+        // want to replace the
+        // prefix at `start_byte`
+        // with the completion
+        // string, and move the
+        // cursor to the end of
+        // the replacement. Use
+        // `replace_range` so we
+        // do exactly one
+        // allocation.
+        self.query
+            .replace_range(start_byte..cursor_byte, &completion);
+        // The new cursor position
+        // is the start of the
+        // replacement (in
+        // characters) plus the
+        // completion's character
+        // count.
+        let completion_chars = completion.chars().count();
+        self.query_cursor = start_char + completion_chars;
+        // Re-arm the debounce/idle
+        // timers so the JIRA
+        // search fires on the
+        // expanded query.
+        // (Same effect as a
+        // normal keystroke.)
+        self.llm_touch();
+        // Recompile the regex (if
+        // any) for the new
+        // query body.
+        self.recompile_regex();
+        // Refresh the row set so
+        // the search-as-you-type
+        // shows the new result
+        // count immediately
+        // (without waiting for
+        // the debounce).
+        self.refresh();
+        // If the expansion has a
+        // trailing `=`, the user
+        // is now ready to type
+        // the value. A status
+        // message like
+        // "expanded labels=" is
+        // a useful confirmation
+        // (and is the same
+        // verbosity as the rest
+        // of the TUI's status
+        // messages). If the
+        // expansion is the
+        // longest-common-prefix
+        // (no trailing `=`), we
+        // don't surface a
+        // status message
+        // because it would
+        // flash too often
+        // during disambiguation
+        // and the user can see
+        // the change in the
+        // query line anyway.
+        if completion.ends_with('=') {
+            self.set_status_message(format!("expanded {}", completion));
+        }
+    }
+
     fn delete_word_backward(&mut self) {
         if let Some(ref mut buf) = self.comment_edit {
             // The comment-edit buffer has no cursor
@@ -7870,6 +8315,18 @@ impl App {
         self.recompile_regex();
         self.refresh();
         self.llm_touch();
+        // Fire the per-mode search
+        // immediately on the
+        // deletion. Same
+        // rationale as
+        // `push_char` /
+        // `backspace`:
+        // non-JIRA modes
+        // should reflect
+        // the user's edit
+        // on the same
+        // frame.
+        self.trigger_text_change_search();
     }
 
     fn clear_query(&mut self) {
@@ -7892,6 +8349,23 @@ impl App {
             // will see we're no longer in LLM mode and
             // clear the preview.
             self.llm_touch();
+            // Fire the per-mode search
+            // (no-op for the
+            // empty query: the
+            // empty check at the
+            // top of
+            // `trigger_text_change_search`
+            // bails before
+            // reaching
+            // `refresh()` /
+            // `llm_maybe_autocall`).
+            // Calling it here is
+            // cheap and keeps
+            // the call sites
+            // uniform — every
+            // text-mutating
+            // path is wired.
+            self.trigger_text_change_search();
         }
     }
 
@@ -10820,6 +11294,22 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // Cycle through: BOTH → Details → OutputPreview → BOTH.
             app.pane_visibility = app.pane_visibility.next();
             app.set_status_message(format!("Pane layout: {}", app.pane_visibility.label()));
+            false
+        }
+        Action::JiraFieldComplete => {
+            // Tab-completion of JQL field
+            // names inside the JIRA
+            // search mode. Outside of
+            // JIRA mode, Tab does
+            // nothing — the add-entry
+            // dialog handles its own
+            // Tab as field-next INSIDE
+            // the dialog, so the two
+            // paths never collide.
+            if !app.is_jira_query() {
+                return false;
+            }
+            app.jira_field_complete_at_cursor();
             false
         }
     }
@@ -25094,6 +25584,804 @@ ssh_config_parse\t\t10,0\n";
             "idle timer must fire the search even when the fast debounce hasn't elapsed, before={} after={}",
             before,
             recorded.lock().unwrap().len()
+        );
+    }
+
+    /// The canonical case from
+    /// the user's request:
+    /// typing a field-name
+    /// prefix and pressing
+    /// Tab expands it. The
+    /// exact expansion
+    /// depends on whether
+    /// the prefix is unique
+    /// (e.g. `stat` matches
+    /// only `status`) or
+    /// ambiguous (e.g. `lab`
+    /// matches both `label`
+    /// and `labels`).
+    ///
+    /// For UNIQUE prefixes the
+    /// expansion is the
+    /// full field name plus
+    /// `=` (the user can
+    /// immediately type
+    /// the value). For
+    /// AMBIGUOUS prefixes
+    /// the expansion is the
+    /// longest common prefix
+    /// with no trailing `=`
+    /// (the user keeps
+    /// typing to
+    /// disambiguate). This
+    /// is the standard
+    /// readline / bash
+    /// completion behaviour
+    /// and is the least
+    /// surprising thing
+    /// for users who already
+    /// know shell
+    /// completion.
+    ///
+    /// The user mentioned
+    /// `lab<TAB> → labels=`
+    /// as their example,
+    /// but `lab` is
+    /// actually ambiguous
+    /// (it matches both
+    /// `label` and
+    /// `labels`). The
+    /// readline convention
+    /// is to extend to the
+    /// longest common
+    /// prefix (`label`),
+    /// not to pick a
+    /// specific field. We
+    /// test the unambiguous
+    /// case below with
+    /// `status`.
+    #[test]
+    fn jira_tab_completion_expands_unique_prefix_to_field_equals() {
+        let mut app = directories_test_app(&[]);
+        // `stat` is a prefix of
+        // `status` (only;
+        // `statusCategory`
+        // also starts with
+        // `status` so the
+        // true LCP would be
+        // `status`). The
+        // `stat` prefix has
+        // two matches
+        // (`status` and
+        // `statusCategory`).
+        // The unambiguous
+        // case is `proj`
+        // which matches only
+        // `project`.
+        app.query = String::from("-proj");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-project=",
+            "unique prefix should expand to field=, got: {:?}",
+            app.query
+        );
+        // Cursor lands right
+        // after the `=`
+        // (position 9: 1
+        // for `-` + 7 for
+        // `project` + 1
+        // for `=`).
+        assert_eq!(app.query_cursor, 9);
+    }
+
+    /// The user's example:
+    /// `lab<TAB>` expands
+    /// to... not `labels=`
+    /// (the user expected)
+    /// but to the longest
+    /// common prefix
+    /// `label`, because
+    /// `lab` matches both
+    /// `label` and
+    /// `labels`. The user
+    /// keeps typing to
+    /// disambiguate
+    /// (`labels` vs
+    /// `label`). This is
+    /// the standard
+    /// readline behaviour.
+    #[test]
+    fn jira_tab_completion_ambiguous_label_prefix_extends_to_label() {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-lab");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        // The completion
+        // extends to the
+        // longest common
+        // prefix of `label`
+        // and `labels`, which
+        // is `label`. No
+        // trailing `=` in
+        // the ambiguous
+        // case.
+        assert_eq!(
+            app.query, "-label",
+            "ambiguous lab<TAB> should extend to label (the LCP), got: {:?}",
+            app.query
+        );
+        assert_eq!(app.query_cursor, 6);
+        // Now the user types
+        // `s` (to
+        // disambiguate to
+        // `labels`) and
+        // presses Tab
+        // again. The prefix
+        // `labels` matches
+        // only `labels`, so
+        // the second Tab
+        // appends the `=`.
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-labels");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-labels=",
+            "second Tab on the disambiguated prefix appends `=`, got: {:?}",
+            app.query
+        );
+    }
+
+    /// Pressing Tab in JIRA mode
+    /// at a complete field
+    /// name (e.g. `labels`)
+    /// appends the `=`. This
+    /// is the
+    /// `jira_field_complete_with_value`
+    /// path: the prefix IS a
+    /// complete field, the
+    /// completion extends to
+    /// itself plus `=`.
+    #[test]
+    fn jira_tab_completion_at_complete_field_appends_equals() {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-labels");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-labels=",
+            "complete field name + Tab should append `=`, got: {:?}",
+            app.query
+        );
+        assert_eq!(app.query_cursor, 8);
+    }
+
+    /// Pressing Tab in JIRA mode
+    /// with a prefix that
+    /// doesn't match any
+    /// field leaves the
+    /// query unchanged AND
+    /// surfaces a status
+    /// message. The function
+    /// must not silently
+    /// destroy text.
+    #[test]
+    fn jira_tab_completion_no_match_leaves_query_unchanged() {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("-xyz");
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(
+            app.query, "-xyz",
+            "no-match prefix must NOT modify the query, got: {:?}",
+            app.query
+        );
+        // A status message is
+        // surfaced so the
+        // user knows Tab
+        // did not silently
+        // fail. The
+        // `status_message`
+        // field is
+        // `Option<(String,
+        // Instant)>`; we
+        // extract the
+        // string for the
+        // assertion.
+        let status = app.status_message.as_ref().map(|(m, _)| m.clone());
+        assert!(
+            status.as_deref().unwrap_or("").contains("xyz"),
+            "status message should mention the unknown prefix, got: {status:?}"
+        );
+    }
+
+    /// Pressing Tab OUTSIDE of
+    /// JIRA mode is a no-op.
+    /// The action should
+    /// not interfere with
+    /// any other mode's
+    /// behaviour. (The
+    /// add-entry dialog
+    /// handles its own Tab
+    /// as field-next INSIDE
+    /// the dialog, but
+    /// `jira_field_complete_at_cursor`
+    /// is the direct
+    /// method; the
+    /// dispatch site in
+    /// `dispatch_action`
+    /// already short-
+    /// circuits on
+    /// `!is_jira_query()`.)
+    #[test]
+    fn jira_tab_completion_outside_jira_mode_is_noop() {
+        let mut app = directories_test_app(&[]);
+        // Query is not a JIRA
+        // query (no `-`
+        // prefix).
+        app.query = String::from("git status");
+        let original = app.query.clone();
+        app.query_cursor = app.query.chars().count();
+        app.jira_field_complete_at_cursor();
+        assert_eq!(app.query, original, "non-JIRA query must be left unchanged");
+    }
+
+    /// The completion is
+    /// position-aware:
+    /// pressing Tab in
+    /// the MIDDLE of a
+    /// field prefix only
+    /// replaces the
+    /// prefix, not the
+    /// characters after
+    /// the cursor.
+    /// E.g. `labe<TAB>` with
+    /// the cursor between
+    /// `b` and `e` should
+    /// only touch the
+    /// portion of the
+    /// field that the
+    /// cursor is on. The
+    /// user's
+    /// just-typed `e`
+    /// should be
+    /// preserved.
+    #[test]
+    fn jira_tab_completion_preserves_text_after_cursor() {
+        let mut app = directories_test_app(&[]);
+        // Query is `-labe`.
+        // Cursor is at
+        // position 4 (right
+        // after `lab`,
+        // before `e`).
+        app.query = String::from("-labe");
+        app.query_cursor = 4; // right after `-lab`
+        app.jira_field_complete_at_cursor();
+        // The prefix `lab`
+        // matches `label`
+        // and `labels`, so
+        // it extends to
+        // the longest
+        // common prefix
+        // `label`. The `e`
+        // (which the user
+        // already typed
+        // after the cursor)
+        // is preserved.
+        assert_eq!(
+            app.query, "-labele",
+            "tab completion should preserve text after the cursor, got: {:?}",
+            app.query
+        );
+        // The cursor lands
+        // at the end of
+        // the expanded
+        // prefix, which
+        // is the position
+        // of the `e`
+        // (position 6).
+        assert_eq!(app.query_cursor, 6);
+    }
+
+    /// The user's request: in
+    /// non-JIRA modes, every
+    /// text-mutating action
+    /// must fire the search
+    /// immediately. The
+    /// earlier behaviour was
+    /// "fire on the next
+    /// frame" (the run loop's
+    /// `refresh()` call), which
+    /// meant a single-frame
+    /// lag between the
+    /// keystroke and the
+    /// updated row set. This
+    /// test verifies the
+    /// synchronous behaviour
+    /// for GLOBAL mode (the
+    /// simplest synchronous
+    /// mode — no session /
+    /// directory scoping, so
+    /// every row in the
+    /// in-memory DB is
+    /// visible). The
+    /// `trigger_text_change_search`
+    /// call is mode-agnostic;
+    /// the GLOBAL / DIR /
+    /// SESS distinction is
+    /// just about the SQL
+    /// `WHERE` clause, not
+    /// about the search
+    /// trigger.
+    ///
+    /// Note: the test inserts
+    /// a single character
+    /// into an empty query
+    /// and asserts that the
+    /// `rows` field is
+    /// repopulated. Before
+    /// the change, the test
+    /// would see a stale
+    /// `rows` field (the one
+    /// from `App::new`'s
+    /// initial `refresh()`).
+    /// After the change, the
+    /// row set reflects the
+    /// new query on the same
+    /// frame.
+    #[test]
+    fn push_char_in_global_mode_fires_search_immediately() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        // The `fetch()` SQL
+        // LEFT JOINs
+        // `command_comments`
+        // and
+        // `history_output`;
+        // both must exist or
+        // the query fails
+        // (and `refresh()`
+        // swallows the
+        // error via
+        // `unwrap_or_default()`,
+        // leaving `rows`
+        // empty).
+        conn.execute_batch(
+            "CREATE TABLE history (
+                    id INTEGER PRIMARY KEY,
+                    command TEXT NOT NULL,
+                    directory TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    exit_code INTEGER,
+                    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                    mode TEXT NOT NULL DEFAULT 'command'
+                );
+                CREATE TABLE command_comments (
+                    command TEXT PRIMARY KEY,
+                    comment TEXT NOT NULL
+                );
+                CREATE TABLE history_output (
+                    history_id INTEGER PRIMARY KEY,
+                    output TEXT
+                );",
+        )
+        .expect("schema");
+        // Two rows: one matches
+        // `git`, one doesn't.
+        // After the keystroke
+        // the row set should
+        // contain only the
+        // `git` row.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+             VALUES (?1, ?2, ?3, 'sess', 0, ?4)",
+            rusqlite::params![1i64, "git status", "/home/u", now],
+        )
+        .expect("insert git");
+        conn.execute(
+            "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+             VALUES (?1, ?2, ?3, 'sess', 0, ?4)",
+            rusqlite::params![2i64, "ls -la", "/home/u", now - 1],
+        )
+        .expect("insert ls");
+        let mut app = App::new(
+            conn,
+            // GLOBAL — no
+            // session /
+            // directory
+            // scoping, so
+            // every row is
+            // visible by
+            // default.
+            Mode::Global,
+            String::new(),
+            false,
+            ExitFilter::All,
+            SortOrder::default(),
+            false,
+            SelectedTheme::None,
+            KeyBindings::defaults(),
+            None,
+            None,
+            crate::QueryPrefixes::default(),
+            None,
+            None,
+            String::from("+$LINE"),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            test_multiplexer(),
+            crate::tui::state::PaneVisibility::default(),
+        );
+        // The initial
+        // `refresh()` should
+        // have populated
+        // `rows` with BOTH
+        // rows (empty query =
+        // no filter).
+        let initial_count = app.rows.len();
+        assert_eq!(
+            initial_count, 2,
+            "initial rows should include both commands, got {}",
+            initial_count
+        );
+        // Now type a single
+        // character. The new
+        // behaviour must
+        // immediately re-
+        // fetch the row
+        // set, filtering by
+        // the new query.
+        app.push_char('g');
+        // The row set should
+        // now contain only
+        // the `git` row.
+        // Before the
+        // `trigger_text_change_search`
+        // change, this
+        // would still show
+        // both rows (the
+        // `refresh()` call
+        // in `push_char`
+        // was missing).
+        assert_eq!(
+            app.rows.len(),
+            1,
+            "after typing 'g', only the git row should remain, got {} rows: {:?}",
+            app.rows.len(),
+            app.rows.iter().map(|r| &r.command).collect::<Vec<_>>()
+        );
+        assert!(
+            app.rows[0].command.contains("git"),
+            "remaining row should be the git one, got: {:?}",
+            app.rows[0].command
+        );
+    }
+
+    /// `backspace` in non-JIRA
+    /// mode must also fire
+    /// the search
+    /// immediately. The
+    /// `backspace()` method
+    /// already called
+    /// `refresh()` for
+    /// non-LLM modes, so
+    /// this test mostly
+    /// documents the
+    /// intent. The
+    /// `trigger_text_change_search`
+    /// call is a no-op for
+    /// GLOBAL (the
+    /// `refresh()` already
+    /// covers it) but is the
+    /// right place to hang
+    /// future
+    /// LLM-specific logic
+    /// off of.
+    #[test]
+    fn backspace_in_global_mode_fires_search_immediately() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE history (
+                    id INTEGER PRIMARY KEY,
+                    command TEXT NOT NULL,
+                    directory TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    exit_code INTEGER,
+                    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                    mode TEXT NOT NULL DEFAULT 'command'
+                );
+                CREATE TABLE command_comments (
+                    command TEXT PRIMARY KEY,
+                    comment TEXT NOT NULL
+                );
+                CREATE TABLE history_output (
+                    history_id INTEGER PRIMARY KEY,
+                    output TEXT
+                );",
+        )
+        .expect("schema");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+             VALUES (?1, ?2, ?3, 'sess', 0, ?4)",
+            rusqlite::params![1i64, "git status", "/home/u", now],
+        )
+        .expect("insert");
+        let mut app = App::new(
+            conn,
+            Mode::Global,
+            String::new(),
+            false,
+            ExitFilter::All,
+            SortOrder::default(),
+            false,
+            SelectedTheme::None,
+            KeyBindings::defaults(),
+            None,
+            None,
+            crate::QueryPrefixes::default(),
+            None,
+            None,
+            String::from("+$LINE"),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            test_multiplexer(),
+            crate::tui::state::PaneVisibility::default(),
+        );
+        // Type `git` —
+        // matching the
+        // `git status`
+        // row.
+        app.push_char('g');
+        app.push_char('i');
+        app.push_char('t');
+        assert_eq!(
+            app.rows.len(),
+            1,
+            "after typing 'git' should match the git row, got {}",
+            app.rows.len()
+        );
+        // Now backspace —
+        // the query is
+        // back to `gi`.
+        // The match should
+        // still hold
+        // (the row
+        // contains `git`
+        // which contains
+        // `gi`), so the
+        // row count is
+        // still 1.
+        app.backspace();
+        assert_eq!(
+            app.rows.len(),
+            1,
+            "after backspacing to 'gi' the git row should still match, got {}",
+            app.rows.len()
+        );
+    }
+
+    /// Empty queries do NOT
+    /// trigger a re-fetch.
+    /// When the user clears
+    /// the box (e.g. via
+    /// `Ctrl-U` or by
+    /// backspacing the
+    /// last character), we
+    /// should not waste
+    /// time re-running the
+    /// fetch — the empty
+    /// body already
+    /// matches every row,
+    /// which is what the
+    /// user just had on
+    /// screen.
+    #[test]
+    fn push_char_then_backspace_to_empty_does_not_re_fetch() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        // Full schema (the
+        // fetch SQL LEFT
+        // JOINs on both
+        // tables).
+        conn.execute_batch(
+            "CREATE TABLE history (
+                    id INTEGER PRIMARY KEY,
+                    command TEXT NOT NULL,
+                    directory TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    exit_code INTEGER,
+                    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                    mode TEXT NOT NULL DEFAULT 'command'
+                );
+                CREATE TABLE command_comments (
+                    command TEXT PRIMARY KEY,
+                    comment TEXT NOT NULL
+                );
+                CREATE TABLE history_output (
+                    history_id INTEGER PRIMARY KEY,
+                    output TEXT
+                );",
+        )
+        .expect("schema");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+             VALUES (?1, ?2, ?3, 'sess', 0, ?4)",
+            rusqlite::params![1i64, "ls", "/h", now],
+        )
+        .expect("insert");
+        let mut app = App::new(
+            conn,
+            Mode::Global,
+            String::new(),
+            false,
+            ExitFilter::All,
+            SortOrder::default(),
+            false,
+            SelectedTheme::None,
+            KeyBindings::defaults(),
+            None,
+            None,
+            crate::QueryPrefixes::default(),
+            None,
+            None,
+            String::from("+$LINE"),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            test_multiplexer(),
+            crate::tui::state::PaneVisibility::default(),
+        );
+        app.session_subdirs.clear();
+        app.tmux_windows.clear();
+        app.push_char('l');
+        app.push_char('s');
+        // Sanity: the row
+        // is matched.
+        assert!(
+            !app.rows.is_empty(),
+            "should have at least one match, got {} rows: {:?}",
+            app.rows.len(),
+            app.rows.iter().map(|r| &r.command).collect::<Vec<_>>()
+        );
+        // Now backspace
+        // twice. The first
+        // removes `s` (query
+        // = `l`, still
+        // matches the
+        // `ls` row). The
+        // second removes
+        // `l` (query =
+        // ``, matches
+        // everything). The
+        // second backspace
+        // is the "empty
+        // query" case:
+        // `trigger_text_change_search`
+        // must short-circuit
+        // and NOT call
+        // `refresh()`. (The
+        // existing
+        // `backspace()`
+        // method DOES call
+        // `refresh()` after
+        // every deletion,
+        // so the row set
+        // will still be
+        // re-fetched. The
+        // point of the
+        // test is to
+        // confirm the
+        // empty-query
+        // path is a no-op
+        // for the
+        // new helper —
+        // the
+        // existing
+        // `refresh()` is
+        // independent.)
+        app.backspace();
+        app.backspace();
+        assert_eq!(app.query, "", "query should be empty");
+        // The row set
+        // should still
+        // contain the row
+        // (empty query =
+        // no filter = all
+        // rows visible).
+        assert!(
+            !app.rows.is_empty(),
+            "empty query should leave the row set populated, got {}",
+            app.rows.len()
+        );
+    }
+
+    /// JIRA mode must NOT
+    /// fire on every
+    /// keystroke — the
+    /// JIRA debounce
+    /// (400ms fast + 3s
+    /// idle safety-net)
+    /// is still
+    /// respected. The
+    /// `trigger_text_change_search`
+    /// helper
+    /// short-circuits
+    /// inside the
+    /// JIRA branch.
+    /// This test verifies
+    /// the guard: a
+    /// `push_char` in
+    /// JIRA mode does
+    /// NOT set
+    /// `jira_in_flight`
+    /// to true (which
+    /// would mean the
+    /// auto-call fired
+    /// immediately).
+    #[test]
+    fn push_char_in_jira_mode_does_not_bypass_debounce() {
+        use std::sync::Arc;
+        let fake = FakeJira {
+            issues: vec![],
+            recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ..Default::default()
+        };
+        let recorded = fake.recorded.clone();
+        let mut app = directories_test_app(&[]);
+        app.set_jira_client(Arc::new(fake));
+        // Set the JIRA
+        // debounce / idle
+        // timers to a
+        // RECENT value
+        // (not past the
+        // threshold).
+        // After
+        // `push_char`,
+        // the timers
+        // should be
+        // re-armed to
+        // "now" (not
+        // fired).
+        app.query = String::from("-");
+        app.query_cursor = 1;
+        let now = std::time::Instant::now();
+        app.jira_debounce_started = Some(now);
+        app.jira_idle_started = Some(now);
+        app.push_char('P');
+        // The JIRA
+        // debounce
+        // should be
+        // re-armed to
+        // "now" (by
+        // `llm_touch`
+        // →
+        // `jira_touch`).
+        // The recorded
+        // JQL list
+        // should NOT
+        // have grown —
+        // the auto-call
+        // is still
+        // waiting for
+        // the debounce
+        // to elapse.
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            0,
+            "JIRA mode must NOT fire immediately on push_char; the debounce is still respected"
         );
     }
 

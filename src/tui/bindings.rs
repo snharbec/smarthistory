@@ -328,6 +328,40 @@ pub enum Action {
     ///
     /// Default key: `F6`. Works in any mode.
     TogglePaneVisibility,
+    /// Tab-completion for JQL field names inside
+    /// the `-` mode. When the user has typed a
+    /// token that matches the prefix of one or
+    /// more JIRA field names (e.g. `lab<TAB>`),
+    /// the token is expanded to the full field
+    /// name with a trailing `=`, and the cursor
+    /// lands right after the `=` so the user can
+    /// immediately type the value. When multiple
+    /// fields share the prefix (e.g. `label`
+    /// and `labels`), the token is extended to
+    /// the longest common prefix and the user
+    /// keeps typing to disambiguate (standard
+    /// readline/bash completion behaviour).
+    ///
+    /// Default key: `Tab`. Outside of JIRA mode
+    /// the action is a no-op so the key doesn't
+    /// interfere with anything else (the TUI
+    /// doesn't currently use `Tab` for any
+    /// other purpose; the add-entry dialog
+    /// handles `Tab` as field-next INSIDE the
+    /// dialog, but the dialog intercepts the
+    /// key before this action fires, so the
+    /// two paths never conflict).
+    ///
+    /// Note: the completion list (`JIRA_FIELDS`
+    /// in `src/jira.rs`) is the system field
+    /// set plus a few common custom-field
+    /// conventions (`sprint`, `epic`, `parent`,
+    /// `storyPoints`, `rank`). User-defined
+    /// custom fields are intentionally NOT in
+    /// the list — those would need a JIRA
+    /// round-trip to enumerate, and a static
+    /// list is more predictable.
+    JiraFieldComplete,
 }
 
 impl Action {
@@ -376,6 +410,7 @@ impl Action {
             Action::ToggleSearchMode => "toggle-search-mode",
             Action::MarkTodoDone => "mark-todo-done",
             Action::TogglePaneVisibility => "toggle-pane-visibility",
+            Action::JiraFieldComplete => "jira-field-complete",
         }
     }
 
@@ -422,6 +457,7 @@ impl Action {
             Action::ToggleSearchMode => "Toggle search mode",
             Action::MarkTodoDone => "Mark todo done",
             Action::TogglePaneVisibility => "Toggle pane visibility",
+            Action::JiraFieldComplete => "JIRA field complete",
         }
     }
 
@@ -466,6 +502,7 @@ impl Action {
             Action::Describe => "llm",
             Action::Correct => "llm",
             Action::DownloadJiraIssue => "tools",
+            Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
             // Adding new entries to the config file
             // (session / host). The dialog state
@@ -523,6 +560,7 @@ impl Action {
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
             Action::TogglePaneVisibility => "F6",
+            Action::JiraFieldComplete => "Tab",
         }
     }
 
@@ -837,6 +875,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,
     Action::TogglePaneVisibility,
+    Action::JiraFieldComplete,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of
