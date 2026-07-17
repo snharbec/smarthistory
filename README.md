@@ -89,29 +89,40 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 
 ### TUI key bindings (subset)
 
+The defaults match the project config file
+(`~/.config/smarthistory/config`); override
+any of them via `key.<action>=<spec>` in your
+own config.
+
 | Key | Action |
 | --- | --- |
 | `Enter` | Stage the selected row / invoke the mode's primary action. |
 | `C-f` | Cycle match algorithm: SUBSTRING → FUZZY → REGEX → SUBSTRING. |
 | `F4` | Cycle sort order: AGE → FREQ → AGE. |
+| `C-s` | Cycle the directory source (ALL → TMUX → CONFIG → ALL). |
 | `Ctrl+K` | LLM "describe" the selected command. |
 | `Ctrl+T` | LLM "correct" the selected command. |
 | `Ctrl+Y` | Yank to clipboard. |
 | `Ctrl+E` | Edit the selected row's comment. |
-| `Ctrl+L` | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
-| `Ctrl+S` | Toggle the duplicate filter (LAST vs ALL). |
+| `Ctrl+O` | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
 | `Ctrl+D` | Delete the selected entry (with confirmation). |
 | `Ctrl+X` | Mark a todo as done (in `!` mode). |
-| `Ctrl+H` | Open the help overlay. |
-| `:` | Open the command palette. |
+| `Ctrl+A` | Open the help overlay. |
+| `Ctrl+Q` | Open the command palette. |
 | `T` | Open the theme picker. |
-| `Ctrl+1` | Add the selected directory as a new named session (`*` mode). |
-| `Ctrl+2` | Add the selected directory as a new host (`*` mode). |
-| `F6` | Toggle pane visibility: BOTH → Details → Output Preview → BOTH. |
+| `F5` | Add the selected directory as a new named session (`*` mode). |
+| `F6` | Add the selected directory as a new host (`*` mode). |
+| `F10` | Toggle pane visibility: BOTH → Details → Output Preview → BOTH. |
 | `F7` | Panes filter: show only live multiplexer windows (`*` mode). |
 | `F8` | Panes filter: show only the `# hosts` block (`*` mode). |
 | `F9` | Panes filter: show only the `# sessions` block (`*` mode). |
-| `Esc` | Close any overlay / cancel the picker. |
+| `C-c`, `Esc` | Close any overlay / cancel the picker. |
+
+The duplicate filter and the "delete matching" actions
+ship **unbound** by default (set them via
+`key.toggle-duplicate-filter=...` and
+`key.delete-matching=...` in your config to
+re-enable them).
 
 All keybindings are user-configurable via `key.<action>=<spec>` in the config file. See [TECHNICAL.md](TECHNICAL.md) for the full reference.
 

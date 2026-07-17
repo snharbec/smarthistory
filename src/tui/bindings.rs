@@ -519,23 +519,53 @@ impl Action {
     /// The default key binding (as a string in the same format the
     /// config file uses, e.g. `"C-h"`, `"Up"`, `"Esc"`).
     pub fn default_key(self) -> &'static str {
+        // These defaults mirror the
+        // user-configured bindings in
+        // `~/.config/smarthistory/config`.
+        // When the config file is
+        // absent, these are the keys
+        // the TUI ships with; when
+        // the config file IS
+        // present, the user's
+        // `key.<action>=<spec>`
+        // entries override these.
+        //
+        // The `"none"` sentinel is
+        // the explicit "no default
+        // key" — the action ships
+        // unbound. `KeyBindings::defaults()`
+        // recognises the sentinel
+        // and skips the action
+        // (the help overlay and
+        // command palette render
+        // it as `(unbound)`).
+        // This is the right thing
+        // for actions the user
+        // has explicitly removed
+        // from their workflow
+        // (e.g. delete-all, the
+        // duplicate filter) —
+        // making the action
+        // `unbound` rather than
+        // picking a key the user
+        // never asked for.
         match self {
-            Action::Cancel => "Esc",
+            Action::Cancel => "C-c",
             Action::CycleMode => "C-g",
-            Action::ToggleDuplicateFilter => "C-s",
+            Action::ToggleDuplicateFilter => "none",
             Action::CycleThemeNext => "C-n",
             Action::CycleThemePrev => "C-p",
             Action::EditComment => "C-e",
-            Action::ShowOutput => "C-l",
+            Action::ShowOutput => "C-o",
             Action::YankSelection => "C-y",
-            Action::EditFileReference => "C-o",
-            Action::OpenHelp => "C-h",
+            Action::EditFileReference => "C-v",
+            Action::OpenHelp => "C-a",
             Action::DeleteSelected => "C-d",
-            Action::DeleteMatching => "C-M-d",
+            Action::DeleteMatching => "none",
             Action::ClearQuery => "C-u",
             Action::CycleExitFilter => "C-j",
             Action::CycleSortOrder => "F4",
-            Action::CycleDirectorySource => "C-M-g",
+            Action::CycleDirectorySource => "C-s",
             Action::Describe => "C-k",
             Action::Correct => "C-t",
             Action::DownloadJiraIssue => "C-M-s",
@@ -550,16 +580,16 @@ impl Action {
             Action::End => "End",
             Action::Backspace => "Backspace",
             Action::DeleteWordBackward => "C-w",
-            Action::CommandAction => ":",
+            Action::CommandAction => "C-q",
             Action::ThemePicker => "T",
             Action::ToggleSearchMode => "C-f",
             Action::MarkTodoDone => "C-x",
-            Action::AddSession => "C-1",
-            Action::AddHost => "C-2",
+            Action::AddSession => "F5",
+            Action::AddHost => "F6",
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
-            Action::TogglePaneVisibility => "F6",
+            Action::TogglePaneVisibility => "F10",
             Action::JiraFieldComplete => "Tab",
         }
     }
@@ -579,6 +609,37 @@ impl Action {
     pub fn default_keys(self) -> &'static [&'static str] {
         match self {
             Action::DeleteWordBackward => &["C-w", "M-Backspace"],
+            // Cancel has two defaults
+            // to match the
+            // user-configured
+            // `key.cancel=C-c,Esc`
+            // in the project's
+            // config file: the
+            // muscle-memory
+            // `Ctrl-C` for
+            // power users
+            // (matches bash /
+            // readline / vim)
+            // AND the readline
+            // / bash `Esc` for
+            // users coming from
+            // the GUI-editor
+            // background. Both
+            // fire the same
+            // `Action::Cancel`,
+            // so a user pressing
+            // either gets the
+            // expected behaviour
+            // without remapping.
+            // Either spec can be
+            // removed via
+            // `key.cancel=...` in
+            // the config file
+            // (single spec) or
+            // `key.cancel=C-c,Esc`
+            // (explicit multi-
+            // spec).
+            Action::Cancel => &["C-c", "Esc"],
             // Every other action keeps the single-spec form
             // for now. The slice indirection avoids forcing
             // a `Vec` allocation in the hot path.
@@ -777,11 +838,52 @@ impl KeyBindings {
         let mut by_action = HashMap::new();
         for a in ALL_ACTIONS {
             let extra = a.default_keys();
+            // The "none" sentinel
+            // means the action
+            // ships unbound. This
+            // is the right thing
+            // for actions the user
+            // has explicitly
+            // removed from their
+            // workflow in the
+            // project config
+            // (e.g. `delete-matching`,
+            // `toggle-duplicate-filter`):
+            // rather than
+            // picking a key the
+            // user never asked
+            // for, the action is
+            // left unbound and
+            // the help overlay /
+            // command palette
+            // render it as
+            // `(unbound)`. The
+            // user can re-bind
+            // it later via
+            // `key.<action>=<spec>`.
+            //
+            // The sentinel is
+            // matched on the
+            // `default_key()`
+            // (single-spec) form
+            // because every
+            // multi-spec action
+            // that ships with
+            // two defaults
+            // (`Cancel`,
+            // `DeleteWordBackward`)
+            // is meaningful —
+            // the sentinel is
+            // only ever used on
+            // single-spec
+            // actions.
+            if a.default_key() == "none" {
+                by_action.insert(*a, Vec::new());
+                continue;
+            }
             let specs: Vec<KeySpec> = if extra.is_empty() {
-                vec![
-                    parse_key_spec(a.default_key())
-                        .expect("default key bindings must always parse"),
-                ]
+                vec![parse_key_spec(a.default_key())
+                    .expect("default key bindings must always parse")]
             } else {
                 extra
                     .iter()

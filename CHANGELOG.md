@@ -94,6 +94,53 @@ All notable changes to this project will be documented in this file.
      can fire the search
      when its respective
      window elapses.
+- The TUI's default key
+  bindings now mirror the
+  project config file
+  (`~/.config/smarthistory/config`).
+  Actions that the user has
+  explicitly rebound in the
+  config (e.g. `C-a` for
+  `open-help`, `C-q` for
+  `command-action`, `C-v`
+  for `edit-file-reference`,
+  `C-o` for `show-output`,
+  `C-s` for
+  `cycle-directory-source`,
+  `F5` / `F6` / `F10` for
+  the panes actions,
+  `C-c` + `Esc` for
+  `cancel`)
+  now ship with those
+  bindings as the default
+  so a fresh checkout
+  behaves the same as a
+  configured install.
+  Actions that the user
+  has explicitly unbound
+  (`toggle-duplicate-filter`
+  and `delete-matching`)
+  ship unbound by default
+  (the `none` sentinel is
+  now a valid default-key
+  value; the help overlay
+  and command palette
+  render those actions as
+  `(unbound)`). The
+  `Cancel` action is the
+  second action to ship
+  with two default
+  bindings (alongside
+  `DeleteWordBackward`):
+  `C-c` and `Esc` — both
+  fire the same action so
+  users from the bash /
+  readline tradition
+  (`C-c`) and the
+  GUI-editor tradition
+  (`Esc`) both get the
+  expected behaviour
+  without remapping.
 - The JIRA search mode now
   supports **tab-completion
   of JQL field names**.

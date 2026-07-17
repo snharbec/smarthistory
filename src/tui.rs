@@ -12922,8 +12922,10 @@ mod tests {
     #[test]
     fn action_for_key_roundtrip() {
         let bindings = KeyBindings::defaults();
-        // C-h is the default for OpenHelp.
-        let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        // `C-a` is the default for OpenHelp (matches the
+        // user-configured `key.open-help=C-a` in
+        // the project config).
+        let evt = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
         assert_eq!(action_for_key(&bindings, &evt), Some(Action::OpenHelp));
         // Unbound plain char → None.
         let evt = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
@@ -12973,9 +12975,23 @@ mod tests {
         entries.insert("toggle-duplication-filter".to_string(), "C-d".to_string());
         let bindings = bindings::key_bindings_from_config(&entries);
         // Unknown action does not pollute any known action.
+        // The default for `toggle-duplicate-filter` is
+        // the `none` sentinel (the user has
+        // explicitly unbound it in the
+        // project config), so the
+        // resulting spec list is empty
+        // and the action renders as
+        // `(unbound)` in the help
+        // overlay / command palette.
+        assert!(
+            bindings.specs(Action::ToggleDuplicateFilter).is_empty(),
+            "ToggleDuplicateFilter should ship unbound (default is `none`), got: {:?}",
+            format_key_specs(bindings.specs(Action::ToggleDuplicateFilter))
+        );
         assert_eq!(
-            format_key_specs(bindings.specs(Action::ToggleDuplicateFilter)),
-            Action::ToggleDuplicateFilter.default_key().to_string()
+            Action::ToggleDuplicateFilter.default_key(),
+            "none",
+            "default_key() for ToggleDuplicateFilter should be the `none` sentinel"
         );
     }
 
@@ -13121,14 +13137,17 @@ mod tests {
     #[test]
     fn command_action_has_default_binding_and_routes() {
         let bindings = KeyBindings::defaults();
-        // The default key for CommandAction is ":" (matches the
-        // vim-style command palette convention).
+        // The default key for CommandAction is `C-q` (matches
+        // the user-configured `key.command-action=C-q` in
+        // the project config; the project's chosen
+        // keybinding keeps `:` free for the regex
+        // search prefix).
         assert_eq!(
             format_key_specs(bindings.specs(Action::CommandAction)),
-            ":".to_string()
+            "C-q".to_string()
         );
-        // Pressing ":" fires the CommandAction.
-        let evt = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::empty());
+        // Pressing `Ctrl-Q` fires the CommandAction.
+        let evt = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(action_for_key(&bindings, &evt), Some(Action::CommandAction));
     }
 
@@ -13403,19 +13422,25 @@ mod tests {
             !app.is_output_viewing(),
             "Esc must actually close the output view (not just return Close)"
         );
-        // `Ctrl+L` (the toggle /
+        // `C-o` (the toggle /
         // ShowOutput action)
-        // also closes.
+        // also closes. (The
+        // default for
+        // ShowOutput was
+        // `C-l` historically;
+        // the project config
+        // moves it to
+        // `C-o`.)
         app.output_view = Some(OutputView {
             text: "captured\noutput".to_string(),
             scroll: 0,
         });
-        let cl = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
-        let r = handle_output_view_key(&mut app, cl, 10);
+        let co = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let r = handle_output_view_key(&mut app, co, 10);
         assert!(matches!(r, OutputViewResult::Close));
         assert!(
             !app.is_output_viewing(),
-            "Ctrl+L (toggle) must actually close the output view"
+            "Ctrl+O (toggle) must actually close the output view"
         );
         // `q` does NOT close
         // anymore — it's
@@ -14464,11 +14489,16 @@ mod tests {
     #[test]
     fn edit_file_reference_default_key_routes() {
         let bindings = KeyBindings::defaults();
+        // `C-v` is the default for EditFileReference
+        // (matches the user-configured
+        // `key.edit-file-reference=C-v` in the
+        // project config; `C-o` is now reserved
+        // for `show-output`).
         assert_eq!(
             format_key_specs(bindings.specs(Action::EditFileReference)),
-            "C-o"
+            "C-v"
         );
-        let evt = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let evt = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
         assert_eq!(
             action_for_key(&bindings, &evt),
             Some(Action::EditFileReference)
@@ -17940,6 +17970,197 @@ mod tests {
         assert_eq!(
             format_key_specs(bindings.specs(Action::DeleteWordBackward)),
             "C-w, M-Backspace"
+        );
+    }
+
+    /// The `Cancel` action ships
+    /// with two default
+    /// bindings: `C-c` and
+    /// `Esc`. The
+    /// user-configured
+    /// `key.cancel=C-c,Esc`
+    /// in the project config
+    /// is the canonical
+    /// source of truth; the
+    /// default is wired to
+    /// match so a fresh
+    /// checkout behaves the
+    /// same as a configured
+    /// install. Both fire the
+    /// same `Action::Cancel`,
+    /// so users from either
+    /// muscle-memory
+    /// background get the
+    /// expected behaviour
+    /// without remapping.
+    #[test]
+    fn cancel_defaults_have_both_specs() {
+        assert_eq!(
+            Action::Cancel.default_keys(),
+            &["C-c", "Esc"],
+            "Cancel must ship with C-c + Esc as the two default bindings"
+        );
+        // `default_key()` returns
+        // the FIRST spec (the
+        // single-spec form).
+        // `C-c` is the first
+        // because the
+        // `default_key()`
+        // arm was updated
+        // alongside the
+        // `default_keys()`
+        // arm.
+        assert_eq!(
+            Action::Cancel.default_key(),
+            "C-c",
+            "default_key() must return the first spec of the multi-spec list"
+        );
+        let bindings = KeyBindings::defaults();
+        assert_eq!(bindings.specs(Action::Cancel).len(), 2);
+        assert_eq!(format_key_specs(bindings.specs(Action::Cancel)), "C-c, Esc");
+        // Both keys route to
+        // `Action::Cancel`.
+        let evt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(action_for_key(&bindings, &evt), Some(Action::Cancel));
+        let evt = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(action_for_key(&bindings, &evt), Some(Action::Cancel));
+    }
+
+    /// The project config
+    /// explicitly binds a
+    /// handful of actions to
+    /// non-default keys
+    /// (`open-help=C-a`,
+    /// `command-action=C-q`,
+    /// `edit-file-reference=C-v`,
+    /// `show-output=C-o`,
+    /// `cycle-directory-source=C-s`,
+    /// `add-session=F5`,
+    /// `add-host=F6`,
+    /// `toggle-pane-visibility=F10`).
+    /// The shipped defaults
+    /// mirror those bindings
+    /// so a fresh checkout
+    /// behaves the same as
+    /// a configured install.
+    #[test]
+    fn project_config_defaults_are_shipped() {
+        let bindings = KeyBindings::defaults();
+        // `key.open-help=C-a` in
+        // the project
+        // config.
+        assert_eq!(format_key_specs(bindings.specs(Action::OpenHelp)), "C-a");
+        // `key.command-action=C-q`
+        // in the project
+        // config.
+        assert_eq!(
+            format_key_specs(bindings.specs(Action::CommandAction)),
+            "C-q"
+        );
+        // `key.edit-file-reference=C-v`
+        // in the project
+        // config.
+        assert_eq!(
+            format_key_specs(bindings.specs(Action::EditFileReference)),
+            "C-v"
+        );
+        // `key.show-output=C-o`
+        // in the project
+        // config.
+        assert_eq!(format_key_specs(bindings.specs(Action::ShowOutput)), "C-o");
+        // `key.cycle-directory-source=C-s`
+        // in the project
+        // config.
+        assert_eq!(
+            format_key_specs(bindings.specs(Action::CycleDirectorySource)),
+            "C-s"
+        );
+        // `key.add-session=F5`
+        // in the project
+        // config.
+        assert_eq!(format_key_specs(bindings.specs(Action::AddSession)), "F5");
+        // `key.add-host=F6`
+        // in the project
+        // config.
+        assert_eq!(format_key_specs(bindings.specs(Action::AddHost)), "F6");
+        // `key.toggle-pane-visibility=F10`
+        // in the project
+        // config.
+        assert_eq!(
+            format_key_specs(bindings.specs(Action::TogglePaneVisibility)),
+            "F10"
+        );
+    }
+
+    /// Actions the user has
+    /// explicitly unbound in
+    /// the project config
+    /// (`toggle-duplicate-filter=none`,
+    /// `delete-matching=none`)
+    /// ship unbound by
+    /// default. The `none`
+    /// sentinel in the
+    /// single-spec
+    /// `default_key()` slot
+    /// is the new "this
+    /// action ships without
+    /// a default binding"
+    /// signal. The help
+    /// overlay and command
+    /// palette render the
+    /// unbound action as
+    /// `(unbound)`.
+    #[test]
+    fn unbound_by_default_actions_ship_without_a_binding() {
+        let bindings = KeyBindings::defaults();
+        // `key.toggle-duplicate-filter=none`
+        // in the project
+        // config.
+        assert!(
+            bindings.is_unbound(Action::ToggleDuplicateFilter),
+            "ToggleDuplicateFilter must ship unbound (default is the `none` sentinel), got: {:?}",
+            format_key_specs(bindings.specs(Action::ToggleDuplicateFilter))
+        );
+        assert_eq!(
+            Action::ToggleDuplicateFilter.default_key(),
+            "none",
+            "default_key() for ToggleDuplicateFilter must be the `none` sentinel"
+        );
+        // `key.delete-matching=none`
+        // in the project
+        // config.
+        assert!(
+            bindings.is_unbound(Action::DeleteMatching),
+            "DeleteMatching must ship unbound (default is the `none` sentinel), got: {:?}",
+            format_key_specs(bindings.specs(Action::DeleteMatching))
+        );
+        assert_eq!(
+            Action::DeleteMatching.default_key(),
+            "none",
+            "default_key() for DeleteMatching must be the `none` sentinel"
+        );
+        // The `none` sentinel
+        // is a default-key
+        // concept ONLY. It
+        // must not be parsed
+        // as a real key spec
+        // (the existing
+        // `parse_key_spec`
+        // behaviour is to
+        // reject it; this
+        // test pins that
+        // contract so a
+        // future refactor
+        // doesn't accidentally
+        // accept `none` as a
+        // literal key).
+        assert!(
+            bindings::parse_key_spec("none").is_err()
+                || bindings::parse_key_spec_opt("none")
+                    .ok()
+                    .flatten()
+                    .is_none(),
+            "`none` must NOT be parseable as a real key spec"
         );
     }
 
