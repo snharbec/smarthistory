@@ -458,6 +458,14 @@ pub enum Action {
     /// round-trip to enumerate, and a static
     /// list is more predictable.
     JiraFieldComplete,
+    /// Open a navigable picker listing the CodeGraph callers and
+    /// callees of the currently selected `&` / `$` (codegraph-
+    /// backed) symbol. Up/Down move, Enter opens the highlighted
+    /// relation's source file in `$EDITOR` at its line, Esc closes.
+    /// Only meaningful in codegraph / tags(fallback) mode and when
+    /// the selected row carries a CodeGraph node id; otherwise a
+    /// no-op with a status message.
+    CodegraphRelations,
 }
 
 impl Action {
@@ -510,6 +518,7 @@ impl Action {
             Action::TogglePaneVisibility => "toggle-pane-visibility",
             Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
+            Action::CodegraphRelations => "codegraph-relations",
         }
     }
 
@@ -560,6 +569,7 @@ impl Action {
             Action::TogglePaneVisibility => "Toggle pane visibility",
             Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
+            Action::CodegraphRelations => "Browse callers / callees",
         }
     }
 
@@ -607,6 +617,7 @@ impl Action {
             Action::Describe => "llm",
             Action::Correct => "llm",
             Action::DownloadJiraIssue => "tools",
+            Action::CodegraphRelations => "codegraph",
             Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
             // Adding new entries to the config file
@@ -699,6 +710,7 @@ impl Action {
             Action::TogglePaneVisibility => "F10",
             Action::JiraFieldComplete => "Tab",
             Action::PickPrefix => "F1",
+            Action::CodegraphRelations => "C-r",
         }
     }
 
@@ -990,10 +1002,8 @@ impl KeyBindings {
                 continue;
             }
             let specs: Vec<KeySpec> = if extra.is_empty() {
-                vec![
-                    parse_key_spec(a.default_key())
-                        .expect("default key bindings must always parse"),
-                ]
+                vec![parse_key_spec(a.default_key())
+                    .expect("default key bindings must always parse")]
             } else {
                 extra
                     .iter()
@@ -1091,6 +1101,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::TogglePaneVisibility,
     Action::JiraFieldComplete,
     Action::PickPrefix,
+    Action::CodegraphRelations,
 ];
 
 /// Build a `KeyBindings` table from a parsed config map of

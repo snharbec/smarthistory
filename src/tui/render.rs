@@ -17,9 +17,10 @@ use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
-    AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView,
-    HelpView, NotesDateFilter, OutputView, PrefixPicker, QuestionView, format_diff, format_time,
+    AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView, NotesDateFilter, OutputView, PrefixPicker, QuestionView,
+    format_diff, format_time,
 };
+use super::CodeGraphRelationsPicker;
 use regex::Regex;
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
@@ -104,6 +105,14 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // from the command menu).
     if let Some(picker) = app.prefix_picker.as_ref() {
         draw_prefix_picker(f, app, picker);
+    }
+
+    // The CodeGraph relations picker is a sibling overlay of the
+    // prefix picker. Drawn after it (and after the completion/
+    // theme pickers below) so it sits on top when both happen to
+    // be open.
+    if let Some(picker) = app.codegraph_relations_picker.as_ref() {
+        draw_codegraph_relations_picker(f, app, picker);
     }
 
     // The completion menu is a
@@ -543,22 +552,40 @@ fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
     // Window of visible lines.
     let end = (scroll + inner_h).min(total);
     let start = scroll;
-    let visible: Vec<Line> = all_lines[start..end]
-        .iter()
-        // Each line is run through the
-        // markdown parser so the JIRA
-        // overlay's `##` headings and
-        // `**bold**` labels render with
-        // proper styling (instead of as
-        // raw text). Non-JIRA overlays
-        // (regular captured output) have
-        // no markdown structure, so the
-        // parser produces plain text
-        // spans — same visual result as
-        // before, but consistent with
-        // the details-pane path.
-        .map(|l| render_preview_line(l))
-        .collect();
+    // The overlay text may carry ANSI escape codes: tags &
+    // codegraph modes pipe source context through `bat
+    // --color=always`, and ag matches carry ANSI from `ag`.
+    // The markdown `render_preview_line` path doesn't parse
+    // ANSI (it mangles `\x1b[...m` through the inline parser),
+    // so when the text contains an escape we route every
+    // visible line through `parse_ansi_line` instead. Plain
+    // text (no escape) still goes through the markdown
+    // parser so JIRA `##` headings and `**bold**` labels in
+    // the JIRA overlay keep their styling.
+    let has_ansi = view.text.contains('\x1b');
+    let visible: Vec<Line> = if has_ansi {
+        all_lines[start..end]
+            .iter()
+            .map(|l| Line::from(parse_ansi_line(l)))
+            .collect()
+    } else {
+        all_lines[start..end]
+            .iter()
+            // Each line is run through the
+            // markdown parser so the JIRA
+            // overlay's `##` headings and
+            // `**bold**` labels render with
+            // proper styling (instead of as
+            // raw text). Non-JIRA overlays
+            // (regular captured output) have
+            // no markdown structure, so the
+            // parser produces plain text
+            // spans — same visual result as
+            // before, but consistent with
+            // the details-pane path.
+            .map(|l| render_preview_line(l))
+            .collect()
+    };
 
     let paragraph = Paragraph::new(visible)
         .block(block)
@@ -1248,6 +1275,11 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     );
     row(
         &mut lines,
+        binding_for(Action::CodegraphRelations),
+        "browse callers / callees of the selected & / $ symbol and open one in $EDITOR",
+    );
+    row(
+        &mut lines,
         binding_for(Action::Describe),
         "ask the LLM what the selected command does (4-sentence summary)",
     );
@@ -1520,6 +1552,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "tags",
         qp.tags.to_string(),
         "list every symbol from the `tags` file (selecting one opens $EDITOR +LINE file); `@lang` filters by file extension and highlights the preview",
+    );
+    mode_row(
+        &mut lines,
+        "codegraph",
+        qp.codegraph.to_string(),
+        "search symbols in the local `.codegraph/codegraph.db` index (FTS5); the selected row's preview shows source context plus callers/callees; `@lang` filters by language; selecting one opens $EDITOR +LINE file; also the fallback for `tags` mode when no `TAGS` file exists",
     );
     mode_row(
         &mut lines,
@@ -2035,6 +2073,114 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
         list_state.select(Some(picker.selected.saturating_sub(start)));
     }
     f.render_stateful_widget(list, inner, &mut list_state);
+}
+
+/// Overlay renderer for the CodeGraph callers/callees picker.
+/// The picker is a centred popup list with two sections (callers,
+/// then callees) separated by header rows; navigation skips the
+/// headers (they're synthesized at render time, not entries).
+fn draw_codegraph_relations_picker(
+    f: &mut Frame,
+    app: &App,
+    picker: &CodeGraphRelationsPicker,
+) {
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
+    // Wider than the prefix picker so the qualified names and
+    // `@file_path:line` suffix are readable.
+    let area = centered_rect(80, 60, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let enter_keys = format_key_specs(app.bindings.specs(Action::Run));
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let enter_hint = if enter_keys.is_empty() {
+        "Enter".to_string()
+    } else {
+        enter_keys
+    };
+    let close_hint = if cancel_keys.is_empty() {
+        "Esc".to_string()
+    } else {
+        format!("{} close", cancel_keys)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(format!(
+            " Callers / callees of {}  {} open / {} ",
+            picker.symbol, enter_hint, close_hint
+        ))
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .fg(fg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(Theme::dim_color());
+    let section_style = Theme::accent();
+    let path_style = Style::default().fg(Theme::dim_color());
+
+    // Build the display rows (section headers + entries) and
+    // paginate around the selected entry so the cursor stays
+    // visible. The visible-window math operates on the *entry*
+    // positions because headers are not independently scrollable.
+    let visible_rows = inner.height as usize;
+    let n = picker.entries.len();
+    let start_entry = picker
+        .selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(n.saturating_sub(visible_rows));
+    let end_entry = (start_entry + visible_rows).min(n);
+
+    // We render line-by-line so section headers can be interleaved
+    // without disturbing the entry-index ↔ selected mapping.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut last_section: Option<crate::tui::CodegraphRelationSection> = None;
+    for (row_pos, entry) in picker
+        .entries
+        .iter()
+        .enumerate()
+        .skip(start_entry)
+        .take(end_entry.saturating_sub(start_entry))
+    {
+        // Emit a section header whenever the section changes
+        // (including the first entry).
+        if last_section != Some(entry.section) {
+            items.push(ListItem::new(Line::from(vec![Span::styled(
+                format!(" {} ", entry.section.header()),
+                section_style,
+            )])));
+            last_section = Some(entry.section);
+        }
+        let is_selected = row_pos == picker.selected;
+        let cursor = if is_selected { " > " } else { "   " };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(cursor, if is_selected { highlight_style } else { dim_style }),
+            Span::styled(
+                format!("{} ", entry.node.qualified_name),
+                if is_selected {
+                    highlight_style
+                } else {
+                    Style::default().fg(fg)
+                },
+            ),
+            Span::styled(
+                format!("@{}:{} ", entry.node.file_path, entry.node.start_line),
+                if is_selected { highlight_style } else { path_style },
+            ),
+        ])));
+    }
+    let list = List::new(items)
+        .style(Style::default().bg(bg))
+        .highlight_style(highlight_style)
+        .highlight_symbol("")
+        .repeat_highlight_symbol(false);
+    f.render_widget(list, inner);
 }
 
 fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
@@ -4747,15 +4893,30 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Ag-mode and tags-mode rows typically have more
-    // content worth previewing; give them one extra line.
-    let take_n = if row.mode == "ag" || row.mode == "tags" {
-        5
+    // Ag-mode, tags-mode, and codegraph-mode rows carry up to
+    // [`SOURCE_CONTEXT_LINES`] (50) lines of source context
+    // plus a callers/callees overlay. The inline pane's height
+    // caps the actually-visible count (ratatui renders only
+    // what fits), but we don't clamp the slice here so a tall
+    // terminal / a scrolled `Ctrl-O` overlay can show every
+    // loaded line. Plain history rows keep their tighter
+    // 4-line preview.
+    let take_n = if row.mode == "ag" || row.mode == "tags" || row.mode == "codegraph" {
+        crate::tui::SOURCE_CONTEXT_LINES
     } else {
         4
     };
-    let is_ansi_ag = row.mode == "ag" && row.output.contains('\x1b');
-    let preview_lines: Vec<Line> = if is_ansi_ag {
+    // `highlight_with_bat` (`--color=always`) emits ANSI escape
+    // codes for tags/codegraph rows, and `ag` itself emits ANSI
+    // for matched-line previews. The markdown `render_preview_line`
+    // path doesn't parse ANSI (it would mangle `\x1b[...m` through
+    // the inline parser), so any output containing an escape must
+    // go through `parse_ansi_line` instead. This is mode-agnostic:
+    // a codegraph/tags row falls back to plain text when bat is
+    // unavailable (no ANSI), and an ag row whose match had no
+    // coloring proceeds through the markdown path cleanly.
+    let has_ansi = row.output.contains('\x1b');
+    let preview_lines: Vec<Line> = if has_ansi {
         row.output
             .lines()
             .take(take_n)
@@ -4916,6 +5077,12 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                     format!(" symbols{} ", algo),
                     app.query.as_str(),
                 )
+            } else if app.is_codegraph_query() {
+                (
+                    "&".to_string(),
+                    format!(" codegraph{} ", algo),
+                    app.query.as_str(),
+                )
             } else if app.is_ag_query() {
                 (",".to_string(), format!(" ag{} ", algo), app.query.as_str())
             } else {
@@ -4963,6 +5130,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::success_color())
             } else if app.is_tags_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_codegraph_query() {
+                Style::default().fg(Theme::accent_color())
             } else if app.is_ag_query() {
                 Style::default().fg(Theme::warning_color())
             } else if is_regex {
@@ -5007,6 +5176,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Theme::success_color())
             } else if app.is_tags_query() {
                 Style::default().fg(Theme::success_color())
+            } else if app.is_codegraph_query() {
+                Style::default().fg(Theme::accent_color())
             } else if app.is_ag_query() {
                 Style::default().fg(Theme::warning_color())
             } else if is_regex {

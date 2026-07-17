@@ -21,12 +21,12 @@
 //!   `,result @rust`     -> `ag ... --rust "result"`
 //!   `,tui *.rs @rust`   -> `ag ... -G '.*\.rs$' --rust "tui"`
 
-use crate::highlight::{highlight_with_bat, parse_query_tokens};
+use crate::highlight::{highlight_with_bat, highlight_with_bat_auto, parse_query_tokens};
 use crate::tui::read_source_context;
 use crate::tui::state::HistoryRow;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How long the ag-mode debounce waits after the last
@@ -272,6 +272,10 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
         // If a language was specified, pipe the context through
         // `bat` for syntax highlighting. We cap the number of
         // bat calls to keep the background thread responsive.
+        // With no `@lang`, fall through to `bat`'s extension-based
+        // auto-detection via `--file-name` (rather than plain
+        // text) so `.rs` / `.java` / `.py` matches still get
+        // colored previews.
         let output = if let Some(lang) = bat_lang {
             if bat_count < BAT_MAX {
                 bat_count += 1;
@@ -279,6 +283,9 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             } else {
                 context
             }
+        } else if bat_count < BAT_MAX {
+            bat_count += 1;
+            highlight_with_bat_auto(&context, &abs_path).unwrap_or(context)
         } else {
             context
         };

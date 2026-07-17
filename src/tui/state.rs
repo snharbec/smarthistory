@@ -97,6 +97,14 @@ pub struct HistoryRow {
     /// (e.g. `SmartHistory`,
     /// `dir: Downloads`).
     pub workspace_label: String,
+
+    /// CodeGraph symbol-node id for rows produced by the
+    /// `&` (codegraph) mode and the `$` (tags) → CodeGraph
+    /// fallback. Empty for every other row. Stashed here so
+    /// the details pane can resolve the symbol's callers /
+    /// callees (`edges` with `kind='calls'`) without
+    /// re-running the FTS search to recover the id.
+    pub codegraph_node_id: String,
 }
 
 impl HistoryRow {

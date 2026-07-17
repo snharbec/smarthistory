@@ -1,6 +1,7 @@
 #![allow(clippy::should_implement_trait)]
 #![allow(clippy::empty_line_after_doc_comments)]
 mod ag;
+mod codegraph;
 mod files;
 mod highlight;
 mod jira;
@@ -933,6 +934,22 @@ pub struct QueryPrefixes {
     /// Selecting a row opens the file in
     /// `$EDITOR` at the matching line.
     pub ag: char,
+    /// Prefix for the CodeGraph symbol-search
+    /// mode (default `&`). Searches the local
+    /// `.codegraph/codegraph.db` index by
+    /// symbol name (FTS5) and lists matching
+    /// functions/methods/classes. The selected
+    /// row's details pane shows the source
+    /// context plus the symbol's callers and
+    /// callees (edges with `kind='calls'`).
+    /// Selecting a row opens the file in
+    /// `$EDITOR` at `start_line`. When no
+    /// `.codegraph/` index exists the `$`
+    /// (tags) mode falls back to this index,
+    /// so a repo without a `TAGS` file still
+    /// has symbol navigation as long as
+    /// CodeGraph has indexed it.
+    pub codegraph: char,
     pub jira: char,
 }
 
@@ -949,6 +966,7 @@ impl Default for QueryPrefixes {
             files: '~',
             tags: '$',
             ag: ',',
+            codegraph: '&',
             jira: '-',
         }
     }
@@ -2270,6 +2288,7 @@ impl Config {
             "files" => prefixes.files = c,
             "tags" => prefixes.tags = c,
             "ag" => prefixes.ag = c,
+            "codegraph" => prefixes.codegraph = c,
             "jira" => prefixes.jira = c,
             _ => {}
         }

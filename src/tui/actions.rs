@@ -194,6 +194,26 @@ impl App {
             }
             return;
         }
+        // `&` queries are CodeGraph symbol-search
+        // requests. Selecting a symbol opens the
+        // source file in $EDITOR at the symbol's
+        // `start_line`, exactly like tags mode
+        // (the row's `directory` and `session_id`
+        // carry the absolute path and line).
+        if self.is_codegraph_query() {
+            if let Some(row) = self.selected_row() {
+                let editor = std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vi".to_string());
+                let filepath = &row.directory;
+                let line = &row.session_id;
+                let quoted = crate::util::shell_quote(filepath);
+                self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                self.pick_mode = Some(PickMode::Run);
+            }
+            return;
+        }
 
         // `#...` queries are directories-view
         // requests. Selecting a

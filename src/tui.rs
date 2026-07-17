@@ -918,6 +918,10 @@ struct App {
     /// text query), so Enter with no navigation
     /// is a no-op.
     prefix_picker: Option<PrefixPicker>,
+    /// CodeGraph callers/callees overlay picker. Opened by the
+    /// `CodegraphRelations` action (`C-r` by default) from a
+    /// `&` / `$` (codegraph-backed) row. `None` when closed.
+    codegraph_relations_picker: Option<CodeGraphRelationsPicker>,
     /// When `Some`, the theme-picker overlay is open. Navigating
     /// the list applies the selected theme live; `Enter` commits,
     /// `Esc` reverts to the original.
@@ -1446,6 +1450,28 @@ struct App {
     /// from queuing a duplicate POST.
     jira_add_comment_in_flight: bool,
 
+    /// Source-file contents cache for tags
+    /// (`$`) mode. The TAGS file can be
+    /// very large (hundreds of thousands
+    /// of symbols) and many symbols point
+    /// back at the same source file. This
+    /// cache makes the preview context
+    /// load from disk only once per file
+    /// per TUI session instead of once
+    /// per symbol, which was the dominant
+    /// cost of opening tags mode.
+    tags_source_cache: std::collections::HashMap<std::path::PathBuf, String>,
+
+    /// Lazily-opened read-only client over the local
+    /// `.codegraph/codegraph.db` index. `None` until
+    /// the first `&` (codegraph) query — or until the
+    /// `$` (tags) fallback discovers no `TAGS` file —
+    /// at which point we try to open it once and cache
+    /// the connection for the rest of the session. A
+    /// missing index leaves this `None` so `&` mode is
+    /// a clean no-op in repos without CodeGraph.
+    codegraph_client: Option<crate::codegraph::CodeGraphClient>,
+
     /// Aggregated files-mode state:
     /// debounce timer, in-flight walk
     /// request, last walked pattern,
@@ -1786,6 +1812,28 @@ impl App {
     fn ag_pattern(&self) -> &str {
         if self.is_ag_query() {
             let p = self.query_prefixes.ag;
+            &self.query[p.len_utf8()..]
+        } else {
+            ""
+        }
+    }
+
+    /// Whether the query is a CodeGraph symbol-search
+    /// request: the query starts with the codegraph
+    /// prefix (`&` by default). The body is matched
+    /// against symbol names in the local
+    /// `.codegraph/codegraph.db` index via FTS5.
+    fn is_codegraph_query(&self) -> bool {
+        let p = self.query_prefixes.codegraph;
+        !self.query.is_empty() && self.query.starts_with(p)
+    }
+
+    /// The codegraph-search body, i.e. everything after
+    /// the leading `&` prefix. Empty string when not in
+    /// codegraph mode.
+    fn codegraph_pattern(&self) -> &str {
+        if self.is_codegraph_query() {
+            let p = self.query_prefixes.codegraph;
             &self.query[p.len_utf8()..]
         } else {
             ""
@@ -3891,15 +3939,18 @@ impl App {
     ///   suffix that the universal tag format appends.
     /// - `directory` — the absolute path of the file the
     ///   symbol was found in (from the section header).
-    /// - `comment` — the symbol name (the short
-    ///   identifier the tag file tags — e.g.
-    ///   `build_prompt`, `SshHostBlock`). Shown as
-    ///   secondary text and used for search matching.
+    /// - `comment` — the source file's basename.
+    ///   Shown as secondary text and used for search
+    ///   matching.
     /// - `session_id` — the line number as a string
     ///   (e.g. `"268"`). Used by the staging layer to
     ///   build the `+LINE_NUMBER` editor argument.
     /// - `mode` — `"tags"`.
-    /// - `source` — `"tags"`.
+    /// - `source` — `"tags"` (or `"tags:<lang>"` when
+    ///   an `@lang` filter is active).
+    /// - `output` — the 5-line source context around
+    ///   the symbol. Populated lazily when the row is
+    ///   selected; see `ensure_selected_tag_context`.
     ///
     /// The `tags` file format is:
     /// ```text
@@ -3955,7 +4006,18 @@ impl App {
         // file are relative to the directory containing the tag
         // file, so we resolve them against that directory (not
         // the cwd) to produce correct absolute paths.
+        //
+        // If no tag file is found anywhere up the tree, fall
+        // back to the CodeGraph index (`.codegraph/codegraph.db`)
+        // when one exists. The fallback rows are tagged with
+        // `mode: "tags"` so the existing tags dispatch (open at
+        // line, `@lang` filter, `ensure_selected_tag_context`)
+        // all work unchanged — the user gets symbol navigation
+        // via CodeGraph data with the `$` UX they already know.
         let tags_path = find_tags_file();
+        if !tags_path.is_file() {
+            return self.fetch_tags_via_codegraph();
+        }
         let tags_dir = tags_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -3999,8 +4061,6 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let mut bat_count: usize = 0;
-        const TAGS_BAT_MAX: usize = 50;
         for line in contents.lines() {
             if line == "\x0c" || line.is_empty() {
                 in_section = false;
@@ -4082,39 +4142,16 @@ impl App {
                     continue;
                 }
             }
-            // Read 5 lines of context around the
-            // symbol (2 before, the match line,
-            // 2 after) from the source file so
-            // the details pane shows the
-            // surrounding code. The context is
-            // stored in `output` (which the
-            // renderer displays in the details /
-            // output preview pane). Best-effort:
-            // if the file can't be read or the
-            // line number is out of range,
-            // `output` stays empty and the row
-            // still works (just without the
-            // preview).
-            //
-            // When the user typed an `@lang` token, pipe the
-            // context through `bat --language <lang>` so the
-            // preview pane shows syntax-highlighted code (the
-            // same behaviour as the `,` (ag) mode). We cap the
-            // number of bat calls per fetch at 50 so a long
-            // symbol list keeps the TUI responsive; once the
-            // cap is reached, the rest of the rows use the
-            // unhighlighted context.
-            let context = read_source_context(&filepath, line_number.parse::<usize>().unwrap_or(0));
-            let output = if let Some(lang) = lang_filter {
-                if bat_count < TAGS_BAT_MAX {
-                    bat_count += 1;
-                    crate::highlight::highlight_with_bat(&context, lang).unwrap_or(context)
-                } else {
-                    context
-                }
-            } else {
-                context
-            };
+            // Source context is loaded lazily when the
+            // row is selected rather than read eagerly
+            // here. A large TAGS file can reference many
+            // symbols in the same source files, and
+            // reading every source file once per symbol
+            // made opening tags mode take tens of seconds
+            // on large repositories. The selected row's
+            // `output` is populated on demand by
+            // `ensure_selected_tag_context` using the
+            // `tags_source_cache`.
             // Tag the row's `source` with the language so the
             // chips / source label match the ag-mode convention
             // (`"tags"` when no language, `"tags:<lang>"` when
@@ -4135,7 +4172,7 @@ impl App {
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                output,
+                output: String::new(),
                 mode: "tags".to_string(),
                 source,
 
@@ -4144,6 +4181,289 @@ impl App {
             next_id -= 1;
         }
         Ok(rows)
+    }
+
+    /// Ensure the currently selected tags-mode row has its
+    /// 5-line source context loaded into `output`. The context
+    /// is read lazily and cached per source file so navigating
+    /// tags rows in the same file doesn't repeatedly hit disk.
+    fn ensure_selected_tag_context(&mut self) {
+        if !self.is_tags_query() {
+            return;
+        }
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        let row_ref = match self.merged_rows.get(idx) {
+            Some(r) => r,
+            None => return,
+        };
+        if row_ref.mode != "tags" || !row_ref.output.is_empty() {
+            return;
+        }
+        let line_number = row_ref.session_id.parse::<usize>().unwrap_or(0);
+        let filepath = row_ref.directory.clone();
+        let lang = crate::highlight::parse_query_tokens(self.tags_pattern().trim())
+            .languages
+            .first()
+            .cloned();
+        let context =
+            read_source_context_with_cache(&filepath, line_number, &mut self.tags_source_cache);
+        // When this tags row came from the CodeGraph fallback
+        // (`fetch_tags_via_codegraph`), the symbolic node id is
+        // stashed in `codegraph_node_id`. Append the callers /
+        // callees overlay so the `$` fallback gets the same rich
+        // context the dedicated `&` mode shows.
+        let mut context = context;
+        let node_id = row_ref.codegraph_node_id.clone();
+        if !node_id.is_empty()
+            && let Some(client) = self.codegraph_client.as_ref() {
+                let callers = client.callers(&node_id, 15);
+                let callees = client.callees(&node_id, 15);
+                if !callers.is_empty() || !callees.is_empty() {
+                    if !context.is_empty() {
+                        context.push('\n');
+                    }
+                    context.push_str("── callers ──\n");
+                    for c in &callers {
+                        context.push_str(&format!(
+                            "  {}  @{}:{}\n",
+                            c.qualified_name, c.file_path, c.start_line
+                        ));
+                    }
+                    context.push_str("── callees ──\n");
+                    for c in &callees {
+                        context.push_str(&format!(
+                            "  {}  @{}:{}\n",
+                            c.qualified_name, c.file_path, c.start_line
+                        ));
+                    }
+                }
+            }
+        if let Some(row) = self.merged_rows.get_mut(idx) {
+            row.output = if let Some(lang) = lang {
+                crate::highlight::highlight_with_bat(&context, &lang).unwrap_or(context)
+            } else {
+                // No explicit `@lang`: let `bat` auto-detect from
+                // the source file's extension via `--file-name`.
+                crate::highlight::highlight_with_bat_auto(&context, &filepath)
+                    .unwrap_or(context)
+            };
+        }
+    }
+
+    /// `$` (tags) fallback when no `tags` / `TAGS` file exists.
+    /// Queries the CodeGraph index instead and returns rows tagged
+    /// with `mode: "tags"` so the existing tags dispatch (open at
+    /// line, `@lang` filter, `ensure_selected_tag_context`) work
+    /// unchanged. The CodeGraph node id is stashed in
+    /// `codegraph_node_id` so `ensure_selected_tag_context` can
+    /// append the callers/callees overlay for these rows too.
+    fn fetch_tags_via_codegraph(&mut self) -> Result<Vec<HistoryRow>> {
+        let pattern = self.tags_pattern().trim();
+        let parsed = crate::highlight::parse_query_tokens(pattern);
+        let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
+        let fts_pattern = parsed.terms.join(" ");
+        if self.codegraph_client.is_none() {
+            self.codegraph_client = crate::codegraph::CodeGraphClient::open();
+        }
+        let Some(client) = self.codegraph_client.as_ref() else {
+            return Ok(Vec::new());
+        };
+        // Empty query with no tag file: list nothing. The user can
+        // type a symbol fragment to start the FTS search.
+        if fts_pattern.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let nodes = client.search(&fts_pattern, lang_filter, 500);
+        let repo_root = client.repo_root();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let source = match lang_filter {
+            Some(lang) => format!("tags:{}", lang),
+            None => "tags".to_string(),
+        };
+        let mut rows: Vec<HistoryRow> = Vec::with_capacity(nodes.len());
+        let mut next_id: i64 = -1;
+        for n in &nodes {
+            let abs = n.abs_path(repo_root);
+            rows.push(HistoryRow {
+                id: next_id,
+                command: if n.qualified_name.is_empty() {
+                    n.name.clone()
+                } else {
+                    n.qualified_name.clone()
+                },
+                directory: abs.to_string_lossy().into_owned(),
+                session_id: n.start_line.to_string(),
+                exit_code: 0,
+                timestamp: now_epoch,
+                comment: format!("{} · {}: {}", n.kind, n.file_path, n.start_line),
+                output: String::new(),
+                mode: "tags".to_string(),
+                source: source.clone(),
+                codegraph_node_id: n.id.clone(),
+                ..Default::default()
+            });
+            next_id -= 1;
+        }
+        Ok(rows)
+    }
+
+    /// Search the local CodeGraph index (`.codegraph/codegraph.db`)
+    /// for symbols matching the `&`-prefixed query body. The body is
+    /// parsed with the same `@lang` token convention as tags mode:
+    /// the first `@lang` filters `nodes.language` (matched verbatim,
+    /// case-insensitive) and the rest are FTS5 prefix terms.
+    ///
+    /// The connection is opened lazily on first use and cached on the
+    /// [`App`] for the rest of the session. A missing index returns
+    /// an empty list — `&` mode is a clean no-op in repos without
+    /// a `.codegraph/` directory.
+    ///
+    /// Each matching node becomes a row whose `directory` holds the
+    /// absolute source path, `session_id` holds the 1-based
+    /// `start_line`, and `codegraph_node_id` stashes the node id for
+    /// the callers/callees overlay loaded by
+    /// [`ensure_selected_codegraph_context`].
+    fn fetch_codegraph(&mut self) -> Result<Vec<HistoryRow>> {
+        let pattern = self.codegraph_pattern().trim();
+        let parsed = crate::highlight::parse_query_tokens(pattern);
+        let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
+        // Rebuild the FTS pattern from the non-language terms so
+        // `@java getSymbol` searches for `getSymbol` filtered to
+        // java (the `@java` token itself must not become an FTS
+        // term).
+        let fts_pattern = parsed.terms.join(" ");
+        // Open (and cache) the read-only CodeGraph connection if we
+        // haven't already. We do this inside `fetch_codegraph`
+        // rather than `App::new` so a repo without an index never
+        // pays the discovery walk for users who never type `&`.
+        if self.codegraph_client.is_none() {
+            self.codegraph_client = crate::codegraph::CodeGraphClient::open();
+        }
+        let Some(client) = self.codegraph_client.as_ref() else {
+            return Ok(Vec::new());
+        };
+        // Empty query → empty list. Listing every symbol in a
+        // 350k-node index is useless and slow to render.
+        if fts_pattern.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        // The `@lang` token maps to CodeGraph's `language` column
+        // verbatim (e.g. `java`, `kotlin`). Unknown values simply
+        // return no rows — same graceful degradation as tags mode
+        // for an unknown `@cobol` filter.
+        let nodes = client.search(&fts_pattern, lang_filter, 500);
+        let repo_root = client.repo_root();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let source = match lang_filter {
+            Some(lang) => format!("codegraph:{}", lang),
+            None => "codegraph".to_string(),
+        };
+        let mut rows: Vec<HistoryRow> = Vec::with_capacity(nodes.len());
+        let mut next_id: i64 = -1;
+        for n in &nodes {
+            let abs = n.abs_path(repo_root);
+            let file_display = n.file_path.clone();
+            rows.push(HistoryRow {
+                id: next_id,
+                command: if n.qualified_name.is_empty() {
+                    n.name.clone()
+                } else {
+                    n.qualified_name.clone()
+                },
+                directory: abs.to_string_lossy().into_owned(),
+                session_id: n.start_line.to_string(),
+                exit_code: 0,
+                timestamp: now_epoch,
+                comment: format!("{} · {}: {}", n.kind, file_display, n.start_line),
+                output: String::new(),
+                mode: "codegraph".to_string(),
+                source: source.clone(),
+                codegraph_node_id: n.id.clone(),
+                ..Default::default()
+            });
+            next_id -= 1;
+        }
+        Ok(rows)
+    }
+
+    /// Load the selected `&`-mode row's source context plus its
+    /// CodeGraph callers and callees into `output`, lazily and
+    /// only once per row. Mirrors [`ensure_selected_tag_context`]
+    /// but appends a `Callers` / `Callees` section built from the
+    /// `edges` table (`kind='calls'`).
+    fn ensure_selected_codegraph_context(&mut self) {
+        if !self.is_codegraph_query() {
+            return;
+        }
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        let (node_id, filepath, line_str, language) =
+            match self.merged_rows.get(idx) {
+                Some(r) if r.mode == "codegraph" && r.output.is_empty() => {
+                    (
+                        r.codegraph_node_id.clone(),
+                        r.directory.clone(),
+                        r.session_id.clone(),
+                        r
+                            .source
+                            .strip_prefix("codegraph:")
+                            .map(|s| s.to_string()),
+                    )
+                }
+                _ => return,
+            };
+        let line_number = line_str.parse::<usize>().unwrap_or(0);
+        let mut context = read_source_context_with_cache(
+            &filepath,
+            line_number,
+            &mut self.tags_source_cache,
+        );
+        // Append the callers / callees overlay. Each is capped so a
+        // hub symbol with thousands of callers doesn't blow up the
+        // details pane; the remaining count is shown so the user
+        // knows the list was truncated.
+        if let Some(client) = self.codegraph_client.as_ref() {
+            let callers = client.callers(&node_id, 15);
+            let callees = client.callees(&node_id, 15);
+            if !callers.is_empty() || !callees.is_empty() {
+                if !context.is_empty() {
+                    context.push('\n');
+                }
+                context.push_str("── callers ──\n");
+                for c in &callers {
+                    context.push_str(&format!(
+                        "  {}  @{}:{}\n",
+                        c.qualified_name, c.file_path, c.start_line
+                    ));
+                }
+                context.push_str("── callees ──\n");
+                for c in &callees {
+                    context.push_str(&format!(
+                        "  {}  @{}:{}\n",
+                        c.qualified_name, c.file_path, c.start_line
+                    ));
+                }
+            }
+        }
+        if let Some(row) = self.merged_rows.get_mut(idx) {
+            row.output = if let Some(lang) = language {
+                crate::highlight::highlight_with_bat(&context, &lang).unwrap_or(context)
+            } else {
+                // No explicit `@lang`: let `bat` auto-detect from
+                // the source file's extension via `--file-name`.
+                crate::highlight::highlight_with_bat_auto(&context, &filepath)
+                    .unwrap_or(context)
+            };
+        }
     }
 }
 
@@ -5966,6 +6286,60 @@ struct PrefixOption {
     description: &'static str,
 }
 
+/// Section a CodeGraph relations-picker entry belongs to. The
+/// picker renders two sections in one flat navigable list:
+/// callers (who calls the selected symbol) and callees (what the
+/// selected symbol calls). Each section gets a header row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodegraphRelationSection {
+    Caller,
+    Callee,
+}
+
+impl CodegraphRelationSection {
+    fn header(self) -> &'static str {
+        match self {
+            CodegraphRelationSection::Caller => "── callers ──",
+            CodegraphRelationSection::Callee => "── callees ──",
+        }
+    }
+}
+
+/// One navigable entry in the CodeGraph relations picker. The
+/// `section` tag lets the renderer insert a section header row
+/// when the section changes between consecutive entries; the
+/// `node` carries the symbol's qualified name, file path, and
+/// line for both display and the Enter action (open in $EDITOR).
+struct CodegraphRelationEntry {
+    section: CodegraphRelationSection,
+    node: crate::codegraph::CodeGraphNode,
+}
+
+/// Overlay picker for CodeGraph callers / callees. Opened by the
+/// `CodegraphRelations` action (`C-r` by default) when the
+/// selected `&` / `$` row carries a CodeGraph node id. Up/Down
+/// navigate, Enter opens the highlighted relation's source file
+/// in `$EDITOR +LINE path` (and exits the TUI so the parent shell
+/// runs it, mirroring the main list's tags/codegraph selection),
+/// Esc / Cancel closes without opening anything.
+struct CodeGraphRelationsPicker {
+    /// Flat list with section tags; the renderer emits a header row
+    /// whenever an entry's section differs from the previous one's.
+    /// Callers come first, then callees.
+    entries: Vec<CodegraphRelationEntry>,
+    /// Index into `entries` of the highlighted row. Header rows
+    /// are not entries — they're synthesized at render time — so
+    /// this index always points at a real, selectable node.
+    selected: usize,
+    /// The symbol whose relations are shown, for the title bar.
+    symbol: String,
+    /// The repo root (the directory containing `.codegraph/`),
+    /// captured at open time so the Enter action can resolve a
+    /// relation's relative `file_path` to an absolute editor-
+    /// openable path without re-touching the CodeGraph client.
+    repo_root: std::path::PathBuf,
+}
+
 impl PrefixPicker {
     /// Build the picker from the user's
     /// configured `QueryPrefixes`. The
@@ -6042,6 +6416,11 @@ impl PrefixPicker {
                 description: "list every symbol in the local ctags `tags` file",
             },
             PrefixOption {
+                prefix: Some(prefixes.codegraph),
+                label: "CodeGraph",
+                description: "search symbols in the local .codegraph index (callers/callees)",
+            },
+            PrefixOption {
                 prefix: Some(prefixes.ag),
                 label: "ag search",
                 description: "search file contents with `ag` (The Silver Searcher)",
@@ -6071,6 +6450,15 @@ impl PrefixPicker {
     /// always populates the list).
     fn selected(&self) -> Option<&PrefixOption> {
         self.options.get(self.selected)
+    }
+}
+
+impl CodeGraphRelationsPicker {
+    /// The highlighted entry, or `None` when the list is empty
+    /// (defensive — the opener only constructs the picker when at
+    /// least one caller or callee exists).
+    fn selected(&self) -> Option<&CodegraphRelationEntry> {
+        self.entries.get(self.selected)
     }
 }
 
@@ -6292,6 +6680,7 @@ impl App {
             help_view: None,
             command_menu: None,
             prefix_picker: None,
+            codegraph_relations_picker: None,
             theme_picker: None,
             completion_menu: None,
             confirm_delete: None,
@@ -6410,6 +6799,8 @@ impl App {
             jira_add_comment_target: None,
             jira_add_comment_request: None,
             jira_add_comment_in_flight: false,
+            tags_source_cache: std::collections::HashMap::new(),
+            codegraph_client: None,
         };
         app.recompile_regex();
         app.refresh();
@@ -6501,7 +6892,10 @@ impl App {
             self.fetch_session_panes();
         }
         self.rows = self.fetch().unwrap_or_default();
-        if self.match_algorithm != MatchAlgorithm::Substring && !self.is_ag_query() {
+        if self.match_algorithm != MatchAlgorithm::Substring
+            && !self.is_ag_query()
+            && !self.is_codegraph_query()
+        {
             // Two-phase borrow: copy the rows out, then post-filter.
             // Avoids the borrow checker complaining about
             // simultaneously borrowing `self.rows` and `self`.
@@ -6552,6 +6946,15 @@ impl App {
         } else {
             self.list_state.select(Some(0));
         }
+        // Load the source context for the selected tags row
+        // lazily now that the selection is known. Keeping this
+        // out of `fetch_tags` avoids reading every source file
+        // once per symbol when a large TAGS file is loaded.
+        self.ensure_selected_tag_context();
+        // Same lazy load for `&` (codegraph) rows: the row's
+        // `output` carries source context + callers/callees,
+        // loaded only for the row under the cursor.
+        self.ensure_selected_codegraph_context();
     }
 
     /// Compute the merged view: primary list + labeled rows
@@ -6638,6 +7041,7 @@ impl App {
             || self.is_jira_query()
             || self.is_files_query()
             || self.is_tags_query()
+            || self.is_codegraph_query()
             || self.is_ag_query()
         {
             let mut merged = self.rows.clone();
@@ -6884,6 +7288,9 @@ impl App {
         }
         if self.is_tags_query() {
             return self.fetch_tags();
+        }
+        if self.is_codegraph_query() {
+            return self.fetch_codegraph();
         }
         if self.is_ag_query() {
             return self.fetch_ag();
@@ -7422,6 +7829,10 @@ impl App {
         let cur = self.list_state.selected().unwrap_or(0) as isize;
         let next = (cur + delta).clamp(0, merged_len as isize - 1) as usize;
         self.list_state.select(Some(next));
+        // The selected row changed; load its preview context on
+        // demand for tags mode without re-fetching the whole list.
+        self.ensure_selected_tag_context();
+        self.ensure_selected_codegraph_context();
     }
 
     fn select_for_run(&mut self) {
@@ -7453,6 +7864,10 @@ impl App {
             return;
         }
         if self.is_tags_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_codegraph_query() {
             self.select_for_run_impl();
             return;
         }
@@ -9629,6 +10044,10 @@ impl App {
     }
 
     fn show_output_view(&mut self) {
+        // For tags mode, the selected row's output is populated
+        // lazily. Make sure it's loaded before opening the overlay.
+        self.ensure_selected_tag_context();
+        self.ensure_selected_codegraph_context();
         // The show-output overlay has two
         // distinct entry points:
         //
@@ -10793,6 +11212,107 @@ impl App {
         self.prefix_picker = None;
     }
 
+    /// Whether the CodeGraph relations picker overlay is currently open.
+    fn is_codegraph_relations_picker_open(&self) -> bool {
+        self.codegraph_relations_picker.is_some()
+    }
+
+    /// Open the CodeGraph callers/callees picker for the currently
+    /// selected `&` / `$` (codegraph-backed) row. The picker lists
+    /// the symbol's callers (who calls it) followed by its callees
+    /// (what it calls) as one navigable list with section headers;
+    /// Enter on a relation opens its source file in `$EDITOR` at
+    /// `start_line` (mirroring the main list's selection), Esc
+    /// closes the overlay.
+    ///
+    /// Only rows carrying a `codegraph_node_id` can open the
+    /// picker — i.e. `&`-mode rows and `$`-mode rows produced by
+    /// the CodeGraph fallback when no `TAGS` file exists. A
+    /// regular tags row (from a real `tags` file) or any non-
+    /// tags/codegraph row surfaces a status message instead of
+    /// opening the picker, so the key is a clean no-op (rather
+    /// than a confusing empty overlay) outside the supported modes.
+    fn open_codegraph_relations(&mut self) {
+        // Need a selected row. Copy the fields we need out of the row
+        // so the immutable borrow of `self` (via `selected_row`) is
+        // released before we assign `self.codegraph_client` below —
+        // holding the row borrow across the lazy client-open would
+        // clash with the `&mut self` needed to populate it.
+        let (node_id, symbol) = match self.selected_row() {
+            None => {
+                self.set_status_message("No row selected".to_string());
+                return;
+            }
+            Some(row) => {
+                // Only meaningful for codegraph /
+                // tags(codegraph-fallback) rows.
+                if row.mode != "codegraph" && row.mode != "tags" {
+                    self.set_status_message(
+                        "Callers/callees are available only in & / $ codegraph mode"
+                            .to_string(),
+                    );
+                    return;
+                }
+                if row.codegraph_node_id.is_empty() {
+                    // A `$` row from a real `tags` file has no
+                    // CodeGraph node id — there's no `edges` row
+                    // to query.
+                    self.set_status_message(
+                        "No CodeGraph node for this row (tags file has no codegraph id)"
+                            .to_string(),
+                    );
+                    return;
+                }
+                let sym = if row.command.is_empty() {
+                    "(symbol)".to_string()
+                } else {
+                    row.command.clone()
+                };
+                (row.codegraph_node_id.clone(), sym)
+            }
+        };
+        // Ensure the read-only client is open (the `&` mode opens
+        // it lazily; the `$` fallback does too).
+        if self.codegraph_client.is_none() {
+            self.codegraph_client = crate::codegraph::CodeGraphClient::open();
+        }
+        let Some(client) = self.codegraph_client.as_ref() else {
+            self.set_status_message("No .codegraph/index found".to_string());
+            return;
+        };
+        let repo_root = client.repo_root().to_path_buf();
+        let callers = client.callers(&node_id, 50);
+        let callees = client.callees(&node_id, 50);
+        if callers.is_empty() && callees.is_empty() {
+            self.set_status_message("No callers or callees recorded for this symbol".to_string());
+            return;
+        }
+        let entries: Vec<CodegraphRelationEntry> = callers
+            .iter()
+            .map(|n| CodegraphRelationEntry {
+                section: CodegraphRelationSection::Caller,
+                node: n.clone(),
+            })
+            .chain(callees.iter().map(|n| CodegraphRelationEntry {
+                section: CodegraphRelationSection::Callee,
+                node: n.clone(),
+            }))
+            .collect();
+        self.codegraph_relations_picker = Some(CodeGraphRelationsPicker {
+            entries,
+            selected: 0,
+            symbol,
+            // stash repo_root on the picker? it's used by Enter to
+            // resolve the relation's relative file_path to an
+            // absolute editor-openable path.
+            repo_root,
+        });
+    }
+
+    fn close_codegraph_relations_picker(&mut self) {
+        self.codegraph_relations_picker = None;
+    }
+
     /// True when the tab-completion
     /// menu is open. The completion
     /// menu is a sibling of the
@@ -11415,6 +11935,16 @@ fn find_tags_file() -> std::path::PathBuf {
 /// returning a formatted string with line numbers. The target line is
 /// marked with `>>` for visual distinction. Used by both tags mode
 /// and ag mode to populate the details-pane preview.
+/// The number of source-context lines loaded around a selected
+/// symbol (`tags` / `codegraph` modes). 25 before, the match
+/// line, and 24 after — i.e. 50 lines — give the user a full
+/// function-body-or-file view in the `Ctrl-O` overlay while the
+/// inline preview pane still shows whatever fits its height.
+/// The `>>` marker on the match line stays aligned across the
+/// half-window regardless of how much before/after context exists
+/// toward the file boundaries.
+pub const SOURCE_CONTEXT_LINES: usize = 50;
+
 pub fn read_source_context(filepath: &str, line_number: usize) -> String {
     if line_number == 0 {
         return String::new();
@@ -11429,8 +11959,54 @@ pub fn read_source_context(filepath: &str, line_number: usize) -> String {
     if target >= lines.len() {
         return String::new();
     }
-    let start = target.saturating_sub(2);
-    let end = (target + 3).min(lines.len());
+    let half = SOURCE_CONTEXT_LINES / 2;
+    let start = target.saturating_sub(half);
+    let end = (target + half).min(lines.len());
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let absolute = start + i;
+        if absolute == target {
+            out.push(format!(">> {:>5}  {}", line_number, line));
+        } else {
+            out.push(format!("   {:>5}  {}", absolute + 1, line));
+        }
+    }
+    out.join("\n")
+}
+
+/// Like [`read_source_context`], but caches the entire file
+/// contents in `cache` so repeated lookups in the same file
+/// (common for tags mode, where many symbols live in one
+/// source file) only hit the disk once per TUI session.
+pub fn read_source_context_with_cache(
+    filepath: &str,
+    line_number: usize,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, String>,
+) -> String {
+    if line_number == 0 {
+        return String::new();
+    }
+    let path = std::path::PathBuf::from(filepath);
+    if !cache.contains_key(&path) {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                cache.insert(path.clone(), contents);
+            }
+            Err(_) => return String::new(),
+        }
+    }
+    let contents = match cache.get(&path) {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    let target = line_number.saturating_sub(1);
+    if target >= lines.len() {
+        return String::new();
+    }
+    let half = SOURCE_CONTEXT_LINES / 2;
+    let start = target.saturating_sub(half);
+    let end = (target + half).min(lines.len());
     let mut out: Vec<String> = Vec::new();
     for (i, line) in lines[start..end].iter().enumerate() {
         let absolute = start + i;
@@ -11704,6 +12280,13 @@ fn run_loop(
         .map(|s| s.height.max(3) as usize)
         .unwrap_or(20);
     loop {
+        // Tags mode loads source context lazily. Make sure
+        // the row under the cursor has its preview before
+        // each draw so the details/output pane never stays
+        // empty just because selection changed through a
+        // path we didn't instrument explicitly.
+        app.ensure_selected_tag_context();
+        app.ensure_selected_codegraph_context();
         if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
@@ -12040,6 +12623,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // the help text underneath.
     if app.is_prefix_picker_open() {
         return handle_prefix_picker_key(app, key);
+    }
+
+    // The CodeGraph relations picker is a sibling overlay: it
+    // also sits above the help overlay so the user can dismiss
+    // it with `Cancel` without scrolling the help text underneath.
+    if app.is_codegraph_relations_picker_open() {
+        return handle_codegraph_relations_picker_key(app, key);
     }
 
     // The completion menu is a
@@ -12480,6 +13070,17 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 return false;
             }
             app.open_prefix_picker();
+            false
+        }
+        Action::CodegraphRelations => {
+            // Open the callers/callees picker for the selected
+            // `&` / `$` (codegraph-backed) row. A no-op (with a
+            // status message) outside codegraph / tags mode, when
+            // no row is selected, or when the selected row has no
+            // CodeGraph node id. The picker takes over key
+            // routing until the user picks a relation (Enter →
+            // open file + exit) or cancels (Esc → close overlay).
+            app.open_codegraph_relations();
             false
         }
     }
@@ -12980,6 +13581,98 @@ fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
         }
         _ => false,
     }
+}
+
+/// Key handler for the CodeGraph relations picker. Up/Down (and
+/// `Ctrl-N`/`Ctrl-P`) move the selection past section headers;
+/// `PageUp`/`PageDown`/`Home`/`End` jump; Enter opens the
+/// highlighted relation's source file in `$EDITOR +LINE path`
+/// and exits the TUI (mirroring the main list's tags/codegraph
+/// selection); the user's `Cancel` binding (Esc / Ctrl-C)
+/// dismisses the picker without opening anything.
+fn handle_codegraph_relations_picker_key(app: &mut App, key: KeyEvent) -> bool {
+    // Dismiss on the user's `Cancel` binding.
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+        app.close_codegraph_relations_picker();
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_codegraph_relations_picker();
+        return true;
+    }
+
+    // Movement keys only need the index; do them with a short
+    // mutable borrow of the picker.
+    let n = match app.codegraph_relations_picker.as_ref() {
+        Some(p) => p.entries.len(),
+        None => return false,
+    };
+    let move_delta = match key.code {
+        // Plain arrow keys have no modifiers, so the guard must
+        // NOT apply to them — splitting the arm keeps `Up`/`Down`
+        // (the primary navigation) working while `Ctrl-P`/`Ctrl-N`
+        // stay a separate guarded arm. (Combining them as
+        // `KeyCode::Up | KeyCode::Char('p') if CONTROL` would make
+        // the guard apply to the whole or-pattern, swallowing plain
+        // `Up`.)
+        KeyCode::Up => Some(-1isize),
+        KeyCode::Down => Some(1isize),
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(-1isize),
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(1isize),
+        KeyCode::PageUp => Some(-5isize),
+        KeyCode::PageDown => Some(5isize),
+        KeyCode::Home => {
+            if let Some(p) = app.codegraph_relations_picker.as_mut() {
+                p.selected = 0;
+            }
+            return false;
+        }
+        KeyCode::End => {
+            if let Some(p) = app.codegraph_relations_picker.as_mut() {
+                p.selected = n.saturating_sub(1);
+            }
+            return false;
+        }
+        _ => None,
+    };
+    if let Some(delta) = move_delta {
+        if let Some(p) = app.codegraph_relations_picker.as_mut() {
+            let next = (p.selected as isize + delta).clamp(0, n.saturating_sub(1) as isize) as usize;
+            p.selected = next;
+        }
+        return false;
+    }
+
+    // Enter: open the highlighted relation's source file. Copy
+    // the fields out of the picker (so the borrow is released
+    // before we stage the selection), close the picker, and stage
+    // `$EDITOR +LINE path` exactly like selecting a codegraph row
+    // in the main list. Returning `true` exits the TUI so the
+    // parent shell runs the editor command.
+    if key.code == KeyCode::Enter {
+        let picked = app
+            .codegraph_relations_picker
+            .as_ref()
+            .and_then(|p| p.selected().map(|e| (e.node.clone(), p.repo_root.clone())));
+        if let Some((node, repo_root)) = picked {
+            app.close_codegraph_relations_picker();
+            let editor = std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "vi".to_string());
+            let abs = node.abs_path(&repo_root);
+            let quoted = crate::util::shell_quote(&abs.to_string_lossy());
+            app.selection = Some(format!("{} +{} {}", editor, node.start_line, quoted));
+            app.pick_mode = Some(PickMode::Run);
+            return true;
+        }
+        // Nothing selected (empty list — shouldn't happen since
+        // the opener guards against it); just close.
+        app.close_codegraph_relations_picker();
+        return false;
+    }
+    false
 }
 
 fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
@@ -24538,6 +25231,7 @@ mod tests {
                 mode: "workspace".to_string(),
                 source: "workspace".to_string(),
                 workspace_label: "SmartHistory".to_string(),
+                codegraph_node_id: String::new(),
             },
             HistoryRow {
                 id: -2,
@@ -24551,6 +25245,7 @@ mod tests {
                 mode: "pane".to_string(),
                 source: "pane".to_string(),
                 workspace_label: "SmartHistory".to_string(),
+                codegraph_node_id: String::new(),
             },
             HistoryRow {
                 id: -3,
@@ -24564,6 +25259,7 @@ mod tests {
                 mode: "pane".to_string(),
                 source: "pane".to_string(),
                 workspace_label: "SmartHistory".to_string(),
+                codegraph_node_id: String::new(),
             },
         ];
         app.query = String::from("*SmartHistory");
@@ -24616,6 +25312,7 @@ mod tests {
                 mode: "workspace".to_string(),
                 source: "workspace".to_string(),
                 workspace_label: "SmartHistory".to_string(),
+                codegraph_node_id: String::new(),
             },
             HistoryRow {
                 id: -2,
@@ -24629,6 +25326,7 @@ mod tests {
                 mode: "pane".to_string(),
                 source: "pane".to_string(),
                 workspace_label: "SmartHistory".to_string(),
+                codegraph_node_id: String::new(),
             },
         ];
         // `*vim` matches the pane's command; the
@@ -30778,9 +31476,9 @@ ssh_config_parse\t\t10,0\n";
     }
 
     #[test]
-    fn prefix_picker_has_twelve_entries() {
+    fn prefix_picker_has_thirteen_entries() {
         let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-        assert_eq!(picker.options.len(), 12);
+        assert_eq!(picker.options.len(), 13);
     }
 
     #[test]
@@ -30875,7 +31573,7 @@ ssh_config_parse\t\t10,0\n";
         app.open_prefix_picker();
         let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
         handle_prefix_picker_key(&mut app, end);
-        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 11);
+        assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 12);
         let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
         handle_prefix_picker_key(&mut app, home);
         assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
@@ -30900,6 +31598,111 @@ ssh_config_parse\t\t10,0\n";
         assert!(
             !app.cancelled,
             "cancelled flag should not be set by picker close"
+        );
+    }
+
+    /// Regression for a guard-ordering bug where the movement
+    /// match arms were written as
+    /// `KeyCode::Up | KeyCode::Char('p') if CONTROL` — the guard
+    /// applied to the whole or-pattern, so a plain `Up` arrow
+    /// (modifiers empty) failed the guard, fell through to
+    /// `_ => None`, and navigation silently did nothing. Plain
+    /// arrows must move the selection; `Ctrl-P`/`Ctrl-N` must
+    /// too. This test constructs a picker directly (no
+    /// `.codegraph` index needed) so the regression is caught
+    /// without an integration setup.
+    fn make_relations_picker(n: usize) -> CodeGraphRelationsPicker {
+        let entries: Vec<CodegraphRelationEntry> = (0..n)
+            .map(|_| CodegraphRelationEntry {
+                section: CodegraphRelationSection::Caller,
+                node: crate::codegraph::CodeGraphNode {
+                    id: String::new(),
+                    kind: "method".to_string(),
+                    name: String::new(),
+                    qualified_name: String::new(),
+                    file_path: String::new(),
+                    language: String::new(),
+                    start_line: 1,
+                    end_line: 1,
+                    signature: None,
+                    docstring: None,
+                },
+            })
+            .collect();
+        CodeGraphRelationsPicker {
+            entries,
+            selected: 0,
+            symbol: String::new(),
+            repo_root: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn codegraph_relations_picker_arrow_keys_navigate() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.codegraph_relations_picker = Some(make_relations_picker(5));
+        assert_eq!(app.codegraph_relations_picker.as_ref().unwrap().selected, 0);
+        // Plain Down (no modifiers) must move to index 1.
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+        handle_codegraph_relations_picker_key(&mut app, down);
+        assert_eq!(
+            app.codegraph_relations_picker.as_ref().unwrap().selected,
+            1,
+            "plain Down arrow must move the selection"
+        );
+        // Plain Up must move back to index 0.
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        handle_codegraph_relations_picker_key(&mut app, up);
+        assert_eq!(
+            app.codegraph_relations_picker.as_ref().unwrap().selected,
+            0,
+            "plain Up arrow must move the selection"
+        );
+    }
+
+    #[test]
+    fn codegraph_relations_picker_ctrl_n_ctrl_p_navigate() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.codegraph_relations_picker = Some(make_relations_picker(5));
+        let ctrl_n = KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        let ctrl_p = KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        handle_codegraph_relations_picker_key(&mut app, ctrl_n);
+        assert_eq!(
+            app.codegraph_relations_picker.as_ref().unwrap().selected,
+            1
+        );
+        handle_codegraph_relations_picker_key(&mut app, ctrl_p);
+        assert_eq!(
+            app.codegraph_relations_picker.as_ref().unwrap().selected,
+            0
+        );
+    }
+
+    #[test]
+    fn codegraph_relations_picker_home_end_jump() {
+        let mut app = global_test_app(&[("hello", 1)]);
+        app.codegraph_relations_picker = Some(make_relations_picker(5));
+        let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
+        handle_codegraph_relations_picker_key(&mut app, end);
+        assert_eq!(
+            app.codegraph_relations_picker.as_ref().unwrap().selected,
+            4
+        );
+        let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
+        handle_codegraph_relations_picker_key(&mut app, home);
+        assert_eq!(
+            app.codegraph_relations_picker.as_ref().unwrap().selected,
+            0
         );
     }
 }
