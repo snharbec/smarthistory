@@ -13676,15 +13676,40 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // In `-` (JIRA) mode, open the selected issue's browse
             // URL in the system browser **in the background** (same
             // as pressing Enter, but spawned detached so the TUI
-            // stays open). Everywhere else, fall through to the
-            // normal `Run` action (select row / open editor /
-            // fire LLM), so the key is an ergonomic Enter
-            // replacement across all modes.
+            // stays open). In `!` (Todo) mode, toggle the
+            // checkbox of the selected todo (same as
+            // `Action::MarkTodoDone` / `Ctrl-X`) — a "smart"
+            // companion to the existing "open the file at
+            // the line" behaviour of `Enter` (which the
+            // fallback also handles). Everywhere else, fall
+            // through to the normal `Run` action (select row /
+            // open editor / fire LLM), so the key is an
+            // ergonomic Enter replacement across all modes.
             if app.is_codegraph_query() || app.is_tags_query() {
                 app.open_codegraph_relations();
                 false
             } else if app.is_jira_query() {
                 app.open_jira_in_background();
+                false
+            } else if app.is_todo_query() {
+                // Same as `Action::MarkTodoDone` (`Ctrl-X`):
+                // flip `- [ ]` ↔ `- [x]` on the selected
+                // todo's line in the source file, then
+                // re-fetch the todo list so the row
+                // disappears (or the marker changes).
+                // `mark_todo_done` is no-op-safe (it
+                // surfaces a status message rather than
+                // staging a selection when no row is
+                // selected, or when the selection is not a
+                // todo row, or when `notes.dir` is
+                // unset), so dispatching directly is
+                // safe. Returning `false` (don't exit the
+                // TUI) matches the other SmartOpen
+                // branches' semantics — the user stays
+                // in the todo list to see the result
+                // (row removed / marker flipped) and
+                // can keep navigating.
+                app.mark_todo_done();
                 false
             } else {
                 app.select_for_run();
@@ -32766,5 +32791,97 @@ ssh_config_parse\t\t10,0\n";
             .get(&codegraph)
             .expect("Run in codegraph mode must record the query into codegraph history");
         assert_eq!(entries, &vec!["&getSymbol".to_string()]);
+    }
+
+    /// `SmartOpen` in `!` (Todo) mode takes the
+    /// mark-todo-done branch, NOT the `Run` fallback.
+    /// The `Run` fallback would stage
+    /// `$EDITOR +<LINE> <file>` and exit; the
+    /// mark-todo-done branch toggles the checkbox of
+    /// the selected row in the source file and stays
+    /// in the TUI so the user sees the row disappear
+    /// (or the marker flip). To avoid actually
+    /// rewriting a notes file during the test, we
+    /// exercise the no-`notes.dir` path and assert
+    /// that the dispatch took the todo branch at all
+    /// — i.e. it did NOT stage a selection (Run would
+    /// have) and did NOT exit, and the status message
+    /// is the mark-todo-done "notes.dir not configured"
+    /// diagnostic, not the Run-fallback-staged command.
+    #[test]
+    fn smart_open_in_todo_mode_takes_mark_done_branch() {
+        let mut app = global_test_app(&[]);
+        // Force the app into todo mode by setting the
+        // query body to a `!` query. A real todo row
+        // (with the synthetic negative id encoding the
+        // line number) is injected into the merged
+        // rows so the selected row is a valid todo
+        // entry.
+        app.query = "!urgent".to_string();
+        app.query_cursor = app.query.chars().count();
+        app.refresh();
+        // Inject a todo row at index 0. The synthetic
+        // id `-(line_number)` is the contract from
+        // `fetch_todos`; mark_todo_done reads it back to
+        // find the line in the source file.
+        let line_number: i64 = 42;
+        let todo_row = crate::tui::state::HistoryRow {
+            id: -line_number,
+            command: "- [ ] pick up milk".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: "today.md".to_string(),
+            output: String::new(),
+            mode: "todo".to_string(),
+            source: String::new(),
+            ..Default::default()
+        };
+        app.merged_rows.insert(0, todo_row);
+        app.list_state.select(Some(0));
+        // No `notes_database` / `notes_dir` are set on
+        // the test app (global_test_app leaves them
+        // None), so mark_todo_done will surface the
+        // "notes.dir is not configured" status message
+        // rather than actually rewriting a file. That's
+        // exactly what we want: the test asserts the
+        // dispatch *routed* to the todo branch without
+        // needing a real notes file.
+        let quit = dispatch_action(&mut app, Action::SmartOpen);
+        assert!(
+            !quit,
+            "SmartOpen in todo mode must NOT exit the TUI (mark-done branch)"
+        );
+        assert!(
+            app.selection.is_none(),
+            "SmartOpen in todo mode must NOT stage a selection (Run fallback would have staged `$EDITOR +LINE file`): {:?}",
+            app.selection
+        );
+        assert_eq!(
+            app.pick_mode, None,
+            "SmartOpen in todo mode must NOT set pick_mode (Run fallback would have)"
+        );
+        // The mark_todo_done branch surfaced a status
+        // message about the missing notes.dir. The
+        // exact wording is a contract: it tells the
+        // user *why* the toggle didn't apply (rather
+        // than silently no-op'ing). If a future refactor
+        // re-routes todo mode to the Run fallback, the
+        // selection / pick_mode assertions above would
+        // already catch the regression; this assertion
+        // pins the specific "took the todo branch" intent.
+        let status = app
+            .status_message
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("");
+        assert!(
+            status.contains("notes.dir is not configured")
+                || status.contains("No todo selected")
+                || status.contains("Mark-todo-done"),
+            "expected the mark-todo-done status message; got: {:?}",
+            status
+        );
     }
 }

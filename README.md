@@ -24,7 +24,7 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`%`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`~`), and tags (`$`).
 - **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate natural-language into a runnable command (`=`), describe a command in plain prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
-- **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one.
+- **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
 - **Output capture** for both tmux (`pipe-pane` log) and herdr (`herdr pane read`): captured output is searchable via the `+` prefix and viewable via `Ctrl+L`.
 - **Note/todo integration** with [note_search](https://github.com/snharbec/note_search): search notes (`@`), list open todos (`!`), and create new entries (`@new <text>` / `!@new <text>`) directly from the TUI.
 - **Named sessions** (config): define sessions directly in `~/.config/smarthistory/config` via `session.<id> = "name"` + `session.<id>.dir = "~/path"`. They appear in the panes (`*`) view under a `# sessions` header; selecting one creates/switches a workspace.
@@ -157,6 +157,10 @@ The first character of the query selects the prefix mode. Each mode answers a di
 | JIRA | `-` | Search JIRA issues via REST API. Selecting an issue opens it in the browser (Enter); `Ctrl-M-s` downloads it as a local markdown note via `note_search jira-issue <KEY>`. |
 | Files | `~` | List every file in the current directory tree. |
 | Tags | `$` | List every symbol from the `tags` file. Selecting opens `$EDITOR +LINE file`. An optional `@lang` token (e.g. `@rust`) filters by file extension and pipes the preview through `bat` for syntax highlighting. |
+| CodeGraph | `&` | Search symbols in the local `.codegraph/codegraph.db` index (FTS5 over name / qualified name / docstring / signature). The selected row's preview shows source context plus a `── callers ──` / `── callees ──` overlay; `Ctrl-R` (or `Ctrl-]`, the Smart-open key) opens a navigable callers / callees picker. `@<lang>` filters by language. Falls back to CodeGraph when `$` mode can't find a `tags` file. |
+| ag | `,` | Search file contents with `ag` (The Silver Searcher). `*<glob>` tokens restrict file patterns; `@<lang>` filters by language. |
+
+**Detailed per-mode reference**: every mode has a long-form page in [`docs/modes/`](docs/modes/README.md) — example queries, special tokens, configuration, related actions, and cross-references to neighbouring modes. The TUI's `Ctrl-A` help overlay renders a live summary; the markdown files are the canonical long reference (and read well outside the TUI).
 
 ### Quick-create from notes/todo mode
 
@@ -173,6 +177,8 @@ The `#` and `*` modes work with both tmux and herdr. The active backend is selec
 # ~/.config/smarthistory/config
 multiplexer=herdr
 ```
+
+> For the full reference (backend selection, building with herdr, setup guides for both backends, troubleshooting), see **[docs/multiplexer.md](docs/multiplexer.md)**.
 
 - **`#` mode (directories)**: the `T` marker shows which directories have an active pane in the configured multiplexer. Selecting a `T`-marked row jumps to that pane; selecting an unmarked row creates a new tmux session / herdr workspace rooted there.
 - **`*` mode (panes)**: lists every pane across every tmux session / herdr workspace as a tree:

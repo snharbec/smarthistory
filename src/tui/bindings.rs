@@ -496,10 +496,15 @@ pub enum Action {
     /// opens the selected issue's browse URL in the system
     /// browser in the background (`open_jira_in_background`,
     /// same as `select_for_run_impl`'s JIRA branch but spawned
-    /// detached so the TUI stays open); in every other mode it
-    /// falls through to the normal `Run` action (select the
-    /// row / open the editor / fire the LLM), so the key works
-    /// as an ergonomic Enter replacement everywhere.
+    /// detached so the TUI stays open); in `!` (Todo) mode it
+    /// toggles the checkbox of the selected todo (same as
+    /// [`Action::MarkTodoDone`], reusing the shared
+    /// `App::mark_todo_done` helper so the behaviour is
+    /// identical to `Ctrl-X` — `C-]` is just an ergonomic
+    /// alternative); in every other mode it falls through to
+    /// the normal `Run` action (select the row / open the
+    /// editor / fire the LLM), so the key works as an
+    /// ergonomic Enter replacement everywhere.
     SmartOpen,
 }
 
@@ -754,7 +759,23 @@ impl Action {
             Action::CommandAction => "C-q",
             Action::ThemePicker => "T",
             Action::ToggleSearchMode => "C-f",
-            Action::MarkTodoDone => "C-x",
+            // `mark-todo-done` ships unbound by default. The
+            // mark-todo-done functionality (toggling the
+            // checkbox of the selected todo in its source
+            // file) is still reachable via the `SmartOpen`
+            // action (`C-]` by default) inside `!` mode —
+            // see `Action::SmartOpen` in `dispatch_action`
+            // for the routing. Leaving `mark-todo-done`
+            // itself unbound frees the `C-x` key for the
+            // user's own use, and `SmartOpen` is the
+            // cross-mode "dive" key the user is most
+            // likely to be holding when they're looking at a
+            // todo row. Users who want the dedicated key
+            // can rebind via
+            // `key.mark-todo-done=<spec>` in the config
+            // file (e.g. `key.mark-todo-done=C-x` restores
+            // the historical binding).
+            Action::MarkTodoDone => "none",
             Action::AddSession => "F5",
             Action::AddHost => "F6",
             Action::FilterPanesWindows => "F7",
