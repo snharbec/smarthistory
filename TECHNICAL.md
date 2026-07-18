@@ -978,6 +978,40 @@ that ephemeral per-invocation state doesn't pollute the user-edited
 3. `mode=` from `~/.local/cache/smarthistory/session`
 4. Built-in default (`SESS`)
 
+#### One-off CLI flags are not persisted
+
+The TUI exposes a handful of flags that are intended for
+one-off invocations (typically from a herdr keybinding, a GUI
+launcher, or a CI script). When any of these flags is
+present on the command line, the corresponding session field
+is **not** written on exit — a `smarthistory tui --prefix '*'`
+from a keybinding doesn't change the user's next plain
+`smarthistory tui` launch's starting query. The full set:
+
+| Flag | Suppresses the persistence of | Notes |
+| --- | --- | --- |
+| `--prefix <char>` | `query=` (session) | The TUI starts with the prefix char as the query; on exit, the `query=` line is omitted from the session. |
+| `--query <text>` (positional) | `query=` (session) | Same as `--prefix` — the user explicitly set the starting query. |
+| `$SMARTHISTORY_TUI_QUERY` (env) | `query=` (session) | Treated the same as a positional `--query` for persistence purposes. |
+| `--mode <SCOPE>` | `mode=` (session) | The TUI runs with the given scope; the `mode=` line is omitted. |
+| `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE` (env) | `mode=` (session) | Treated the same as a CLI `--mode` for persistence purposes (a herdr keybinding can `export SMARTHISTORY_TUI_MODE=GLOBAL smarthistory tui` without leaking the scope). |
+| `--pane <LAYOUT>` | `panevisibility=` (session) | The TUI runs with the given layout; the `panevisibility=` line is omitted. |
+| `--pane-height <HEIGHT>` | `paneheight=` (session) | The TUI runs with the given pane-height preset; the `paneheight=` line is omitted. `default` / `medium` / `tall` are the canonical values; `mid` / `mid-tall` (alias `medium`), `large` / `expanded` (alias `tall`), and `normal` (alias `default`) are also accepted. |
+| `--panes-filter <FILTER>` | (none) | The `panes_filter` field is not currently persisted in the session file (it resets to its default on every launch), so this flag has no persistence side-effect. It's tracked in `CliOverrides` for symmetry and accurate documentation. |
+
+Other session fields (`theme`, `sort_order`, `exit_filter`,
+`duplicate_filter`, `directory_source`, `pane_height` when
+changed via F11 inside the TUI, `pane_visibility` when
+changed inside the TUI) **are** persisted — those state
+changes are only reachable through interactive use of the
+TUI, and the persisted session is the natural place to
+remember them across launches.
+
+1. `--mode` flag (or `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE`)
+2. `initialmode=` from `~/.config/smarthistory/config`
+3. `mode=` from `~/.local/cache/smarthistory/session`
+4. Built-in default (`SESS`)
+
 ### TUI themes
 
 The TUI can be themed in one of two ways:

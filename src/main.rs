@@ -229,6 +229,20 @@ enum Commands {
         /// is used).
         #[arg(long, value_name = "FILTER")]
         panes_filter: Option<String>,
+        /// Height of the Details + Output Preview rows.
+        /// Values: `default` (the historical ~50% / 8-line
+        /// panes, equivalent to F11 in the TUI), `medium`
+        /// (~60% of the list area), `tall` (~70% of the
+        /// list area, more context visible without
+        /// scrolling). The F11 in-TUI toggle cycles the
+        /// same three presets; this flag sets the starting
+        /// height for this launch only (the value is NOT
+        /// persisted to the session file, so a one-off
+        /// `smarthistory tui --pane-height tall` from a
+        /// herdr keybinding doesn't change the user's
+        /// default pane height).
+        #[arg(long, value_name = "HEIGHT")]
+        pane_height: Option<String>,
         #[arg(index = 1)]
         query: Option<String>,
     },
@@ -3846,6 +3860,7 @@ fn main() -> anyhow::Result<()> {
             query,
             pane,
             panes_filter,
+            pane_height,
         } => {
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
@@ -3853,6 +3868,28 @@ fn main() -> anyhow::Result<()> {
             //   $SMARTHISTORY_MODE          — alias
             // Otherwise fall back to the config file's `initialmode`
             // (or `SESS` if unset).
+            //
+            // Track which source actually supplied the scope so
+            // we can mark the corresponding `CliOverrides.mode`
+            // field. The semantic is: `--mode` and the env vars
+            // are treated as "one-off, don't persist" overrides
+            // (a herdr keybinding setting `--mode GLOBAL` for a
+            // single invocation shouldn't change the user's next
+            // plain `smarthistory tui` launch). The config-file
+            // `initialmode=` setting is treated as a persistent
+            // preference (the user wrote it in their config; they
+            // expect it to apply every launch and they expect the
+            // session file to keep their currently-active scope in
+            // sync).
+            let cli_mode_override = mode.is_some()
+                || std::env::var("SMARTHISTORY_TUI_MODE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .is_some()
+                || std::env::var("SMARTHISTORY_MODE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .is_some();
             let initial_mode = mode
                 .or_else(|| {
                     std::env::var("SMARTHISTORY_TUI_MODE")
@@ -3890,9 +3927,21 @@ fn main() -> anyhow::Result<()> {
             // values and take the first character — the prefix is
             // always a single character by construction (see
             // `QueryPrefixes`).
+            //
+            // `cli_query_override` is the trigger for
+            // `CliOverrides.query` — BOTH `--prefix` and a
+            // positional `--query` (or `$SMARTHISTORY_TUI_QUERY`)
+            // are treated as one-off CLI overrides that should
+            // not leak into the next launch.
+            let env_query = std::env::var("SMARTHISTORY_TUI_QUERY")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let cli_query_override = prefix.is_some()
+                || query.is_some()
+                || env_query.is_some();
             let (initial_query, override_session_query) =
-                match (prefix.as_deref(), query.as_deref()) {
-                    (Some(p), _) => {
+                match (prefix.as_deref(), query.as_deref(), env_query.as_deref()) {
+                    (Some(p), _, _) => {
                         // Take the first char of the prefix string
                         // (it's always a single char by construction;
                         // we accept multi-char input defensively for
@@ -3900,8 +3949,9 @@ fn main() -> anyhow::Result<()> {
                         let first_char = p.chars().next().unwrap_or_default().to_string();
                         (first_char, true)
                     }
-                    (None, Some(q)) => (q.to_string(), false),
-                    (None, None) => (String::new(), false),
+                    (None, Some(q), _) => (q.to_string(), false),
+                    (None, None, Some(q)) => (q.to_string(), false),
+                    (None, None, None) => (String::new(), false),
                 };
             // Build the LLM client up front so the TUI entry
             // point doesn't need to know about config parsing.
@@ -3914,6 +3964,60 @@ fn main() -> anyhow::Result<()> {
                 .map(llm::OllamaClient::new)
                 .map(|c| Box::new(c) as Box<dyn llm::LlmClient>);
             let llm_config = tui_cfg.llm.clone();
+            // Bundle the four CLI override flags into a
+            // single struct. The TUI uses this to decide
+            // which session fields to NOT persist on
+            // exit, so a one-off CLI invocation (e.g.
+            // `smarthistory tui --prefix '*'` from a
+            // herdr keybinding) doesn't leak the
+            // resulting state into the next plain
+            // launch. See `CliOverrides` for the
+            // per-field rationale.
+            //
+            // Validate `--pane-height` up front so an
+            // invalid value produces a clear error
+            // message instead of being silently
+            // dropped. We don't apply the value to
+            // `app.pane_height` here — the TUI does
+            // that via `run_tui_to_stdout` — but a
+            // typo like `--pane-height large` (note:
+            // `large` is an alias for `tall` so this
+            // would actually parse) would be caught
+            // by the TUI's own `PaneHeight::parse`
+            // call. Pre-validate here so a typo
+            // (e.g. `--pane-height extra-tall`)
+            // surfaces a clean error and the TUI
+            // never starts.
+            if let Some(ref h) = pane_height
+                && crate::tui::state::PaneHeight::parse(h).is_none()
+            {
+                return Err(anyhow::anyhow!(
+                    "invalid --pane-height {:?}; expected one of: default, medium, tall",
+                    h
+                ));
+            }
+            let cli_overrides = tui::CliOverrides {
+                mode: cli_mode_override,
+                query: cli_query_override,
+                pane_visibility: pane.is_some(),
+                // `panes_filter` isn't currently
+                // persisted in the session file
+                // (the field is reset to its default
+                // on every launch), so this flag is
+                // informational. It's tracked for
+                // symmetry with the other four and
+                // so the documentation accurately
+                // lists all five CLI flags as
+                // "one-off".
+                panes_filter: panes_filter.is_some(),
+                // `--pane-height <HEIGHT>` is a
+                // one-off override: applied for this
+                // launch but not persisted. See
+                // `CliOverrides::pane_height` for
+                // the rationale and the corresponding
+                // `paneheight=` save-site gate.
+                pane_height: pane_height.is_some(),
+            };
             match tui::run_tui_to_stdout(
                 initial_mode,
                 initial_query,
@@ -3923,6 +4027,8 @@ fn main() -> anyhow::Result<()> {
                 override_session_query,
                 pane.as_deref(),
                 panes_filter.as_deref(),
+                pane_height.as_deref(),
+                cli_overrides,
             )? {
                 Some((command, pick_mode)) => {
                     if exec {
