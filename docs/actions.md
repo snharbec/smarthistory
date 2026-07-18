@@ -639,16 +639,27 @@ Filter the `*`-mode panes view to show only the `# sessions` block. Pressing the
 
 Toggle detail pane visibility. Cycles through: `BOTH` (details + output preview side-by-side) → `Details` only → `Output Preview` only → `BOTH`. When only one pane is visible, the remaining pane uses the full detail-row height — useful on narrow terminals where the side-by-side layout would be cramped.
 
-### `TogglePaneHeight`
+### `IncreasePaneHeight`
 
 | Field | Value |
 | --- | --- |
-| Config key | `toggle-pane-height` |
-| Display name | Toggle pane height |
+| Config key | `increase-pane-height` |
+| Display name | Increase pane height |
 | Default key | `F11` |
 | Category | layout |
 
-Toggle the detail / output-preview row height between three presets: **Default** (8 lines, ~50% of the list area), **Medium** (~60% of the list area), and **Tall** (~70% of the list area). The toggle cycles `Default → Medium → Tall → Default`. The setting is persisted in the session file (`paneheight=default` / `paneheight=medium` / `paneheight=tall`) so the user's choice carries over to the next TUI startup. Useful when reading a long source-context preview: press `F11` to step up the height one level at a time, then `F11` again at Tall to restore the default.
+Grow the detail / output-preview row height by one line, up to a terminal-size-dependent maximum that always leaves at least a few lines for the history list. The setting is persisted in the session file (`paneheight=<N>`, a plain line count) so the user's chosen height carries over to the next TUI startup. Useful when reading a long source-context preview: hold `F11` to grow the pane exactly as far as needed, one line at a time.
+
+### `DecreasePaneHeight`
+
+| Field | Value |
+| --- | --- |
+| Config key | `decrease-pane-height` |
+| Display name | Decrease pane height |
+| Default key | `S-F11` |
+| Category | layout |
+
+Shrink the detail / output-preview row height by one line, down to the historical 8-line floor. The mirror image of `IncreasePaneHeight`.
 
 ---
 

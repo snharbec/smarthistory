@@ -99,12 +99,12 @@ pub(crate) struct TuiSession {
     /// Unrecognised values
     /// are silently dropped.
     pane_visibility: Option<String>,
-    /// Which detail-pane height was
-    /// active at the end of the last
-    /// session (`default` /
-    /// `tall`). `None` means "no
-    /// preference" and falls back to
-    /// `PaneHeight::Default`.
+    /// The details/output-preview row
+    /// height (in lines) active at the
+    /// end of the last session. `None`
+    /// means "no preference" and falls
+    /// back to `PaneHeight::default()`
+    /// (the 8-line historical floor).
     pane_height: Option<String>,
 }
 
@@ -318,8 +318,9 @@ impl TuiSession {
                     // `pane_visibility`: only
                     // accept values that
                     // `PaneHeight::parse`
-                    // recognises (`default` /
-                    // `tall` plus aliases).
+                    // recognises (a plain
+                    // non-negative integer
+                    // line count).
                     if crate::tui::state::PaneHeight::parse(
                         value,
                     )
@@ -1152,11 +1153,12 @@ pub(crate) struct App {
     /// Preview → BOTH with `F6`
     /// (configurable).
     pane_visibility: crate::tui::state::PaneVisibility,
-    /// Which detail-pane height preset is
-    /// active (`Default` 8 lines,
-    /// `Tall` ~70% of the list area).
-    /// Toggled by `Action::TogglePaneHeight`
-    /// and persisted in the session file.
+    /// The active details/output-preview row height,
+    /// in terminal lines (8-line historical floor).
+    /// Adjusted one line at a time by
+    /// `Action::IncreasePaneHeight` /
+    /// `Action::DecreasePaneHeight` and persisted in
+    /// the session file.
     pane_height: crate::tui::state::PaneHeight,
     /// The currently-selected TUI palette. Defaults to
     /// `SelectedTheme::None`, which means the manually-configured
@@ -10926,7 +10928,7 @@ pub fn run_tui_to_stdout(
     // gated on these flags via
     // `cli_overrides` so a one-off
     // `smarthistory tui --pane-height
-    // tall` invocation doesn't
+    // 20` invocation doesn't
     // leak into the next plain
     // launch.
     if let Some(v) = override_pane_visibility
@@ -11126,9 +11128,9 @@ pub fn run_tui_to_stdout(
             Some(app.pane_visibility.as_str().to_string())
         },
         pane_height: if cli_overrides.pane_height
-            || app.pane_height == crate::tui::state::PaneHeight::Default
+            || app.pane_height == crate::tui::state::PaneHeight::default()
         {
-            // CLI override (e.g. `--pane-height tall`) OR
+            // CLI override (e.g. `--pane-height 14`) OR
             // the value is the default. Both cases write
             // `None` so the session file either doesn't
             // mention pane height (default is implicit) or
@@ -11136,7 +11138,7 @@ pub fn run_tui_to_stdout(
             // into the next launch.
             None
         } else {
-            Some(app.pane_height.as_str().to_string())
+            Some(app.pane_height.as_str())
         },
     };
     session.save();
@@ -11926,12 +11928,27 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.set_status_message(format!("Pane layout: {}", app.pane_visibility.label()));
             false
         }
-        Action::TogglePaneHeight => {
-            // Toggle between `Default` (8 lines, ~50% of the
-            // list area) and `Tall` (~70% of the list area).
-            // Persisted in the session file so the user's
-            // choice carries over to the next TUI startup.
-            app.pane_height = app.pane_height.toggle();
+        Action::IncreasePaneHeight => {
+            // Grow by one line, clamped so the history list
+            // keeps a few lines of its own. `crossterm`'s
+            // current terminal size is queried directly
+            // (mirrors the `page_size` fallback pattern used
+            // at the top of `run_loop`) since `dispatch_action`
+            // doesn't otherwise have the render area's height
+            // in scope. Persisted in the session file so the
+            // user's chosen height carries over to the next
+            // TUI startup.
+            let page_size = crossterm::terminal::size()
+                .map(|(_, rows)| rows as usize)
+                .unwrap_or(20);
+            app.pane_height = app.pane_height.increase(page_size);
+            app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
+            false
+        }
+        Action::DecreasePaneHeight => {
+            // Shrink by one line, never below the historical
+            // 8-line floor.
+            app.pane_height = app.pane_height.decrease();
             app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
             false
         }
@@ -13816,7 +13833,7 @@ mod tui_session_tests {
             theme: Some("dracula".to_string()),
             directory_source: Some("tmux".to_string()),
             pane_visibility: Some("output".to_string()),
-            pane_height: Some("tall".to_string()),
+            pane_height: Some("20".to_string()),
         };
         let _ = original.save_to(&tmp);
         let loaded = TuiSession::load_from(&tmp);
@@ -13829,7 +13846,7 @@ mod tui_session_tests {
         assert_eq!(loaded.theme.as_deref(), Some("dracula"));
         assert_eq!(loaded.directory_source.as_deref(), Some("tmux"));
         assert_eq!(loaded.pane_visibility.as_deref(), Some("output"));
-        assert_eq!(loaded.pane_height.as_deref(), Some("tall"));
+        assert_eq!(loaded.pane_height.as_deref(), Some("20"));
     }
 
     /// The save function should not write a `query=`
@@ -13864,7 +13881,7 @@ mod tui_session_tests {
         let session = build_session_for_test(
             &app_query,
             crate::tui::state::PaneVisibility::Both,
-            crate::tui::state::PaneHeight::Default,
+            crate::tui::state::PaneHeight::default(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
@@ -13908,7 +13925,7 @@ mod tui_session_tests {
         let session = build_session_for_test(
             "",
             crate::tui::state::PaneVisibility::Both,
-            crate::tui::state::PaneHeight::Default,
+            crate::tui::state::PaneHeight::default(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
@@ -13943,7 +13960,7 @@ mod tui_session_tests {
         let session = build_session_for_test(
             "",
             crate::tui::state::PaneVisibility::OutputPreview,
-            crate::tui::state::PaneHeight::Default,
+            crate::tui::state::PaneHeight::default(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
@@ -13960,8 +13977,8 @@ mod tui_session_tests {
     /// <HEIGHT>` was passed, the resulting height is NOT
     /// persisted. This is the "one-off keybinding" use
     /// case — the user maps `Ctrl-Alt-T` to
-    /// `smarthistory tui --pane-height tall` from a herdr
-    /// keybinding, and the resulting `paneheight=tall`
+    /// `smarthistory tui --pane-height 20` from a herdr
+    /// keybinding, and the resulting `paneheight=20`
     /// must not leak into the next plain
     /// `smarthistory tui` launch.
     #[test]
@@ -13979,11 +13996,11 @@ mod tui_session_tests {
             panes_filter: false,
             pane_height: true,
         };
-        // TUI ran with `--pane-height tall`.
+        // TUI ran with `--pane-height 20`.
         let session = build_session_for_test(
             "",
             crate::tui::state::PaneVisibility::Both,
-            crate::tui::state::PaneHeight::Tall,
+            crate::tui::state::PaneHeight::parse("20").unwrap(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
@@ -13996,12 +14013,13 @@ mod tui_session_tests {
         );
     }
 
-    /// `PaneHeight::Medium` is also a one-off value
-    /// (medium, like Tall, is not the default). When
-    /// `--pane-height medium` is passed, the value is
-    /// applied for this launch but not persisted.
+    /// A second one-off value, distinct from both the
+    /// default (`8`) and the value used in the sibling
+    /// test above (`20`), to make sure the override
+    /// policy isn't accidentally keyed off a specific
+    /// magic number rather than "not the default".
     #[test]
-    fn session_save_skips_pane_height_medium_when_cli_overrides_it() {
+    fn session_save_skips_pane_height_custom_value_when_cli_overrides_it() {
         use super::CliOverrides;
         let tmp = std::env::temp_dir().join(format!(
             "smarthistory_session_test_pane_height_medium_{}.ini",
@@ -14015,11 +14033,11 @@ mod tui_session_tests {
             panes_filter: false,
             pane_height: true,
         };
-        // TUI ran with `--pane-height medium`.
+        // TUI ran with `--pane-height 15`.
         let session = build_session_for_test(
             "",
             crate::tui::state::PaneVisibility::Both,
-            crate::tui::state::PaneHeight::Medium,
+            crate::tui::state::PaneHeight::parse("15").unwrap(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
@@ -14034,7 +14052,7 @@ mod tui_session_tests {
 
     /// When the user pressed F11 inside the TUI to
     /// expand the panes (no CLI flag), the resulting
-    /// `paneheight=tall` SHOULD be persisted. The
+    /// `paneheight=20` SHOULD be persisted. The
     /// CLI-override policy only skips persistence for
     /// explicit `--pane-height` invocations.
     #[test]
@@ -14053,21 +14071,20 @@ mod tui_session_tests {
             pane_height: false,
         };
         // TUI ran with no CLI override; the user
-        // pressed F11 inside the TUI to expand.
+        // pressed F11 repeatedly inside the TUI to
+        // expand to 20 lines.
         let session = build_session_for_test(
             "",
             crate::tui::state::PaneVisibility::Both,
-            crate::tui::state::PaneHeight::Tall,
+            crate::tui::state::PaneHeight::parse("20").unwrap(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
         let contents = std::fs::read_to_string(&tmp).expect("session file written");
         let _ = std::fs::remove_file(&tmp);
         assert!(
-            contents
-                .lines()
-                .any(|l| l.starts_with("paneheight=tall")),
-            "expected `paneheight=tall` line in session when changed via F11; got:\n{}",
+            contents.lines().any(|l| l.starts_with("paneheight=20")),
+            "expected `paneheight=20` line in session when changed via F11; got:\n{}",
             contents
         );
     }
@@ -14087,7 +14104,7 @@ mod tui_session_tests {
         let session = build_session_for_test(
             "git status",
             crate::tui::state::PaneVisibility::Both,
-            crate::tui::state::PaneHeight::Default,
+            crate::tui::state::PaneHeight::default(),
             &overrides,
         );
         let _ = session.save_to(&tmp);
@@ -14143,7 +14160,7 @@ mod tui_session_tests {
                 Some(app_pane_visibility.as_str().to_string())
             },
             pane_height: if overrides.pane_height
-                || app_pane_height == crate::tui::state::PaneHeight::Default
+                || app_pane_height == crate::tui::state::PaneHeight::default()
             {
                 // CLI override OR the value is the
                 // default. Both cases write `None` so
@@ -14154,7 +14171,7 @@ mod tui_session_tests {
                 // launch.
                 None
             } else {
-                Some(app_pane_height.as_str().to_string())
+                Some(app_pane_height.as_str())
             },
         }
     }

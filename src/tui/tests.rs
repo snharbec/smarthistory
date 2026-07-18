@@ -759,6 +759,65 @@ fn handle_key_falls_through_to_push_char_when_unbound_and_no_overlay() {
     assert_eq!(app.query, "z");
 }
 
+/// `F11` grows the pane height, `Shift-F11` shrinks it — the
+/// replacement for the old single-key 3-preset toggle. Verifies
+/// both the default bindings and that they route to the right
+/// `Action` via `action_for_key`.
+#[test]
+fn pane_height_default_keys_are_f11_and_shift_f11() {
+    let bindings = KeyBindings::defaults();
+    assert_eq!(
+        format_key_specs(bindings.specs(Action::IncreasePaneHeight)),
+        "F11".to_string()
+    );
+    assert_eq!(
+        format_key_specs(bindings.specs(Action::DecreasePaneHeight)),
+        "S-F11".to_string()
+    );
+    let f11 = KeyEvent::new(KeyCode::F(11), KeyModifiers::empty());
+    assert_eq!(
+        action_for_key(&bindings, &f11),
+        Some(Action::IncreasePaneHeight)
+    );
+    let shift_f11 = KeyEvent::new(KeyCode::F(11), KeyModifiers::SHIFT);
+    assert_eq!(
+        action_for_key(&bindings, &shift_f11),
+        Some(Action::DecreasePaneHeight)
+    );
+}
+
+/// `Action::IncreasePaneHeight` grows the pane height by exactly
+/// one line per press (not a jump to a fixed preset). The dispatch
+/// arm queries the live terminal size via `crossterm::terminal::size()`
+/// (falling back to 20 when there's no attached TTY, e.g. under a
+/// test runner), so the expected value is derived the same way here
+/// rather than hard-coding a page size that may not match whatever
+/// terminal the test happens to run under.
+#[test]
+fn dispatch_action_increase_pane_height_grows_by_one_line() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let before = app.pane_height;
+    let quit = dispatch_action(&mut app, Action::IncreasePaneHeight);
+    assert!(!quit);
+    let page_size = crossterm::terminal::size()
+        .map(|(_, rows)| rows as usize)
+        .unwrap_or(20);
+    assert_eq!(app.pane_height, before.increase(page_size));
+}
+
+/// `Action::DecreasePaneHeight` shrinks by one line and floors at
+/// the historical 8-line minimum rather than going negative or
+/// wrapping.
+#[test]
+fn dispatch_action_decrease_pane_height_floors_at_min() {
+    let mut app = global_test_app(&[("a", 1)]);
+    assert_eq!(app.pane_height, crate::tui::state::PaneHeight::default());
+    let quit = dispatch_action(&mut app, Action::DecreasePaneHeight);
+    assert!(!quit);
+    // Already at the floor — decreasing further is a no-op.
+    assert_eq!(app.pane_height, crate::tui::state::PaneHeight::default());
+}
+
 /// The destructive-confirm
 /// dialog closes on the
 /// user-configured `Cancel`

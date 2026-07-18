@@ -370,15 +370,21 @@ pub enum Action {
     ///
     /// Default key: `F6`. Works in any mode.
     TogglePaneVisibility,
-    /// Toggle the detail / output-preview row
-    /// height between two presets: `Default`
-    /// (8 lines, ~50% of the list area) and `Tall`
-    /// (~70% of the list area). Persisted in
-    /// the session file so the user's choice
-    /// carries over to the next TUI startup.
+    /// Grow the detail / output-preview row height
+    /// by one line, clamped so the history list
+    /// always keeps a few lines of its own.
+    /// Persisted in the session file so the user's
+    /// chosen height carries over to the next TUI
+    /// startup.
     ///
     /// Default key: `F11`. Works in any mode.
-    TogglePaneHeight,
+    IncreasePaneHeight,
+    /// Shrink the detail / output-preview row
+    /// height by one line, never below the
+    /// historical 8-line floor.
+    ///
+    /// Default key: `Shift-F11`. Works in any mode.
+    DecreasePaneHeight,
     /// Open the prefix picker. The
     /// picker is a centred
     /// overlay (modelled on
@@ -589,7 +595,8 @@ impl Action {
             Action::ToggleSearchMode => "toggle-search-mode",
             Action::MarkTodoDone => "mark-todo-done",
             Action::TogglePaneVisibility => "toggle-pane-visibility",
-            Action::TogglePaneHeight => "toggle-pane-height",
+            Action::IncreasePaneHeight => "increase-pane-height",
+            Action::DecreasePaneHeight => "decrease-pane-height",
             Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
             Action::CodegraphRelations => "codegraph-relations",
@@ -643,7 +650,8 @@ impl Action {
             Action::ToggleSearchMode => "Toggle search mode",
             Action::MarkTodoDone => "Mark todo done",
             Action::TogglePaneVisibility => "Toggle pane visibility",
-            Action::TogglePaneHeight => "Toggle pane height",
+            Action::IncreasePaneHeight => "Increase pane height",
+            Action::DecreasePaneHeight => "Decrease pane height",
             Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
             Action::CodegraphRelations => "Browse callers / callees",
@@ -712,7 +720,7 @@ impl Action {
                 "panes"
             }
             Action::TogglePaneVisibility => "layout",
-            Action::TogglePaneHeight => "layout",
+            Action::IncreasePaneHeight | Action::DecreasePaneHeight => "layout",
         }
     }
 
@@ -821,7 +829,8 @@ impl Action {
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
             Action::TogglePaneVisibility => "F10",
-            Action::TogglePaneHeight => "F11",
+            Action::IncreasePaneHeight => "F11",
+            Action::DecreasePaneHeight => "S-F11",
             Action::JiraFieldComplete => "Tab",
             Action::PickPrefix => "F1",
             Action::CodegraphRelations => "C-r",
@@ -1227,7 +1236,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,
     Action::TogglePaneVisibility,
-    Action::TogglePaneHeight,
+    Action::IncreasePaneHeight,
+    Action::DecreasePaneHeight,
     Action::JiraFieldComplete,
     Action::PickPrefix,
     Action::CodegraphRelations,

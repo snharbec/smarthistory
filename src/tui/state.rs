@@ -551,101 +551,189 @@ impl PaneVisibility {
     }
 }
 
-/// Which detail-pane height to use for
-/// the details row + output preview row.
-/// Toggles between three presets (~50%, ~60%, ~70%
-/// of the list area) so the user can quickly give the
-/// details more room when reading a long source-
-/// context preview, or reclaim it for the history list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PaneHeight {
-    /// The default — details row
-    /// + output preview share ~50% of
-    /// the list area. Each pane is the
-    /// same fixed height (8 rows) as
-    /// the historical layout.
-    #[default]
-    Default,
-    /// Intermediate — details row +
-    /// output preview share ~60% of
-    /// the list area. A middle ground
-    /// that gives more room than
-    /// `Default` without taking over
-    /// the whole list.
-    Medium,
-    /// Expanded — details row + output
-    /// preview share ~70% of the list
-    /// area. Each pane is taller so
-    /// more context is visible without
-    /// scrolling.
-    Tall,
+/// The height (in terminal lines) of the details row and the
+/// output preview row. Adjustable one line at a time via
+/// `Action::IncreasePaneHeight` / `Action::DecreasePaneHeight`
+/// (default keys `F11` / `Shift-F11`) so the user can nudge the
+/// details pane to exactly the size they want, rather than picking
+/// from a fixed set of presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneHeight(u16);
+
+impl Default for PaneHeight {
+    fn default() -> Self {
+        PaneHeight(Self::MIN)
+    }
 }
 
 impl PaneHeight {
-    /// Toggle between the three presets:
-    /// Default → Medium → Tall → Default.
-    pub fn toggle(self) -> Self {
-        match self {
-            PaneHeight::Default => PaneHeight::Medium,
-            PaneHeight::Medium => PaneHeight::Tall,
-            PaneHeight::Tall => PaneHeight::Default,
-        }
+    /// The historical fixed details-row height, and the floor
+    /// `decrease` never goes below.
+    pub const MIN: u16 = 8;
+
+    /// Rows reserved for the history list itself, even at the
+    /// tallest details pane, so `increase` can never shrink the
+    /// list to nothing.
+    const MIN_LIST_ROWS: u16 = 3;
+
+    /// One line taller, clamped to `max_for(page_size)`.
+    pub fn increase(self, page_size: usize) -> Self {
+        PaneHeight(self.0.saturating_add(1).min(Self::max_for(page_size)))
     }
 
-    /// The row height (in terminal
-    /// lines) for the details row and
-    /// the output preview row. The
-    /// `page_size` is the total
-    /// available height minus the
-    /// fixed-height chrome (mode strip,
-    /// input, status — 5 lines).
+    /// One line shorter, never below `MIN`.
+    pub fn decrease(self) -> Self {
+        PaneHeight(self.0.saturating_sub(1).max(Self::MIN))
+    }
+
+    /// The tallest the details row may grow to for a given
+    /// terminal size: total height minus the fixed chrome (mode
+    /// strip, input, status — 5 lines) minus `MIN_LIST_ROWS` for
+    /// the history list. Never below `MIN`, so a very short
+    /// terminal still gets the historical default rather than
+    /// something smaller.
+    fn max_for(page_size: usize) -> u16 {
+        (page_size as u16)
+            .saturating_sub(5)
+            .saturating_sub(Self::MIN_LIST_ROWS)
+            .max(Self::MIN)
+    }
+
+    /// The row height (in terminal lines) for the details row and
+    /// the output preview row. Clamped against the current
+    /// terminal's `max_for(page_size)` — a preference persisted
+    /// from a larger terminal degrades gracefully on a smaller one
+    /// instead of starving the history list, without mutating the
+    /// stored preference itself.
     pub fn detail_row_height(self, page_size: usize) -> u16 {
-        // The history list shares the
-        // vertical space with the details
-        // row. `Default` is the historical
-        // 8-line details row; `Medium` is
-        // ~60% of the list area; `Tall` is
-        // ~70% of the list area. A tall
-        // terminal gets a proportional
-        // expansion (not a fixed extra
-        // few lines). Each step never goes
-        // below the default 8 lines so a
-        // very short terminal doesn't make
-        // the details row shorter than the
-        // historic default.
-        let list_area = page_size.saturating_sub(8);
-        match self {
-            PaneHeight::Default => 8,
-            PaneHeight::Medium => ((list_area as u32 * 6) / 10) as u16 + 8,
-            PaneHeight::Tall => ((list_area as u32 * 7) / 10) as u16 + 8,
-        }
+        self.0.min(Self::max_for(page_size))
     }
 
-    /// Human-readable label for the
-    /// status bar.
-    pub fn label(self) -> &'static str {
-        match self {
-            PaneHeight::Default => "default",
-            PaneHeight::Medium => "medium",
-            PaneHeight::Tall => "tall",
-        }
+    /// Human-readable label for the status bar, e.g. "14 lines".
+    pub fn label(self) -> String {
+        format!("{} line{}", self.0, if self.0 == 1 { "" } else { "s" })
     }
 
-    /// Canonical string for persistence.
-    pub fn as_str(self) -> &'static str {
-        self.label()
+    /// Canonical string for persistence: the plain line count.
+    pub fn as_str(self) -> String {
+        self.0.to_string()
     }
 
-    /// Parse a string like "default" or
-    /// "tall" (case-insensitive).
-    /// Returns `None` for anything else.
+    /// Parse a persisted/CLI value: a plain non-negative integer
+    /// number of lines. Values below `MIN` are clamped up to `MIN`
+    /// (rather than rejected) so a hand-edited config/session file
+    /// with e.g. `paneheight=3` can't wedge the details row below
+    /// the historical floor. Returns `None` for anything that
+    /// isn't a valid integer.
     pub fn parse(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "default" | "normal" | "standard" | "short" => Some(PaneHeight::Default),
-            "medium" | "mid" | "mid-tall" | "middle" => Some(PaneHeight::Medium),
-            "tall" | "large" | "expanded" | "70" => Some(PaneHeight::Tall),
-            _ => None,
+        s.trim()
+            .parse::<u16>()
+            .ok()
+            .map(|n| PaneHeight(n.max(Self::MIN)))
+    }
+}
+
+#[cfg(test)]
+mod pane_height_tests {
+    use super::PaneHeight;
+
+    #[test]
+    fn default_is_the_historical_8_line_floor() {
+        assert_eq!(PaneHeight::default(), PaneHeight::parse("8").unwrap());
+    }
+
+    #[test]
+    fn increase_grows_by_exactly_one_line() {
+        let h = PaneHeight::parse("10").unwrap().increase(100);
+        assert_eq!(h, PaneHeight::parse("11").unwrap());
+    }
+
+    #[test]
+    fn decrease_shrinks_by_exactly_one_line() {
+        let h = PaneHeight::parse("10").unwrap().decrease();
+        assert_eq!(h, PaneHeight::parse("9").unwrap());
+    }
+
+    /// `decrease` must never go below the historical 8-line floor,
+    /// no matter how many times it's called.
+    #[test]
+    fn decrease_never_goes_below_min() {
+        let mut h = PaneHeight::default();
+        for _ in 0..20 {
+            h = h.decrease();
         }
+        assert_eq!(h, PaneHeight::parse("8").unwrap());
+    }
+
+    /// `increase` must clamp to `max_for(page_size)` rather than
+    /// growing without bound — otherwise a user holding F11 could
+    /// shrink the history list to nothing (or push the layout into
+    /// a degenerate state on a small terminal).
+    #[test]
+    fn increase_clamps_to_max_for_page_size() {
+        // A 20-line terminal: max = 20 - 5 (chrome) - 3 (min list
+        // rows) = 12.
+        let mut h = PaneHeight::default();
+        for _ in 0..50 {
+            h = h.increase(20);
+        }
+        assert_eq!(h, PaneHeight::parse("12").unwrap());
+    }
+
+    /// On a terminal too short for the derived max to exceed the
+    /// historical floor, `increase` must be a no-op rather than
+    /// panicking or shrinking below `MIN`.
+    #[test]
+    fn increase_is_a_no_op_on_a_very_short_terminal() {
+        let h = PaneHeight::default().increase(5);
+        assert_eq!(h, PaneHeight::default());
+    }
+
+    /// `detail_row_height` clamps a persisted/CLI preference against
+    /// the CURRENT terminal's max without mutating the stored value
+    /// — so shrinking the terminal degrades the rendered height
+    /// gracefully, and growing it back restores the original
+    /// preference.
+    #[test]
+    fn detail_row_height_clamps_without_mutating_preference() {
+        let tall_preference = PaneHeight::parse("40").unwrap();
+        // Small terminal: rendered height is clamped down.
+        assert!(tall_preference.detail_row_height(20) < 40);
+        // The stored preference itself is untouched.
+        assert_eq!(tall_preference, PaneHeight::parse("40").unwrap());
+        // A big enough terminal renders the full preference.
+        assert_eq!(tall_preference.detail_row_height(1000), 40);
+    }
+
+    #[test]
+    fn parse_rejects_the_old_named_presets() {
+        // The old `default` / `medium` / `tall` preset names are no
+        // longer valid — `PaneHeight` is a plain line count now.
+        assert_eq!(PaneHeight::parse("default"), None);
+        assert_eq!(PaneHeight::parse("medium"), None);
+        assert_eq!(PaneHeight::parse("tall"), None);
+    }
+
+    #[test]
+    fn parse_clamps_a_too_small_value_up_to_min() {
+        assert_eq!(PaneHeight::parse("0"), Some(PaneHeight::default()));
+        assert_eq!(PaneHeight::parse("3"), Some(PaneHeight::default()));
+    }
+
+    #[test]
+    fn parse_accepts_a_valid_line_count() {
+        assert_eq!(
+            PaneHeight::parse("14"),
+            Some(PaneHeight::parse("14").unwrap())
+        );
+        assert_eq!(PaneHeight::parse("14").unwrap().detail_row_height(1000), 14);
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert_eq!(PaneHeight::parse("abc"), None);
+        assert_eq!(PaneHeight::parse(""), None);
+        assert_eq!(PaneHeight::parse("-5"), None);
     }
 }
 

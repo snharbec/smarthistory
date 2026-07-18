@@ -229,18 +229,15 @@ enum Commands {
         /// is used).
         #[arg(long, value_name = "FILTER")]
         panes_filter: Option<String>,
-        /// Height of the Details + Output Preview rows.
-        /// Values: `default` (the historical ~50% / 8-line
-        /// panes, equivalent to F11 in the TUI), `medium`
-        /// (~60% of the list area), `tall` (~70% of the
-        /// list area, more context visible without
-        /// scrolling). The F11 in-TUI toggle cycles the
-        /// same three presets; this flag sets the starting
-        /// height for this launch only (the value is NOT
-        /// persisted to the session file, so a one-off
-        /// `smarthistory tui --pane-height tall` from a
-        /// herdr keybinding doesn't change the user's
-        /// default pane height).
+        /// Height of the Details + Output Preview rows, in
+        /// terminal lines (e.g. `--pane-height 14`). The
+        /// historical default is 8 lines; `F11` / `Shift-F11`
+        /// grow/shrink it by one line at a time in the TUI.
+        /// This flag sets the starting height for this launch
+        /// only (the value is NOT persisted to the session
+        /// file, so a one-off `smarthistory tui --pane-height
+        /// 20` from a herdr keybinding doesn't change the
+        /// user's default pane height).
         #[arg(long, value_name = "HEIGHT")]
         pane_height: Option<String>,
         #[arg(index = 1)]
@@ -4259,19 +4256,16 @@ fn main() -> anyhow::Result<()> {
             // dropped. We don't apply the value to
             // `app.pane_height` here — the TUI does
             // that via `run_tui_to_stdout` — but a
-            // typo like `--pane-height large` (note:
-            // `large` is an alias for `tall` so this
-            // would actually parse) would be caught
-            // by the TUI's own `PaneHeight::parse`
-            // call. Pre-validate here so a typo
-            // (e.g. `--pane-height extra-tall`)
-            // surfaces a clean error and the TUI
-            // never starts.
+            // typo like `--pane-height fourteen`
+            // would be caught by the TUI's own
+            // `PaneHeight::parse` call. Pre-validate
+            // here so a typo surfaces a clean error
+            // and the TUI never starts.
             if let Some(ref h) = pane_height
                 && crate::tui::state::PaneHeight::parse(h).is_none()
             {
                 return Err(anyhow::anyhow!(
-                    "invalid --pane-height {:?}; expected one of: default, medium, tall",
+                    "invalid --pane-height {:?}; expected a non-negative integer number of lines",
                     h
                 ));
             }
