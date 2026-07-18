@@ -664,6 +664,7 @@ The picker is populated from the `edges` table in `.codegraph/codegraph.db` (`ki
 
 - [`docs/modes/README.md`](modes/README.md) — the per-prefix-mode reference (one markdown file per mode).
 - [`docs/multiplexer.md`](multiplexer.md) — tmux + herdr backend support.
+- [`docs/configuration.md`](configuration.md) — the full config-file reference (every `key.<action>`, `prefix.<name>`, `tuicolor.*`, `capturelines.*`, `smart-open.*`, `jira.search.*`, `session.*`, `host.*`, `notes.*`, `ollama.*`, and env-var override).
 - [`README.md`](../README.md#tui-key-bindings-subset) — the high-level key bindings table.
 - [`TECHNICAL.md`](../TECHNICAL.md) — the implementation reference (the `MultiplexerBackend` trait, the `Action` enum, the config parser, etc.).
 - [`src/tui/bindings.rs`](../src/tui/bindings.rs) — the canonical source for the `Action` enum and the `config_key` / `display_name` / `default_key` / `category` methods.

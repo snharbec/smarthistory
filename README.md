@@ -126,7 +126,7 @@ ship **unbound** by default (set them via
 `key.delete-matching=...` in your config to
 re-enable them).
 
-All keybindings are user-configurable via `key.<action>=<spec>` in the config file. See [docs/actions.md](docs/actions.md) for the full reference (all 48 actions, grouped by category, with config keys and default keys); see [TECHNICAL.md](TECHNICAL.md) for the deeper implementation reference.
+All keybindings are user-configurable via `key.<action>=<spec>` in the config file. See [docs/actions.md](docs/actions.md) for the full reference (all 48 actions, grouped by category, with config keys and default keys); see [docs/configuration.md](docs/configuration.md) for the full config-file reference (every `key.<action>`, `prefix.<name>`, `tuicolor.*`, `capturelines.*`, `smart-open.*`, `jira.search.*`, `session.*`, `host.*`, `notes.*`, `ollama.*`, and env-var override); see [TECHNICAL.md](TECHNICAL.md) for the deeper implementation reference.
 
 ## Match algorithm
 
