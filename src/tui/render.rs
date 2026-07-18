@@ -4988,15 +4988,28 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Ag-mode, tags-mode, and codegraph-mode rows carry up to
-    // [`SOURCE_CONTEXT_LINES`] (50) lines of source context
-    // plus a callers/callees overlay. The inline pane's height
-    // caps the actually-visible count (ratatui renders only
-    // what fits), but we don't clamp the slice here so a tall
-    // terminal / a scrolled `Ctrl-O` overlay can show every
-    // loaded line. Plain history rows keep their tighter
-    // 4-line preview.
-    let take_n = if row.mode == "ag" || row.mode == "tags" || row.mode == "codegraph" {
+    // Ag-mode, tags-mode, codegraph-mode, JIRA-mode, notes-mode,
+    // todo-mode, and files-mode rows carry more than 4 lines of
+    // context. Ag/tags/codegraph carry up to
+    // [`SOURCE_CONTEXT_LINES`] (50) lines of source context plus a
+    // callers/callees overlay. JIRA rows carry a 3-line header
+    // (Status/Priority, Due/Assignee, Description label) followed by
+    // the full issue description body. Notes / todo / files rows
+    // carry the first 50 lines of the referenced file (piped
+    // through `bat` for syntax highlighting).
+    // The inline pane's height caps the actually-visible count
+    // (ratatui renders only what fits), but we don't clamp the
+    // slice here so a tall terminal / a scrolled `Ctrl-O` overlay
+    // can show every loaded line. Plain history rows keep their
+    // tighter 4-line preview.
+    let take_n = if row.mode == "ag"
+        || row.mode == "tags"
+        || row.mode == "codegraph"
+        || row.mode == "jira"
+        || row.mode == "note"
+        || row.mode == "todo"
+        || row.mode == "file"
+    {
         crate::tui::SOURCE_CONTEXT_LINES
     } else {
         4
@@ -5026,10 +5039,22 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
 
+    // Render without `Wrap` so lines wider than the preview
+    // area get truncated at the right edge with the beginning
+    // still visible. The previous behavior (`.wrap(Wrap { trim:
+    // false })`) wrapped long lines to multiple visual rows,
+    // which destroyed the source-code alignment for `bat`-
+    // highlighted previews (e.g. an indented `    foo` line
+    // would wrap to a new row with the indentation preserved
+    // but the start position no longer matching the source).
+    // Source code reads top-to-bottom / left-to-right; users
+    // want to see the start of each line, not a wrapped
+    // continuation. The horizontal scroll is left at 0
+    // (the default) so the leftmost column is always anchored
+    // — the beginning of every line is always visible.
     let paragraph = Paragraph::new(preview_lines)
         .block(block)
-        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)))
-        .wrap(Wrap { trim: false });
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)));
     f.render_widget(paragraph, area);
 }
 

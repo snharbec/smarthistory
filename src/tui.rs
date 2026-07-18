@@ -4394,6 +4394,9 @@ impl App {
             // Still need to load the lazy context.
             crate::tui::mode::tags::ensure_selected_context(self);
             crate::tui::mode::codegraph::ensure_selected_context(self);
+            crate::tui::mode::notes::ensure_selected_context(self);
+            crate::tui::mode::todo::ensure_selected_context(self);
+            crate::tui::mode::files::ensure_selected_context(self);
             return;
         }
         // First-time entry into
@@ -4494,6 +4497,14 @@ impl App {
         // `output` carries source context + callers/callees,
         // loaded only for the row under the cursor.
         crate::tui::mode::codegraph::ensure_selected_context(self);
+        // Lazy-load the first 50 lines of the selected note
+        // file for `@` (notes) and `!` (todo) modes. Piped
+        // through `bat` for syntax highlighting.
+        crate::tui::mode::notes::ensure_selected_context(self);
+        crate::tui::mode::todo::ensure_selected_context(self);
+        // Lazy-load the first 50 lines of the selected file
+        // for `~` (files) mode. Directory rows are skipped.
+        crate::tui::mode::files::ensure_selected_context(self);
     }
 
     /// Compute the merged view: primary list + labeled rows
@@ -5275,9 +5286,13 @@ impl App {
         let next = (cur + delta).clamp(0, merged_len as isize - 1) as usize;
         self.list_state.select(Some(next));
         // The selected row changed; load its preview context on
-        // demand for tags mode without re-fetching the whole list.
+        // demand for the active mode without re-fetching the
+        // whole list.
         crate::tui::mode::tags::ensure_selected_context(self);
         crate::tui::mode::codegraph::ensure_selected_context(self);
+        crate::tui::mode::notes::ensure_selected_context(self);
+        crate::tui::mode::todo::ensure_selected_context(self);
+        crate::tui::mode::files::ensure_selected_context(self);
     }
 
     fn select_for_run(&mut self) {
@@ -7582,10 +7597,14 @@ impl App {
     }
 
     fn show_output_view(&mut self) {
-        // For tags mode, the selected row's output is populated
-        // lazily. Make sure it's loaded before opening the overlay.
+        // For all lazy-context modes, the selected row's
+        // output is populated lazily. Make sure it's loaded
+        // before opening the overlay.
         crate::tui::mode::tags::ensure_selected_context(self);
         crate::tui::mode::codegraph::ensure_selected_context(self);
+        crate::tui::mode::notes::ensure_selected_context(self);
+        crate::tui::mode::todo::ensure_selected_context(self);
+        crate::tui::mode::files::ensure_selected_context(self);
         // The show-output overlay has two
         // distinct entry points:
         //
@@ -10541,6 +10560,9 @@ fn run_loop(
         // path we didn't instrument explicitly.
         crate::tui::mode::tags::ensure_selected_context(app);
         crate::tui::mode::codegraph::ensure_selected_context(app);
+        crate::tui::mode::notes::ensure_selected_context(app);
+        crate::tui::mode::todo::ensure_selected_context(app);
+        crate::tui::mode::files::ensure_selected_context(app);
         if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }

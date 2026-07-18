@@ -431,3 +431,90 @@ pub(crate) fn fetch_file_updated_timestamps(
     }
     map
 }
+
+/// Lazy-load the first 50 lines of the currently-selected note
+/// into `output` for preview in the output preview pane.
+/// Called from `App::refresh()` on every selection change so
+/// the preview updates immediately when the user navigates.
+/// `read_note_preview` returns the entire file, which can be
+/// large; the output preview pane clamps the visible lines
+/// but loading the full file into every row is wasteful.
+/// Here we take only the first `SOURCE_CONTEXT_LINES` lines
+/// so the preview is bounded and the pane shows useful
+/// content without scrolling.
+pub(crate) fn ensure_selected_context(app: &mut App) {
+    
+
+    if !matches(app) {
+        return;
+    }
+    let Some(idx) = app.list_state.selected() else {
+        return;
+    };
+
+    let (filename, existing_output) = match app.merged_rows.get(idx) {
+        Some(r) if r.mode == "note" => (r.command.clone(), r.output.clone()),
+        _ => return, // Not a note row (e.g., user just switched modes)
+    };
+
+    // If the output is already non-empty, we've already loaded
+    // the context for this row. `read_note_preview` was called
+    // during `fetch_notes` and populated `output` with the
+    // full file content. However, we want to re-cap to 50 lines
+    // for the preview (the full file may be thousands of lines).
+    // If `output` already contains the full content, replace
+    // it with just the first 50 lines.
+    let Some(ref notes_dir) = app.notes_dir else {
+        return;
+    };
+    let filepath = notes_dir.join(&filename);
+    if !filepath.is_file() {
+        return;
+    }
+    let filepath_str = filepath.to_string_lossy().into_owned();
+
+    // Read from cache (or file) using `tags_source_cache` so
+    // multiple notes in the same file share one disk read. We
+    // use `line_number = 0` to get the file from the cache; the
+    // real `source_context` helpers take a line number for
+    // context-around-a-line, but we want the full file. Just
+    // use `read_to_string` + cache directly.
+    let content = {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        let cache: &mut HashMap<PathBuf, String> = &mut app.tags_source_cache;
+        if !cache.contains_key(&filepath) {
+            match std::fs::read_to_string(&filepath) {
+                Ok(s) => {
+                    cache.insert(filepath.clone(), s);
+                }
+                Err(_) => return,
+            }
+        }
+        cache.get(&filepath).cloned().unwrap_or_default()
+    };
+
+    if content.is_empty() && existing_output.is_empty() {
+        return;
+    }
+
+    // Take the first 50 lines. If the file is shorter, take all.
+    let preview: String = content
+        .lines()
+        .take(crate::tui::SOURCE_CONTEXT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Pipe through `bat` for syntax highlighting (same as
+    // tags / codegraph modes). `highlight_with_bat_auto` lets
+    // bat detect the language from the file extension via
+    // `--file-name`. Falls back to the plain text when bat is
+    // unavailable.
+    let highlighted =
+        crate::highlight::highlight_with_bat_auto(&preview, &filepath_str).unwrap_or(preview);
+
+    if let Some(row) = app.merged_rows.get_mut(idx)
+        && row.output != highlighted {
+            row.output = highlighted;
+        }
+}

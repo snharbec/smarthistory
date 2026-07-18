@@ -648,7 +648,7 @@ Toggle detail pane visibility. Cycles through: `BOTH` (details + output preview 
 | Default key | `F11` |
 | Category | layout |
 
-Toggle the detail / output-preview row height between two presets: **Default** (8 lines, ~50% of the list area) and **Tall** (~70% of the list area). The setting is persisted in the session file (`paneheight=default` / `paneheight=tall`) so the user's choice carries over to the next TUI startup. Useful when reading a long source-context preview: press `F11` to give the details / output panes more vertical room, then `F11` again to reclaim the space for the history list.
+Toggle the detail / output-preview row height between three presets: **Default** (8 lines, ~50% of the list area), **Medium** (~60% of the list area), and **Tall** (~70% of the list area). The toggle cycles `Default → Medium → Tall → Default`. The setting is persisted in the session file (`paneheight=default` / `paneheight=medium` / `paneheight=tall`) so the user's choice carries over to the next TUI startup. Useful when reading a long source-context preview: press `F11` to step up the height one level at a time, then `F11` again at Tall to restore the default.
 
 ---
 

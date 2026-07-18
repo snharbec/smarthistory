@@ -538,12 +538,10 @@ impl PaneVisibility {
 
 /// Which detail-pane height to use for
 /// the details row + output preview row.
-/// Toggles between two presets (50%
-/// and 70% of the list area) so the user
-/// can quickly give the details more
-/// room when reading a long source-
-/// context preview, or reclaim it for
-/// the history list.
+/// Toggles between three presets (~50%, ~60%, ~70%
+/// of the list area) so the user can quickly give the
+/// details more room when reading a long source-
+/// context preview, or reclaim it for the history list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaneHeight {
     /// The default — details row
@@ -553,6 +551,13 @@ pub enum PaneHeight {
     /// the historical layout.
     #[default]
     Default,
+    /// Intermediate — details row +
+    /// output preview share ~60% of
+    /// the list area. A middle ground
+    /// that gives more room than
+    /// `Default` without taking over
+    /// the whole list.
+    Medium,
     /// Expanded — details row + output
     /// preview share ~70% of the list
     /// area. Each pane is taller so
@@ -562,10 +567,12 @@ pub enum PaneHeight {
 }
 
 impl PaneHeight {
-    /// Toggle between the two presets.
+    /// Toggle between the three presets:
+    /// Default → Medium → Tall → Default.
     pub fn toggle(self) -> Self {
         match self {
-            PaneHeight::Default => PaneHeight::Tall,
+            PaneHeight::Default => PaneHeight::Medium,
+            PaneHeight::Medium => PaneHeight::Tall,
             PaneHeight::Tall => PaneHeight::Default,
         }
     }
@@ -581,23 +588,21 @@ impl PaneHeight {
         // The history list shares the
         // vertical space with the details
         // row. `Default` is the historical
-        // 8-line details row; `Tall` is
-        // 70% of the list area so a tall
+        // 8-line details row; `Medium` is
+        // ~60% of the list area; `Tall` is
+        // ~70% of the list area. A tall
         // terminal gets a proportional
         // expansion (not a fixed extra
-        // few lines).
+        // few lines). Each step never goes
+        // below the default 8 lines so a
+        // very short terminal doesn't make
+        // the details row shorter than the
+        // historic default.
         let list_area = page_size.saturating_sub(8);
         match self {
             PaneHeight::Default => 8,
-            PaneHeight::Tall => {
-                // 70% of the list area, but
-                // never less than the default
-                // 8 (so a very short terminal
-                // doesn't make the details
-                // row shorter than the historic
-                // default).
-                ((list_area as u32 * 7) / 10) as u16 + 8
-            }
+            PaneHeight::Medium => ((list_area as u32 * 6) / 10) as u16 + 8,
+            PaneHeight::Tall => ((list_area as u32 * 7) / 10) as u16 + 8,
         }
     }
 
@@ -606,6 +611,7 @@ impl PaneHeight {
     pub fn label(self) -> &'static str {
         match self {
             PaneHeight::Default => "default",
+            PaneHeight::Medium => "medium",
             PaneHeight::Tall => "tall",
         }
     }
@@ -621,6 +627,7 @@ impl PaneHeight {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "default" | "normal" | "standard" | "short" => Some(PaneHeight::Default),
+            "medium" | "mid" | "mid-tall" | "middle" => Some(PaneHeight::Medium),
             "tall" | "large" | "expanded" | "70" => Some(PaneHeight::Tall),
             _ => None,
         }

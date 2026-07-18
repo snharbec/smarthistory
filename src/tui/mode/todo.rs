@@ -440,3 +440,72 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     app.notes_date_filter = filter;
     Ok(rows)
 }
+
+/// Lazy-load the content of the note file containing the
+/// currently-selected todo line into `output` for preview in
+/// the output preview pane. Called from `App::refresh()` on
+/// every selection change so the preview updates immediately
+/// when the user navigates. The todo row carries the
+/// filename in `comment` and the notes directory in
+/// `directory`; we read the first 50 lines of the file.
+pub(crate) fn ensure_selected_context(app: &mut App) {
+    
+
+    if !matches(app) {
+        return;
+    }
+    let Some(idx) = app.list_state.selected() else {
+        return;
+    };
+
+    let (filename, _dir) = match app.merged_rows.get(idx) {
+        Some(r) if r.mode == "todo" => (r.comment.clone(), r.directory.clone()),
+        _ => return,
+    };
+
+    let Some(ref notes_dir) = app.notes_dir else {
+        return;
+    };
+    let filepath = notes_dir.join(&filename);
+    if !filepath.is_file() {
+        return;
+    }
+
+    // Read from the shared cache so multiple rows in the same
+    // note file share one disk read.
+    let content = {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        let cache: &mut HashMap<PathBuf, String> = &mut app.tags_source_cache;
+        if !cache.contains_key(&filepath) {
+            match std::fs::read_to_string(&filepath) {
+                Ok(s) => {
+                    cache.insert(filepath.clone(), s);
+                }
+                Err(_) => return,
+            }
+        }
+        cache.get(&filepath).cloned().unwrap_or_default()
+    };
+
+    if content.is_empty() {
+        return;
+    }
+
+    let preview: String = content
+        .lines()
+        .take(crate::tui::SOURCE_CONTEXT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Pipe through `bat` for syntax highlighting (same as
+    // tags / codegraph / notes modes).
+    let filepath_str = filepath.to_string_lossy().into_owned();
+    let highlighted =
+        crate::highlight::highlight_with_bat_auto(&preview, &filepath_str).unwrap_or(preview);
+
+    if let Some(row) = app.merged_rows.get_mut(idx)
+        && row.output != highlighted {
+            row.output = highlighted;
+        }
+}
