@@ -7,7 +7,9 @@
 //! browser. Credentials / config come from the
 //! `JIRA_SERVER`, `JIRA_API_TOKEN`, `JIRA_URL`, and
 //! `JIRA_PROJECT` environment variables.
+use crate::tui::state::HistoryRow;
 use crate::tui::App;
+use anyhow::Result;
 
 /// Whether the query is a JIRA issue-search request:
 /// the query starts with the jira prefix (`-` by
@@ -29,4 +31,14 @@ pub(crate) fn pattern(app: &App) -> &str {
     } else {
         ""
     }
+}
+
+/// Fetch the JIRA-mode result set. The JIRA search
+/// runs on a background thread (spawned by
+/// `App::jira_touch` → `crate::jira::spawn_jira_search`),
+/// so this just clones the cached rows from
+/// `App::jira_rows`. A future pass can move the
+/// JIRA background-thread orchestration here.
+pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
+    Ok(app.jira_rows.clone())
 }

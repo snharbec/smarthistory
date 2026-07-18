@@ -3793,142 +3793,12 @@ impl App {
         }
     }
 
-    fn fetch_panes(&mut self) -> Result<Vec<HistoryRow>> {
-        self.fetch_session_panes();
-        // Apply the panes-filter
-        // (toggled by F7 / F8 /
-        // F9) BEFORE the token
-        // filter so the user can
-        // narrow within the
-        // filtered section (e.g.
-        // `*vim` with the Windows
-        // filter on shows only
-        // live panes running vim).
-        //
-        // The filter is on the
-        // row's `source` field:
-        //   - `Windows` keeps
-        //     `pane` + `workspace`
-        //     (live multiplexer).
-        //   - `Hosts` keeps `hosts`.
-        //   - `Sessions` keeps
-        //     `sessions`.
-        //   - `All` keeps everything.
-        let section_rows: Vec<HistoryRow> = if self.panes_filter.is_default() {
-            self.session_panes.clone()
-        } else {
-            self.session_panes
-                .iter()
-                .filter(|r| match self.panes_filter {
-                    PanesFilter::All => true,
-                    PanesFilter::Windows => r.source == "pane" || r.source == "workspace",
-                    PanesFilter::Hosts => r.source == "hosts",
-                    PanesFilter::Sessions => r.source == "sessions",
-                })
-                .cloned()
-                .collect()
-        };
-        let filter = self.panes_pattern().trim();
-        let case_sensitive = self.is_case_sensitive();
-        let tokens: Vec<String> = filter
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .map(|t| {
-                if case_sensitive {
-                    t.to_string()
-                } else {
-                    t.to_lowercase()
-                }
-            })
-            .collect();
-        if tokens.is_empty() {
-            return Ok(section_rows);
-        }
-        // Per-row match predicate. Used for both
-        // the Substring fast path and the Fuzzy /
-        // Regex delegating path.
-        let row_matches = |r: &HistoryRow| -> bool {
-            // When the match algorithm is Substring,
-            // use the fast inline AND-by-token check.
-            // When it's Fuzzy or Regex, delegate to
-            // `query_matches_text` so the active
-            // algorithm is honored.
-            if self.match_algorithm != MatchAlgorithm::Substring {
-                return self.query_matches_text(&r.command)
-                    || self.query_matches_text(&r.comment)
-                    || (!r.output.is_empty() && self.query_matches_text(&r.output));
-            }
-            if case_sensitive {
-                tokens.iter().all(|tok| {
-                    r.command.contains(tok) || r.comment.contains(tok) || r.output.contains(tok)
-                })
-            } else {
-                let cmd_lc = r.command.to_lowercase();
-                let dir_lc = r.comment.to_lowercase();
-                let tab_lc = r.output.to_lowercase();
-                tokens
-                    .iter()
-                    .all(|tok| cmd_lc.contains(tok) || dir_lc.contains(tok) || tab_lc.contains(tok))
-            }
-        };
-        // Group-aware filter: the panes-mode rows
-        // are already laid out as a linearised
-        // tree (`workspace_header, pane, pane, …,
-        // workspace_header, pane, …`) by
-        // `fetch_session_panes_impl`. Each group is
-        // "one workspace header followed by its
-        // zero-or-more child pane rows". A group
-        // matches if ANY row in the group matches
-        // (workspace-label match OR any-child-pane
-        // match), in which case the WHOLE group is
-        // emitted. This is what the user asked
-        // for: "I searched for `SmartHistory`, I
-        // want to see the workspace AND its panes".
-        // Hosts (`source == "hosts"`) and sessions
-        // (`source == "sessions"`) are standalone
-        // rows (no children) and use the legacy
-        // per-row filter.
-        let mut out: Vec<HistoryRow> = Vec::new();
-        let mut idx = 0;
-        while idx < section_rows.len() {
-            let row = &section_rows[idx];
-            if row.source == "workspace" {
-                // Collect the contiguous group:
-                // this `workspace` header plus every
-                // immediately following row whose
-                // `source` is `"pane"`. Rows after
-                // the first non-`pane` row start a
-                // new group.
-                let group_start = idx;
-                let mut group_end = idx + 1;
-                while group_end < section_rows.len() && section_rows[group_end].source == "pane" {
-                    group_end += 1;
-                }
-                let group = &section_rows[group_start..group_end];
-                // Group matches if any row in it
-                // matches. This is the
-                // parent-wins-and-child-wins semantic:
-                // typing the workspace label keeps
-                // the whole workspace; typing a pane
-                // command keeps that pane AND its
-                // parent workspace header.
-                if group.iter().any(row_matches) {
-                    out.extend_from_slice(group);
-                }
-                idx = group_end;
-            } else {
-                // Standalone row (hosts, sessions,
-                // or a stray pane that lost its
-                // header for any reason): per-row
-                // filter.
-                if row_matches(row) {
-                    out.push(row.clone());
-                }
-                idx += 1;
-            }
-        }
-        Ok(out)
-    }
+    // `fetch_panes` was extracted to
+    // `crate::tui::mode::panes::fetch` (151 lines, the multiplexer
+    // snapshot / panes-filter / token-filter / group-aware filter
+    // pipeline). The dispatch in `App::fetch` calls the per-mode
+    // function via `ModeKind::Panes`.
+
 
     /// Walk the current directory
     /// recursively, collecting
@@ -3944,18 +3814,13 @@ impl App {
     /// 1000 rows, sorted by
     /// path (directories first,
     /// then alphabetical).
-    fn fetch_files(&mut self) -> Result<Vec<HistoryRow>> {
-        // Return cached results from the
-        // most recent background walk.
-        // The walk is triggered by
-        // `files_maybe_autocall` →
-        // `spawn_files_walk` → background
-        // thread → `process_files_result`.
-        // While the walk is in flight,
-        // this returns the stale (or
-        // empty) cache so the TUI never
-        Ok(self.files_state.rows.clone())
-    }
+    // `fetch_files` was extracted to
+    // `crate::tui::mode::files::fetch` (the
+    // cached-rows clone is one line; the
+    // interesting logic is the background walk
+    // that `files_maybe_autocall` →
+    // `spawn_files_walk` → `process_files_result`
+    // manages).
 
     /// Parse the `tags` file in the current directory
     /// and return one `HistoryRow` per symbol entry.
@@ -3979,7 +3844,7 @@ impl App {
     ///   an `@lang` filter is active).
     /// - `output` — the 5-line source context around
     ///   the symbol. Populated lazily when the row is
-    ///   selected; see `ensure_selected_tag_context`.
+    ///   selected; see `crate::tui::mode::tags::ensure_selected_context`.
     ///
     /// The `tags` file format is:
     /// ```text
@@ -4040,7 +3905,7 @@ impl App {
         // back to the CodeGraph index (`.codegraph/codegraph.db`)
         // when one exists. The fallback rows are tagged with
         // `mode: "tags"` so the existing tags dispatch (open at
-        // line, `@lang` filter, `ensure_selected_tag_context`)
+        // line, `@lang` filter, `crate::tui::mode::tags::ensure_selected_context`)
         // all work unchanged — the user gets symbol navigation
         // via CodeGraph data with the `$` UX they already know.
         let tags_path = find_tags_file();
@@ -4179,7 +4044,7 @@ impl App {
             // made opening tags mode take tens of seconds
             // on large repositories. The selected row's
             // `output` is populated on demand by
-            // `ensure_selected_tag_context` using the
+            // `crate::tui::mode::tags::ensure_selected_context` using the
             // `tags_source_cache`.
             // Tag the row's `source` with the language so the
             // chips / source label match the ag-mode convention
@@ -4216,77 +4081,19 @@ impl App {
     /// 5-line source context loaded into `output`. The context
     /// is read lazily and cached per source file so navigating
     /// tags rows in the same file doesn't repeatedly hit disk.
-    fn ensure_selected_tag_context(&mut self) {
-        if !self.is_tags_query() {
-            return;
-        }
-        let Some(idx) = self.list_state.selected() else {
-            return;
-        };
-        let row_ref = match self.merged_rows.get(idx) {
-            Some(r) => r,
-            None => return,
-        };
-        if row_ref.mode != "tags" || !row_ref.output.is_empty() {
-            return;
-        }
-        let line_number = row_ref.session_id.parse::<usize>().unwrap_or(0);
-        let filepath = row_ref.directory.clone();
-        let lang = crate::highlight::parse_query_tokens(self.tags_pattern().trim())
-            .languages
-            .first()
-            .cloned();
-        let context =
-            read_source_context_with_cache(&filepath, line_number, &mut self.tags_source_cache);
-        // When this tags row came from the CodeGraph fallback
-        // (`fetch_tags_via_codegraph`), the symbolic node id is
-        // stashed in `codegraph_node_id`. Append the callers /
-        // callees overlay so the `$` fallback gets the same rich
-        // context the dedicated `&` mode shows.
-        let mut context = context;
-        let node_id = row_ref.codegraph_node_id.clone();
-        if !node_id.is_empty()
-            && let Some(client) = self.codegraph_client.as_ref() {
-                let callers = client.callers(&node_id, 15);
-                let callees = client.callees(&node_id, 15);
-                if !callers.is_empty() || !callees.is_empty() {
-                    if !context.is_empty() {
-                        context.push('\n');
-                    }
-                    context.push_str("── callers ──\n");
-                    for c in &callers {
-                        context.push_str(&format!(
-                            "  {}  @{}:{}\n",
-                            c.qualified_name, c.file_path, c.start_line
-                        ));
-                    }
-                    context.push_str("── callees ──\n");
-                    for c in &callees {
-                        context.push_str(&format!(
-                            "  {}  @{}:{}\n",
-                            c.qualified_name, c.file_path, c.start_line
-                        ));
-                    }
-                }
-            }
-        if let Some(row) = self.merged_rows.get_mut(idx) {
-            row.output = if let Some(lang) = lang {
-                crate::highlight::highlight_with_bat(&context, &lang).unwrap_or(context)
-            } else {
-                // No explicit `@lang`: let `bat` auto-detect from
-                // the source file's extension via `--file-name`.
-                crate::highlight::highlight_with_bat_auto(&context, &filepath)
-                    .unwrap_or(context)
-            };
-        }
-    }
+    // `ensure_selected_tag_context` was extracted to
+    // `crate::tui::mode::tags::ensure_selected_context` (the
+    // source-context + CodeGraph-fallback callers/callees
+    // overlay for the selected `$`-mode row). The dispatch
+    // in the call sites uses the per-mode function directly.
+
 
     /// `$` (tags) fallback when no `tags` / `TAGS` file exists.
     /// Queries the CodeGraph index instead and returns rows tagged
     /// with `mode: "tags"` so the existing tags dispatch (open at
-    /// line, `@lang` filter, `ensure_selected_tag_context`) work
+    /// line, `@lang` filter, `crate::tui::mode::tags::ensure_selected_context`) work
     /// unchanged. The CodeGraph node id is stashed in
-    /// `codegraph_node_id` so `ensure_selected_tag_context` can
+    /// `codegraph_node_id` so `crate::tui::mode::tags::ensure_selected_context` can
     /// append the callers/callees overlay for these rows too.
     fn fetch_tags_via_codegraph(&mut self) -> Result<Vec<HistoryRow>> {
         let pattern = self.tags_pattern().trim();
@@ -4423,77 +4230,13 @@ impl App {
         Ok(rows)
     }
 
-    /// Load the selected `&`-mode row's source context plus its
-    /// CodeGraph callers and callees into `output`, lazily and
-    /// only once per row. Mirrors [`ensure_selected_tag_context`]
-    /// but appends a `Callers` / `Callees` section built from the
-    /// `edges` table (`kind='calls'`).
-    fn ensure_selected_codegraph_context(&mut self) {
-        if !self.is_codegraph_query() {
-            return;
-        }
-        let Some(idx) = self.list_state.selected() else {
-            return;
-        };
-        let (node_id, filepath, line_str, language) =
-            match self.merged_rows.get(idx) {
-                Some(r) if r.mode == "codegraph" && r.output.is_empty() => {
-                    (
-                        r.codegraph_node_id.clone(),
-                        r.directory.clone(),
-                        r.session_id.clone(),
-                        r
-                            .source
-                            .strip_prefix("codegraph:")
-                            .map(|s| s.to_string()),
-                    )
-                }
-                _ => return,
-            };
-        let line_number = line_str.parse::<usize>().unwrap_or(0);
-        let mut context = read_source_context_with_cache(
-            &filepath,
-            line_number,
-            &mut self.tags_source_cache,
-        );
-        // Append the callers / callees overlay. Each is capped so a
-        // hub symbol with thousands of callers doesn't blow up the
-        // details pane; the remaining count is shown so the user
-        // knows the list was truncated.
-        if let Some(client) = self.codegraph_client.as_ref() {
-            let callers = client.callers(&node_id, 15);
-            let callees = client.callees(&node_id, 15);
-            if !callers.is_empty() || !callees.is_empty() {
-                if !context.is_empty() {
-                    context.push('\n');
-                }
-                context.push_str("── callers ──\n");
-                for c in &callers {
-                    context.push_str(&format!(
-                        "  {}  @{}:{}\n",
-                        c.qualified_name, c.file_path, c.start_line
-                    ));
-                }
-                context.push_str("── callees ──\n");
-                for c in &callees {
-                    context.push_str(&format!(
-                        "  {}  @{}:{}\n",
-                        c.qualified_name, c.file_path, c.start_line
-                    ));
-                }
-            }
-        }
-        if let Some(row) = self.merged_rows.get_mut(idx) {
-            row.output = if let Some(lang) = language {
-                crate::highlight::highlight_with_bat(&context, &lang).unwrap_or(context)
-            } else {
-                // No explicit `@lang`: let `bat` auto-detect from
-                // the source file's extension via `--file-name`.
-                crate::highlight::highlight_with_bat_auto(&context, &filepath)
-                    .unwrap_or(context)
-            };
-        }
-    }
+    // `ensure_selected_codegraph_context` was extracted to
+    // `crate::tui::mode::codegraph::ensure_selected_context`
+    // (the source-context + callers/callees overlay
+    // for the selected `&`-mode row). The dispatch
+    // in the call sites uses the per-mode function
+    // directly.
+
 }
 
 // File-mode helpers (FilesState, walk_dir, IgnoreSet,
@@ -6984,11 +6727,11 @@ impl App {
         // lazily now that the selection is known. Keeping this
         // out of `fetch_tags` avoids reading every source file
         // once per symbol when a large TAGS file is loaded.
-        self.ensure_selected_tag_context();
+        crate::tui::mode::tags::ensure_selected_context(self);
         // Same lazy load for `&` (codegraph) rows: the row's
         // `output` carries source context + callers/callees,
         // loaded only for the row under the cursor.
-        self.ensure_selected_codegraph_context();
+        crate::tui::mode::codegraph::ensure_selected_context(self);
     }
 
     /// Compute the merged view: primary list + labeled rows
@@ -7296,32 +7039,29 @@ impl App {
         if matches!(self.mode, Mode::Stats) {
             return self.fetch_stats();
         }
-        if self.is_todo_query() {
-            return self.fetch_todos();
-        }
-        if self.is_notes_query() {
-            return self.fetch_notes();
-        }
-        if self.is_directories_query() {
-            return self.fetch_directories();
-        }
-        if self.is_panes_query() {
-            return self.fetch_panes();
-        }
-        if self.is_jira_query() {
-            return self.fetch_jira();
-        }
-        if self.is_files_query() {
-            return self.fetch_files();
-        }
-        if self.is_tags_query() {
-            return self.fetch_tags();
-        }
-        if self.is_codegraph_query() {
-            return self.fetch_codegraph();
-        }
-        if self.is_ag_query() {
-            return self.fetch_ag();
+        // The per-mode fetch dispatch. The modes are
+        // mutually exclusive (the first char of the
+        // query determines the active mode) so a flat
+        // `match` on `ModeKind` is the canonical form;
+        // each per-mode `fetch_*` orchestration is
+        // free to read / mutate any `App` state it
+        // needs because the match arm is the only
+        // borrow of `self` in that arm. The history /
+        // no-prefix fall-through runs the SQL
+        // `SELECT` below.
+        match crate::tui::mode::active_mode(self) {
+            crate::tui::mode::ModeKind::Todo => return self.fetch_todos(),
+            crate::tui::mode::ModeKind::Notes => return self.fetch_notes(),
+            crate::tui::mode::ModeKind::Directories => return self.fetch_directories(),
+            crate::tui::mode::ModeKind::Panes => return crate::tui::mode::panes::fetch(self),
+            crate::tui::mode::ModeKind::Jira => return crate::tui::mode::jira::fetch(self),
+            crate::tui::mode::ModeKind::Files => return crate::tui::mode::files::fetch(self),
+            crate::tui::mode::ModeKind::Tags => return self.fetch_tags(),
+            crate::tui::mode::ModeKind::Codegraph => return self.fetch_codegraph(),
+            crate::tui::mode::ModeKind::Ag => return crate::tui::mode::ag::fetch(self),
+            // Output, LLM, Question, History: all
+            // fall through to the SQL `SELECT` below.
+            _ => {}
         }
         let (where_clause, params) = self.build_where();
         let sql = format!(
@@ -7859,8 +7599,8 @@ impl App {
         self.list_state.select(Some(next));
         // The selected row changed; load its preview context on
         // demand for tags mode without re-fetching the whole list.
-        self.ensure_selected_tag_context();
-        self.ensure_selected_codegraph_context();
+        crate::tui::mode::tags::ensure_selected_context(self);
+        crate::tui::mode::codegraph::ensure_selected_context(self);
     }
 
     fn select_for_run(&mut self) {
@@ -8305,9 +8045,12 @@ impl App {
     // ---- AG (`,`-prefix) content search ----
 
     /// Return cached ag search results.
-    fn fetch_ag(&mut self) -> Result<Vec<HistoryRow>> {
-        Ok(self.ag_state.rows.clone())
-    }
+    // `fetch_ag` was extracted to
+    // `crate::tui::mode::ag::fetch` (a one-line
+    // cached-rows clone; the interesting logic
+    // is the background `ag` process that
+    // `ag_touch` → `crate::ag::spawn_ag_search` →
+    // `process_ag_result` manages).
 
     /// Arm the ag-mode debounce. Mirrors `files_touch`.
     fn ag_touch(&mut self) {
@@ -8755,16 +8498,12 @@ impl App {
             }
         }
     }
-
-    /// Return the cached JIRA rows (no network — the live
-    /// fetch happens in the background via
-    /// `jira_maybe_autocall`). Wired into `fetch()`'s
-    /// dispatch. An empty cache (no result yet / not
-    /// configured) yields an empty list; the status message
-    /// from the fetch path tells the user why.
-    fn fetch_jira(&mut self) -> Result<Vec<crate::tui::state::HistoryRow>> {
-        Ok(self.jira_rows.clone())
-    }
+    // `fetch_jira` was extracted to
+    // `crate::tui::mode::jira::fetch` (a one-line
+    // cached-rows clone; the live fetch happens in
+    // the background via `jira_maybe_autocall` →
+    // `crate::jira::spawn_jira_search` →
+    // `process_jira_result`).
 
     /// Install a JIRA client for tests (a fake). When set,
     /// searches run synchronously on the calling thread via
@@ -10168,8 +9907,8 @@ impl App {
     fn show_output_view(&mut self) {
         // For tags mode, the selected row's output is populated
         // lazily. Make sure it's loaded before opening the overlay.
-        self.ensure_selected_tag_context();
-        self.ensure_selected_codegraph_context();
+        crate::tui::mode::tags::ensure_selected_context(self);
+        crate::tui::mode::codegraph::ensure_selected_context(self);
         // The show-output overlay has two
         // distinct entry points:
         //
@@ -13004,8 +12743,8 @@ fn run_loop(
         // each draw so the details/output pane never stays
         // empty just because selection changed through a
         // path we didn't instrument explicitly.
-        app.ensure_selected_tag_context();
-        app.ensure_selected_codegraph_context();
+        crate::tui::mode::tags::ensure_selected_context(app);
+        crate::tui::mode::codegraph::ensure_selected_context(app);
         if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
@@ -26108,7 +25847,7 @@ mod tests {
     fn fetch_panes_returns_all_when_no_filter() {
         let mut app = panes_test_app(&[("%1", "@1", "/tmp", "zsh"), ("%2", "@2", "/tmp", "vim")]);
         app.query = String::from("*");
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].source, "pane");
         assert_eq!(rows[0].session_id, "%1");
@@ -26123,7 +25862,7 @@ mod tests {
         let mut app = panes_test_app(&[("%1", "@1", "/tmp", "zsh"), ("%2", "@2", "/tmp", "vim")]);
         // `*vim` → only the pane running vim.
         app.query = String::from("*vim");
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, "%2");
         assert_eq!(rows[0].command, "vim");
@@ -26196,7 +25935,7 @@ mod tests {
             },
         ];
         app.query = String::from("*SmartHistory");
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         // The workspace header AND its two child panes
         // are all kept, because the workspace label
         // matches the query.
@@ -26266,7 +26005,7 @@ mod tests {
         // workspace header is also kept so the user
         // sees the context.
         app.query = String::from("*vim");
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].mode, "workspace");
         assert_eq!(rows[0].command, "SmartHistory");
@@ -26315,7 +26054,7 @@ mod tests {
         });
         app.query = String::from("*");
         app.panes_filter = PanesFilter::Windows;
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         // Only the pane row
         // should remain.
         assert_eq!(rows.len(), 1);
@@ -26359,7 +26098,7 @@ mod tests {
         });
         app.query = String::from("*");
         app.panes_filter = PanesFilter::Hosts;
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         // Only the host row
         // should remain.
         assert_eq!(rows.len(), 1);
@@ -26403,7 +26142,7 @@ mod tests {
         });
         app.query = String::from("*");
         app.panes_filter = PanesFilter::Sessions;
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         // Only the session
         // row should remain.
         assert_eq!(rows.len(), 1);
@@ -26449,7 +26188,7 @@ mod tests {
         });
         app.query = String::from("*Proxmox");
         app.panes_filter = PanesFilter::Hosts;
-        let rows = app.fetch_panes().unwrap();
+        let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
         // Only the Proxmox
         // host should match.
         assert_eq!(rows.len(), 1);
@@ -27311,7 +27050,7 @@ ssh_config_parse\t\t10,0\n";
         // query (none →
         // all rows).
         app.query = String::from("*");
-        let rows = app.fetch_panes().expect("fetch_panes succeeds");
+        let rows = crate::tui::mode::panes::fetch(&mut app).expect("fetch_panes succeeds");
         // Both injected
         // rows must
         // survive the
@@ -27376,13 +27115,13 @@ ssh_config_parse\t\t10,0\n";
         // panes in
         // workspace `wA`.
         app.query = String::from("*wA");
-        let rows = app.fetch_panes().expect("fetch_panes succeeds");
+        let rows = crate::tui::mode::panes::fetch(&mut app).expect("fetch_panes succeeds");
         assert_eq!(rows.len(), 2);
         // `*wB` matches
         // neither row
         // (both are `wA`).
         app.query = String::from("*wB");
-        let rows = app.fetch_panes().expect("fetch_panes succeeds");
+        let rows = crate::tui::mode::panes::fetch(&mut app).expect("fetch_panes succeeds");
         assert_eq!(rows.len(), 0);
     }
 

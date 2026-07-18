@@ -5,7 +5,9 @@
 //! treated as file-pattern globs (`-G`) and restrict
 //! which files are searched. Selecting a row opens
 //! the file in `$EDITOR` at the matching line.
+use crate::tui::state::HistoryRow;
 use crate::tui::App;
+use anyhow::Result;
 
 /// Whether the query is an ag content-search request:
 /// the query starts with the ag prefix (`,` by
@@ -27,4 +29,16 @@ pub(crate) fn pattern(app: &App) -> &str {
     } else {
         ""
     }
+}
+
+/// Fetch the ag-mode result set. The actual ag
+/// process runs on a background thread (spawned by
+/// `App::ag_touch` → `crate::ag::spawn_ag_search`),
+/// so this just clones the cached rows from
+/// `App::ag_state`. A future pass can move the
+/// debounce / background-thread orchestration here
+/// too — the cached `ag_state` would have to become
+/// a per-mode sub-state.
+pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
+    Ok(app.ag_state.rows.clone())
 }

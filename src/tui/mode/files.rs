@@ -5,7 +5,9 @@
 //! Selecting a row opens the file in `$EDITOR` (or the
 //! configured per-extension command, via the SmartOpen
 /// key `Ctrl-]`).
+use crate::tui::state::HistoryRow;
 use crate::tui::App;
+use anyhow::Result;
 
 /// Whether the query is a files-view request:
 /// the query starts with the files prefix (`~` by
@@ -28,4 +30,14 @@ pub(crate) fn pattern(app: &App) -> &str {
     } else {
         ""
     }
+}
+
+/// Fetch the files-mode result set. The walk runs
+/// on a background thread (spawned by
+/// `App::files_touch` → `crate::files::spawn_walk`),
+/// so this just clones the cached rows from
+/// `App::files_state`. A future pass can move the
+/// walk / debounce orchestration here.
+pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
+    Ok(app.files_state.rows.clone())
 }
