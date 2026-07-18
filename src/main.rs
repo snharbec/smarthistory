@@ -1037,6 +1037,27 @@ pub struct Config {
     /// TUI theme palette. Each field is a hex color string like
     /// `#ffaa00` or a named color (`red`, `green`, `cyan`, ...).
     theme: TuiTheme,
+    /// The built-in theme to use when the terminal is
+    /// detected as LIGHT (i.e. light background). Set via
+    /// `theme.light=<slug>` in the config file; the slug
+    /// is the same identifier the theme picker shows
+    /// (kebab-case, e.g. `gruvbox-light`, `catppuccin-latte`,
+    /// `leuven`). The user's choice is independent of
+    /// `theme.dark` — you can set one without the other
+    /// and the unset slot falls back to the OTHER slot
+    /// at runtime, so a single `theme.light=gruvbox-light`
+    /// line is enough to opt into a light theme on
+    /// light terminals while keeping the existing dark
+    /// theme for dark terminals. The theme picker
+    /// writes to the active scheme's slot on commit, so
+    /// choosing a new theme in a light terminal
+    /// automatically updates `theme.light` (the
+    /// `theme.dark` value stays untouched).
+    theme_light: Option<String>,
+    /// The built-in theme to use when the terminal is
+    /// detected as DARK. Same semantics as
+    /// `theme_light`. Set via `theme.dark=<slug>`.
+    theme_dark: Option<String>,
     /// User-customizable TUI key bindings. Built from `key.<action>`
     /// entries in the config file; defaults match the original
     /// hard-coded Ctrl-* bindings.
@@ -1374,6 +1395,20 @@ impl Config {
             // config file. See the field doc for the
             // matching / fallback semantics.
             smart_open_file_commands: std::collections::HashMap::new(),
+            // No theme is selected by default — the
+            // TUI falls back to its built-in default
+            // (`SelectedTheme::None` plus the
+            // manual `tuicolor.*` palette). Users
+            // opt in by setting `theme.light=...`
+            // and/or `theme.dark=...`. The two are
+            // independent: setting only one applies
+            // the same theme in BOTH light and dark
+            // terminals (the unset slot falls back
+            // to the set one at runtime). Setting
+            // both lets the user pick a separate
+            // light / dark theme.
+            theme_light: None,
+            theme_dark: None,
         }
     }
 
@@ -1640,6 +1675,59 @@ impl Config {
                             .insert(cmd.to_string(), parse_capture_lines(value));
                     } else if let Some(field) = other.strip_prefix("tuicolor.") {
                         Self::assign_theme_field(&mut self.theme, field, value);
+                    } else if other == "theme-light" {
+                        // Alias for the dashed form
+                        // `theme-light=...` (some
+                        // config-file writers prefer
+                        // dashes over dots in keys).
+                        // The canonical form is
+                        // `theme.light=` (see the
+                        // else-if branch below).
+                        if !value.is_empty() {
+                            self.theme_light = Some(value.to_string());
+                        }
+                    } else if other == "theme-dark" {
+                        // Alias for the dashed form
+                        // `theme-dark=...`. The canonical
+                        // form is `theme.dark=` (see the
+                        // else-if branch below).
+                        if !value.is_empty() {
+                            self.theme_dark = Some(value.to_string());
+                        }
+                    } else if let Some(scheme) = other.strip_prefix("theme.") {
+                        // `theme.light=<slug>` /
+                        // `theme.dark=<slug>` — the
+                        // per-scheme theme selection.
+                        // An empty value clears the
+                        // slot (the user can wipe
+                        // one scheme without
+                        // touching the other).
+                        let value = value.trim();
+                        match scheme.to_ascii_lowercase().as_str() {
+                            "light" => {
+                                self.theme_light = if value.is_empty() {
+                                    None
+                                } else {
+                                    Some(value.to_string())
+                                };
+                            }
+                            "dark" => {
+                                self.theme_dark = if value.is_empty() {
+                                    None
+                                } else {
+                                    Some(value.to_string())
+                                };
+                            }
+                            _ => {
+                                // Unknown scheme name —
+                                // silently ignore so a
+                                // typo doesn't break the
+                                // rest of the config
+                                // (matching the
+                                // `tuicolor.<unknown>`
+                                // policy).
+                            }
+                        }
                     } else if let Some(action) = other.strip_prefix("key.")
                         && !action.is_empty()
                     {
@@ -2011,6 +2099,53 @@ impl Config {
     /// any user overrides from `~/.config/smarthistory/config`.
     pub fn theme(&self) -> &TuiTheme {
         &self.theme
+    }
+
+    /// The user-configured theme for the LIGHT scheme
+    /// (`theme.light=<slug>` in the config file). `None`
+    /// when the user hasn't set one — the TUI loader
+    /// then falls back to the active scheme's
+    /// `theme.dark=` value, then to the built-in
+    /// default, then to `SelectedTheme::None` (the
+    /// manual `tuicolor.*` palette). The scheme for
+    /// which this applies is auto-detected at startup
+    /// via `detect_color_scheme()`; the TUI shows the
+    /// detected scheme in the status bar so the user
+    /// always knows which slot is in effect.
+    pub fn theme_light(&self) -> Option<&str> {
+        self.theme_light.as_deref()
+    }
+
+    /// The user-configured theme for the DARK scheme
+    /// (`theme.dark=<slug>` in the config file). `None`
+    /// when the user hasn't set one. Same fallback
+    /// chain as `theme_light()`.
+    pub fn theme_dark(&self) -> Option<&str> {
+        self.theme_dark.as_deref()
+    }
+
+    /// The theme to actually use for a given scheme.
+    /// Returns the user-configured `theme.<scheme>=`
+    /// value when set, otherwise falls back to the
+    /// OTHER scheme (so the user only has to set one
+    /// and the same theme applies in both light and
+    /// dark terminals), otherwise `None` (the TUI
+    /// falls back to its built-in default).
+    pub fn theme_for(&self, scheme: crate::tui::theme::ColorScheme) -> Option<&str> {
+        match scheme {
+            crate::tui::theme::ColorScheme::Light => self
+                .theme_light
+                .as_deref()
+                .or(self.theme_dark.as_deref()),
+            crate::tui::theme::ColorScheme::Dark => self
+                .theme_dark
+                .as_deref()
+                .or(self.theme_light.as_deref()),
+            crate::tui::theme::ColorScheme::Unknown => self
+                .theme_dark
+                .as_deref()
+                .or(self.theme_light.as_deref()),
+        }
     }
 
     /// Effective selection-row background color. Falls back to the
@@ -2893,7 +3028,35 @@ fn split_fields(fields: &[String]) -> (Vec<String>, Vec<String>) {
 
 /// Return the SQL expression for a conceptual field name, qualifying
 /// history columns with `h.` and the global comment with `c.comment`.
+/// The `history` table's real columns, plus the two joined
+/// pseudo-columns (`comment` from `command_comments`, `output` from
+/// `history_output`). This is the complete allowlist of names
+/// `qualify_field` will accept — anything else is user-supplied
+/// `--fields` input that must not be spliced into the SQL text
+/// unchecked (a bare `format!("h.{}", name)` on an unvalidated name
+/// is a SQL injection primitive: a value containing a `--` comment
+/// marker can terminate the SELECT list and append arbitrary SQL).
+const KNOWN_RAW_FIELDS: &[&str] = &[
+    "id",
+    "command",
+    "directory",
+    "session_id",
+    "exit_code",
+    "timestamp",
+    "mode",
+    "comment",
+    "output",
+];
+
+/// Return the SQL expression for a conceptual field name, qualifying
+/// history columns with `h.` and the global comment with `c.comment`.
+/// Unknown field names fall back to `command`, matching the existing
+/// "unsupported query column" fallback used elsewhere in this file.
 fn qualify_field(name: &str) -> String {
+    if !KNOWN_RAW_FIELDS.contains(&name) {
+        eprintln!("warning: unsupported field {:?}, falling back to command", name);
+        return "h.command".to_string();
+    }
     match name {
         "comment" => "c.comment".to_string(),
         "output" => "o.output".to_string(),
@@ -3162,6 +3325,89 @@ fn build_search_where_clause(
     (format!("{}{}", prefix, extra), params)
 }
 
+/// Upsert every row of an imported `HistoryExport` into `history`
+/// (plus its `command_comments` / `history_output` side tables),
+/// returning `(imported, updated)` counts. Extracted from
+/// `Commands::Import` so the insert-vs-update distinction is
+/// independently testable.
+fn import_history_rows(
+    conn: &Connection,
+    rows: &[HistoryExportRow],
+) -> anyhow::Result<(usize, usize)> {
+    let mut imported = 0usize;
+    let mut updated = 0usize;
+    for row in rows {
+        // `INSERT ... ON CONFLICT DO UPDATE` reports a changed-row
+        // count of 1 for BOTH a fresh insert and a
+        // conflict-triggered update, so the count itself can't
+        // distinguish the two cases. Check for the row's existence
+        // up front instead.
+        use rusqlite::OptionalExtension;
+        let existed = conn
+            .query_row(
+                "SELECT 1 FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+                params![row.command, row.directory, row.session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+
+        // Upsert the history row.
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, exit_code, timestamp, mode) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT (command, directory, session_id) DO UPDATE \
+             SET timestamp = excluded.timestamp, \
+                 exit_code = excluded.exit_code, \
+                 mode = excluded.mode",
+            params![
+                row.command,
+                row.directory,
+                row.session_id,
+                row.exit_code,
+                row.timestamp,
+                row.mode,
+            ],
+        )?;
+
+        if existed {
+            updated += 1;
+        } else {
+            imported += 1;
+        }
+
+        // Store the comment if present.
+        if let Some(ref comment) = row.comment
+            && !comment.is_empty()
+        {
+            conn.execute(
+                "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+                     ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+                params![row.command, comment],
+            )?;
+        }
+
+        // Store the output if present.
+        if let Some(ref output) = row.output
+            && !output.is_empty()
+        {
+            // Get the history id for this row.
+            let history_id: i64 = conn.query_row(
+                "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+                params![row.command, row.directory, row.session_id],
+                |r| r.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
+                     ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, \
+                     captured_at = (strftime('%s', 'now'))",
+                params![history_id, output],
+            )?;
+        }
+    }
+    Ok((imported, updated))
+}
+
 fn init_db() -> anyhow::Result<Connection> {
     let path = get_db_path();
     if let Some(parent) = path.parent() {
@@ -3249,6 +3495,23 @@ fn migrate_history_comment_column(conn: &Connection) -> anyhow::Result<()> {
             exit_code INTEGER,
             timestamp INTEGER DEFAULT (strftime('%s', 'now'))
         )",
+        [],
+    )?;
+    // Recreate the dedup index immediately — before dropping
+    // `history_old` below — so there's no window where the new
+    // `history` table lacks `idx_history_dedup`. `Commands::Add`'s
+    // `INSERT ... ON CONFLICT (command, directory, session_id)`
+    // upsert requires this index to exist; without it, the very
+    // first history write in the same process right after an
+    // upgrade (typically the zsh precmd hook on the next prompt)
+    // fails with "ON CONFLICT clause does not match any…constraint"
+    // and that entry is lost. (`init_db`'s own `CREATE UNIQUE INDEX
+    // IF NOT EXISTS` call runs *before* this migration and so
+    // doesn't cover the index this migration just dropped by
+    // recreating the table.)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_dedup
+         ON history (command, directory, session_id)",
         [],
     )?;
     conn.execute(
@@ -3507,6 +3770,22 @@ fn main() -> anyhow::Result<()> {
                 println!("Aborted.");
                 return Ok(());
             }
+
+            // Delete captured output first (explicit cascade — SQLite
+            // doesn't enforce `ON DELETE CASCADE` unless `PRAGMA
+            // foreign_keys = ON` is issued, which this connection
+            // never does). Without this, a row deleted here can free
+            // up its `id` for reuse (the `history.id` column has no
+            // `AUTOINCREMENT`), and the orphaned `history_output` row
+            // at that same id would resurface as the captured output
+            // of a later, unrelated command — most concerning for the
+            // exact "scrub a command containing a secret" workflow
+            // this subcommand exists for.
+            let output_delete_sql = format!(
+                "DELETE FROM history_output WHERE history_id IN (SELECT id FROM history{})",
+                where_clause
+            );
+            conn.execute(&output_delete_sql, &params_ref[..])?;
 
             let delete_sql = format!("DELETE FROM history{}", where_clause);
             let deleted = conn.execute(&delete_sql, &params_ref[..])?;
@@ -4129,7 +4408,6 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Import { filename } => {
-            let _json = std::fs::read_to_string(&filename)?;
             let json = std::fs::read_to_string(&filename)?;
             let export: HistoryExport = serde_json::from_str(&json)?;
 
@@ -4137,66 +4415,7 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Unsupported export version {}; expected 1", export.version);
             }
 
-            let mut imported = 0usize;
-            let mut updated = 0usize;
-            for row in &export.history {
-                // Upsert the history row.
-                let result = conn.execute(
-                    "INSERT INTO history (command, directory, session_id, exit_code, timestamp, mode) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                     ON CONFLICT (command, directory, session_id) DO UPDATE \
-                     SET timestamp = excluded.timestamp, \
-                         exit_code = excluded.exit_code, \
-                         mode = excluded.mode",
-                    params![
-                        row.command,
-                        row.directory,
-                        row.session_id,
-                        row.exit_code,
-                        row.timestamp,
-                        row.mode,
-                    ],
-                )?;
-
-                if result == 0 {
-                    // ON CONFLICT DO UPDATE returns 0 when the
-                    // conflict triggered an update rather than an
-                    // insert. We detect this by checking if the
-                    // row existed before.
-                    updated += 1;
-                } else {
-                    imported += 1;
-                }
-
-                // Store the comment if present.
-                if let Some(ref comment) = row.comment
-                    && !comment.is_empty()
-                {
-                    conn.execute(
-                        "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
-                             ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
-                        params![row.command, comment],
-                    )?;
-                }
-
-                // Store the output if present.
-                if let Some(ref output) = row.output
-                    && !output.is_empty()
-                {
-                    // Get the history id for this row.
-                    let history_id: i64 = conn.query_row(
-                            "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
-                            params![row.command, row.directory, row.session_id],
-                            |r| r.get(0),
-                        )?;
-                    conn.execute(
-                        "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
-                             ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, \
-                             captured_at = (strftime('%s', 'now'))",
-                        params![history_id, output],
-                    )?;
-                }
-            }
+            let (imported, updated) = import_history_rows(&conn, &export.history)?;
 
             eprintln!(
                 "Imported {} new entries, updated {} existing entries from {}",
@@ -4401,6 +4620,26 @@ fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+                // Cascade the captured output of the row(s) we're
+                // about to collide-delete (SQLite doesn't enforce
+                // `ON DELETE CASCADE` here — see the matching
+                // comment in `Commands::Clean`), otherwise an
+                // orphaned `history_output` row can resurface under
+                // a later, unrelated command that reuses the freed
+                // `id`.
+                if let Err(e) = conn.execute(
+                    "DELETE FROM history_output WHERE history_id IN \
+                     (SELECT id FROM history \
+                      WHERE command = ?1 \
+                        AND directory = ?2 \
+                        AND session_id = ?3 \
+                        AND id != ?4)",
+                    rusqlite::params![cmd, new_dir, sid, id],
+                ) {
+                    eprintln!("warning: failed to clear collision output for id={id}: {e}");
+                    skipped += 1;
+                    continue;
+                }
                 if let Err(e) = conn.execute(
                     "DELETE FROM history \
                      WHERE command = ?1 \
@@ -4491,6 +4730,183 @@ mod tests {
         // sort as the oldest possible entries (9999 months).
         assert_eq!(format_diff(0), "9999M");
         assert_eq!(format_diff(-1), "9999M");
+    }
+
+    /// `qualify_field` must reject any name outside the known
+    /// `history`/`command_comments`/`history_output` columns rather
+    /// than splicing it straight into the SQL text — an unvalidated
+    /// name from `--fields` is a SQL injection primitive (a value
+    /// containing a `--` comment marker could terminate the SELECT
+    /// list and append arbitrary SQL).
+    #[test]
+    fn qualify_field_rejects_unknown_names() {
+        assert_eq!(
+            qualify_field("id FROM history h UNION SELECT sql FROM sqlite_master --"),
+            "h.command"
+        );
+    }
+
+    #[test]
+    fn qualify_field_accepts_known_columns() {
+        assert_eq!(qualify_field("command"), "h.command");
+        assert_eq!(qualify_field("directory"), "h.directory");
+        assert_eq!(qualify_field("session_id"), "h.session_id");
+        assert_eq!(qualify_field("exit_code"), "h.exit_code");
+        assert_eq!(qualify_field("timestamp"), "h.timestamp");
+        assert_eq!(qualify_field("mode"), "h.mode");
+        assert_eq!(qualify_field("id"), "h.id");
+        assert_eq!(qualify_field("comment"), "c.comment");
+        assert_eq!(qualify_field("output"), "o.output");
+    }
+
+    /// `migrate_history_comment_column` rebuilds the `history` table
+    /// (rename-old / create-new / copy / drop-old) for databases
+    /// carrying the legacy per-row `comment` column. The rebuilt
+    /// table must come out of the migration with
+    /// `idx_history_dedup` already in place — otherwise the first
+    /// `INSERT ... ON CONFLICT (command, directory, session_id)`
+    /// upsert issued against it (e.g. by `Commands::Add`, run by the
+    /// zsh precmd hook on the very next prompt) fails because the
+    /// `ON CONFLICT` target constraint doesn't exist yet.
+    #[test]
+    fn migrate_history_comment_column_recreates_dedup_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Build the legacy schema by hand: a `history` table with
+        // the old per-row `comment` column, no dedup index yet.
+        conn.execute(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY,
+                command TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                exit_code INTEGER,
+                timestamp INTEGER,
+                comment TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE command_comments (command TEXT PRIMARY KEY, comment TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, exit_code, timestamp, comment)
+             VALUES ('ls', '/tmp', 'sess-1', 0, 1000, 'a comment')",
+            [],
+        )
+        .unwrap();
+
+        migrate_history_comment_column(&conn).unwrap();
+
+        let has_index: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_dedup'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap();
+        assert!(has_index, "idx_history_dedup must exist after migration");
+
+        // The index existing is necessary but the real regression
+        // test is that the upsert the precmd hook relies on actually
+        // works against the rebuilt table.
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, exit_code, timestamp)
+             VALUES ('ls', '/tmp', 'sess-1', 0, 2000)
+             ON CONFLICT (command, directory, session_id)
+             DO UPDATE SET exit_code = excluded.exit_code, timestamp = excluded.timestamp",
+            [],
+        )
+        .expect("upsert must succeed against the rebuilt table");
+    }
+
+    /// Build the minimal schema `import_history_rows` needs
+    /// (`history` with its dedup index, plus the two side tables).
+    fn import_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY,
+                command TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                exit_code INTEGER,
+                timestamp INTEGER,
+                mode TEXT NOT NULL DEFAULT 'command'
+            );
+            CREATE UNIQUE INDEX idx_history_dedup ON history (command, directory, session_id);
+            CREATE TABLE command_comments (command TEXT PRIMARY KEY, comment TEXT NOT NULL);
+            CREATE TABLE history_output (
+                history_id INTEGER PRIMARY KEY,
+                output TEXT NOT NULL,
+                captured_at INTEGER,
+                FOREIGN KEY (history_id) REFERENCES history(id)
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn export_row(command: &str, directory: &str, session_id: &str) -> HistoryExportRow {
+        HistoryExportRow {
+            id: None,
+            command: command.to_string(),
+            directory: directory.to_string(),
+            session_id: session_id.to_string(),
+            exit_code: 0,
+            timestamp: 1000,
+            mode: "command".to_string(),
+            comment: None,
+            output: None,
+        }
+    }
+
+    /// A fresh row (no existing `(command, directory, session_id)`
+    /// match) must count as imported, not updated.
+    #[test]
+    fn import_history_rows_counts_fresh_rows_as_imported() {
+        let conn = import_test_db();
+        let rows = vec![export_row("ls", "/tmp", "sess-1")];
+        let (imported, updated) = import_history_rows(&conn, &rows).unwrap();
+        assert_eq!((imported, updated), (1, 0));
+    }
+
+    /// Re-importing the same `(command, directory, session_id)` must
+    /// count as updated, not imported — `INSERT ... ON CONFLICT DO
+    /// UPDATE` reports the same changed-row count (1) for both
+    /// cases, so `import_history_rows` must distinguish them via an
+    /// existence check rather than trusting that count.
+    #[test]
+    fn import_history_rows_counts_reimported_rows_as_updated() {
+        let conn = import_test_db();
+        let rows = vec![export_row("ls", "/tmp", "sess-1")];
+        import_history_rows(&conn, &rows).unwrap();
+
+        let (imported, updated) = import_history_rows(&conn, &rows).unwrap();
+        assert_eq!(
+            (imported, updated),
+            (0, 1),
+            "re-importing the same row must report it as updated, not imported"
+        );
+    }
+
+    #[test]
+    fn import_history_rows_mixed_batch_counts_each_correctly() {
+        let conn = import_test_db();
+        import_history_rows(&conn, &[export_row("ls", "/tmp", "sess-1")]).unwrap();
+
+        let (imported, updated) = import_history_rows(
+            &conn,
+            &[
+                export_row("ls", "/tmp", "sess-1"),  // pre-existing -> updated
+                export_row("pwd", "/tmp", "sess-1"), // new -> imported
+            ],
+        )
+        .unwrap();
+        assert_eq!((imported, updated), (1, 1));
     }
 
     #[test]
@@ -5068,5 +5484,97 @@ tmuxpaneoutputdir=~/custom-tmux
             out[0]
         );
         assert_eq!(out[0], "line1\\nline2");
+    }
+
+    /// `Config::theme_for` returns the user-configured
+    /// `theme.<scheme>=` value when set, with a fallback
+    /// to the OTHER scheme's value. The fallback is
+    /// symmetric: a user who only set `theme.dark=dracula`
+    /// gets dracula on a light terminal too. This is the
+    /// "one line, two schemes" opt-in shape — easier to
+    /// write than setting both, and the common case
+    /// (a user who runs the same theme in both their
+    /// light and dark terminals) only needs one entry.
+    #[test]
+    fn theme_for_uses_active_scheme_first() {
+        let mut cfg = Config::default();
+        cfg.theme_light = Some("gruvbox-light".to_string());
+        cfg.theme_dark = Some("dracula".to_string());
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Light),
+            Some("gruvbox-light")
+        );
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Dark),
+            Some("dracula")
+        );
+    }
+
+    /// When only the light slot is set, a dark terminal
+    /// falls back to it (so a user who only set
+    /// `theme.light=catppuccin-latte` gets the same
+    /// theme in both their light AND dark terminals).
+    #[test]
+    fn theme_for_falls_back_to_other_scheme() {
+        let mut cfg = Config::default();
+        cfg.theme_light = Some("catppuccin-latte".to_string());
+        // Dark slot unset; the light value is the fallback.
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Light),
+            Some("catppuccin-latte")
+        );
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Dark),
+            Some("catppuccin-latte")
+        );
+    }
+
+    /// When only the dark slot is set, a light terminal
+    /// falls back to it (the inverse of the previous
+    /// test).
+    #[test]
+    fn theme_for_falls_back_from_dark_to_light() {
+        let mut cfg = Config::default();
+        cfg.theme_dark = Some("nord".to_string());
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Light),
+            Some("nord")
+        );
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Dark),
+            Some("nord")
+        );
+    }
+
+    /// When neither slot is set, `theme_for` returns
+    /// `None` — the TUI loader then falls back to the
+    /// legacy `theme=` line in the session file, then to
+    /// `SelectedTheme::None` (the manual `tuicolor.*`
+    /// palette).
+    #[test]
+    fn theme_for_returns_none_when_unset() {
+        let cfg = Config::default();
+        assert!(cfg.theme_light.is_none());
+        assert!(cfg.theme_dark.is_none());
+        assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Light).is_none());
+        assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Dark).is_none());
+        assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Unknown).is_none());
+    }
+
+    /// `Unknown` scheme behaves the same as `Dark` in
+    /// the fallback chain — the detection couldn't tell
+    /// which scheme the terminal is, so we treat it as
+    /// the historical default (Dark) and look at the
+    /// dark slot first.
+    #[test]
+    fn theme_for_unknown_uses_dark_slot_first() {
+        let mut cfg = Config::default();
+        cfg.theme_light = Some("light-only".to_string());
+        cfg.theme_dark = Some("dark-only".to_string());
+        // Unknown → dark slot wins (the convention).
+        assert_eq!(
+            cfg.theme_for(crate::tui::theme::ColorScheme::Unknown),
+            Some("dark-only")
+        );
     }
 }

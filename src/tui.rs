@@ -45,7 +45,7 @@ pub use theme::{BuiltinTheme, SelectedTheme, ThemePicker, install_palette};
 /// invocation so that the user's mode, query, and duplicate-filter
 /// preferences carry over.
 #[derive(Debug, Default, Clone)]
-struct TuiSession {
+pub(crate) struct TuiSession {
     /// Last used search mode (e.g. "SESS", "DIR", "GLOBAL").
     mode: Option<String>,
     /// Last entered search query.
@@ -205,6 +205,22 @@ impl TuiSession {
             return Self::default();
         };
         Self::load_from(&path)
+    }
+
+    /// Public-for-crate variant of `load()`. Used by
+    /// `App::toggle_color_scheme` to re-read the
+    /// persisted `theme=` line from the session file
+    /// when the user swaps the active color scheme
+    /// mid-session. The session file is normally
+    /// read once at startup; this lets the toggle
+    /// action honour any in-session theme change
+    /// (e.g. the user picked a different theme from
+    /// the picker earlier in the same launch and
+    /// the picker wrote the slug to the session
+    /// file — we want the toggle to pick up the
+    /// most recent value, not the startup value).
+    pub(crate) fn load_or_default() -> Self {
+        Self::load()
     }
 
     /// Load a session from an explicit path. Used by the
@@ -1146,6 +1162,17 @@ pub(crate) struct App {
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
     theme: SelectedTheme,
+    /// The terminal's detected color scheme (light / dark
+    /// / unknown). Stored on the App so the theme picker
+    /// and status bar can show the active scheme and so
+    /// the picker's commit hook knows which
+    /// `theme.<scheme>=` slot to write to. Refreshed at
+    /// startup via `detect_color_scheme()`; never
+    /// changes during a single TUI session (a runtime
+    /// scheme change would require re-querying the
+    /// terminal via OSC 10/11, which is out of scope for
+    /// the env-var-based detection).
+    detected_scheme: crate::tui::theme::ColorScheme,
     /// Active key bindings, resolved from the user's config file.
     /// Defaults match the original hard-coded Ctrl-* shortcuts.
     bindings: KeyBindings,
@@ -1652,10 +1679,12 @@ pub(crate) struct App {
     /// "at the oldest". Session-local — not persisted.
     mode_query_history_index: std::collections::HashMap<char, Option<usize>>,
     /// Cache key for the SQL `fetch()` short-circuit: the
-    /// `(query, mode, exit_filter, match_algorithm)` tuple from
-    /// the last successful fetch. When this matches the
-    /// current state, `refresh()` skips re-querying the DB.
-    last_fetch_key: Option<(String, Mode, ExitFilter, MatchAlgorithm)>,
+    /// `(query, mode, exit_filter, match_algorithm,
+    /// directory_source)` tuple from the last successful fetch.
+    /// When this matches the current state, `refresh()` skips
+    /// re-querying the DB.
+    last_fetch_key:
+        Option<(String, Mode, ExitFilter, MatchAlgorithm, crate::tui::state::DirectorySource)>,
 
     /// Aggregated files-mode state:
     /// debounce timer, in-flight walk
@@ -1752,6 +1781,118 @@ const MODE_NONE: char = '\0';
 /// it straightforward to add a new prefix by extending
 /// `QueryPrefixes` (the function reads the configured
 /// prefixes, not a hard-coded list).
+/// Write a single `theme.<scheme>=<slug>` line to the user's
+/// `~/.config/smarthistory/config` file. Used by
+/// `App::close_theme_picker_commit` when the user picks a
+/// new theme from the in-TUI picker.
+///
+/// Behaviour:
+///
+/// - **Per-scheme**: the line is keyed on `theme.light` or
+///   `theme.dark` depending on the auto-detected terminal
+///   scheme. The OTHER scheme's value is left untouched
+///   (so a user with `theme.light=gruvbox-light
+///   theme.dark=dracula` who picks `catppuccin-latte` on
+///   a light terminal ends up with
+///   `theme.light=catppuccin-latte theme.dark=dracula`).
+///
+/// - **Replace existing line**: if the file already has a
+///   `theme.<scheme>=...` line for this scheme, it is
+///   replaced in place. Other config-file lines (every
+///   `tuicolor.*`, `prefix.*`, `key.*`, etc.) are
+///   preserved verbatim.
+///
+/// - **Empty value = clear**: passing an empty
+///   `new_value` writes `theme.<scheme>=` (the line is
+///   present but the value is empty). The existing
+///   `Config::parse` treats an empty value as `None`
+///   (the slot is cleared), so this effectively
+///   unsets the slot. We keep the line present (rather
+///   than deleting it) so the user's intent is
+///   visible in the config file and a future
+///   `theme.<scheme>=<slug>` line can simply
+///   overwrite it.
+///
+/// - **Atomic write**: the file is written to a
+///   `.tmp` sibling and `rename`d over the original
+///   so a power loss / kill mid-write can't leave a
+///   half-written config (matching the
+///   `write_new_entry_to_config` pattern).
+///
+/// Returns an error string on any I/O failure. Callers
+/// surface the error to the user via the status bar; the
+/// in-memory theme choice still applies for the current
+/// session even if the write fails.
+fn write_theme_to_config(
+    scheme: crate::tui::theme::ColorScheme,
+    new_value: &str,
+) -> Result<(), String> {
+    let config_path = crate::config_path().ok_or_else(|| {
+        "no config file found — set $XDG_CONFIG_HOME/smarthistory/config \
+         or ~/.config/smarthistory/config"
+            .to_string()
+    })?;
+    let contents = std::fs::read_to_string(&config_path).map_err(|e| {
+        format!(
+            "failed to read {}: {}",
+            config_path.display(),
+            e
+        )
+    })?;
+    // Pick the canonical key (`theme.light` /
+    // `theme.dark`). The `Unknown` case is mapped to
+    // `dark` upstream (in the caller) so we don't
+    // need to handle it here.
+    let key = match scheme {
+        crate::tui::theme::ColorScheme::Light => "theme.light",
+        crate::tui::theme::ColorScheme::Dark => "theme.dark",
+        crate::tui::theme::ColorScheme::Unknown => "theme.dark",
+    };
+    // Walk the existing file line by line. We replace
+    // the FIRST occurrence of `theme.<scheme>=` (the
+    // parser allows only one value per scheme, so a
+    // duplicate would be a typo) and accumulate any
+    // remaining lines untouched.
+    let mut new_contents = String::with_capacity(contents.len() + 64);
+    let mut replaced = false;
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if !replaced && trimmed.starts_with(&format!("{}=", key)) {
+            // Replace this line with the new value.
+            new_contents.push_str(&format!("{}={}\n", key, new_value));
+            replaced = true;
+        } else {
+            new_contents.push_str(line);
+            new_contents.push('\n');
+        }
+    }
+    if !replaced {
+        // No existing `theme.<scheme>=` line —
+        // append a new one. Use a blank line
+        // separator if the file has existing
+        // content so the new key is visually
+        // separated.
+        if !new_contents.is_empty() && !new_contents.ends_with("\n\n") {
+            new_contents.push('\n');
+        }
+        new_contents.push_str(&format!("{}={}\n", key, new_value));
+    }
+    // Atomic write — same pattern as
+    // `write_new_entry_to_config`.
+    let tmp_path = config_path.with_extension("tmp");
+    std::fs::write(&tmp_path, new_contents.as_bytes())
+        .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
+    std::fs::rename(&tmp_path, &config_path).map_err(|e| {
+        format!(
+            "failed to rename {} to {}: {}",
+            tmp_path.display(),
+            config_path.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
 fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
     let Some(c) = query.chars().next() else {
         return MODE_NONE;
@@ -3197,19 +3338,107 @@ impl App {
         self.refresh();
     }
 
-    /// Cycle to the next theme. `Ctrl-N` calls this; `Ctrl-P` calls
-    /// `cycle_theme_prev`. Updates the global palette immediately so
-    /// the change is visible on the next frame, and triggers a full
-    /// repaint by marking the terminal as needing a redraw.
-    fn cycle_theme_next(&mut self) {
-        self.theme = self.theme.next();
+    /// Toggle between the active color scheme
+    /// (light / dark) and the OTHER one. The
+    /// "active" scheme is the one auto-detected at
+    /// startup (via `detect_color_scheme()` in
+    /// `src/tui/theme/mod.rs`); the "other" scheme
+    /// is its complement. After toggling, the TUI
+    /// re-resolves the theme from the config file
+    /// (`theme.<scheme>=<slug>` first, then
+    /// `theme.<other-scheme>=<slug>`, then the
+    /// session file's `theme=` line, then
+    /// `SelectedTheme::None`) and re-installs the
+    /// palette so the change is visible on the next
+    /// frame.
+    ///
+    /// Behaviour:
+    ///
+    /// - `Unknown` is mapped to `Dark` for the
+    ///   purpose of the toggle (matches the
+    ///   loader's fallback). The first toggle
+    ///   from `Unknown` always goes to `Light`.
+    /// - The toggle re-reads the config file via
+    ///   `Config::load()` so the just-toggled
+    ///   scheme's `theme.<scheme>=<slug>` value
+    ///   is picked up. A user with
+    ///   `theme.light=catppuccin-latte
+    ///   theme.dark=dracula` on a dark terminal
+    ///   starts with `dracula`; pressing `C-l`
+    ///   swaps the active scheme to `Light`,
+    ///   re-resolves to `catppuccin-latte`, and
+    ///   installs it. Pressing `C-l` again swaps
+    ///   back to `Dark` and re-resolves to
+    ///   `dracula`.
+    /// - A status message confirms the swap so
+    ///   the user always knows which scheme is
+    ///   now active (the status bar also shows
+    ///   the active scheme next to the theme
+    ///   name; both update in lockstep).
+    /// - This does NOT write to the config
+    ///   file. The `theme.<scheme>=<slug>`
+    ///   values are set when the user picks a
+    ///   specific theme from the in-TUI picker
+    ///   (see `App::close_theme_picker_commit`).
+    ///   `ToggleColorScheme` is a faster
+    ///   "swap the active scheme" shortcut for
+    ///   users who already have both schemes
+    ///   configured; the picker is the right
+    ///   tool for picking a new theme.
+    fn toggle_color_scheme(&mut self) {
+        use crate::tui::theme::ColorScheme;
+        // Map `Unknown` to `Dark` for the
+        // comparison so the first toggle from
+        // `Unknown` always goes to `Light` (the
+        // user-facing "I want to see the light
+        // version of my themes" intent). This
+        // matches the loader's `Dark` default.
+        let active = match self.detected_scheme {
+            ColorScheme::Light => ColorScheme::Light,
+            ColorScheme::Dark | ColorScheme::Unknown => {
+                ColorScheme::Dark
+            }
+        };
+        let new_scheme = active.other();
+        self.detected_scheme = new_scheme;
+        // Re-resolve the theme against the new
+        // scheme. The lookup chain is the same as
+        // `run_tui_to_stdout`'s startup path:
+        // `theme.<new>=` first, then
+        // `theme.<other>=` as a fallback, then
+        // the session file's `theme=`, then
+        // `SelectedTheme::None`.
+        let cfg = crate::Config::load();
+        let new_theme = cfg
+            .theme_for(new_scheme)
+            .map(crate::tui::theme::SelectedTheme::from_slug)
+            .or_else(|| {
+                // The session file is the
+                // next-priority hint. The
+                // run_loop saves it on exit
+                // and reloads it on the next
+                // TUI launch — but it's
+                // not loaded at this point in
+                // the run, so we fall back
+                // to the current `self.theme`
+                // (the user's in-memory pick)
+                // if there's no per-scheme
+                // value. This is the same
+                // policy as the startup
+                // loader.
+                crate::tui::TuiSession::load_or_default()
+                    .theme
+                    .as_deref()
+                    .map(crate::tui::theme::SelectedTheme::from_slug)
+            })
+            .unwrap_or(self.theme);
+        self.theme = new_theme;
         install_palette(self.theme);
-    }
-
-    /// Cycle to the previous theme.
-    fn cycle_theme_prev(&mut self) {
-        self.theme = self.theme.prev();
-        install_palette(self.theme);
+        self.set_status_message(format!(
+            "switched to {} scheme (theme: {})",
+            new_scheme.label(),
+            self.theme.display_name()
+        ));
     }
 
     /// Return true if the given text matches the current query:
@@ -4247,6 +4476,7 @@ impl App {
         sort_order: SortOrder,
         query_prefilled: bool,
         theme: SelectedTheme,
+        detected_scheme: crate::tui::theme::ColorScheme,
         bindings: KeyBindings,
         llm: Option<Box<dyn crate::llm::LlmClient>>,
         llm_config: Option<crate::llm::LlmConfig>,
@@ -4311,6 +4541,7 @@ impl App {
             pane_visibility,
             pane_height,
             theme,
+            detected_scheme,
             bindings,
             status_message: None,
             llm,
@@ -4519,16 +4750,24 @@ impl App {
         //
         // The cache key is a simple tuple of everything that
         // affects the SQL result: the query text, the scope
-        // mode, the exit filter, the sort order, and the match
-        // algorithm (Regex/Fuzzy skip the SQL filter, so the
-        // result differs). We don't include the
-        // `duplicate_filter` because that's applied in
-        // `build_merged_rows`, not in `fetch()`.
+        // mode, the exit filter, the match algorithm
+        // (Regex/Fuzzy skip the SQL filter, so the result
+        // differs), and the directory source (read inside
+        // `directories::fetch` — see `src/tui/mode/directories.rs`
+        // — so a change here must also invalidate the cache; an
+        // earlier version omitted it, so cycling the directory
+        // source without touching the query left `self.rows`
+        // pinned to the previous source). We don't include the
+        // `duplicate_filter` or `sort_order` because both are
+        // applied in `build_merged_rows`, not in `fetch()`, and
+        // `build_merged_rows` runs unconditionally on every
+        // `refresh()` call regardless of the cache short-circuit.
         let cache_key = (
             self.query.clone(),
             self.mode,
             self.exit_filter,
             self.match_algorithm,
+            self.directory_source,
         );
         if self.last_fetch_key.as_ref() == Some(&cache_key) {
             // Still need to rebuild the merged rows (the
@@ -4542,12 +4781,7 @@ impl App {
                 self.list_state.select(Some(0));
             }
             // Still need to load the lazy context.
-            crate::tui::mode::tags::ensure_selected_context(self);
-            crate::tui::mode::codegraph::ensure_selected_context(self);
-            crate::tui::mode::notes::ensure_selected_context(self);
-            crate::tui::mode::todo::ensure_selected_context(self);
-            crate::tui::mode::files::ensure_selected_context(self);
-            crate::tui::mode::panes::ensure_selected_context(self);
+            crate::tui::mode::ensure_selected_context(self);
             return;
         }
         // First-time entry into
@@ -4639,26 +4873,11 @@ impl App {
         } else {
             self.list_state.select(Some(0));
         }
-        // Load the source context for the selected tags row
-        // lazily now that the selection is known. Keeping this
-        // out of `fetch_tags` avoids reading every source file
-        // once per symbol when a large TAGS file is loaded.
-        crate::tui::mode::tags::ensure_selected_context(self);
-        // Same lazy load for `&` (codegraph) rows: the row's
-        // `output` carries source context + callers/callees,
-        // loaded only for the row under the cursor.
-        crate::tui::mode::codegraph::ensure_selected_context(self);
-        // Lazy-load the first 50 lines of the selected note
-        // file for `@` (notes) and `!` (todo) modes. Piped
-        // through `bat` for syntax highlighting.
-        crate::tui::mode::notes::ensure_selected_context(self);
-        crate::tui::mode::todo::ensure_selected_context(self);
-        // Lazy-load the first 50 lines of the selected file
-        // for `~` (files) mode. Directory rows are skipped.
-        crate::tui::mode::files::ensure_selected_context(self);
-        // Lazy-load the last 50 visible lines of the
-        // selected herdr pane for `*` (panes) mode.
-        crate::tui::mode::panes::ensure_selected_context(self);
+        // Load the lazy preview context (source lines for
+        // tags/codegraph, note/todo/file previews, herdr pane
+        // output) for whichever mode is active, now that the
+        // selection is known.
+        crate::tui::mode::ensure_selected_context(self);
     }
 
     /// Compute the merged view: primary list + labeled rows
@@ -5026,6 +5245,7 @@ impl App {
             self.mode,
             self.exit_filter,
             self.match_algorithm,
+            self.directory_source,
         ));
         Ok(rows)
     }
@@ -5442,12 +5662,7 @@ impl App {
         // The selected row changed; load its preview context on
         // demand for the active mode without re-fetching the
         // whole list.
-        crate::tui::mode::tags::ensure_selected_context(self);
-        crate::tui::mode::codegraph::ensure_selected_context(self);
-        crate::tui::mode::notes::ensure_selected_context(self);
-        crate::tui::mode::todo::ensure_selected_context(self);
-        crate::tui::mode::files::ensure_selected_context(self);
-        crate::tui::mode::panes::ensure_selected_context(self);
+        crate::tui::mode::ensure_selected_context(self);
     }
 
     fn select_for_run(&mut self) {
@@ -7755,12 +7970,7 @@ impl App {
         // For all lazy-context modes, the selected row's
         // output is populated lazily. Make sure it's loaded
         // before opening the overlay.
-        crate::tui::mode::tags::ensure_selected_context(self);
-        crate::tui::mode::codegraph::ensure_selected_context(self);
-        crate::tui::mode::notes::ensure_selected_context(self);
-        crate::tui::mode::todo::ensure_selected_context(self);
-        crate::tui::mode::files::ensure_selected_context(self);
-        crate::tui::mode::panes::ensure_selected_context(self);
+        crate::tui::mode::ensure_selected_context(self);
         // The show-output overlay has two
         // distinct entry points:
         //
@@ -9941,9 +10151,92 @@ impl App {
 
     /// Commit the currently selected theme and close the picker.
     /// The picker is already applying live updates as the user
-    /// navigates, so on `Enter` we just close the overlay.
+    /// navigates, so on `Enter` we close the overlay AND
+    /// write the chosen theme slug to the config file. The
+    /// write is per-scheme: when the active scheme is
+    /// light, the new slug goes into `theme.light=`; when
+    /// it's dark, the new slug goes into `theme.dark=`.
+    /// The OTHER scheme's value is left untouched (so a
+    /// user with `theme.light=gruvbox-light theme.dark=dracula`
+    /// who opens the picker on a light terminal and picks
+    /// `catppuccin-latte` ends up with
+    /// `theme.light=catppuccin-latte theme.dark=dracula` —
+    /// the dark theme is preserved).
+    ///
+    /// The write is best-effort: a config-write failure
+    /// surfaces as a status message but doesn't block the
+    /// commit (the user's choice still applies for the
+    /// current session via the in-memory `app.theme`; they
+    /// just don't get persistence until they fix the file
+    /// permission and pick again). The legacy single-key
+    /// `theme=` line in the session file is no longer the
+    /// source of truth — the per-scheme config keys are.
     fn close_theme_picker_commit(&mut self) {
+        let chosen = self.theme;
         self.theme_picker = None;
+        // Resolve the active scheme — the picker is
+        // showing the live preview, so the scheme is
+        // whatever the auto-detector returned at startup
+        // (it never changes during a single TUI
+        // session). Fall back to Dark if the field is
+        // somehow unset (defensive — should never happen
+        // because `App::new` always sets it).
+        let scheme = self.detected_scheme;
+        let scheme_label = match scheme {
+            crate::tui::theme::ColorScheme::Light => "light",
+            crate::tui::theme::ColorScheme::Dark => "dark",
+            crate::tui::theme::ColorScheme::Unknown => {
+                // The user is on an
+                // undetectable terminal.
+                // Pick the dark slot
+                // by convention
+                // (matches the
+                // `install_palette`
+                // fallback). The
+                // status message
+                // tells the user
+                // what happened.
+                "dark"
+            }
+        };
+        // Compute the slug to write. `SelectedTheme::None`
+        // is a special case: it means "the manual
+        // `tuicolor.*` palette" and is not a valid value
+        // for `theme.<scheme>=` (which is reserved for
+        // built-in theme slugs). We map it to a sentinel
+        // that effectively unsets the slot — the user
+        // can always set the other scheme to fall back
+        // to the manual palette. In practice the picker
+        // doesn't let the user select `None` via
+        // `Enter` (the `None` row is filtered out of
+        // the live-updated selection), so this branch
+        // is mostly defensive.
+        let new_value = match chosen {
+            SelectedTheme::None => String::new(),
+            SelectedTheme::Builtin(b) => b.slug().to_string(),
+        };
+        if let Err(e) =
+            write_theme_to_config(scheme, &new_value)
+        {
+            self.set_status_message(format!(
+                "theme change not persisted: {} (in-memory change still applies; the file at {} is unchanged)",
+                e,
+                crate::config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+            ));
+        } else if new_value.is_empty() {
+            self.set_status_message(format!(
+                "cleared theme.{} in config (other scheme's value, if any, is preserved)",
+                scheme_label
+            ));
+        } else {
+            self.set_status_message(format!(
+                "wrote theme.{}={} to config (other scheme's value, if any, is preserved)",
+                scheme_label,
+                new_value
+            ));
+        }
     }
 
     fn is_labeled_view(&self) -> bool {
@@ -10360,6 +10653,12 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
         SortOrder::default(),
         false,                 // query_prefilled
         crate::tui::theme::SelectedTheme::None,
+        // The check command runs headless (no TTY,
+        // no theme rendering), so the detected
+        // scheme is irrelevant. We pass `Dark`
+        // (the historical default) just to
+        // satisfy the parameter.
+        crate::tui::theme::ColorScheme::Dark,
         bindings,
         None,                  // llm client
         llm_config,
@@ -10446,15 +10745,64 @@ pub fn run_tui_to_stdout(
     let notes_dir = app_cfg.notes_dir().map(|p| p.to_path_buf());
     let session = TuiSession::load();
     let duplicate_filter = session.duplicate_filter.unwrap_or(app_cfg.duplicate_filter);
-    // Install the user-configured TUI palette (or built-in defaults)
-    // into a thread-local so the draw helpers can read it without
-    // needing it threaded through every signature.
-    let initial_theme = session
-        .theme
-        .as_deref()
+    // Resolve the initial theme. The precedence order is:
+    //
+    //   1. The `theme.<scheme>=<slug>` config value
+    //      for the auto-detected terminal scheme
+    //      (`theme.light=` on a light terminal,
+    //      `theme.dark=` on a dark terminal). The
+    //      scheme is detected from the environment
+    //      via `detect_color_scheme()`. Users with
+    //      a weird setup that doesn't expose a
+    //      signal can set BOTH `theme.light=` and
+    //      `theme.dark=` to opt in explicitly.
+    //   2. Fallback to the OTHER scheme's
+    //      `theme.<other-scheme>=<slug>` value
+    //      (so a user who only set `theme.dark=`
+    //      gets the same theme on a light
+    //      terminal — the existing behaviour).
+    //   3. The legacy `theme=<slug>` line in the
+    //      session file. The session file's
+    //      `theme=` line is unchanged by this
+    //      refactor; it's a "last-used theme"
+    //      hint that the user can rely on for
+    //      quick recovery (e.g. after a config
+    //      edit that wipes the per-scheme
+    //      values).
+    //   4. The default (`SelectedTheme::None`,
+    //      i.e. the manual `tuicolor.*`
+    //      palette). When all of the above are
+    //      unset, the TUI falls back to the
+    //      user's hand-crafted palette (or the
+    //      built-in defaults if the user hasn't
+    //      set any `tuicolor.*` keys).
+    //
+    // The detected scheme is also stored on the
+    // `App` so the theme picker can show it as
+    // a hint ("you're editing the LIGHT slot;
+    // the DARK slot is currently gruvbox-light")
+    // and so the status bar can show "scheme:
+    // light" / "scheme: dark".
+    let detected = crate::tui::theme::detect_color_scheme();
+    let cfg = Config::load();
+    let initial_theme = cfg
+        .theme_for(detected)
         .map(SelectedTheme::from_slug)
+        .or_else(|| {
+            session
+                .theme
+                .as_deref()
+                .map(SelectedTheme::from_slug)
+        })
         .unwrap_or(SelectedTheme::None);
     install_palette(initial_theme);
+    // Remember the detected scheme for the theme
+    // picker and status bar. We also pass the
+    // `Config` by reference into `App::new` so
+    // the picker can re-resolve the OTHER slot's
+    // value (the `theme_dark` value when the user
+    // is editing the `theme_light` slot, and
+    // vice versa).
     // The effective initial mode is decided by precedence:
     //   1. The `initial_mode` argument (already resolved by `main`
     //      from --mode / env / config).
@@ -10521,6 +10869,7 @@ pub fn run_tui_to_stdout(
         initial_sort_order,
         prefilled_query.is_some(),
         initial_theme,
+        detected,
         bindings,
         llm,
         llm_config,
@@ -10817,12 +11166,7 @@ fn run_loop(
         // each draw so the details/output pane never stays
         // empty just because selection changed through a
         // path we didn't instrument explicitly.
-        crate::tui::mode::tags::ensure_selected_context(app);
-        crate::tui::mode::codegraph::ensure_selected_context(app);
-        crate::tui::mode::notes::ensure_selected_context(app);
-        crate::tui::mode::todo::ensure_selected_context(app);
-        crate::tui::mode::files::ensure_selected_context(app);
-        crate::tui::mode::panes::ensure_selected_context(app);
+        crate::tui::mode::ensure_selected_context(app);
         if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
@@ -11304,12 +11648,8 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.toggle_duplicate_filter();
             false
         }
-        Action::CycleThemeNext => {
-            app.cycle_theme_next();
-            false
-        }
-        Action::CycleThemePrev => {
-            app.cycle_theme_prev();
+        Action::ToggleColorScheme => {
+            app.toggle_color_scheme();
             false
         }
         Action::EditComment => {
@@ -13819,3 +14159,218 @@ mod tui_session_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod write_theme_to_config_tests {
+    use super::write_theme_to_config;
+    use crate::tui::theme::ColorScheme;
+    use std::sync::Mutex;
+
+    /// Process-wide mutex that serialises every
+    /// `write_theme_to_config` test. The function
+    /// mutates the process-level `$HOME` env var to
+    /// redirect `config_path()` to a temp file, and
+    /// the parallel test runner would otherwise let
+    /// two tests stomp on each other's env (one
+    /// setting $HOME to /tmp/A while another sets it
+    /// to /tmp/B). The `unsafe` `set_var` calls are
+    /// the load-bearing concern here; serialising
+    /// the test through a single mutex is the
+    /// standard workaround. We use a `std::sync::Mutex`
+    /// (NOT `parking_lot` or similar) to keep the test
+    /// dependency footprint at zero.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: build a config file with the given
+    /// existing contents, run the write, and return
+    /// the resulting file text. Uses a temp file so
+    /// the test doesn't touch the user's real
+    /// config. The `HOME` env var is redirected to a
+    /// temp directory for the duration of the test so
+    /// `config_path()` finds the temp file instead of
+    /// the real one.
+    fn run_with_existing(
+        existing: &str,
+        scheme: ColorScheme,
+        new_value: &str,
+    ) -> String {
+        // Serialise every test that mutates $HOME
+        // through this global lock. The lock is
+        // released on drop (the guard is held for
+        // the lifetime of this function).
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp_home = std::env::temp_dir().join(format!(
+            "smarthistory_theme_write_test_{}_{:?}",
+            std::process::id(),
+            scheme
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_home);
+        std::fs::create_dir_all(&tmp_home).expect("create tmp home");
+        let cfg_dir = tmp_home.join(".config/smarthistory");
+        std::fs::create_dir_all(&cfg_dir).expect("create cfg dir");
+        let cfg_path = cfg_dir.join("config");
+        std::fs::write(&cfg_path, existing).expect("write seed config");
+        // Redirect $HOME so `config_path()` returns our
+        // temp file. We do this by calling the private
+        // path lookup via `crate::config_path()`, which
+        // reads $HOME at call time.
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: this is a single-threaded test
+        // setting an env var for the duration of the
+        // test (serialised by HOME_LOCK above). We
+        // restore the previous value on the way out.
+        // Mutating process-level env is the only
+        // way to influence `config_path()` from here
+        // without refactoring it to take a path
+        // argument.
+        unsafe {
+            std::env::set_var("HOME", &tmp_home);
+        }
+        let result = write_theme_to_config(scheme, new_value);
+        // Restore HOME regardless of the outcome so
+        // parallel tests don't see a polluted env.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let contents = std::fs::read_to_string(&cfg_path)
+            .expect("read back the written config");
+        let _ = std::fs::remove_dir_all(&tmp_home);
+        result.expect("write should succeed for valid input");
+        contents
+    }
+
+    /// Writing a fresh `theme.dark=` line to an empty
+    /// config appends it with a leading newline so the
+    /// new line is visually separated from any future
+    /// prepended comments. The line is `theme.dark=dracula`.
+    #[test]
+    fn writes_new_line_when_no_existing_match() {
+        let result = run_with_existing(
+            "",
+            ColorScheme::Dark,
+            "dracula",
+        );
+        assert!(
+            result.contains("theme.dark=dracula"),
+            "expected `theme.dark=dracula` in result; got:\n{}",
+            result
+        );
+    }
+
+    /// Writing a NEW scheme's line to a config that
+    /// already has the OTHER scheme's line preserves
+    /// the existing line. The classic "user picks a
+    /// light theme on a light terminal" case.
+    #[test]
+    fn other_scheme_value_is_preserved() {
+        let seed = "\
+# existing config
+tuicolor.bg=#1a1a1a
+theme.dark=dracula
+";
+        let result = run_with_existing(
+            seed,
+            ColorScheme::Light,
+            "gruvbox-light",
+        );
+        // The new light value is present.
+        assert!(
+            result.contains("theme.light=gruvbox-light"),
+            "expected new `theme.light=` line; got:\n{}",
+            result
+        );
+        // The existing dark value is preserved.
+        assert!(
+            result.contains("theme.dark=dracula"),
+            "expected existing `theme.dark=dracula` to be preserved; got:\n{}",
+            result
+        );
+        // The unrelated tuicolor value is preserved.
+        assert!(
+            result.contains("tuicolor.bg=#1a1a1a"),
+            "expected unrelated tuicolor.bg to be preserved; got:\n{}",
+            result
+        );
+    }
+
+    /// Writing a scheme's line when the same scheme is
+    /// already set REPLACES the value in place. The
+    /// "user picks a new theme" case.
+    #[test]
+    fn replaces_existing_value_in_place() {
+        let seed = "\
+theme.light=old-light-theme
+theme.dark=dracula
+";
+        let result = run_with_existing(
+            seed,
+            ColorScheme::Light,
+            "new-light-theme",
+        );
+        // The new value is present.
+        assert!(
+            result.contains("theme.light=new-light-theme"),
+            "expected new `theme.light=` value; got:\n{}",
+            result
+        );
+        // The old value is gone.
+        assert!(
+            !result.contains("old-light-theme"),
+            "expected old value to be removed; got:\n{}",
+            result
+        );
+        // The other scheme is preserved.
+        assert!(
+            result.contains("theme.dark=dracula"),
+            "expected dark value to be preserved; got:\n{}",
+            result
+        );
+        // Only one `theme.light=` line (no duplicate).
+        assert_eq!(
+            result.matches("theme.light=").count(),
+            1,
+            "expected exactly one `theme.light=` line; got:\n{}",
+            result
+        );
+    }
+
+    /// Writing an empty value writes `theme.<scheme>=`
+    /// (the line is present but empty), which the
+    /// parser treats as `None` (the slot is cleared).
+    /// The other scheme's value is preserved.
+    #[test]
+    fn empty_value_clears_the_slot() {
+        let seed = "\
+theme.light=catppuccin-latte
+theme.dark=dracula
+";
+        let result = run_with_existing(seed, ColorScheme::Light, "");
+        // The empty light line is present (so the
+        // user's intent — "I want to clear the light
+        // slot" — is visible in the config file).
+        assert!(
+            result.lines()
+                .any(|l| l.trim_start().starts_with("theme.light=")
+                    && l.trim_start() == "theme.light="),
+            "expected empty `theme.light=` line; got:\n{}",
+            result
+        );
+        // The dark value is preserved.
+        assert!(
+            result.contains("theme.dark=dracula"),
+            "expected dark value to be preserved; got:\n{}",
+            result
+        );
+    }
+}
+
+// Suppress the unused-import warning: the test
+// module imports `ColorScheme` and `write_theme_to_config`
+// from the parent module. We do not need any additional
+// types here.
+#[allow(dead_code)]
+fn _no_op_marker() {}

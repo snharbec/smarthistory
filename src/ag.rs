@@ -305,7 +305,17 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             id: next_id,
             command: content.trim_start().to_string(),
             directory: abs_path,
-            session_id: line_num.to_string(),
+            // Store the *parsed* `line_number` (validated as a
+            // `usize`, falling back to `0` on anything malformed),
+            // not the raw `line_num` field from `ag`'s output. A
+            // filename containing an embedded colon (valid on
+            // macOS/Linux) shifts `splitn(3, ':')`'s fields, and
+            // `session_id` is later spliced unquoted into a staged
+            // `$EDITOR +<line> <file>` shell string (see
+            // `stage_editor_open_at_line` in `tui/actions.rs`) — an
+            // unvalidated raw string here would be a command
+            // injection primitive.
+            session_id: line_number.to_string(),
             exit_code: 0,
             timestamp: 0,
             comment: basename,

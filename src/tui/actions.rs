@@ -4,6 +4,24 @@
 
 use super::*;
 
+/// Build a `$EDITOR +<line> <file>` command for staging, validating
+/// `line` as a plain positive integer before splicing it in
+/// unquoted. `+<line>` is the vim/most-editors line-jump syntax and
+/// can't be shell-quoted as a unit without breaking that syntax, so
+/// the numeric check is the only guard — an unvalidated `line`
+/// coming from row data (tags/ag/codegraph rows all carry it in
+/// `session_id`, sourced from ctags fields, `ag` output splitting,
+/// or a DB column) would otherwise be a command-injection primitive
+/// the moment it's `eval`'d by the parent shell. A non-numeric line
+/// still opens the file, just without jumping to a line.
+pub(crate) fn stage_editor_open_at_line(editor: &str, filepath: &str, line: &str) -> String {
+    let quoted_path = crate::util::shell_quote(filepath);
+    match line.parse::<u64>() {
+        Ok(n) => format!("{} +{} {}", editor, n, quoted_path),
+        Err(_) => format!("{} {}", editor, quoted_path),
+    }
+}
+
 impl App {
     pub(crate) fn select_for_run_impl(&mut self) {
         // The active prefix mode drives a flat `match`
@@ -78,10 +96,11 @@ impl App {
                     // The absolute path is in
                     // `row.directory`, the line
                     // number is in `row.session_id`.
-                    let filepath = &row.directory;
-                    let line = &row.session_id;
-                    let quoted = crate::util::shell_quote(filepath);
-                    self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                    self.selection = Some(stage_editor_open_at_line(
+                        &editor,
+                        &row.directory,
+                        &row.session_id,
+                    ));
                     self.pick_mode = Some(PickMode::Run);
                 }
             }
@@ -95,10 +114,11 @@ impl App {
                         .ok()
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "vi".to_string());
-                    let filepath = &row.directory;
-                    let line = &row.session_id;
-                    let quoted = crate::util::shell_quote(filepath);
-                    self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                    self.selection = Some(stage_editor_open_at_line(
+                        &editor,
+                        &row.directory,
+                        &row.session_id,
+                    ));
                     self.pick_mode = Some(PickMode::Run);
                 }
             }
@@ -116,10 +136,11 @@ impl App {
                         .ok()
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "vi".to_string());
-                    let filepath = &row.directory;
-                    let line = &row.session_id;
-                    let quoted = crate::util::shell_quote(filepath);
-                    self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                    self.selection = Some(stage_editor_open_at_line(
+                        &editor,
+                        &row.directory,
+                        &row.session_id,
+                    ));
                     self.pick_mode = Some(PickMode::Run);
                 }
             }

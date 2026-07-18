@@ -248,6 +248,24 @@ pub mod question;
 pub mod tags;
 pub mod todo;
 
+/// Lazy-load the selected row's preview context for every mode that
+/// needs it (tags/codegraph/notes/todo/files/panes). Each mode's own
+/// `ensure_selected_context` bails out immediately via its own
+/// `matches(app)` check, so calling all six unconditionally is cheap
+/// and correct regardless of which mode is active — this is the
+/// single dispatch point every call site should use instead of
+/// re-listing the six calls inline (previously duplicated across
+/// `App::refresh`, `App::move_selection`, `App::show_output_view`,
+/// and `run_loop`).
+pub(crate) fn ensure_selected_context(app: &mut App) {
+    crate::tui::mode::tags::ensure_selected_context(app);
+    crate::tui::mode::codegraph::ensure_selected_context(app);
+    crate::tui::mode::notes::ensure_selected_context(app);
+    crate::tui::mode::todo::ensure_selected_context(app);
+    crate::tui::mode::files::ensure_selected_context(app);
+    crate::tui::mode::panes::ensure_selected_context(app);
+}
+
 /// The colour used to tint the input border / title for a given
 /// prefix mode. The history / no-prefix mode is a `None` (the
 /// caller falls back to its own default). Implemented as a

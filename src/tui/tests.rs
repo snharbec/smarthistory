@@ -650,6 +650,115 @@ fn command_palette_respects_multi_key_cancel_binding() {
     assert!(app.is_command_menu_open());
 }
 
+// -- `handle_key` precedence-chain regression tests --
+//
+// Everything above drives the individual overlay handlers
+// (`handle_command_menu_key`, etc.) directly. That's useful but
+// bypasses the actual `handle_key` entry point — the function that
+// decides WHICH handler gets the key in the first place, via a
+// 9-level modal-precedence chain (command menu > prefix picker >
+// codegraph relations picker > completion menu > theme picker >
+// help overlay > confirm-delete > comment-edit > add-entry-dialog >
+// action dispatch > fallback char insertion). Nothing in the
+// existing suite called `handle_key` itself, so a bug in the
+// precedence ORDER (e.g. a new overlay inserted at the wrong
+// position, or a check accidentally dropped) had no test to catch
+// it. These tests exercise `handle_key` end-to-end for the
+// precedence boundaries that matter most: two overlays open at
+// once (only the higher-precedence one may react), and the
+// fallback paths at the bottom of the chain.
+
+/// When the command menu is open, `handle_key` must route to it
+/// even if a lower-precedence overlay (the help view) also happens
+/// to be open — a state that shouldn't occur in practice, but which
+/// exercises the actual `if`/`else if` order in `handle_key` rather
+/// than assuming it. The user's Cancel key (default `Esc`) must
+/// close only the command menu; the help view must be untouched.
+#[test]
+fn handle_key_command_menu_takes_precedence_over_help_overlay() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_command_menu();
+    app.open_help();
+    assert!(app.is_command_menu_open());
+    assert!(app.is_help_viewing());
+
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    let quit = handle_key(&mut app, esc);
+
+    assert!(!quit);
+    assert!(
+        !app.is_command_menu_open(),
+        "Esc must close the command menu (it has precedence)"
+    );
+    assert!(
+        app.is_help_viewing(),
+        "the help overlay must be untouched — handle_key must not have \
+         reached the help-view branch at all"
+    );
+}
+
+/// While `confirm_delete` is set, `handle_key` must route every key
+/// to `handle_confirm_delete_key` instead of falling through to
+/// action dispatch or the default "type a character into the
+/// query" path. A plain unbound character (`z`) must be swallowed
+/// by the confirmation dialog, not appended to the query.
+#[test]
+fn handle_key_confirm_delete_intercepts_before_fallback_char_insert() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = String::new();
+    app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+
+    let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
+    let quit = handle_key(&mut app, z);
+
+    assert!(!quit);
+    assert_eq!(
+        app.query, "",
+        "an unbound character pressed during a delete confirmation must \
+         not reach the query — the dialog must intercept it first"
+    );
+    assert!(
+        app.confirm_delete.is_some(),
+        "the dialog must stay open ('z' is neither y/n/Cancel)"
+    );
+}
+
+/// With no overlay open, a key bound to an `Action` (the default
+/// Cancel binding, `Esc`) must be dispatched via `dispatch_action`
+/// rather than falling through to character insertion.
+#[test]
+fn handle_key_dispatches_bound_action_when_no_overlay_open() {
+    let mut app = global_test_app(&[("a", 1)]);
+    assert!(!app.is_command_menu_open());
+    assert!(!app.is_help_viewing());
+    assert!(app.confirm_delete.is_none());
+
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    let quit = handle_key(&mut app, esc);
+
+    // `dispatch_action`'s `Action::Cancel` arm (with no LLM request
+    // in flight) sets `app.cancelled` and returns `true` to end the
+    // TUI loop.
+    assert!(quit, "Cancel with no overlay open must end the TUI loop");
+    assert!(app.cancelled);
+}
+
+/// With no overlay open and the key unbound, `handle_key` must fall
+/// through to `push_char` and append the character to the query —
+/// the bottom of the precedence chain.
+#[test]
+fn handle_key_falls_through_to_push_char_when_unbound_and_no_overlay() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = String::new();
+
+    // 'z' is not bound to any action by default.
+    let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
+    let quit = handle_key(&mut app, z);
+
+    assert!(!quit);
+    assert_eq!(app.query, "z");
+}
+
 /// The destructive-confirm
 /// dialog closes on the
 /// user-configured `Cancel`
@@ -979,6 +1088,13 @@ fn stats_test_app(rows: &[(&str, i64)]) -> App {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        // Tests don't care about the
+        // detected scheme; pass Dark
+        // (the historical default) so
+        // any test that reads
+        // `app.detected_scheme()` gets
+        // a deterministic value.
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -1054,6 +1170,7 @@ fn global_test_app(rows: &[(&str, i64)]) -> App {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -1127,6 +1244,7 @@ fn global_test_app_with_dedup_index(rows: &[(&str, i64)]) -> App {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -1371,6 +1489,7 @@ fn cycle_exit_filter_refreshes_rows() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -1991,6 +2110,7 @@ fn selected_row_finds_labeled_only_rows() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -2114,6 +2234,7 @@ fn select_for_run_on_labeled_only_row_stages_command() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -2371,13 +2492,18 @@ fn session_row_in_panes_mode_focuses_existing_herdr_workspace() {
     // happens to be set) and fails in CI
     // (where it isn't) — exactly the same
     // flake as the host-row siblings.
-    // We use the same `ENV_LOCK` mutex
-    // pattern the JIRA tests use for
-    // `JIRA_SERVER` / `JIRA_API_TOKEN`, so a
-    // parallel test that also sets these env
-    // vars doesn't observe a torn state.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // `HERDR_PANE_ID` is process-global and
+    // touched by several sibling tests in this
+    // file, so we must hold the module-level
+    // `ENV_LOCK` (declared once below, shared
+    // by every env-mutating test) rather than a
+    // per-function static — a function-local
+    // `static ENV_LOCK` here would shadow the
+    // shared one and give each test its own
+    // private, non-synchronizing lock, which
+    // defeats the whole point when multiple
+    // tests race on the same env var under the
+    // parallel test runner.
     let _g = lock_or_recover(&ENV_LOCK);
     let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
     // SAFETY: see the set_var
@@ -2640,8 +2766,16 @@ fn host_row_in_panes_mode_stages_herdr_create_and_ssh() {
     // fails in CI (where it isn't). Same pattern as the
     // sibling test `host_row_in_panes_mode_ssh_argv_includes_port_and_identity`
     // — see that test for the full rationale.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    //
+    // `HERDR_PANE_ID` is process-global and touched by
+    // several tests in this file, so this must hold the
+    // shared module-level `ENV_LOCK` (declared once
+    // below) rather than a per-function static — a
+    // function-local `static ENV_LOCK` would shadow the
+    // shared one, giving each test its own private,
+    // non-synchronizing lock and defeating the point
+    // when tests race on the same env var under the
+    // parallel test runner.
     let _g = lock_or_recover(&ENV_LOCK);
     let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
     // SAFETY: no other test in this binary sets
@@ -2803,12 +2937,17 @@ fn host_row_in_panes_mode_ssh_argv_includes_port_and_identity() {
     // Without this guard the test passes on developer
     // machines (where the env var happens to be set) and
     // fails in CI (where it isn't) — exactly the flake the
-    // user reported. We use the same `ENV_LOCK` mutex
-    // pattern the JIRA tests use for `JIRA_SERVER` /
-    // `JIRA_API_TOKEN`, so a parallel test that also sets
-    // these env vars doesn't observe a torn state.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // user reported.
+    //
+    // `HERDR_PANE_ID` is process-global and touched by
+    // several tests in this file, so this must hold the
+    // shared module-level `ENV_LOCK` (declared once
+    // below) rather than a per-function static — a
+    // function-local `static ENV_LOCK` would shadow the
+    // shared one, giving each test its own private,
+    // non-synchronizing lock and defeating the point
+    // when tests race on the same env var under the
+    // parallel test runner.
     let _g = lock_or_recover(&ENV_LOCK);
     let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
     // SAFETY: no other test in this binary sets
@@ -2957,8 +3096,16 @@ fn host_row_in_panes_mode_focuses_existing_herdr_workspace() {
     // machines (where the env var happens to be set) and
     // fails in CI (where it isn't). Same pattern as the
     // sibling host tests.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    //
+    // `HERDR_PANE_ID` is process-global and touched by
+    // several tests in this file, so this must hold the
+    // shared module-level `ENV_LOCK` (declared once
+    // below) rather than a per-function static — a
+    // function-local `static ENV_LOCK` would shadow the
+    // shared one, giving each test its own private,
+    // non-synchronizing lock and defeating the point
+    // when tests race on the same env var under the
+    // parallel test runner.
     let _g = lock_or_recover(&ENV_LOCK);
     let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
     // SAFETY: see the set_var comment in the
@@ -3291,6 +3438,7 @@ fn make_llm_app(query: &str, fake: FakeLlm) -> App {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         Some(Box::new(fake)),
         None,
@@ -3495,6 +3643,7 @@ fn run_llm_query_surfaces_not_configured_when_client_is_none() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None, // <-- the missing LLM config
         None,
@@ -4355,6 +4504,7 @@ fn output_test_app(rows: &[(&str, &str)]) -> App {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -6027,6 +6177,7 @@ fn labeled_only_row_appears_at_end_of_merged_list() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -6143,6 +6294,7 @@ fn labeled_row_already_in_primary_list_is_not_duplicated() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -6268,6 +6420,7 @@ fn labeled_only_row_stays_at_end_even_if_newer() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -6398,6 +6551,7 @@ fn labeled_only_partition_in_frequency_mode() {
         SortOrder::Frequency,
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -8186,6 +8340,7 @@ fn directories_test_app(rows: &[(&str, &str, i64)]) -> App {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -9529,7 +9684,7 @@ fn select_unmarked_directory_quotes_paths_with_spaces() {
     app.select_for_run();
     let staged = app.selection.as_deref().expect("selection must be set");
     assert!(
-        staged.contains(r#"-c "/Users/has spaces/project""#),
+        staged.contains("-c '/Users/has spaces/project'"),
         "path with spaces must be quoted, got: {staged:?}"
     );
 }
@@ -10394,6 +10549,58 @@ fn cycle_directory_source_three_times_wraps_to_all() {
     );
     // Query is just `#` (empty body).
     assert_eq!(app.query, "#");
+}
+
+/// Regression test: `App::refresh()`'s SQL-fetch cache short-circuit
+/// must invalidate when `directory_source` changes, even if the
+/// query text is untouched. `directory_source` is read inside
+/// `directories::fetch`, which only runs on a cache miss — if it's
+/// missing from the cache key, cycling the source (e.g. pressing the
+/// directory-source key twice in a row without editing the query)
+/// leaves `self.rows` — and therefore what's on screen — pinned to
+/// whatever the *previous* source produced.
+#[test]
+fn cycle_directory_source_actually_refetches_rows() {
+    let n = std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let pid = std::process::id();
+    let tmux_path = std::env::temp_dir().join(format!("smarthistory_cache_key_{pid}_{n}"));
+    let _ = std::fs::create_dir_all(&tmux_path);
+    // SQL row and tmux row use different paths so both are visible
+    // (and not deduped against each other) in `All` mode.
+    let mut app = directories_test_app(&[("ls", "/tmp", 60)]);
+    app.tmux_windows.push(TmuxWindowInfo {
+        pane_id: "%7".to_string(),
+        path: tmux_path.to_string_lossy().into_owned(),
+        ..Default::default()
+    });
+    app.directory_source = crate::tui::state::DirectorySource::All;
+    app.query = "#".to_string();
+    app.refresh();
+    assert_eq!(
+        app.merged_rows().len(),
+        2,
+        "All mode must show both the SQL and tmux rows, got: {:?}",
+        app.merged_rows()
+            .iter()
+            .map(|r| (r.directory.clone(), r.source.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // Switch to Tmux-only WITHOUT touching the query text — this is
+    // exactly the state transition the broken cache key missed.
+    app.directory_source = crate::tui::state::DirectorySource::Tmux;
+    app.refresh();
+    assert_eq!(
+        app.merged_rows().len(),
+        1,
+        "Tmux mode must re-fetch and show only the tmux row, got: {:?}",
+        app.merged_rows()
+            .iter()
+            .map(|r| (r.directory.clone(), r.source.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(app.merged_rows()[0].source, "tmux");
+    let _ = std::fs::remove_dir_all(&tmux_path);
 }
 
 /// Switching from a search
@@ -11289,6 +11496,40 @@ ssh_config_parse\t\t10,0\n";
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
+}
+
+/// `stage_editor_open_at_line` is the shared helper behind the
+/// Tags/Ag/Codegraph selection arms. It must validate `line` as a
+/// plain positive integer before splicing it into the staged
+/// `$EDITOR +<line> <file>` string — a raw, unvalidated line field
+/// (e.g. from a colon-containing filename shifting `ag`'s
+/// `file:line:content` split) is a command-injection primitive the
+/// moment the parent shell `eval`s the staged string.
+#[test]
+fn stage_editor_open_at_line_rejects_non_numeric_line() {
+    let staged = crate::tui::actions::stage_editor_open_at_line(
+        "vi",
+        "/tmp/file.rs",
+        "123; touch pwned",
+    );
+    assert!(
+        !staged.contains("touch pwned"),
+        "malicious line field must not survive into the staged command, got: {staged:?}"
+    );
+    assert!(
+        !staged.contains(";"),
+        "no shell metacharacter from the line field should reach the staged command, got: {staged:?}"
+    );
+    // A non-numeric line still opens the file, just without a
+    // `+<line>` jump. `/tmp/file.rs` needs no shell quoting (only
+    // path/alnum characters), so `shell_quote` passes it through.
+    assert_eq!(staged, "vi /tmp/file.rs");
+}
+
+#[test]
+fn stage_editor_open_at_line_accepts_numeric_line() {
+    let staged = crate::tui::actions::stage_editor_open_at_line("vi", "/tmp/file.rs", "42");
+    assert_eq!(staged, "vi +42 /tmp/file.rs");
 }
 
 /// Selecting a pane in `*` mode stages the
@@ -14381,6 +14622,7 @@ fn push_char_in_global_mode_fires_search_immediately() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -14503,6 +14745,7 @@ fn backspace_in_global_mode_fires_search_immediately() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,
@@ -14612,6 +14855,7 @@ fn push_char_then_backspace_to_empty_does_not_re_fetch() {
         SortOrder::default(),
         false,
         SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
         KeyBindings::defaults(),
         None,
         None,

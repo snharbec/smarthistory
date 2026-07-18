@@ -1053,14 +1053,7 @@ impl MultiplexerBackend for TmuxBackend {
             &[std::env::var("HOME").unwrap_or_default()],
         )
         .into_owned();
-        let quoted_path = if path
-            .chars()
-            .any(|c| c.is_whitespace() || "<>|&;\"'$`\\".contains(c))
-        {
-            format!("\"{}\"", path)
-        } else {
-            path
-        };
+        let quoted_path = crate::util::shell_quote(&path);
         // `-d` (detached) +
         // explicit switch-client
         // so the smarthistory
@@ -2158,7 +2151,26 @@ mod tests {
         let cmd = b
             .create_command(std::path::Path::new("/var/tmp/My Work"), "work")
             .unwrap();
-        assert!(cmd.contains("\"/var/tmp/My Work\""), "got: {cmd}");
+        assert!(cmd.contains("'/var/tmp/My Work'"), "got: {cmd}");
+    }
+
+    /// A directory name carrying a shell metacharacter must be
+    /// single-quoted (via `shell_quote`), not double-quoted — POSIX
+    /// double quotes still allow `$(...)`/backtick command
+    /// substitution to run, which would execute arbitrary commands
+    /// the moment the staged `tmux new-session -c ...` string is
+    /// `eval`'d.
+    #[test]
+    fn tmux_backend_neutralizes_command_substitution_in_path() {
+        let b = TmuxBackend;
+        let cmd = b
+            .create_command(std::path::Path::new("/var/tmp/foo$(touch pwned)bar"), "work")
+            .unwrap();
+        assert!(
+            cmd.contains("'/var/tmp/foo$(touch pwned)bar'"),
+            "got: {cmd}"
+        );
+        assert!(!cmd.contains("\"/var/tmp/foo$(touch pwned)bar\""));
     }
 
     #[test]

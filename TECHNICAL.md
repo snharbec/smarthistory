@@ -231,6 +231,8 @@ Supported keys:
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
 | `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `info`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
+| `theme.light=<slug>` | The built-in theme to use when the terminal is detected as LIGHT (light background). `<slug>` is one of the 73 built-in theme slugs (kebab-case, e.g. `gruvbox-light`, `catppuccin-latte`, `leuven`, `rose-pine`). Falls back to `theme.dark=` if unset, then to the legacy `theme=` line in the session file. The TUI auto-detects the scheme from `$COLORFGBG` / `$TERM_PROGRAM` / `$WT_SESSION` (see "Per-scheme theme selection" below). The other scheme's value is preserved when the user picks a new theme from the in-TUI picker. | (no theme — manual `tuicolor.*` palette) |
+| `theme.dark=<slug>` | The built-in theme to use when the terminal is detected as DARK (the historical default). Same slug set as `theme.light`. The other scheme's value is preserved when the user picks a new theme. | (no theme — manual `tuicolor.*` palette) |
 | `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `toggle-pane-height`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`, `smart-open`, `codegraph-relations`, `previous-history`, `next-history`, `yank-selection`, `mark-todo-done`, `llm-describe`, `llm-correct`, `prefix-picker`, `download-jira-issue`, `add-entry`, `cycle-panes-filter`, `toggle-search-mode`, `show-label-help`. The full list with categories and default keys lives in `docs/actions.md`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, `F11`, or a plain character (`g`, `/`, `?`, …). Multiple specs separated by `,` bind the same action to multiple keys. Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
 | `prefix.<mode>=<char>` | The prefix character for a given TUI mode. The full set: `prefix.notes` (default `@`), `prefix.todo` (`!`), `prefix.directories` (`#`), `prefix.panes` (`*`), `prefix.jira` (`-`), `prefix.files` (`~`), `prefix.tags` (`$`), `prefix.codegraph` (`&`), `prefix.ag` (`,`). All other ASCII prefix chars are taken. | mode's default |
 | `files.ignore=<name1 name2 ...>` | Space-separated list of directory *basenames* to skip during the `~` mode walk. Hidden directories (basename starting with `.`) are always skipped. The built-in `DEFAULT_IGNORES` set is also honored (typical build / dependency directories like `node_modules`, `target`, `.git`, `__pycache__`). | (built-in `DEFAULT_IGNORES`) |
@@ -1052,9 +1054,12 @@ The TUI can be themed in one of two ways:
    `material-dark`, `leuven`, `rose-pine`).
 
    The active theme is shown on the right side of the status bar
-   (`theme: <Name>`) and is persisted to
-   `~/.local/cache/smarthistory/session` so the next TUI launch
-   starts on the same theme.
+   (`theme: <Name>`) along with the auto-detected terminal
+   scheme (`· light` / `· dark`); see the next section for
+   how this drives the per-scheme theme selection. The
+   session file `~/.local/cache/smarthistory/session`
+   still records the last-used theme as a "quick recovery"
+   hint for users who haven't set the per-scheme keys.
 
    Built-in themes supply **all** the palette colors — background,
    foreground, selection, badge foreground, and the per-pane
@@ -1063,6 +1068,109 @@ The TUI can be themed in one of two ways:
    `tuicolor.*` settings still override any of those on a
    per-slot basis: for example, `tuicolor.bg=#1a1a1a` forces the
    background dark even on a light theme.
+
+#### Per-scheme theme selection
+
+The TUI auto-detects the terminal's color scheme at startup
+via `detect_color_scheme()` (in `src/tui/theme/mod.rs`),
+which reads the following signals in order — the first
+non-`Unknown` answer wins:
+
+1. **`$COLORFGBG`** — the most reliable signal on Linux /
+   BSD. Set by xterm, rxvt, gnome-terminal, konsole, and
+   most other X11 / Wayland terminals. The format is
+   `COLORFGBG="fg;bg"`; we read the LAST numeric token as
+   the bg ANSI index and treat index ≥ 7 as light (the
+   standard 16-color palette puts bright colors in indices
+   8-15). `COLORFGBG="default;default"` is what newer
+   terminals write when they can't be classified, and we
+   treat that as `Unknown`.
+
+2. **`$TERM_PROGRAM`** — heuristic for terminals that
+   don't set `COLORFGBG`. `iTerm.app` and `WezTerm`
+   default to dark; `Apple_Terminal` defaults to light.
+
+3. **`$WT_SESSION`** — Windows Terminal sets this; its
+   default is dark. We treat its presence as `Dark`
+   rather than `Unknown` because the vast majority of
+   Windows Terminal users run with the default dark
+   theme.
+
+4. **OSC 10 / 11 query** — the cross-platform standard
+   for "what's the terminal's default bg / fg color?".
+   Implemented via the
+   [`terminal-colorsaurus`](https://crates.io/crates/terminal-colorsaurus)
+   crate, which sends `\x1b]11;?\x07` (query bg) and
+   parses the terminal's reply (typically
+   `\x1b]11;rgb:ffff/ffff/ffff\x07` on xterm / iTerm2 /
+   kitty / alacritty / gnome-terminal / wezterm / every
+   other modern terminal). The crate converts the reply
+   to a `Light` / `Dark` classification using a
+   perceived-lightness threshold. Bounded by a 300ms
+   timeout so the user doesn't notice the extra startup
+   latency. This is the answer for the env-var-blind
+   case (e.g. a bare `xterm-256color` shell that sets
+   none of the above). Skipped if stdout isn't a TTY
+   (so piped invocations don't get their output
+   corrupted by the OSC escape sequence) and wrapped in
+   `std::panic::catch_unwind` (so a buggy terminal
+   emitting a malformed OSC reply can't take the whole
+   TUI down).
+
+5. **Fallback**: `Unknown` (the loader treats this as
+   `Dark`, matching the historical smarthistory look).
+
+Once the scheme is detected, the loader picks the active
+theme from the config file in this order:
+
+1. The user-configured `theme.<scheme>=<slug>` for the
+   detected scheme (e.g. `theme.light=gruvbox-light` on a
+   light terminal).
+2. The user-configured `theme.<other-scheme>=<slug>` as a
+   fallback (so a user with only `theme.dark=dracula` gets
+   dracula on a light terminal too).
+3. The legacy `theme=<slug>` line in the session file
+   (the historical "last used theme" hint, kept for
+   backwards compat).
+4. The default (`SelectedTheme::None`, i.e. the manual
+   `tuicolor.*` palette).
+
+The two per-scheme keys are independent. Common shapes:
+
+```ini
+# Opt in to a single theme for both schemes.
+# Light and dark terminals both use dracula.
+theme.dark=dracula
+
+# Use gruvbox-light on light terminals, dracula
+# on dark ones — the typical "I run a different
+# theme per terminal" configuration.
+theme.light=gruvbox-light
+theme.dark=dracula
+
+# Set only one to make the other fall back to it:
+#   theme.light=catppuccin-latte  # used directly on
+#                                  # light terminals,
+#                                  # and as a fallback
+#                                  # on dark ones.
+#   theme.dark=                    # empty value =
+#                                  # cleared; the
+#                                  # loader falls back
+#                                  # to the light slot.
+```
+
+When the user picks a new theme from the in-TUI theme
+picker, the picker writes the chosen slug to the **active
+scheme's** slot in the config file (atomically — see the
+"Atomic write" comment in `write_theme_to_config`). The
+OTHER scheme's value is left untouched, so a user with
+`theme.light=gruvbox-light theme.dark=dracula` who picks
+`catppuccin-latte` on a light terminal ends up with
+`theme.light=catppuccin-latte theme.dark=dracula` — the
+dark theme is preserved. A status message confirms the
+write ("`wrote theme.light=catppuccin-latte to config
+(other scheme's value, if any, is preserved)`") so the
+user always knows which slot they touched.
 
 ### TUI search syntax
 

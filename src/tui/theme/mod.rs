@@ -4,6 +4,7 @@
 use crate::Config;
 use crate::tui::theme::palette_storage::PALETTE;
 use ratatui::style::Color;
+use std::io::IsTerminal;
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum SelectedTheme {
@@ -12,6 +13,286 @@ pub enum SelectedTheme {
     None,
     /// One of the built-in themes.
     Builtin(BuiltinTheme),
+}
+
+/// The terminal's current color scheme. Used by
+/// `detect_color_scheme()` (a best-effort auto-detection that
+/// reads `$COLORFGBG`, `$TERM_PROGRAM`, and `$WT_SESSION`)
+/// and by the `theme.light=` / `theme.dark=` config keys
+/// (which let the user pick a separate built-in theme for
+/// each scheme). The active scheme at startup selects
+/// which of the two `theme.<scheme>=...` values applies.
+///
+/// The default is `Dark`: the historical smarthistory
+/// look, the default of every built-in theme, and the
+/// scheme of the most common modern terminal (wezterm /
+/// kitty / alacritty / gnome-terminal / iTerm2 all
+/// default to dark). Users with a light terminal can
+/// either set `theme.light=<slug>` in the config file
+/// (the loader then picks it up) or the in-TUI theme
+/// picker will write the active scheme's slot on
+/// commit.
+///
+/// `Unknown` is the "we have no idea" case — the
+/// detection function couldn't read any signal, the
+/// user hasn't set either `theme.light` or `theme.dark`,
+/// and there's no `theme=` legacy key. In that case the
+/// loader falls back to the dark default (the same
+/// behaviour `Dark` would produce) and the user can
+/// pick a real theme once the TUI is running.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy, Hash)]
+pub enum ColorScheme {
+    Light,
+    #[default]
+    Dark,
+    /// Detection failed AND the user hasn't set either
+    /// `theme.light` or `theme.dark`. Treated as `Dark`
+    /// at the call site; the variant exists so
+    /// `detect_color_scheme()` can communicate the
+    /// "I don't know" state without conflating it with
+    /// "I know and it's dark".
+    Unknown,
+}
+
+impl ColorScheme {
+    /// The lowercased ASCII label used in the config
+    /// file (`theme.light=...` / `theme.dark=...`) and in
+    /// status messages / theme-picker hints.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorScheme::Light => "light",
+            ColorScheme::Dark => "dark",
+            ColorScheme::Unknown => "unknown",
+        }
+    }
+
+    /// The opposite scheme. Used by the theme picker to
+    /// compute the "this is the OTHER slot's value"
+    /// when the user commits a new theme — we want to
+    /// know the current state of the dark slot while
+    /// the user is editing the light slot, so the
+    /// picker can show "you're about to change
+    /// the LIGHT theme; the DARK theme is currently
+    /// gruvbox-light".
+    pub fn other(self) -> ColorScheme {
+        match self {
+            ColorScheme::Light => ColorScheme::Dark,
+            ColorScheme::Dark => ColorScheme::Light,
+            ColorScheme::Unknown => ColorScheme::Unknown,
+        }
+    }
+}
+
+/// Best-effort detection of the terminal's color
+/// scheme. Returns the most informative answer we can
+/// give. The detection is intentionally conservative:
+/// if we can't tell, return `ColorScheme::Unknown` (the
+/// call site treats that as `Dark` and the user can
+/// pick a real theme from inside the TUI).
+///
+/// Detection order (first non-`Unknown` answer wins):
+///
+/// 1. **`$COLORFGBG`** — the most reliable signal on
+///    Linux / BSD. Set by xterm, rxvt, gnome-terminal,
+///    konsole, and most other X11 / Wayland terminals
+///    to the default fg and bg ANSI indices
+///    (`COLORFGBG="15;0"` = white-on-black = dark;
+///    `COLORFGBG="0;15"` = black-on-white = light;
+///    `COLORFGBG="default;default"` is what newer
+///    terminals write when they can't be classified,
+///    and we treat that as `Unknown`). The indices are
+///    ANSI palette positions, not RGB, so a high bg
+///    index (>= 7) on a light theme typically
+///    corresponds to a bright color. We use the
+///    "is the bg index in the bright half" heuristic
+///    which works for the standard 16-color palette
+///    (bg 0-6 = dark theme, bg 7+ = light theme).
+///
+/// 2. **`$TERM_PROGRAM`** — heuristic for terminals
+///    that don't set `COLORFGBG`. `iTerm.app`,
+///    `Apple_Terminal`, and `WezTerm` are
+///    user-configurable; we don't try to peek at the
+///    user's preference, but the absence of any
+///    signal leaves us at `Unknown` (which is then
+///    treated as `Dark` by the loader). macOS
+///    `Terminal.app` sets `TERM_PROGRAM=Apple_Terminal`
+///    and its default is light, but most users on macOS
+///    running smarthistory have switched to iTerm2 or
+///    WezTerm — the default of `Unknown` is the safe
+///    answer here.
+///
+/// 3. **`$WT_SESSION`** — Windows Terminal sets this
+///    and defaults to dark; we treat its presence as
+///    `Dark` rather than `Unknown` because the vast
+///    majority of Windows Terminal users run with the
+///    default dark theme.
+///
+/// 4. **OSC 10 / 11 query** via the
+///    `terminal-colorsaurus` crate — the cross-platform
+///    standard for "what's the terminal's default
+///    bg / fg color?". We send `\x1b]11;?\x07` (query
+///    bg), read the terminal's reply with a short
+///    timeout (~300ms), and parse the RGB. Supports
+///    xterm, iTerm2, kitty, alacritty, gnome-terminal,
+///    wezterm, and every other modern terminal. This
+///    is the answer for the env-var-blind case (e.g. a
+///    bare `xterm-256color` shell that sets none of
+///    the above). Skipped if stdout isn't a TTY (so
+///    piped invocations don't get their output
+///    corrupted by the OSC escape sequence).
+///
+/// 5. Fallback: `Unknown` (treated as `Dark` by the
+///    loader).
+///
+/// The OSC query is the load-bearing step for users
+/// with a "clean" shell environment (no
+/// `$COLORFGBG`, no `$TERM_PROGRAM`). The env-var
+/// steps run first as a fast first pass — they're
+/// effectively free and answer the question in the
+/// common case (the user runs iTerm2, xterm,
+/// gnome-terminal, or any other terminal that sets
+/// `COLORFGBG` on its own). The OSC query is only
+/// reached when every env-var step returns `None`,
+/// and only when stdout is a TTY.
+///
+/// Note: the OSC query must run BEFORE the terminal
+/// enters raw mode (otherwise the answer would
+/// interfere with the TUI's own input handling). The
+/// call site in `run_tui_to_stdout` honors this: the
+/// detection happens before
+/// `crossterm::terminal::enable_raw_mode`. The query
+/// also adds ~5-300ms of startup latency depending on
+/// the terminal's reply speed; we accept this as a
+/// one-time cost because (a) the user only pays it
+/// once per TUI launch, (b) the OSC query is the only
+/// way to know the actual scheme on a bare
+/// `xterm-256color` shell, and (c) the status-bar
+/// display of the active scheme is worth the wait.
+pub fn detect_color_scheme() -> ColorScheme {
+    // Step 1: COLORFGBG.
+    if let Some(c) = std::env::var("COLORFGBG").ok().and_then(|s| {
+        // The format is "fg;bg" with optional ";"
+        // followed by a terminal-default indicator
+        // we ignore. Split on ';' and take the LAST
+        // numeric token as the bg (some terminals put
+        // extra metadata after).
+        let bg = s
+            .split(';').rfind(|t| !t.is_empty())
+            .and_then(|t| t.parse::<u8>().ok());
+        bg.map(|b| {
+            // Standard 16-color palette: indices
+            // 0-7 are the dark / standard half,
+            // 8-15 are the bright half. Most
+            // terminals on a light background use a
+            // bright (>=7) bg. We pick 7 as the
+            // threshold (the white-on-black case
+            // uses index 0, the black-on-white case
+            // uses index 7 or 15).
+            if b >= 7 {
+                ColorScheme::Light
+            } else {
+                ColorScheme::Dark
+            }
+        })
+    }) {
+        return c;
+    }
+    // Step 2: $TERM_PROGRAM. We treat the well-known
+    // values as informative defaults — iTerm2 is dark
+    // by default, Apple_Terminal is light by default,
+    // WezTerm is dark by default. Users who run these
+    // with non-default colors will end up with the
+    // wrong scheme unless they set `theme.light=...` /
+    // `theme.dark=...` explicitly. That's an
+    // acceptable trade-off — the env-var signal is
+    // already a hint, not a guarantee.
+    if let Ok(p) = std::env::var("TERM_PROGRAM") {
+        match p.as_str() {
+            "iTerm.app" | "WezTerm" => return ColorScheme::Dark,
+            "Apple_Terminal" => return ColorScheme::Light,
+            _ => {}
+        }
+    }
+    // Step 3: Windows Terminal.
+    if std::env::var("WT_SESSION").is_ok() {
+        return ColorScheme::Dark;
+    }
+    // Step 4: OSC 10 / 11 query via
+    // `terminal-colorsaurus`. This is the cross-platform
+    // standard: the terminal replies with the actual
+    // RGB of the default background, and the crate
+    // converts that to a `Light` / `Dark` classification
+    // using a perceived-lightness threshold.
+    //
+    // Skip if stdout isn't a TTY. Two reasons:
+    //
+    // 1. The OSC escape sequence (`\x1b]11;?\x07`)
+    //    would be written to the pipe, corrupting
+    //    whatever downstream consumer is reading
+    //    (a pager, a redirect to a file, etc.). The
+    //    env-var fallbacks already answer the
+    //    detection question for the rare case where
+    //    the user pipes the TUI binary — the TUI
+    //    itself wouldn't render in that case anyway.
+    // 2. The reply comes back over the TTY's input
+    //    side. If stdout is a pipe, the input side
+    //    is whatever the parent shell provides, and
+    //    reading a "reply" from it would deadlock
+    //    (or, if the parent is non-interactive,
+    //    return EOF immediately).
+    //
+    // We also wrap the call in a defensive
+    // `std::panic::catch_unwind` so a buggy terminal
+    // that emits a malformed OSC reply (which has
+    // been known to crash naive parsers) doesn't
+    // take the whole TUI down before it even starts.
+    // A panic is treated like any other failure: we
+    // fall through to `Unknown` and the user can
+    // pick a theme from inside the TUI.
+    if std::io::stdout().is_terminal() {
+        // The `use` is at the function scope (not
+        // inside the `catch_unwind` closure) so
+        // `ThemeMode` is visible to the
+        // pattern-matches below the call. The
+        // closure captures by value, so there's
+        // no lifetime concern.
+        use terminal_colorsaurus::{
+            theme_mode, QueryOptions, ThemeMode,
+        };
+        let result = std::panic::catch_unwind(|| {
+            // 300ms is enough for any reasonable
+            // terminal (most reply in <50ms) and short
+            // enough that the user doesn't notice the
+            // extra startup latency. SSH connections
+            // over high-latency links might need more,
+            // but those users are already paying
+            // hundreds of ms of startup cost; the
+            // 300ms cap is a UX budget, not a
+            // correctness limit.
+            //
+            // `QueryOptions` is `#[non_exhaustive]`
+            // upstream (so future versions can add
+            // new options without a SemVer break), so
+            // we MUST use the `Default` impl and patch
+            // the one field we care about. We can't
+            // construct it with a struct literal.
+            let mut options = QueryOptions::default();
+            options.timeout = std::time::Duration::from_millis(300);
+            theme_mode(options).ok()
+        });
+        if let Ok(Some(ThemeMode::Light)) = result {
+            return ColorScheme::Light;
+        }
+        if let Ok(Some(ThemeMode::Dark)) = result {
+            return ColorScheme::Dark;
+        }
+        // `Ok(None)` (terminal-colorsaurus couldn't
+        // classify) and `Err(_)` (timeout / parse
+        // failure) both fall through to `Unknown`.
+        // `Err` and panics are not fatal — the OSC
+        // query is best-effort.
+    }
+    ColorScheme::Unknown
 }
 
 /// Every built-in theme smarthistory knows about. The upstream
@@ -506,24 +787,9 @@ impl SelectedTheme {
         }
     }
 
-    /// Cycle to the next theme in the list, wrapping around. The
-    /// order is `None` (manual) followed by every theme in
-    /// `BuiltinTheme::all()` (upstream first, then curated).
-    pub fn next(self) -> Self {
-        let themes = Self::ordered_list();
-        let pos = themes.iter().position(|t| *t == self).unwrap_or(0);
-        themes[(pos + 1) % themes.len()]
-    }
-
-    /// Cycle to the previous theme.
-    pub fn prev(self) -> Self {
-        let themes = Self::ordered_list();
-        let pos = themes.iter().position(|t| *t == self).unwrap_or(0);
-        themes[(pos + themes.len() - 1) % themes.len()]
-    }
-
     /// The full ordered list: `None` first, then every entry in
     /// `BuiltinTheme::all()` in canonical order.
+    #[allow(dead_code)] // convention API; the theme picker rolls its own filter
     fn ordered_list() -> Vec<SelectedTheme> {
         let mut themes: Vec<SelectedTheme> = Vec::with_capacity(BuiltinTheme::all().len() + 1);
         themes.push(SelectedTheme::None);
@@ -892,3 +1158,177 @@ mod styles;
 
 pub use picker::ThemePicker;
 pub use styles::Theme;
+
+#[cfg(test)]
+mod scheme_tests {
+    use super::{ColorScheme, detect_color_scheme};
+    use std::sync::Mutex;
+
+    /// Process-wide mutex that serialises every
+    /// `detect_color_scheme()` test that mutates
+    /// env vars. The function reads several
+    /// process-level env vars (`$COLORFGBG`,
+    /// `$TERM_PROGRAM`, `$WT_SESSION`) and the OSC
+    /// step (in real terminals) reads from the TTY;
+    /// the parallel test runner would otherwise let
+    /// two tests stomp on each other's env.
+    /// `std::sync::Mutex` keeps the test dependency
+    /// footprint at zero.
+    static DETECTION_LOCK: Mutex<()> = Mutex::new(());
+
+    /// `ColorScheme::other()` returns the opposite
+    /// scheme. Used by the theme picker to compute
+    /// "the OTHER slot's value" when displaying the
+    /// active scheme's slot — so the picker can show
+    /// "you're about to change the LIGHT theme; the
+    /// DARK theme is currently gruvbox-light".
+    #[test]
+    fn other_returns_dark_for_light_and_vice_versa() {
+        assert_eq!(ColorScheme::Light.other(), ColorScheme::Dark);
+        assert_eq!(ColorScheme::Dark.other(), ColorScheme::Light);
+    }
+
+    /// `Unknown.other()` is itself — there is no
+    /// "other" scheme when we couldn't detect either
+    /// one. The caller falls back to `Dark` upstream.
+    #[test]
+    fn unknown_other_is_unknown() {
+        assert_eq!(ColorScheme::Unknown.other(), ColorScheme::Unknown);
+    }
+
+    /// `ColorScheme::label()` returns the lowercased
+    /// ASCII label used in config-file keys
+    /// (`theme.light` / `theme.dark`), status
+    /// messages, and the theme picker. This is the
+    /// single source of truth for the wire format.
+    #[test]
+    fn label_matches_config_key() {
+        assert_eq!(ColorScheme::Light.label(), "light");
+        assert_eq!(ColorScheme::Dark.label(), "dark");
+        assert_eq!(ColorScheme::Unknown.label(), "unknown");
+    }
+
+    /// The default scheme is `Dark` (the historical
+    /// smarthistory look, the most common modern
+    /// terminal default). The test pins the default so
+    /// a future refactor doesn't accidentally flip it
+    /// to `Light` (which would surprise every dark-
+    /// terminal user on first run).
+    #[test]
+    fn default_is_dark() {
+        assert_eq!(ColorScheme::default(), ColorScheme::Dark);
+    }
+
+    /// `detect_color_scheme()` returns `Dark` when
+    /// `$COLORFGBG` has a small bg index (standard
+    /// 16-color palette: indices 0-6 = dark half,
+    /// 7+ = bright half). This is the historical
+    /// dark-terminal case (`COLORFGBG="15;0"` =
+    /// white-on-black). The test is hermetic — it
+    /// sets `$COLORFGBG` to a known value and
+    /// expects the documented behaviour, regardless
+    /// of the OSC step's outcome (the env-var step
+    /// runs first and short-circuits before the OSC
+    /// call, so we don't need a real terminal).
+    #[test]
+    fn colorfgbg_dark_index_returns_dark() {
+        // Serialise with the other env-mutating
+        // tests in this module (see DETECTION_LOCK
+        // doc comment). The lock is released on
+        // drop.
+        let _guard = DETECTION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The env var is process-wide, so we set it
+        // for the duration of the test.
+        // SAFETY: process-level env mutation,
+        // serialised by DETECTION_LOCK above.
+        let prev = std::env::var("COLORFGBG").ok();
+        unsafe {
+            std::env::set_var("COLORFGBG", "15;0");
+        }
+        let scheme = detect_color_scheme();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("COLORFGBG", v),
+                None => std::env::remove_var("COLORFGBG"),
+            }
+        }
+        assert_eq!(
+            scheme,
+            ColorScheme::Dark,
+            "expected Dark for `COLORFGBG=15;0`"
+        );
+    }
+
+    /// The bright-half heuristic: a `COLORFGBG`
+    /// value with bg index >= 7 (the bright half
+    /// of the standard 16-color palette) returns
+    /// `Light`. The black-on-white case is
+    /// `COLORFGBG="0;15"`; the white-on-white case
+    /// is `COLORFGBG="15;15"`. Both should classify
+    /// as `Light`.
+    #[test]
+    fn colorfgbg_bright_index_returns_light() {
+        let _guard = DETECTION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("COLORFGBG").ok();
+        unsafe {
+            std::env::set_var("COLORFGBG", "0;15");
+        }
+        let scheme = detect_color_scheme();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("COLORFGBG", v),
+                None => std::env::remove_var("COLORFGBG"),
+            }
+        }
+        assert_eq!(
+            scheme,
+            ColorScheme::Light,
+            "expected Light for `COLORFGBG=0;15`"
+        );
+    }
+
+    /// `COLORFGBG="default;default"` is what newer
+    /// terminals write when they can't be
+    /// classified. We treat the non-numeric
+    /// tokens as `Unknown` (the env-var step
+    /// returns `None` and the function falls
+    /// through to the OSC step). In a non-TTY test
+    /// environment the OSC step is skipped, so the
+    /// overall result is `Unknown`. This test
+    /// pins that behaviour so a future refactor
+    /// doesn't accidentally classify "default" as
+    /// a numeric index.
+    #[test]
+    fn colorfgbg_default_default_returns_unknown_or_dark() {
+        let _guard = DETECTION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("COLORFGBG").ok();
+        unsafe {
+            std::env::set_var("COLORFGBG", "default;default");
+        }
+        let scheme = detect_color_scheme();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("COLORFGBG", v),
+                None => std::env::remove_var("COLORFGBG"),
+            }
+        }
+        // The env-var step returns `None` (the
+        // "default" token doesn't parse as a u8),
+        // the OSC step is skipped in non-TTY test
+        // environments, so the result is
+        // `Unknown`. In a real TTY the OSC step
+        // would answer the question, but we
+        // can't test that path here.
+        assert_eq!(
+            scheme,
+            ColorScheme::Unknown,
+            "expected Unknown for `COLORFGBG=default;default` in a non-TTY env"
+        );
+    }
+}

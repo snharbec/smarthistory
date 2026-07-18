@@ -14,10 +14,29 @@ pub enum Action {
     CycleMode,
     /// Toggle the duplicate filter.
     ToggleDuplicateFilter,
-    /// Cycle to the next theme.
-    CycleThemeNext,
-    /// Cycle to the previous theme.
-    CycleThemePrev,
+    /// Toggle between the active color scheme
+    /// (light / dark) and the OTHER one. The
+    /// "active" scheme is the one auto-detected at
+    /// startup (via `detect_color_scheme()` in
+    /// `src/tui/theme/mod.rs`); the "other" scheme
+    /// is its complement. After toggling, the TUI
+    /// re-resolves the theme from the config file
+    /// (`theme.<scheme>=<slug>` first, then
+    /// `theme.<other-scheme>=<slug>`, then the
+    /// session file's `theme=` line, then
+    /// `SelectedTheme::None`) and re-installs the
+    /// palette so the change is visible on the
+    /// next frame. A status message confirms the
+    /// new active scheme. This is a much faster
+    /// way to switch themes than the theme picker
+    /// (which scrolls a list of 73 themes) and is
+    /// the right key for users who only ever
+    /// toggle between two specific themes (e.g.
+    /// `theme.light=catppuccin-latte
+    /// theme.dark=dracula` — pressing `C-l` once
+    /// swaps from dracula to catppuccin-latte and
+    /// vice versa, no list navigation needed).
+    ToggleColorScheme,
     /// Start editing the comment of the selected entry.
     EditComment,
     /// Open the captured-output view.
@@ -532,8 +551,7 @@ impl Action {
             Action::Cancel => "cancel",
             Action::CycleMode => "cycle-mode",
             Action::ToggleDuplicateFilter => "toggle-duplicate-filter",
-            Action::CycleThemeNext => "cycle-theme-next",
-            Action::CycleThemePrev => "cycle-theme-prev",
+            Action::ToggleColorScheme => "toggle-color-scheme",
             Action::EditComment => "edit-comment",
             Action::ShowOutput => "show-output",
             Action::YankSelection => "yank-selection",
@@ -587,8 +605,7 @@ impl Action {
             Action::Cancel => "Cancel",
             Action::CycleMode => "Cycle scope",
             Action::ToggleDuplicateFilter => "Toggle dedup",
-            Action::CycleThemeNext => "Next theme",
-            Action::CycleThemePrev => "Previous theme",
+            Action::ToggleColorScheme => "Toggle color scheme",
             Action::EditComment => "Edit comment",
             Action::ShowOutput => "Show output",
             Action::YankSelection => "Yank selection",
@@ -664,7 +681,7 @@ impl Action {
             | Action::ToggleSearchMode
             | Action::PickPrefix => "search",
             Action::MarkTodoDone => "todo",
-            Action::CycleThemeNext | Action::CycleThemePrev => "theme",
+            Action::ToggleColorScheme => "theme",
             Action::EditComment
             | Action::ShowOutput
             | Action::OpenHelp
@@ -736,17 +753,21 @@ impl Action {
             Action::Cancel => "C-c",
             Action::CycleMode => "C-g",
             Action::ToggleDuplicateFilter => "none",
-            // C-n / C-p were previously the defaults for
-            // CycleThemeNext / CycleThemePrev. They're now
-            // claimed by NextHistory / PreviousHistory (the
-            // per-mode query-history recall) so theme cycling
-            // ships unbound by default. Users who want keyboard
-            // theme cycling can rebind via
-            // `key.cycle-theme-next=...` / `key.cycle-theme-prev=...`
-            // (e.g. `M-n` / `M-p` are free and a natural
-            // mnemonic for "next / previous").
-            Action::CycleThemeNext => "none",
-            Action::CycleThemePrev => "none",
+            // `C-l` (ASCII 0x0C, form feed) is a free
+            // key and a natural mnemonic for "Light
+            // mode" (it's also the conventional
+            // readline/vim shortcut for redraw — the
+            // TUI doesn't need that, so we reclaim it
+            // for the color-scheme toggle). The action
+            // swaps the active scheme (Light ↔ Dark) and
+            // re-resolves the theme from the config file
+            // so the change is visible on the next
+            // frame; see `App::toggle_color_scheme`
+            // in `src/tui.rs`. Users who prefer a
+            // different key can rebind via
+            // `key.toggle-color-scheme=<spec>` (e.g.
+            // `M-t` is a popular alternative).
+            Action::ToggleColorScheme => "C-l",
             Action::EditComment => "C-e",
             Action::ShowOutput => "C-o",
             Action::YankSelection => "C-y",
@@ -1168,8 +1189,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::Cancel,
     Action::CycleMode,
     Action::ToggleDuplicateFilter,
-    Action::CycleThemeNext,
-    Action::CycleThemePrev,
+    Action::ToggleColorScheme,
     Action::EditComment,
     Action::ShowOutput,
     Action::YankSelection,
