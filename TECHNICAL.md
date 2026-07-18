@@ -4,6 +4,13 @@ A custom ZSH history navigation system, implemented as a fast Rust CLI tool
 with SQLite backend. Replaces atuin and fzf for users who want a more
 predictable history walk at the line editor.
 
+> Per-mode and per-action documentation lives in [`docs/`](docs/) (one
+> Markdown file per TUI mode under [`docs/modes/`](docs/modes/) plus
+> a complete actions reference in [`docs/actions.md`](docs/actions.md)
+> and a multiplexer setup guide in [`docs/multiplexer.md`](docs/multiplexer.md)).
+> This file is the high-level overview; the `docs/` tree is the
+> in-depth reference.
+
 ## Why Smart History?
 
 Existing tools like `atuin` often interleave shell history in ways that don't
@@ -53,7 +60,15 @@ match standard workflow expectations. This project aims to provide:
   own query syntax). The fuzzy algorithm is fzf-style —
   every character of the query must appear in the row
   in order, case-insensitive, so `gsc` finds
-  `git status --short && cargo build`.
+  `git status --short && cargo build`. In addition
+  to the four `F3`-cycled "search shape" modes, the TUI
+  has nine prefix-only modes that switch data sources
+  on a single keystroke: notes (`@`), todos (`!`),
+  directories (`#`), panes (`*`), JIRA (`-`), files
+  (`~`), tags (`$`, with a CodeGraph fallback when no
+  `TAGS` file is found), CodeGraph (`&`), and `ag`
+  (`,`). See the per-mode docs in `docs/modes/` (one
+  Markdown file per mode) for the full mechanics of each.
 - **Two sort orders, persisted across invocations:** the
   default sorts by age (newest first — the historical
   behavior). Pressing `F4` switches to sort by command
@@ -165,6 +180,18 @@ match standard workflow expectations. This project aims to provide:
   `prefix.todo=...`.
 - **Debug logging:** `SMARTHISTORY_DEBUG=1` enables per-press logging of
   cache decisions to `~/.local/cache/smarthistory/widget-debug.log`.
+- **`smarthistory check [--prefix <char>]`:** a
+  diagnostic CLI subcommand that walks every mode's
+  external dependencies and reports a structured
+  `ok` / `warn` / `err` table. Use it to verify a
+  first-run install (does the SQLite DB open? are
+  `JIRA_SERVER` and `JIRA_API_TOKEN` set? is `ag` on
+  `$PATH`? is `.codegraph/codegraph.db` present and
+  populated?) or to debug a specific mode (`smarthistory
+  check --prefix -` runs only the JIRA check). Exit
+  codes: 0 = all ok, 1 = warnings only, 2 = at least
+  one error. See the "Code structure → `smarthistory
+  check`" section below for sample output.
 - **Atuin import** for users migrating from atuin.
 
 ## Installation
@@ -204,13 +231,15 @@ Supported keys:
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override. For example `capturelines.ps=ALL` captures the full output of `ps` regardless of the default limit. | inherits `capturelines` |
 | `initialmode=SESS\|DIR\|GLOBAL` | Initial search scope for the TUI when neither `--mode` nor `$SMARTHISTORY_TUI_MODE` is set. | `SESS` |
 | `tuicolor.<field>=<color>` | Override a TUI palette color. `<field>` is one of `bg`, `fg`, `accent`, `success`, `error`, `warning`, `dim`, `highlight`, `info`, `selection`, `badgefg`, `listbg`, `detailsbg`, `inputbg`, `statusbg`. `<color>` is a CSS named color (`red`, `cyan`, …), a 16-color terminal name (`lightblue`, `darkgray`, …), or a hex string (`#rrggbb` / `0xrrggbb`). | (built-in default) |
-| `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, or a plain character (`g`, `/`, `?`, …). Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
+| `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `toggle-pane-height`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`, `smart-open`, `codegraph-relations`, `previous-history`, `next-history`, `yank-selection`, `mark-todo-done`, `llm-describe`, `llm-correct`, `prefix-picker`, `download-jira-issue`, `add-entry`, `cycle-panes-filter`, `toggle-search-mode`, `show-label-help`. The full list with categories and default keys lives in `docs/actions.md`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, `F11`, or a plain character (`g`, `/`, `?`, …). Multiple specs separated by `,` bind the same action to multiple keys. Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
+| `prefix.<mode>=<char>` | The prefix character for a given TUI mode. The full set: `prefix.notes` (default `@`), `prefix.todo` (`!`), `prefix.directories` (`#`), `prefix.panes` (`*`), `prefix.jira` (`-`), `prefix.files` (`~`), `prefix.tags` (`$`), `prefix.codegraph` (`&`), `prefix.ag` (`,`). All other ASCII prefix chars are taken. | mode's default |
+| `files.ignore=<name1 name2 ...>` | Space-separated list of directory *basenames* to skip during the `~` mode walk. Hidden directories (basename starting with `.`) are always skipped. The built-in `DEFAULT_IGNORES` set is also honored (typical build / dependency directories like `node_modules`, `target`, `.git`, `__pycache__`). | (built-in `DEFAULT_IGNORES`) |
+| `smart-open.default=<cmd>` | The default command to stage when the `~` mode's `Ctrl-]` SmartOpen action fires on a file with no per-extension override. Use the literal `$FILE` placeholder to substitute the file path; the default `$EDITOR $FILE` works for most users. | `$EDITOR $FILE` |
+| `smart-open.<ext>=<cmd>` | Per-extension SmartOpen command. `<ext>` is the lowercase file extension (without the dot). Use `$FILE` for the file path. Selecting a `.pdf` row in `~` mode and pressing `Ctrl-]` runs the configured `smart-open.pdf=...` command; selecting a `.py` row and pressing `Ctrl-]` runs `smart-open.py=...`. The `smart-open.default` value is used when no per-extension entry matches. | inherits `smart-open.default` |
 | `ollama.url=http://host:port` | URL of a local ollama instance used by the LLM command-generation mode (the `=...` query prefix in the TUI). Must be paired with `ollama.model`. | (feature disabled) |
 | `ollama.model=<name>` | ollama model name to use, e.g. `llama3.2`, `qwen2.5-coder`, `codellama`. Must be paired with `ollama.url`. The model must already be pulled (`ollama pull <name>`). | (feature disabled) |
 | `notes.database=~/path` | Path to a [note_search](https://github.com/snharbec/note_search) SQLite database. When set, the `@` prefix searches notes instead of shell history. Can also be set via the `NOTE_SEARCH_DATABASE` environment variable. | (feature disabled) |
 | `notes.dir=~/path` | Path to the directory containing note files. Used to read note content for the preview pane and to resolve filenames when opening a note in the editor. Can also be set via the `NOTE_SEARCH_DIR` environment variable. | (feature disabled) |
-| `prefix.notes=@` | Prefix character for note search mode. Change this if `@` conflicts with other key bindings. | `@` |
-| `prefix.todo=!` | Prefix character for the todo-search mode. Change this if `!` conflicts with other key bindings. | `!` |
 | `todo.line_option=+$LINE` | Template for the line-number option appended to the editor command when a todo line is selected. The literal `$LINE` is substituted with the 1-based line number. Default `+$LINE` works with `vim`, `nano`, `emacs -nw`, and most POSIX editors. Examples: `+LINE:$LINE`, `:$LINE`. | `+$LINE` |
 | `jira.search.<name>=<jql>` | Define a named JQL fragment for the `-`-mode TUI search. `<name>` is a `\w+` identifier (reserved names `me`, `today`, `week`, `month` are dropped with a warning). The fragment is invoked in the body as `@<name>` and spliced verbatim into the generated JQL, wrapped in parens to preserve any internal `AND`/`OR`. See the "User-defined JQL fragments" section under JIRA mode below. | (no fragments) |
 | `multiplexer=tmux\|herdr` | Which terminal multiplexer the directory-switching (`#` mode) and panes-switching (`*` mode) flows target. The tmux backend is always available; the herdr backend is compiled in by default and can be excluded with `--no-default-features` at build time. See the "Multiplexer backend" section below. | `tmux` |
@@ -331,6 +360,182 @@ The zsh precmd hook calls `smarthistory config get
 tmuxpaneoutputdir` to discover the tmux log directory, so changing
 `tmuxpaneoutputdir` in the config file requires no further action.
 
+## Code structure
+
+The repository is split between a CLI entry point (`src/main.rs`,
+~5000 lines) and a TUI module (`src/tui/`, ~13,000 production lines
+
+- ~17,900 lines of inline tests in `src/tui/tests.rs`). The TUI is
+organised by *concern*, not by mode, with each prefix-mode owning
+its own file in `src/tui/mode/`.
+
+### Top-level layout
+
+| File | Responsibility |
+| --- | --- |
+| `src/main.rs` | CLI entry point. Parses `Commands::Tui` / `Search` / `Clean` / `Init` / `Config` / `Check` / `Import`, builds the `Config`, dispatches to the right runner. |
+| `src/ag.rs` | Streaming `ag` wrapper: spawns `ag`, parses match lines, feeds them into the TUI list via the `AgState` channel. |
+| `src/codegraph.rs` | Read-only client over the local `.codegraph/codegraph.db` FTS5 index. Symbol search, callers, callees, node-by-id. |
+| `src/files.rs` | Files-mode walker + `FilesState` background channel. The walker ignores hidden entries and user-configured `files.ignore=` patterns. |
+| `src/highlight.rs` | `bat` wrappers for syntax highlighting: `highlight_with_bat` (explicit language) and `highlight_with_bat_auto` (auto-detect from `--file-name`). |
+| `src/jira.rs` | JIRA REST v2 client + JQL builder + fragment splice. The `JiraClient` is constructed lazily on first `-` keystroke; the `JIRA_SERVER` / `JIRA_API_TOKEN` env vars are read at that point. |
+| `src/llm.rs` | `ollama` HTTP client. The `LlmClient` trait abstracts the `generate` / `chat` endpoints. `LlmConfig` is the resolved (url, model) pair. |
+| `src/multiplexer.rs` | The `MultiplexerBackend` trait (snapshot, focus, create, send-in-pane, read-pane) and two implementations: `TmuxBackend` (always available) and `HerdrBackend` (feature-gated on `herdr`, enabled by default). |
+| `src/util.rs` | Path canonicalisation, home-prefix matching, shell quoting, `~`-expansion, time-ago formatting. |
+| `src/init.zsh` | The zsh widget source emitted by `smarthistory init zsh`. ~1000 lines of zsh for the line-editor Up/Down traversal, mode cycle, hook setup, and `SMARTHISTORY_DEBUG` plumbing. |
+
+### TUI layout
+
+| File | Responsibility |
+| --- | --- |
+| `src/tui.rs` | The TUI's `App` struct (`src/tui.rs` was 33,537 lines; 17,880 lines of tests were extracted to `src/tui/tests.rs` and the mode-specific methods were moved to per-mode modules — it now sits at ~13,000 lines). Owns the run loop, key dispatch, debounce timers, SQL fetch, and the `refresh()` orchestration. |
+| `src/tui/actions.rs` | All 48 TUI actions. Each `Action` variant has a default key binding (in `src/tui/bindings.rs`), a category (`navigation` / `edit` / `mode` / `command` / `view` / `theme` / `layout`), and a `dispatch` method. |
+| `src/tui/bindings.rs` | `KeyBindings`, the keymap parser, and the `Bindings` registry. Reads `key.<action>=<spec>` from the config file. |
+| `src/tui/render.rs` | Every drawing function: list, details / output preview, input box, status bar, help overlay, command palette, theme picker, prefix picker, completion menu, confirm-delete, add-entry dialog, codegraph relations picker, show-output overlay. The inline output preview renders the first 50 lines of the selected row's preview; long lines are NOT wrapped (truncated at the right edge so the beginning is always visible). |
+| `src/tui/state.rs` | Pure-data types: `HistoryRow`, `PanesFilter`, `DirectorySource`, `PaneVisibility`, `PaneHeight`, `MatchAlgorithm`, `ExitFilter`, `SortOrder`, `NotesDateFilter`. |
+| `src/tui/labeled.rs` | The "labeled rows" fetch: rows that have a `command_comments` entry but are not in the primary SQL fetch. |
+| `src/tui/stats.rs` | The `Mode::Stats` fetch (frequency-sorted history using the `LEAD()` window function). |
+| `src/tui/theme/` | Theme picker, palette installation, curated theme catalog. 15 upstream themes (from `ratatui-themes`) + 58 curated themes (in `curated/`), 73 total. |
+| `src/tui/tests.rs` | The TUI's test suite (~17,900 lines). Mock `MultiplexerBackend` implementations for the four backends used across the test suite (`FakeHerdrBackend`, `FakeEmptyHerdrBackend` × 2, and a placeholder herdr backend that returns canned data). All `tui::App` integration tests live here. |
+| `src/tui/mode/` | One file per prefix mode (see below). |
+
+### Per-mode modules (`src/tui/mode/`)
+
+Each prefix mode owns a `pub(crate)` free-function module, not a
+Rust `trait`. The convention is six functions per mode:
+
+- `matches(app: &App) -> bool` — does the current query match
+  this mode? (`query.starts_with(prefix)`.)
+- `pattern(app: &App) -> &str` — the body (everything after the
+  leading prefix character).
+- `fetch(app: &mut App) -> Result<Vec<HistoryRow>>` — the mode's
+  data fetch. Returns the unfiltered primary list; the SQL
+  post-filter (Regex / Fuzzy) is applied by `App::refresh()`
+  after the fetch.
+- `ensure_selected_context(app: &mut App)` — lazy-loads the
+  selected row's preview into `row.preview` (a 50-line source
+  snippet piped through `bat`, the last 50 lines of a herdr
+  pane, the first 50 lines of a notes / todo / files entry, …).
+  Called on every selection change from `App::refresh()` and
+  `App::move_selection`.
+- `stage_*_selection(app: &mut App)` (one per row kind) — the
+  select-and-run action. Copies the right fields out of the
+  row, asks the backend to stage the focus / create / open
+  command, and sets `app.selection` + `app.pick_mode`.
+- `check(app: &App) -> CheckReport` — the `smarthistory check`
+  diagnostic for this mode. Verifies the mode's external
+  dependencies (DB tables present, env vars set, `ag` on
+  `$PATH`, etc.) and returns an `ok` / `warn` / `err` report.
+
+The `ModeKind` enum in `src/tui/mode/mod.rs` is the canonical
+index: every mode knows its own default prefix character
+(`ModeKind::Jira.default_prefix() == '-'`) and the active mode
+is resolved with a single `match`. A `trait` was considered but
+the borrow checker / object-safety trade-offs (the per-mode
+functions need different field access patterns, e.g.
+`panes::fetch` calls into the multiplexer, `jira::fetch`
+returns a `Result<JiraRows>`, `stats::fetch` is on a
+non-prefixed mode) outweighed the compile-time enforcement
+benefit. A `ModeKind` enum + flat `match` gives the
+single-dispatch-point benefit at zero abstraction cost.
+
+The `ModeKind::all()` list is the source of truth for both the
+`Check` CLI subcommand and the help overlay's "Search modes"
+section. Adding a new prefix mode is three steps: create
+`src/tui/mode/<name>.rs` with the six functions, add a variant
+to `ModeKind`, and add a `prefix.<name> = 'X'` line to
+`QueryPrefixes::default()`. The TUI wires it up automatically.
+
+| File | Default prefix | Source of truth | Notes |
+| --- | --- | --- | --- |
+| `ag.rs` | `,` | Live `ag` subprocess | Streamed results, no DB. |
+| `codegraph.rs` | `&` | `.codegraph/codegraph.db` FTS5 | The `$` (tags) mode's fallback when no `TAGS` file is found. |
+| `directories.rs` | `#` | SQL history + sessiondirs + multiplexer | Group-aware sort. |
+| `files.rs` | `~` | Local filesystem walk | Directories are filtered out (use `#` for directory navigation). |
+| `jira.rs` | `-` | JIRA REST v2 | The only mode with a `@`-prefix fragment syntax. |
+| `llm.rs` | `=` | Local `ollama` | The `llm_check` verifies `ollama.url` + `ollama.model` are set and the model is pulled. |
+| `notes.rs` | `@` | `note_search` SQLite DB | Has its own query syntax (Obsidian-style `#tag` / `[[link]]` / `[attr:value]`). |
+| `output.rs` | `+` | (not a fetch — the `+` prefix is an in-refresh post-filter over the SQL output column) | |
+| `panes.rs` | `*` | Multiplexer (`tmux` / `herdr`) | Group-aware filter: searching for a pane command keeps the parent workspace header. |
+| `question.rs` | `%` | Local `ollama` | |
+| `tags.rs` | `$` | ctags `TAGS` file or CodeGraph fallback | Lazy source-context loading (50 lines, cached per file). |
+| `todo.rs` | `!` | `note_search` SQLite DB | One row per open todo, not per note. |
+
+The two `stats` and `labeled` modules live in `src/tui/stats.rs`
+and `src/tui/labeled.rs` respectively — they aren't prefix
+modes (the first is the default `STATS` TUI scope, the second
+is the labeled-rows merge in the SQL fetch), so they don't
+fit the per-mode module convention.
+
+### `App::refresh()` flow
+
+Every TUI tick that could change the visible list goes through
+`App::refresh()` (`src/tui.rs`):
+
+1. **SQL cache short-circuit**: if the (query, mode, exit
+   filter, sort order, match algorithm) tuple is unchanged
+   since the last fetch, skip the SQL round-trip and only
+   rebuild `merged_rows` + load the lazy context for the
+   newly-selected row.
+2. **Mode-specific snapshot priming**: directories mode
+   populates the multiplexer pane snapshot; panes mode
+   populates the session-panes snapshot; the JIRA / LLM /
+   ag / files modes are no-ops here (their debounces run
+   in the run-loop tick).
+3. **`self.fetch()`**: dispatches to the active mode's
+   `fetch()` via the `ModeKind` match. The result goes into
+   `self.rows`.
+4. **Post-filter** (Regex / Fuzzy only): narrows `self.rows`
+   in Rust without another SQL round-trip.
+5. **`refresh_labeled()`**: rebuilds the labeled-only
+   partition.
+6. **`build_merged_rows()`**: combines primary + labeled +
+   LLM preview into `self.merged_rows` (different strategies
+   per mode — panes is `self.rows.clone()`; directories
+   skips the labeled merge entirely; everything else does
+   the dedup-by-command + sort).
+7. **`ensure_selected_context()` per mode**: each of the
+   five lazy-context modes (tags, codegraph, notes, todo,
+   files, panes) is called to load the preview for the row
+   under the cursor.
+
+### `smarthistory check`
+
+A new top-level CLI subcommand, `smarthistory check
+[--prefix <char>]`, runs every mode's `check()` function
+(or a single one when `--prefix` is given) and prints a
+report. Exit codes: `0` = all ok, `1` = warnings only,
+`2` = at least one error. Useful for first-run diagnostics
+and for CI:
+
+```bash
+$ smarthistory check
+mode    status  detail
+history ok      sqlite db: 940 rows, exit filter table present
+ag      ok      ag 2.2.0 at /opt/homebrew/bin/ag
+files   warn    walk_dir() returned 0 entries in /home/har
+              (the directory is empty or every file is in
+              the ignore list)
+notes   ok      sqlite db: 940 indexed notes, 91 open todos
+todo    ok      same as notes (todo table is in the same db)
+tags    warn    no TAGS file in cwd or any ancestor; falling
+              back to CodeGraph
+codegraph ok    .codegraph/codegraph.db: 1870 nodes, 6085 edges
+llm     error   ollama.url or ollama.model not set; LLM
+              features disabled
+jira    error   JIRA_SERVER or JIRA_API_TOKEN not set
+directories ok  sql round-trip ok, multiplexer=herdr
+panes   ok      multiplexer=herdr, 4 workspaces, 11 panes
+```
+
+`CheckReport` (in `src/tui/mode/mod.rs`) is the structured
+result: a `mode: ModeKind`, a `status: CheckStatus`
+(Ok / Warn / Err), a `details: Vec<CheckReport>` for
+multi-step diagnostics, and a `worst_status()` aggregator.
+A mode that needs a sub-check tree (e.g. "DB open ok →
+tables present ok → sample search ok") pushes child reports
+and `worst_status()` reduces the tree to its worst leaf.
+
 ## TMUX integration
 
 To use the automatic capture feature inside tmux, the following
@@ -423,7 +628,7 @@ directory switching.
 ### What the backend does
 
 The TUI's `MultiplexerBackend` trait (in `src/multiplexer.rs`) has
-five methods, and both backends implement them the same way:
+six methods, and both backends implement them the same way:
 
 | Method | tmux backend | herdr backend |
 | --- | --- | --- |
@@ -432,6 +637,7 @@ five methods, and both backends implement them the same way:
 | `focus_command(id)` | `tmux select-pane -t <id> && tmux switch-client -t <id>` | `herdr workspace focus <id>` |
 | `create_command(dir, label)` | `tmux new-session -d -s <label> -c <dir>; tmux switch-client -t <label>` | `herdr workspace create --cwd <dir> --label <label> --focus` |
 | `send_in_pane_command(id, body)` | `tmux send-keys -t <id> <body> Enter` | `herdr pane send-text <id> <body>` |
+| `read_pane(id, lines)` | not implemented (returns `None`; the TUI shows "no preview available" for tmux pane rows) | `herdr pane read <id> --lines N` (last N visible lines; used by the `*`-mode details pane) |
 
 Both backends are silent on failure: `tmux` / `herdr` missing from
 PATH, no server running, or a subprocess hanging past
@@ -467,6 +673,21 @@ cwd") differently, and a few corners of the UX are backend-aware:
   `DIR:tmux` or `DIR:herdr` depending on which backend is
   active, so the user always knows which one is producing the
   marker.
+- **Pane preview (`*` mode details pane)**: the herdr
+  backend supports `read_pane(pane_id, lines)`, which
+  shells out to `herdr pane read <pane_id> --lines N`
+  and returns the last N visible lines of the pane.
+  These flow into the details / output-preview pane
+  when the user navigates to a herdr pane row, so
+  you can see what the agent / shell in that pane is
+  currently displaying before you focus it. The
+  tmux backend returns `None` (we don't have a
+  `tmux capture-pane` path wired into the trait) and
+  the TUI shows "no preview available" for tmux
+  pane rows. Per-pane reads are memoized for 750ms
+  via `App::pane_preview_cache` so rapid Up / Down
+  navigation doesn't trigger a `herdr` IPC call on
+  every keystroke.
 
 ### Building with herdr support
 
@@ -766,25 +987,35 @@ The TUI can be themed in one of two ways:
    The first entry in the cycling list, **"no theme"**, uses these
    colors verbatim.
 
-2. **Built-in themes**: press `Ctrl-N` (next) or `Ctrl-P` (previous)
-   in the TUI to cycle through **21 built-in themes** (15 from the
-   `ratatui-themes` crate plus 6 curated themes shipped with
-   smarthistory):
+2. **Built-in themes**: press `T` (or `Ctrl-N` /
+   `Ctrl-P` if rebound) in the TUI to open the
+   searchable theme picker. Press `T` again or
+   `Esc` to dismiss without changing. The picker
+   shows the **73 built-in themes** (15 upstream
+   from the `ratatui-themes` crate plus 58 curated
+   themes shipped with smarthistory) and filters as
+   you type (try typing `dark`, `light`, or a name
+   fragment). The cycle keys (`Ctrl-N` /
+   `Ctrl-P`) are still available for hands-free
+   stepping through the alphabetical list; both
+   are now unbound by default (free for per-mode
+   history recall) and `T` is the new default for
+   the picker.
 
-   ```
-   Upstream (ratatui-themes):
-     Dracula, One Dark Pro, Nord, Catppuccin Mocha/Latte,
-     Gruvbox Dark/Light, Tokyo Night, Solarized Dark/Light,
-     Monokai Pro, Rosé Pine, Kanagawa, Everforest, Cyberpunk
+   The 58 curated themes live in
+   `src/tui/theme/curated/` (alphabetical order:
+   `adwaita`, `alabaster`, `ashes`, `atelier` …,
+   `zenburn`). The 15 upstream themes are the
+   `ratatui-themes` crate's full set: Dracula, One
+   Dark Pro, Nord, Catppuccin Mocha/Latte,
+   Gruvbox Dark/Light, Tokyo Night, Solarized
+   Dark/Light, Monokai Pro, Rosé Pine, Kanagawa,
+   Everforest, Cyberpunk.
 
-   Curated (shipped with smarthistory):
-     Doom One, Doom Solarized Light, Plain, Leuven,
-     Material Dark, Material Light
-   ```
-
-   The cycle order is `no theme → Dracula → … → Cyberpunk → Doom
-   One → … → Material Light → no theme`. Slugs are kebab-case
-   (e.g. `doom-one`, `material-dark`, `leuven`).
+   The cycle order is `no theme → adwaita → … →
+   zenburn → ratatui upstream themes → no theme`.
+   Slugs are kebab-case (e.g. `doom-one`,
+   `material-dark`, `leuven`, `rose-pine`).
 
    The active theme is shown on the right side of the status bar
    (`theme: <Name>`) and is persisted to
@@ -914,7 +1145,7 @@ results match the user's mental model exactly.
 #### Other search modes (prefix-only)
 
 In addition to the four `F3`-cycled modes
-above, six more modes are reachable by
+above, nine more modes are reachable by
 typing the prefix character directly. These
 modes are NOT cycled by `F3` (the cycle
 covers plain / regex / fuzzy / output only).
@@ -931,11 +1162,15 @@ prefixes shown; rebindable in
 | ------------- | ------ | ------------ |
 | LLM command   | `=`    | Send the body to ollama, generate a Bash command, stage it for execution. The new command is also written to the history table with the original description as the comment. |
 | Question      | `%`    | Send the body to ollama, get a short answer (4 sentences max) in a full-screen overlay. The question is saved to history with the answer as output. |
-| Notes         | `@`    | Search the [note_search](https://github.com/snharbec/note_search) SQLite database. Results show the note's filename, title, and age (sorted newest-first). Selecting a note opens it in `$EDITOR`. Needs `notes.database` + `notes.dir` configured. |
-| Todo          | `!`    | List open todos from the note_search database (one per line, not one per file). Selecting a todo opens `$EDITOR <file> +<line>` at the right line. |
+| Notes         | `@`    | Search the [note_search](https://github.com/snharbec/note_search) SQLite database. Results show the note's filename, title, and age (sorted newest-first). Selecting a note opens it in `$EDITOR`. Needs `notes.database` + `notes.dir` configured. The details pane shows the first 50 lines of the selected note, piped through `bat` for syntax highlighting. |
+| Todo          | `!`    | List open todos from the note_search database (one per line, not one per file). Selecting a todo opens `$EDITOR <file> +<line>` at the right line. The details pane shows the first 50 lines of the note containing the selected todo, with the todo line in context. |
 | Directories   | `#`    | List every directory in the global history (sorted by most-recent activity). Selecting a row stages `cd <path>` and exits the TUI. |
-| Panes         | `*`    | List every pane in the current tmux session (excluding the pane the TUI is running in, read from `$TMUX_PANE`). Selecting a pane stages a `select-window` + `select-pane` jump. |
-| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser (`Enter`). `Ctrl-M-s` (the `download-jira-issue` action) stages `note_search jira-issue <KEY>` so the issue is downloaded as a local markdown note. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). |
+| Panes         | `*`    | List every pane across every tmux / herdr session (or workspace, for herdr), excluding the pane the TUI is running in. Layout: one workspace / session header per group, panes indented underneath. Selecting a pane stages a focus command and exits. The details pane shows the last 50 visible lines of the selected herdr pane (from `herdr pane read <id>`; tmux backend shows "no preview"). |
+| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser (`Enter`). `Ctrl-M-s` (the `download-jira-issue` action) stages `note_search jira-issue <KEY>` so the issue is downloaded as a local markdown note. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). The details pane shows a 3-line header (Status / Priority / Due / Assignee) plus the full issue description. |
+| Files         | `~`    | Walk the current directory and all subdirectories, listing every file (skipping directories — directory navigation is `#` mode's job). Selecting a file opens it in `$EDITOR` (or the configured per-extension command via `smart-open.<ext>=<cmd>`). The details pane shows the first 50 lines, piped through `bat`. Honors `files.ignore=` (space-separated basename patterns). |
+| Tags          | `$`    | List every symbol from a local ctags `tags` file. Selecting a row opens the source file in `$EDITOR` at the symbol's line. The details pane shows 50 lines of source context around the symbol, piped through `bat` for syntax highlighting. Falls back to CodeGraph (`&` mode's data source) when no `TAGS` file exists in the current directory or any ancestor. See the CodeGraph row for the back-end details. |
+| CodeGraph     | `&`    | Search symbols in the local `.codegraph/codegraph.db` FTS5 index. Selecting a row shows 50 lines of source context + a callers / callees overlay in the details pane; `Ctrl-R` opens the full callers / callees list as a navigable overlay. See `docs/modes/codegraph.md` for the full mechanics. |
+| ag            | `,`    | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher). Results are streamed in as `ag` produces them, with matched-line previews highlighted in the TUI. The details pane shows the first 50 lines of context around the match. Requires `ag` on `$PATH`. |
 
 The `F3` cycle preserves the body of your
 query and only changes the leading prefix
@@ -948,7 +1183,7 @@ on the `F3` cycle (the cycle is a UI
 affordance for the four "search shape"
 modes — plain, regex, fuzzy, output —
 that differ only in *how* the body is
-matched; the other six are *different
+matched; the other nine are *different
 data sources* that need an explicit
 switch).
 

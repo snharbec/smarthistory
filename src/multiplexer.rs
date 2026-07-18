@@ -476,6 +476,17 @@ pub trait MultiplexerBackend: Send + Sync {
     /// send-text`.
     fn send_in_pane_command(&self, pane_id: &str, body: &str) -> Option<String>;
 
+    /// Read the last `lines` visible lines of the given
+    /// pane for use as an output-preview in the TUI. For
+    /// herdr this is `herdr pane read <pane_id> --lines N`;
+    /// for tmux we don't have an equivalent (the
+    /// `capture-pane` machinery is not exposed here), so
+    /// the tmux implementation returns `None` and the
+    /// caller falls back to a "(no preview available)"
+    /// placeholder. Best-effort: a failure (`None`) is
+    /// rendered as a placeholder, not an error.
+    fn read_pane(&self, pane_id: &str, lines: usize) -> Option<String>;
+
     /// Backend name for status
     /// messages and the help
     /// overlay ("tmux" / "herdr").
@@ -1076,6 +1087,17 @@ impl MultiplexerBackend for TmuxBackend {
         ))
     }
 
+    fn read_pane(&self, _pane_id: &str, _lines: usize) -> Option<String> {
+        // tmux's `capture-pane` machinery isn't exposed in
+        // this trait's `tmux_run` helper (it'd be a
+        // separate binary path), and we want a single
+        // `MultiplexerBackend` API. The tmux backend
+        // therefore returns `None` and the TUI falls back
+        // to a "(no preview)" placeholder. Only the herdr
+        // backend currently surfaces live pane content.
+        None
+    }
+
     fn name(&self) -> &'static str {
         "tmux"
     }
@@ -1288,6 +1310,121 @@ pub fn herdr_pane_cmdline(pane_id: &str) -> Option<String> {
 
 #[cfg(not(feature = "herdr"))]
 pub fn herdr_pane_cmdline(_pane_id: &str) -> Option<String> {
+    None
+}
+
+/// Read the last `lines` visible lines of a herdr pane
+/// (the agent / shell currently displayed in that pane).
+/// Backed by `herdr pane read <pane_id> --lines N --ansi`.
+/// Returns `None` on a non-herdr build, on spawn / IO
+/// failure, on timeout, on `pane_not_found`, or on an
+/// empty response. The `--source visible` default captures
+/// the currently-visible viewport of the pane (the part
+/// the user would see if they were looking at it), so the
+/// output-preview pane in the TUI reflects the same
+/// content the agent is showing.
+///
+/// The `--ansi` flag tells herdr to emit ANSI SGR
+/// escape codes (`\x1b[38;2;R;G;Bm` for truecolor
+/// foreground, `\x1b[48;2;R;G;Bm` for truecolor
+/// background, plus the usual 8-color / 256-color /
+/// modifier codes) for every span. The TUI's
+/// `parse_ansi_line` (`src/tui/render.rs`) converts
+/// these to ratatui `Span`s. Without `--ansi`, herdr
+/// emits plain text and the preview loses its
+/// syntax highlighting / status colors.
+///
+/// Note: `herdr pane read` returns *ANSI text on
+/// stdout* on success and a JSON error envelope on
+/// failure (with exit 0 in both cases), so we can't
+/// rely on a non-zero exit code to detect errors.
+/// We detect `pane_not_found` by looking for that
+/// string in the captured output. Anything else, we
+/// return as the captured text — the ANSI parser is
+/// tolerant of malformed sequences.
+///
+/// Timeout is bounded by
+/// `HERDR_PANE_READ_TIMEOUT_MS` (default 1500ms),
+/// generous enough to cover a `herdr` IPC round-trip
+/// but tight enough not to block the TUI's run loop
+/// on a stalled daemon.
+#[cfg(feature = "herdr")]
+pub fn herdr_pane_read(pane_id: &str, lines: usize) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    if pane_id.is_empty() || lines == 0 {
+        return None;
+    }
+    let timeout_ms: u64 = std::env::var("HERDR_PANE_READ_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
+    let mut child = match Command::new("herdr")
+        .args([
+            "pane",
+            "read",
+            pane_id,
+            "--lines",
+            &lines.to_string(),
+            "--ansi",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    let mut stdout = child.stdout.take()?;
+    let mut buf = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        let mut chunk = [0u8; 4096];
+        match stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.wait();
+    if buf.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    // Distinguish a `pane_not_found` error envelope
+    // from real pane content. herdr returns the
+    // error JSON on stdout (with exit 0), so we
+    // have to inspect the text. The check matches
+    // the JSON envelope structure
+    // (`{"code":"pane_not_found",...}`) rather
+    // than a bare substring — with `--ansi` enabled
+    // the bare substring could appear inside a
+    // real pane's content (a debug print, a test
+    // fixture, a string literal in source code
+    // being displayed), which would cause us to
+    // mis-classify real content as an error and
+    // return `None` (no preview available). The
+    // JSON envelope check is robust because
+    // real-world terminal content almost never
+    // starts with `{"code":"pane_not_found"`.
+    if text.contains("\"code\":\"pane_not_found\"") {
+        return None;
+    }
+    Some(text)
+}
+
+#[cfg(not(feature = "herdr"))]
+pub fn herdr_pane_read(_pane_id: &str, _lines: usize) -> Option<String> {
     None
 }
 
@@ -1869,6 +2006,15 @@ impl MultiplexerBackend for HerdrBackend {
             pane_id,
             crate::util::shell_quote(body)
         ))
+    }
+
+    fn read_pane(&self, pane_id: &str, lines: usize) -> Option<String> {
+        // Delegate to the free function. Wrapped here so the
+        // TUI only depends on the `MultiplexerBackend` trait,
+        // not the `herdr` feature flag (the trait method
+        // works on any backend; only the herdr impl returns
+        // content).
+        herdr_pane_read(pane_id, lines)
     }
 
     fn name(&self) -> &'static str {

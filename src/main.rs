@@ -3745,6 +3745,7 @@ fn main() -> anyhow::Result<()> {
                         "pane",
                         "read",
                         &pane_id,
+                        "--ansi",
                         "--source",
                         "recent-unwrapped",
                         "--lines",

@@ -831,3 +831,140 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // after the run loop settles, and the snapshot
         // id at that point matches the current snapshot.
     }
+
+/// Lazy-load the last 50 lines of the selected herdr pane
+/// into `row.preview` for the output preview pane. Called
+/// from `App::refresh()` and `App::move_selection` on every
+/// selection change so the preview updates immediately when
+/// the user navigates the `*` panes list.
+///
+/// Behavior by row kind:
+/// - `mode == "pane"`: read the pane's last 50 visible
+///   lines via `app.multiplexer.read_pane(pane_id, 50)`.
+///   The pane id is in `row.session_id`. On success, the
+///   text is stored verbatim in `row.preview`; on failure
+///   (tmux backend, daemon down, `pane_not_found`, or
+///   timeout), the row is left with an empty preview so
+///   the renderer shows the standard "no preview
+///   available" placeholder.
+/// - `mode == "workspace"`: workspaces are group headers
+///   with no pane content of their own; preview stays
+///   empty.
+/// - `mode == "session"`: configured sessions are
+///   external commands (not live panes); preview stays
+///   empty.
+///
+/// The function is cheap to call repeatedly: the
+/// `read_pane` call is gated on `row.preview.is_empty()`
+/// so a row that already has its preview doesn't trigger
+/// a second `herdr` IPC round-trip on subsequent
+/// selections. The cache is per-row, not per-pane-id —
+/// re-selecting a pane after selecting something else
+/// will re-read (the visible content of the pane may
+/// have changed in the meantime).
+pub(crate) fn ensure_selected_context(app: &mut App) {
+    if !matches(app) {
+        return;
+    }
+    let Some(idx) = app.list_state.selected() else {
+        return;
+    };
+
+    // Read the row's kind and pane id up front so the
+    // immutable borrow is released before the
+    // `&mut app.multiplexer.read_pane` and the
+    // `&mut app.merged_rows` borrow.
+    let (kind, pane_id) = match app.merged_rows.get(idx) {
+        Some(r) if r.mode == "pane" => ("pane", r.session_id.clone()),
+        Some(r) if r.mode == "workspace" => ("workspace", String::new()),
+        Some(r) if r.mode == "session" => ("session", String::new()),
+        _ => return, // host rows or other modes
+    };
+
+    if kind != "pane" || pane_id.is_empty() {
+        return;
+    }
+
+    // Read the current preview state so we can
+    // short-circuit. We re-read on every selection even
+    // if the row was previously read (the pane content
+    // may have changed). To avoid the IPC round-trip on
+    // every keystroke, we keep a tiny memoization: the
+    // last pane id we read + the time we read it, and
+    // skip re-reading within a 750ms window. The same
+    // `pane_id` will refresh the preview every
+    // selection, so the user still sees fresh content
+    // when navigating.
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    let cache_key = pane_id.clone();
+    let now = Instant::now();
+    let cached_at: Option<Instant> = app
+        .pane_preview_cache
+        .as_ref()
+        .and_then(|m| m.get(&cache_key).copied());
+    let fresh = cached_at
+        .map(|t| now.duration_since(t) < Duration::from_millis(750))
+        .unwrap_or(false);
+
+    if !fresh {
+        let preview_text = app.multiplexer.read_pane(&pane_id, 50);
+        // Update the memoization timestamp even on
+        // failure so a transient daemon blip doesn't
+        // trigger a tight retry loop on every
+        // keystroke.
+        let cache = app
+            .pane_preview_cache
+            .get_or_insert_with(HashMap::new);
+        cache.insert(cache_key, now);
+        // For panes mode, `build_merged_rows` is a
+        // straight clone of `self.rows` (no dedup, no
+        // labeled injection — see the panes-mode
+        // comment in `build_merged_rows`). So the
+        // row index is identical between `self.rows`
+        // and `self.merged_rows`. We MUST write the
+        // preview to BOTH so a subsequent
+        // `build_merged_rows` rebuild doesn't wipe
+        // the preview (the typical case: a pane
+        // cmdline background-thread update arrives
+        // and `process_pane_cmdlines` calls
+        // `self.rows = self.fetch()` + `self.merged_rows
+        // = self.build_merged_rows()`; the new
+        // `self.rows` has empty previews, and the
+        // rebuild clones them into `merged_rows`).
+        //
+        // Writing to both indexes keeps the preview
+        // alive across cmdline updates and across
+        // every other rebuild path. The earlier code
+        // only wrote to `merged_rows` and so the
+        // preview appeared to "toggle": it was
+        // visible for one frame after a selection
+        // change (the write beat the next
+        // `process_pane_cmdlines` tick), then was
+        // wiped by the next rebuild, then
+        // re-populated by the next
+        // `ensure_selected_context` call, ad
+        // infinitum.
+        if let Some(text) = preview_text {
+            let preview: String = text
+                .lines()
+                .take(crate::tui::SOURCE_CONTEXT_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(row) = app.rows.get_mut(idx)
+                && row.preview != preview {
+                    row.preview = preview.clone();
+                }
+            if let Some(row) = app.merged_rows.get_mut(idx)
+                && row.preview != preview {
+                    row.preview = preview;
+                }
+        } else {
+            // Empty / unavailable: keep any existing
+            // preview on both copies (so a transient
+            // failure doesn't blank a successful
+            // read). Don't write empty strings —
+            // they'd clobber a previously-good read.
+        }
+    }
+}

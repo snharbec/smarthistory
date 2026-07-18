@@ -1240,6 +1240,20 @@ pub(crate) struct App {
     /// lookup (from an old snapshot) is detected
     /// and discarded.
     panes_snapshot_id: u64,
+
+    /// Memoization cache for `pane::ensure_selected_context`:
+    /// for each pane id we've recently read, the
+    /// `Instant` we read it. Reads within a short
+    /// window are skipped to avoid an IPC round-trip
+    /// to `herdr` on every keystroke (the TUI run
+    /// loop calls `ensure_selected_context` from
+    /// every action dispatch, which can be many
+    /// events per second). `None` until the first
+    /// read; populated lazily. Cleared at TUI
+    /// exit only — pane content does change over
+    /// time, so the cache TTL is short (~750ms)
+    /// rather than "until process exit".
+    pane_preview_cache: Option<std::collections::HashMap<String, std::time::Instant>>,
     /// Cached home-prefix list
     /// for path
     /// normalization
@@ -2215,8 +2229,50 @@ impl App {
         // panes mode — otherwise the rebuild
         // is wasted work (and could thrash
         // the main view).
+        //
+        // The new `self.rows` from `fetch()` has
+        // empty `preview` fields (the fetch
+        // itself doesn't load any pane
+        // content). The previous `self.rows`
+        // may have populated `preview` values
+        // (written by `panes::ensure_selected_context`
+        // when the user selected a row, or by
+        // the user re-selecting after a previous
+        // read). Without preservation, the
+        // rebuild would wipe the previews and
+        // the user would see the row's
+        // `tab_id` (`row.output`) for one frame
+        // (until the next `ensure_selected_context`
+        // re-populated) — the "toggling" bug
+        // reported alongside the cmdline
+        // background-thread feature.
+        //
+        // Snapshot the old previews by pane_id
+        // before the re-fetch, then copy them
+        // back onto the matching new rows
+        // afterward. Workspace and session rows
+        // don't carry previews so they're
+        // skipped (their pane_id is empty in
+        // our snapshot map, so a `Some("")`
+        // entry would be a no-op anyway).
         if self.is_panes_query() {
+            let mut old_previews: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for row in &self.rows {
+                if row.mode == "pane" && !row.preview.is_empty() {
+                    old_previews.insert(row.session_id.clone(), row.preview.clone());
+                }
+            }
             self.rows = self.fetch().unwrap_or_default();
+            // Restore the previews onto the
+            // matching new rows.
+            for row in self.rows.iter_mut() {
+                if row.mode == "pane"
+                    && let Some(preview) = old_previews.get(&row.session_id)
+                {
+                    row.preview = preview.clone();
+                }
+            }
             self.merged_rows = self.build_merged_rows();
         }
     }
@@ -4198,6 +4254,12 @@ impl App {
             panes_filter: PanesFilter::default(),
             pane_cmdlines_request: None,
             panes_snapshot_id: 0,
+            // Lazy pane-preview memoization: maps pane_id
+            // → `Instant` of last read. The map itself
+            // is `Option` so we don't pay the
+            // allocation until the first `*`-mode
+            // preview is actually requested.
+            pane_preview_cache: None,
             // Multiplexer backend
             // (tmux / herdr).
             // The staging layer
@@ -4397,6 +4459,7 @@ impl App {
             crate::tui::mode::notes::ensure_selected_context(self);
             crate::tui::mode::todo::ensure_selected_context(self);
             crate::tui::mode::files::ensure_selected_context(self);
+            crate::tui::mode::panes::ensure_selected_context(self);
             return;
         }
         // First-time entry into
@@ -4505,6 +4568,9 @@ impl App {
         // Lazy-load the first 50 lines of the selected file
         // for `~` (files) mode. Directory rows are skipped.
         crate::tui::mode::files::ensure_selected_context(self);
+        // Lazy-load the last 50 visible lines of the
+        // selected herdr pane for `*` (panes) mode.
+        crate::tui::mode::panes::ensure_selected_context(self);
     }
 
     /// Compute the merged view: primary list + labeled rows
@@ -5293,6 +5359,7 @@ impl App {
         crate::tui::mode::notes::ensure_selected_context(self);
         crate::tui::mode::todo::ensure_selected_context(self);
         crate::tui::mode::files::ensure_selected_context(self);
+        crate::tui::mode::panes::ensure_selected_context(self);
     }
 
     fn select_for_run(&mut self) {
@@ -7605,6 +7672,7 @@ impl App {
         crate::tui::mode::notes::ensure_selected_context(self);
         crate::tui::mode::todo::ensure_selected_context(self);
         crate::tui::mode::files::ensure_selected_context(self);
+        crate::tui::mode::panes::ensure_selected_context(self);
         // The show-output overlay has two
         // distinct entry points:
         //
@@ -7646,7 +7714,30 @@ impl App {
         // dispatch on those.
         let selection = self
             .selected_row()
-            .map(|r| (r.command.clone(), r.mode.clone(), r.output.clone()));
+            .map(|r| {
+                // For `preview_only` modes (pane / workspace /
+                // session), the row's `output` is metadata
+                // (the pane's `tab_id`, an empty string for
+                // headers, etc.), not actual content. Use the
+                // `preview` field instead so the overlay
+                // shows the real pane content rather than the
+                // tab_id. For every other mode the historical
+                // `output` is the right field (it carries
+                // either the captured stdout of a history
+                // command, the source-context + callers /
+                // callees overlay for symbols, or the JIRA
+                // description body).
+                let is_preview_only = matches!(
+                    r.mode.as_str(),
+                    "pane" | "workspace" | "session"
+                );
+                let text = if is_preview_only && !r.preview.is_empty() {
+                    r.preview.clone()
+                } else {
+                    r.output.clone()
+                };
+                (r.command.clone(), r.mode.clone(), text)
+            });
         let Some((command, mode, output)) = selection else {
             return;
         };
@@ -10563,6 +10654,7 @@ fn run_loop(
         crate::tui::mode::notes::ensure_selected_context(app);
         crate::tui::mode::todo::ensure_selected_context(app);
         crate::tui::mode::files::ensure_selected_context(app);
+        crate::tui::mode::panes::ensure_selected_context(app);
         if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }

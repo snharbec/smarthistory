@@ -105,6 +105,21 @@ pub struct HistoryRow {
     /// callees (`edges` with `kind='calls'`) without
     /// re-running the FTS search to recover the id.
     pub codegraph_node_id: String,
+
+    /// Last-N-lines capture of the row's underlying source, set
+    /// lazily by per-mode `ensure_selected_context` helpers so
+    /// the output-preview pane can show the user the content
+    /// they're about to interact with. For herdr pane rows
+    /// (the `*` panes mode) this is the output of
+    /// `herdr pane read <pane_id> --lines 50` — the
+    /// tail of whatever the agent / shell is currently
+    /// displaying in that pane. Empty for every other row, and
+    /// for pane rows whose content hasn't been read yet.
+    /// Kept separate from `output` (which is the pane's
+    /// `tab_id` used by `focus_pane` and is also where other
+    /// modes dump their preview text) so the two uses
+    /// don't fight over the same field.
+    pub preview: String,
 }
 
 impl HistoryRow {

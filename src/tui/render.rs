@@ -7,7 +7,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -4821,16 +4821,41 @@ fn push_plain_span(spans: &mut Vec<Span<'static>>, text: String, base: Style) {
     }
 }
 
-/// Parse a single line containing ANSI escape sequences (as produced by
-/// `bat --color=always`) into ratatui `Span`s with the appropriate
-/// foreground colors and modifiers.
+/// Parse a single line containing ANSI escape sequences into
+/// ratatui `Span`s with the appropriate foreground / background
+/// colors and modifiers.
 ///
-/// Supported sequences:
-/// - `\x1b[m` or `\x1b[0m` → reset
-/// - `\x1b[1m` → bold
-/// - `\x1b[3m` → italic
-/// - `\x1b[38;2;R;G;Bm` → truecolor foreground
-/// - `\x1b[38;5;Nm` → 256-color foreground (approximated)
+/// Supported SGR (Select Graphic Rendition) parameter sets:
+///
+/// - **Reset / modifiers**: `0` (reset all), `1` (bold),
+///   `2` (dim), `3` (italic), `4` (underline), `5` (blink),
+///   `7` (reverse video), `8` (hidden), `9` (strikethrough).
+///   `22` / `23` / `24` / `27` / `28` / `29` are the
+///   corresponding "disable" codes.
+/// - **8-color fg / bg**: `30..37` (basic fg), `40..47`
+///   (basic bg), `90..97` (bright fg), `100..107` (bright bg).
+///   `39` = default fg, `49` = default bg.
+/// - **256-color fg / bg**: `38;5;N` (fg), `48;5;N` (bg).
+///   `N` is the 256-color palette index (0..=255), looked up
+///   in `xterm256_to_rgb`.
+/// - **Truecolor fg / bg**: `38;2;R;G;B` (fg), `48;2;R;G;B`
+///   (bg). `R` / `G` / `B` are 0..=255 decimal values.
+/// - **Colon separator**: the same `38:2:R:G:B` / `48:2:R:G:B`
+///   / `38:5:N` forms with `:` instead of `;`. Some terminals
+///   (and herdr) emit this variant.
+/// - **Multi-parameter sequences**: `\x1b[1;31m` (bold + red)
+///   is applied left-to-right. `\x1b[0m` resets all attributes.
+///
+/// Anything outside this set is silently dropped (the
+/// existing style is preserved) — this is intentional, so
+/// unknown codes don't accidentally clear colors set by
+/// earlier codes in the same line.
+///
+/// The parser is shared between the inline output preview
+/// (`draw_output_preview`) and the full-screen
+/// `draw_output_view` overlay. Both code paths detect ANSI
+/// via `preview_text.contains('\x1b')` and route through
+/// here when present.
 fn parse_ansi_line(line: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut current_text = String::new();
@@ -4840,6 +4865,13 @@ fn parse_ansi_line(line: &str) -> Vec<Span<'static>> {
     while let Some(c) = chars.next() {
         if c == '\x1b' && chars.peek() == Some(&'[') {
             chars.next(); // consume '['
+            // Walk to the next alphabetic byte (the SGR
+            // command character, always `m` for SGR but
+            // we tolerate other CSI terminators by just
+            // skipping to the next `m`). We also stop on
+            // the private-use characters (`<` / `=` / `>`
+            // / `?`) so we don't accidentally consume
+            // past the end of an unsupported CSI.
             let mut params = String::new();
             let mut cmd = '\0';
             while let Some(&ch) = chars.peek() {
@@ -4847,6 +4879,20 @@ fn parse_ansi_line(line: &str) -> Vec<Span<'static>> {
                     cmd = ch;
                     chars.next();
                     break;
+                }
+                // `:` is a valid separator within a
+                // parameter list (used by herdr and
+                // some terminals for truecolor). The
+                // existing parser only kept `;` /
+                // digits; the new one also keeps `:` so
+                // `38:2:R:G:B` parses correctly. We
+                // normalize `:` to `;` later so the
+                // downstream code can treat both forms
+                // uniformly.
+                if ch == ':' {
+                    params.push(';');
+                    chars.next();
+                    continue;
                 }
                 params.push(ch);
                 chars.next();
@@ -4868,47 +4914,188 @@ fn parse_ansi_line(line: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// Apply a single SGR parameter string to a base style.
+/// Apply one SGR parameter set (e.g. `"0"`, `"1;31"`,
+/// `"38;2;131;148;150"`, `"38:2:131:148:150"`) to a base
+/// style, returning the updated style. Empty / unset
+/// parameter (`\x1b[m`) is treated as a reset (`0`),
+/// matching the standard's behavior.
+///
+/// Parameters are applied LEFT-TO-RIGHT, in order. A
+/// `\x1b[0;1;31m` sequence resets, then enables bold, then
+/// sets the foreground to red. This is the
+/// "cumulative, no implicit reset" interpretation that
+/// every modern terminal follows.
+///
+/// Truecolor / 256-color parameters consume the next
+/// 2-3 sub-parameters (so the parser looks ahead in the
+/// `parts` slice). An out-of-range value is silently
+/// ignored — the existing style is preserved rather
+/// than clobbered.
 fn apply_ansi_sgr(params: &str, style: Style) -> Style {
-    let parts: Vec<&str> = params.split(';').collect();
-    if parts.is_empty() || parts[0].is_empty() {
-        return Style::default(); // ESC[m = reset
+    // Normalize the `:` separator form to `;` so the
+    // downstream parsing can treat both forms uniformly.
+    // `38:2:131:148:150` becomes `38;2;131;148;150`.
+    let normalized = params.replace(':', ";");
+    let parts: Vec<&str> = normalized.split(';').collect();
+    if parts.is_empty() {
+        return style;
     }
-    let primary = parts[0];
-    match primary {
-        "0" => Style::default(),
-        "1" => style.add_modifier(Modifier::BOLD),
-        "3" => style.add_modifier(Modifier::ITALIC),
-        "38" if parts.len() >= 3 => match parts[1] {
-            "2" if parts.len() >= 5 => {
-                let r = parts[2].parse::<u8>().unwrap_or(0);
-                let g = parts[3].parse::<u8>().unwrap_or(0);
-                let b = parts[4].parse::<u8>().unwrap_or(0);
-                style.fg(ratatui::style::Color::Rgb(r, g, b))
+    let mut style = style;
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i];
+        // An empty parameter between separators (e.g.
+        // `\x1b[;31m`) is treated as a 0 (reset) by
+        // xterm; we match that.
+        let code = if part.is_empty() { "0" } else { part };
+        let code_int = code.parse::<u16>().unwrap_or(0);
+        match code_int {
+            // Reset
+            0 => style = Style::default(),
+            // Modifiers (enable)
+            1 => style = style.add_modifier(Modifier::BOLD),
+            2 => style = style.add_modifier(Modifier::DIM),
+            3 => style = style.add_modifier(Modifier::ITALIC),
+            4 => style = style.add_modifier(Modifier::UNDERLINED),
+            5 => {
+                // Blink is not representable in
+                // ratatui; the closest we can get
+                // is BOLD (visually distinct but
+                // not "flashing"). Skip silently
+                // to avoid misrepresenting the
+                // source.
             }
-            "5" if parts.len() >= 3 => {
-                let n = parts[2].parse::<u8>().unwrap_or(0);
-                let (r, g, b) = xterm256_to_rgb(n);
-                style.fg(ratatui::style::Color::Rgb(r, g, b))
+            7 => style = style.add_modifier(Modifier::REVERSED),
+            8 => {
+                // Hidden: render as DIM so the
+                // text is still visible (a
+                // truly invisible preview is
+                // worse than a dim one).
+                style = style.add_modifier(Modifier::DIM);
             }
-            _ => style,
-        },
-        "48" if parts.len() >= 3 => match parts[1] {
-            "2" if parts.len() >= 5 => {
-                let r = parts[2].parse::<u8>().unwrap_or(0);
-                let g = parts[3].parse::<u8>().unwrap_or(0);
-                let b = parts[4].parse::<u8>().unwrap_or(0);
-                style.bg(ratatui::style::Color::Rgb(r, g, b))
+            9 => style = style.add_modifier(Modifier::CROSSED_OUT),
+            // Modifiers (disable)
+            22 => style = style.remove_modifier(Modifier::DIM | Modifier::BOLD),
+            23 => style = style.remove_modifier(Modifier::ITALIC),
+            24 => style = style.remove_modifier(Modifier::UNDERLINED),
+            27 => style = style.remove_modifier(Modifier::REVERSED),
+            28 => {
+                // Hidden off: nothing to do
+                // (we mapped Hidden to DIM on
+                // enable; don't remove DIM
+                // here, the user may have
+                // set it explicitly).
             }
-            "5" if parts.len() >= 3 => {
-                let n = parts[2].parse::<u8>().unwrap_or(0);
-                let (r, g, b) = xterm256_to_rgb(n);
-                style.bg(ratatui::style::Color::Rgb(r, g, b))
+            29 => style = style.remove_modifier(Modifier::CROSSED_OUT),
+            // Basic 8-color foreground
+            30 => style = style.fg(ratatui::style::Color::Black),
+            31 => style = style.fg(ratatui::style::Color::Red),
+            32 => style = style.fg(ratatui::style::Color::Green),
+            33 => style = style.fg(ratatui::style::Color::Yellow),
+            34 => style = style.fg(ratatui::style::Color::Blue),
+            35 => style = style.fg(ratatui::style::Color::Magenta),
+            36 => style = style.fg(ratatui::style::Color::Cyan),
+            37 => style = style.fg(ratatui::style::Color::White),
+            38 => {
+                // 38;5;N OR 38;2;R;G;B
+                let next = parts.get(i + 1).copied().unwrap_or("");
+                if next == "5" {
+                    if let Some(n) = parts
+                        .get(i + 2)
+                        .and_then(|s| s.parse::<u8>().ok())
+                    {
+                        let (r, g, b) = xterm256_to_rgb(n);
+                        style = style.fg(ratatui::style::Color::Rgb(r, g, b));
+                        i += 2;
+                    }
+                } else if next == "2" {
+                    let r = parts
+                        .get(i + 2)
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let g = parts
+                        .get(i + 3)
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let b = parts
+                        .get(i + 4)
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    style = style.fg(ratatui::style::Color::Rgb(r, g, b));
+                    i += 4;
+                }
             }
-            _ => style,
-        },
-        _ => style,
+            39 => style = style.fg(Color::Reset),
+            // Basic 8-color background
+            40 => style = style.bg(ratatui::style::Color::Black),
+            41 => style = style.bg(ratatui::style::Color::Red),
+            42 => style = style.bg(ratatui::style::Color::Green),
+            43 => style = style.bg(ratatui::style::Color::Yellow),
+            44 => style = style.bg(ratatui::style::Color::Blue),
+            45 => style = style.bg(ratatui::style::Color::Magenta),
+            46 => style = style.bg(ratatui::style::Color::Cyan),
+            47 => style = style.bg(ratatui::style::Color::White),
+            48 => {
+                // 48;5;N OR 48;2;R;G;B
+                let next = parts.get(i + 1).copied().unwrap_or("");
+                if next == "5" {
+                    if let Some(n) = parts
+                        .get(i + 2)
+                        .and_then(|s| s.parse::<u8>().ok())
+                    {
+                        let (r, g, b) = xterm256_to_rgb(n);
+                        style = style.bg(ratatui::style::Color::Rgb(r, g, b));
+                        i += 2;
+                    }
+                } else if next == "2" {
+                    let r = parts
+                        .get(i + 2)
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let g = parts
+                        .get(i + 3)
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let b = parts
+                        .get(i + 4)
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    style = style.bg(ratatui::style::Color::Rgb(r, g, b));
+                    i += 4;
+                }
+            }
+            49 => style = style.bg(Color::Reset),
+            // Bright 8-color foreground
+            90 => style = style.fg(ratatui::style::Color::DarkGray),
+            91 => style = style.fg(ratatui::style::Color::LightRed),
+            92 => style = style.fg(ratatui::style::Color::LightGreen),
+            93 => style = style.fg(ratatui::style::Color::LightYellow),
+            94 => style = style.fg(ratatui::style::Color::LightBlue),
+            95 => style = style.fg(ratatui::style::Color::LightMagenta),
+            96 => style = style.fg(ratatui::style::Color::LightCyan),
+            97 => style = style.fg(ratatui::style::Color::White),
+            // Bright 8-color background
+            100 => style = style.bg(ratatui::style::Color::DarkGray),
+            101 => style = style.bg(ratatui::style::Color::LightRed),
+            102 => style = style.bg(ratatui::style::Color::LightGreen),
+            103 => style = style.bg(ratatui::style::Color::LightYellow),
+            104 => style = style.bg(ratatui::style::Color::LightBlue),
+            105 => style = style.bg(ratatui::style::Color::LightMagenta),
+            106 => style = style.bg(ratatui::style::Color::LightCyan),
+            107 => style = style.bg(ratatui::style::Color::White),
+            _ => {
+                // Unknown SGR code: ignore
+                // silently. The existing
+                // style is preserved so we
+                // don't accidentally
+                // clobber a color set by
+                // an earlier code in the
+                // same line.
+            }
+        }
+        i += 1;
     }
+    style
 }
 
 /// Convert a standard xterm 256-color index to an RGB triple.
@@ -4978,7 +5165,53 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    if row.output.is_empty() {
+    // The preview text source. Most modes populate
+    // `row.output` (which has dual duty: it's also
+    // the captured output of history commands and the
+    // tab_id of pane rows). The newer `row.preview`
+    // field is reserved for lazy-loaded context that
+    // DOESN'T fit the dual-duty use of `row.output`:
+    //   - herdr pane rows store their `tab_id` in
+    //     `row.output` (needed by `focus_pane`), so
+    //     the pane's visible content has to live
+    //     somewhere else.
+    // For rows with a populated `preview`, use it;
+    // otherwise fall back to `output` (the historical
+    // convention).
+    //
+    // `preview_only_modes` are the row kinds where
+    // `row.output` is NOT a sensible preview fallback
+    // (it carries metadata, not content). For those
+    // rows we read `row.preview` exclusively and treat
+    // an empty preview as "no preview available",
+    // showing the standard placeholder instead of
+    // falling back to the metadata field. The earlier
+    // code naively fell back to `row.output` for
+    // every mode, which made a `mode == "pane"` row
+    // whose preview IPC failed (or hadn't completed
+    // yet) display its `tab_id` (e.g. `wA:t1`) for
+    // one frame and then snap to the actual pane
+    // content the next time `ensure_selected_context`
+    // ran — the "toggling between pane id and
+    // content" bug the user reported.
+    let preview_only = matches!(
+        row.mode.as_str(),
+        "pane" | "workspace" | "session"
+    );
+    let preview_text: &str = if !row.preview.is_empty() {
+        row.preview.as_str()
+    } else if preview_only {
+        // No preview available, and the fallback
+        // `output` field is metadata we'd rather not
+        // show as "preview". The empty-string check
+        // below turns this into the standard
+        // "No output captured" placeholder.
+        ""
+    } else {
+        row.output.as_str()
+    };
+
+    if preview_text.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled("No output captured", Theme::dim()))
                 .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)))
@@ -4989,14 +5222,16 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Ag-mode, tags-mode, codegraph-mode, JIRA-mode, notes-mode,
-    // todo-mode, and files-mode rows carry more than 4 lines of
-    // context. Ag/tags/codegraph carry up to
+    // todo-mode, files-mode, and panes-mode rows carry more than
+    // 4 lines of context. Ag/tags/codegraph carry up to
     // [`SOURCE_CONTEXT_LINES`] (50) lines of source context plus a
     // callers/callees overlay. JIRA rows carry a 3-line header
     // (Status/Priority, Due/Assignee, Description label) followed by
     // the full issue description body. Notes / todo / files rows
     // carry the first 50 lines of the referenced file (piped
-    // through `bat` for syntax highlighting).
+    // through `bat` for syntax highlighting). Pane rows carry
+    // the last 50 visible lines of the underlying herdr pane
+    // (from `herdr pane read <pane_id> --lines 50`).
     // The inline pane's height caps the actually-visible count
     // (ratatui renders only what fits), but we don't clamp the
     // slice here so a tall terminal / a scrolled `Ctrl-O` overlay
@@ -5009,6 +5244,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         || row.mode == "note"
         || row.mode == "todo"
         || row.mode == "file"
+        || row.mode == "pane"
     {
         crate::tui::SOURCE_CONTEXT_LINES
     } else {
@@ -5023,16 +5259,20 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // a codegraph/tags row falls back to plain text when bat is
     // unavailable (no ANSI), and an ag row whose match had no
     // coloring proceeds through the markdown path cleanly.
-    let has_ansi = row.output.contains('\x1b');
+    //
+    // herdr pane content is plain text by default (we don't pass
+    // `--format ansi` to `herdr pane read` to keep the IPC
+    // payload small), so the markdown path is the right one.
+    let has_ansi = preview_text.contains('\x1b');
     let preview_lines: Vec<Line> = if has_ansi {
-        row.output
+        preview_text
             .lines()
             .take(take_n)
             .map(parse_ansi_line)
             .map(Line::from)
             .collect()
     } else {
-        row.output
+        preview_text
             .lines()
             .take(take_n)
             .map(render_preview_line)
@@ -6150,6 +6390,217 @@ mod ansi_tests {
         assert_eq!(
             spans[0].style.fg,
             Some(ratatui::style::Color::Rgb(255, 0, 0))
+        );
+    }
+
+    #[test]
+    fn parse_ansi_basic_8_color_foreground() {
+        // The 8 standard fg colors. herdr sometimes emits
+        // these (e.g. for simpler agents that don't use
+        // truecolor) and the old parser silently dropped
+        // them — the user saw "colors are different than
+        // when I call this manually" because every basic
+        // 8-color code in the pane was being ignored.
+        for (code, expected) in [
+            ("30", ratatui::style::Color::Black),
+            ("31", ratatui::style::Color::Red),
+            ("32", ratatui::style::Color::Green),
+            ("33", ratatui::style::Color::Yellow),
+            ("34", ratatui::style::Color::Blue),
+            ("35", ratatui::style::Color::Magenta),
+            ("36", ratatui::style::Color::Cyan),
+            ("37", ratatui::style::Color::White),
+        ] {
+            let input = format!("\x1b[{}mhi\x1b[0m", code);
+            let spans = parse_ansi_line(&input);
+            assert_eq!(spans.len(), 1, "code {}: span count", code);
+            assert_eq!(spans[0].style.fg, Some(expected), "code {}: fg", code);
+        }
+    }
+
+    #[test]
+    fn parse_ansi_bright_8_color_foreground() {
+        for (code, expected) in [
+            ("90", ratatui::style::Color::DarkGray),
+            ("91", ratatui::style::Color::LightRed),
+            ("92", ratatui::style::Color::LightGreen),
+            ("93", ratatui::style::Color::LightYellow),
+            ("94", ratatui::style::Color::LightBlue),
+            ("95", ratatui::style::Color::LightMagenta),
+            ("96", ratatui::style::Color::LightCyan),
+            ("97", ratatui::style::Color::White),
+        ] {
+            let input = format!("\x1b[{}mhi\x1b[0m", code);
+            let spans = parse_ansi_line(&input);
+            assert_eq!(spans.len(), 1, "code {}: span count", code);
+            assert_eq!(spans[0].style.fg, Some(expected), "code {}: fg", code);
+        }
+    }
+
+    #[test]
+    fn parse_ansi_basic_8_color_background() {
+        // Same set for the bg channel — the old parser
+        // only handled 48;2;R;G;B and 48;5;N, dropping
+        // every 4x code.
+        for (code, expected) in [
+            ("40", ratatui::style::Color::Black),
+            ("41", ratatui::style::Color::Red),
+            ("42", ratatui::style::Color::Green),
+            ("43", ratatui::style::Color::Yellow),
+            ("44", ratatui::style::Color::Blue),
+            ("45", ratatui::style::Color::Magenta),
+            ("46", ratatui::style::Color::Cyan),
+            ("47", ratatui::style::Color::White),
+        ] {
+            let input = format!("\x1b[{}mhi\x1b[0m", code);
+            let spans = parse_ansi_line(&input);
+            assert_eq!(spans.len(), 1, "code {}: span count", code);
+            assert_eq!(spans[0].style.bg, Some(expected), "code {}: bg", code);
+        }
+    }
+
+    #[test]
+    fn parse_ansi_default_fg_bg() {
+        // 39 = default fg, 49 = default bg. ratatui
+        // exposes these as `Color::Reset`.
+        let input = "\x1b[39;49mhi\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Reset));
+        assert_eq!(spans[0].style.bg, Some(ratatui::style::Color::Reset));
+    }
+
+    #[test]
+    fn parse_ansi_multi_parameter_sequence() {
+        // `\x1b[1;31m` is "bold red" — both codes apply.
+        let input = "\x1b[1;31mboldred\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "boldred");
+        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Red));
+        assert!(
+            spans[0].style.add_modifier.contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn parse_ansi_colon_separator_truecolor() {
+        // herdr and some terminals emit truecolor
+        // with `:` instead of `;` inside the parameter
+        // list: `\x1b[38:2:R:G:Bm`. The old parser
+        // treated `:` as a non-digit and dropped
+        // everything, so the color was lost.
+        let input = "\x1b[38:2:102:217:239mfn\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "fn");
+        assert_eq!(
+            spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(102, 217, 239))
+        );
+    }
+
+    #[test]
+    fn parse_ansi_colon_separator_256_color() {
+        // Same colon-separator form for 256-color.
+        let input = "\x1b[38:5:196mred\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(255, 0, 0))
+        );
+    }
+
+    #[test]
+    fn parse_ansi_underline_strikethrough_dim() {
+        // All the common modifiers the old parser
+        // silently dropped.
+        let input = "\x1b[4munder\x1b[0m \x1b[9mstrike\x1b[0m \x1b[2mdim\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 5);
+        assert!(spans[0].style.add_modifier.contains(
+            ratatui::style::Modifier::UNDERLINED
+        ));
+        assert!(
+            spans[2].style.add_modifier.contains(
+                ratatui::style::Modifier::CROSSED_OUT
+            )
+        );
+        assert!(spans[4].style.add_modifier.contains(ratatui::style::Modifier::DIM));
+    }
+
+    #[test]
+    fn parse_ansi_fg_and_bg_combined() {
+        // A real-world herdr emit:
+        // `[38;2;108;108;108m[48;2;232;240;232mTook 0.0s[0m`
+        // — fg + bg + text in one run.
+        let input =
+            "\x1b[38;2;108;108;108m\x1b[48;2;232;240;232mTook 0.0s\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "Took 0.0s");
+        assert_eq!(
+            spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(108, 108, 108))
+        );
+        assert_eq!(
+            spans[0].style.bg,
+            Some(ratatui::style::Color::Rgb(232, 240, 232))
+        );
+    }
+
+    #[test]
+    fn parse_ansi_reset_clears_attributes() {
+        // `[0m` should clear fg / bg / modifiers. The
+        // old code already handled this — keep the
+        // regression test.
+        let input = "\x1b[1;31mboldred\x1b[0mplain";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[1].content, "plain");
+        assert_eq!(spans[1].style.fg, None);
+        assert_eq!(spans[1].style.bg, None);
+    }
+
+    #[test]
+    fn parse_ansi_empty_parameter_is_reset() {
+        // `\x1b[m` and `\x1b[;31m` are equivalent to
+        // `\x1b[0m` / `\x1b[0;31m` per the xterm spec.
+        let input = "\x1b[mbefore\x1b[31mred\x1b[0m";
+        let spans = parse_ansi_line(input);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "before");
+        assert_eq!(spans[0].style.fg, None);
+        assert_eq!(spans[1].content, "red");
+        assert_eq!(spans[1].style.fg, Some(ratatui::style::Color::Red));
+    }
+
+    #[test]
+    fn parse_ansi_real_herdr_pane_output() {
+        // A representative slice of real `herdr pane read
+        // w20:p1 --ansi` output: a status line with fg +
+        // bg truecolor, surrounded by `[0m` resets. The
+        // renderer should reproduce the same colors
+        // visible in the terminal when the user runs the
+        // command by hand.
+        let input = "\x1b[0m\x1b[48;2;232;240;232m \x1b[0m\x1b[38;2;108;108;108m\x1b[48;2;232;240;232mTook 0.0s\x1b[0m";
+        let spans = parse_ansi_line(input);
+        // The exact span count depends on how many SGR
+        // codes emit empty-text segments; what matters is
+        // that the visible "Took 0.0s" text carries the
+        // right fg + bg.
+        let took = spans
+            .iter()
+            .find(|s| s.content.contains("Took 0.0s"))
+            .expect("expected a span containing 'Took 0.0s'");
+        assert_eq!(
+            took.style.fg,
+            Some(ratatui::style::Color::Rgb(108, 108, 108))
+        );
+        assert_eq!(
+            took.style.bg,
+            Some(ratatui::style::Color::Rgb(232, 240, 232))
         );
     }
 }
