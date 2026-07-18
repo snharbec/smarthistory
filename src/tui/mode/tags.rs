@@ -5,7 +5,9 @@
 //! typed pattern. When no `tags` file exists, falls back
 //! to the local `.codegraph/codegraph.db` FTS5 index
 //! (see [`crate::tui::mode::codegraph`]).
+use crate::tui::state::HistoryRow;
 use crate::tui::App;
+use anyhow::Result;
 
 /// Whether the query is a tags-search request:
 /// the query starts with the tags prefix (`$` by
@@ -27,6 +29,298 @@ pub(crate) fn pattern(app: &App) -> &str {
     } else {
         ""
     }
+}
+
+/// Fetch the tags-mode result set.
+///
+/// Steps:
+/// 1. Search for a `tags` file in the current
+///    directory, then walk upward through parent
+///    directories (mirroring how vim / nvim discover
+///    tag files). The first `tags` found is used.
+/// 2. If no tag file exists anywhere up the tree,
+///    fall back to the CodeGraph index via
+///    `App::fetch_tags_via_codegraph`. The fallback
+///    rows are tagged with `mode: "tags"` so the
+///    existing tags dispatch (open at line, `@lang`
+///    filter, `ensure_selected_context`) work
+///    unchanged.
+/// 3. Parse the TAGS file: section header
+///    (`<filename>,<line_count>`) on the line after
+///    a `\x0c` separator, then one symbol line per
+///    entry (`<display><line>,<offset>`). Working
+///    backward from the end splits the line into
+///    `display` / `line_number` / `byte_offset`.
+/// 4. Apply the `@lang` extension filter (if any)
+///    and the token filter (AND-combined
+///    whitespace-separated tokens, case-sensitive
+///    when the body has any uppercase).
+/// 5. Build `HistoryRow`s with a synthetic negative
+///    `id` (matching the codegraph-mode convention),
+///    the absolute path in `directory`, the line
+///    number in `session_id`, and the source file's
+///    basename in `comment`. The source context is
+///    loaded lazily on selection by
+///    `ensure_selected_context`.
+pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
+    // Search for a `tags` file in the current
+    // directory, then walk upward through parent
+    // directories until one is found (or we hit the
+    // filesystem root). This mirrors how editors
+    // like vim/nvim discover tag files: the first
+    // `tags` file found (closest to the cwd) is the
+    // one that's used. The file paths inside the tag
+    // file are relative to the directory containing
+    // the tag file, so we resolve them against that
+    // directory (not the cwd) to produce correct
+    // absolute paths.
+    //
+    // If no tag file is found anywhere up the tree,
+    // fall back to the CodeGraph index
+    // (`.codegraph/codegraph.db`) when one exists.
+    // The fallback rows are tagged with `mode:
+    // "tags"` so the existing tags dispatch (open at
+    // line, `@lang` filter,
+    // `ensure_selected_context`) all work
+    // unchanged — the user gets symbol navigation
+    // via CodeGraph data with the `$` UX they
+    // already know.
+    let tags_path = crate::tui::find_tags_file();
+    if !tags_path.is_file() {
+        return fetch_via_codegraph(app);
+    }
+    let tags_dir = tags_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let contents = match std::fs::read_to_string(&tags_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let pattern = pattern(app).trim();
+    let case_sensitive = app.is_case_sensitive();
+
+    // Use the shared classifier so `$`, `,` (ag),
+    // and any future content modes share one set of
+    // rules. The first `@lang` token (if any) drives
+    // both the extension filter and the bat
+    // syntax-highlight; later `@lang` tokens are
+    // accepted by the parser but ignored here
+    // (consistent with ag mode using the first one).
+    let parsed = crate::highlight::parse_query_tokens(pattern);
+    let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
+    // Build the extension set for the language
+    // filter (if any). An unknown language — e.g.
+    // `@cobol` — yields `None`, in which case we
+    // still apply the bat highlighting (bat will
+    // fall back to its own extension-based
+    // detection, gracefully degrading), but we skip
+    // the extension filter so the user sees a
+    // (possibly empty) result rather than a silent
+    // zero.
+    let allowed_exts: Option<Vec<String>> = lang_filter
+        .and_then(crate::highlight::extensions_for_language)
+        .map(|exts| exts.iter().map(|s| s.to_string()).collect());
+
+    let tokens: Vec<String> = parsed
+        .terms
+        .into_iter()
+        .map(|t| if case_sensitive { t } else { t.to_lowercase() })
+        .collect();
+    let mut rows: Vec<HistoryRow> = Vec::new();
+    let mut next_id: i64 = -1;
+    let mut current_file: String = String::new();
+    let mut in_section = false;
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for line in contents.lines() {
+        if line == "\x0c" || line.is_empty() {
+            in_section = false;
+            continue;
+        }
+        if !in_section {
+            // Section header: <filename>,<line_count>
+            if let Some(idx) = line.find(',') {
+                current_file = line[..idx].to_string();
+            } else {
+                current_file = line.to_string();
+            }
+            in_section = true;
+            continue;
+        }
+        // Symbol line: <display><line>,<offset>
+        // Parse from the end: last comma → offset,
+        // digits before it → line, rest → display.
+        let Some(comma_idx) = line.rfind(',') else {
+            continue;
+        };
+        let offset_str = &line[comma_idx + 1..];
+        if offset_str.is_empty() || !offset_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let rest = &line[..comma_idx];
+        // Walk back from the end of `rest` to find
+        // where the line-number digits start.
+        let mut i = rest.len();
+        while i > 0 && rest.as_bytes()[i - 1].is_ascii_digit() {
+            i -= 1;
+        }
+        if i == rest.len() {
+            // No digits found — malformed line.
+            continue;
+        }
+        let line_number = &rest[i..];
+        let display = &rest[..i];
+        if display.is_empty() || line_number.is_empty() {
+            continue;
+        }
+        // Build the absolute file path. File paths
+        // in the tag file are relative to the
+        // directory containing the tag file (not
+        // necessarily the cwd), so we resolve
+        // against `tags_dir`.
+        let filepath = if std::path::Path::new(&current_file).is_absolute() {
+            current_file.clone()
+        } else {
+            tags_dir.join(&current_file).to_string_lossy().into_owned()
+        };
+        // Apply the `@lang` extension filter, if
+        // any. Extension comparison is
+        // case-insensitive (extensions are
+        // lowercased before lookup, so `.RS` matches
+        // `@rust` the same as `.rs`).
+        if let Some(ref exts) = allowed_exts {
+            let file_ext = std::path::Path::new(&current_file)
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            let ext_ok = file_ext
+                .as_deref()
+                .map(|e| exts.iter().any(|a| a == e))
+                .unwrap_or(false);
+            if !ext_ok {
+                continue;
+            }
+        }
+        // Apply the token filter.
+        if !tokens.is_empty() {
+            let (display_check, file_check) = if case_sensitive {
+                (display.to_string(), current_file.clone())
+            } else {
+                (display.to_lowercase(), current_file.to_lowercase())
+            };
+            let all_match = tokens.iter().all(|tok| {
+                display_check.contains(tok) || file_check.contains(tok)
+            });
+            if !all_match {
+                continue;
+            }
+        }
+        // Source context is loaded lazily when the
+        // row is selected rather than read eagerly
+        // here. A large TAGS file can reference many
+        // symbols in the same source files, and
+        // reading every source file once per symbol
+        // made opening tags mode take tens of
+        // seconds on large repositories. The
+        // selected row's `output` is populated on
+        // demand by `ensure_selected_context` using
+        // the `tags_source_cache`.
+        // Tag the row's `source` with the language
+        // so the chips / source label match the
+        // ag-mode convention (`"tags"` when no
+        // language, `"tags:<lang>"` when one was
+        // supplied). This also lets the status bar
+        // surface the active language in a future
+        // iteration.
+        let source = match lang_filter {
+            Some(lang) => format!("tags:{}", lang),
+            None => "tags".to_string(),
+        };
+        rows.push(HistoryRow {
+            id: next_id,
+            command: display.to_string(),
+            directory: filepath,
+            session_id: line_number.to_string(),
+            exit_code: 0,
+            timestamp: now_epoch,
+            comment: std::path::Path::new(&current_file)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            output: String::new(),
+            mode: "tags".to_string(),
+            source,
+            ..Default::default()
+        });
+        next_id -= 1;
+    }
+    Ok(rows)
+}
+
+/// `$` (tags) fallback when no `tags` / `TAGS` file
+/// exists. Queries the CodeGraph index instead and
+/// returns rows tagged with `mode: "tags"` so the
+/// existing tags dispatch (open at line, `@lang`
+/// filter, `ensure_selected_context`) work
+/// unchanged. The CodeGraph node id is stashed in
+/// `codegraph_node_id` so `ensure_selected_context`
+/// can append the callers/callees overlay for these
+/// rows too.
+fn fetch_via_codegraph(app: &mut App) -> Result<Vec<HistoryRow>> {
+    let pattern = pattern(app).trim();
+    let parsed = crate::highlight::parse_query_tokens(pattern);
+    let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
+    let fts_pattern = parsed.terms.join(" ");
+    if app.codegraph_client.is_none() {
+        app.codegraph_client = crate::codegraph::CodeGraphClient::open();
+    }
+    let Some(client) = app.codegraph_client.as_ref() else {
+        return Ok(Vec::new());
+    };
+    // Empty query with no tag file: list nothing.
+    // The user can type a symbol fragment to start
+    // the FTS search.
+    if fts_pattern.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let nodes = client.search(&fts_pattern, lang_filter, 500);
+    let repo_root = client.repo_root();
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let source = match lang_filter {
+        Some(lang) => format!("tags:{}", lang),
+        None => "tags".to_string(),
+    };
+    let mut rows: Vec<HistoryRow> = Vec::with_capacity(nodes.len());
+    let mut next_id: i64 = -1;
+    for n in &nodes {
+        let abs = n.abs_path(repo_root);
+        rows.push(HistoryRow {
+            id: next_id,
+            command: if n.qualified_name.is_empty() {
+                n.name.clone()
+            } else {
+                n.qualified_name.clone()
+            },
+            directory: abs.to_string_lossy().into_owned(),
+            session_id: n.start_line.to_string(),
+            exit_code: 0,
+            timestamp: now_epoch,
+            comment: format!("{} · {}: {}", n.kind, n.file_path, n.start_line),
+            output: String::new(),
+            mode: "tags".to_string(),
+            source: source.clone(),
+            codegraph_node_id: n.id.clone(),
+            ..Default::default()
+        });
+        next_id -= 1;
+    }
+    Ok(rows)
 }
 
 /// Lazy-load the source-context preview for the

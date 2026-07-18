@@ -14,6 +14,10 @@ pub mod bindings;
 pub mod mode;
 pub mod render;
 pub mod state;
+pub mod labeled;
+
+pub mod stats;
+
 pub mod theme;
 
 use crate::Config;
@@ -304,7 +308,7 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
 /// `App` without an `Option` for the
 /// default-case bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotesDateFilter {
+pub(crate) enum NotesDateFilter {
     /// No date filter; show all notes (default).
     All,
     /// Notes updated today (within the last 24h).
@@ -1873,12 +1877,14 @@ impl App {
         crate::tui::mode::codegraph::matches(self)
     }
 
-    /// The codegraph-search body, i.e. everything after
-    /// the leading `&` prefix. Empty string when not in
-    /// codegraph mode.
-    fn codegraph_pattern(&self) -> &str {
-        crate::tui::mode::codegraph::pattern(self)
-    }
+    // `codegraph_pattern` was inlined into
+    // `crate::tui::mode::codegraph::fetch` — the only
+    // caller is now the per-mode free function, so the
+    // 1-line shim is removed. The `App::codegraph_pattern`
+    // method body was identical to the per-mode
+    // `pattern()` function; the call-site change
+    // was a rename from `self.codegraph_pattern()`
+    // to `crate::tui::mode::codegraph::pattern(self)`.
 
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
@@ -1929,1664 +1935,50 @@ impl App {
         std::fs::read_to_string(&path).unwrap_or_default()
     }
 
-    /// Search every note file for todo entries.
-    /// Each todo line becomes its own
-    /// `HistoryRow` (with the line text as
-    /// `command`, the filename as `comment`,
-    /// and the surrounding context as `output`).
-    /// The typed query (with `@today` / `@week`
-    /// / `@month` / `@year` aliases) is applied
-    /// against the file's last-modified
-    /// timestamp and the todo text.
-    ///
-    /// Sorting: by file mtime DESC (newer files
-    /// first), then by line number ASC within a
-    /// file. The line-order tiebreaker makes the
-    /// list within a single file read top-to-
-    /// bottom, which is what the user expects
-    /// when working through a single document.
-    fn fetch_todos(&mut self) -> Result<Vec<HistoryRow>> {
-        // We delegate to the note_search library
-        // the same way `fetch_notes` does. The
-        // library is the canonical source for
-        // todo data: the indexer parses every
-        // note in `notes.dir` at update time
-        // and stores each todo in the
-        // `todo_entries` table, with the line
-        // number, the (open/closed) state, the
-        // priority, due date, tags, etc. Scanning
-        // the filesystem ourselves would re-do
-        // that work in Rust, and worse: it
-        // wouldn't see todos that the user has
-        // indexed through `note_search` but that
-        // live in a directory our `notes.dir`
-        // path doesn't point at. Going through
-        // the library guarantees the user sees
-        // exactly what `note_search list` would
-        // show.
-        let Some(ref db_path) = self.notes_database else {
-            // Without a notes database we can't
-            // query todos. Mirror the notes-mode
-            // UX: emit a soft status message and
-            // return an empty list so the user
-            // sees a clear "no todos" reason
-            // rather than a confusing empty list.
-            self.set_status_message("Todo mode: notes.database is not configured".to_string());
-            return Ok(Vec::new());
-        };
+    // `fetch_todos` was extracted to
+    // `crate::tui::mode::todo::fetch` (the note_search
+    // `search_todos` query + per-row file-mtime enrichment
+    // + date-filter post-sort for the `!` mode).
+    // The two `App` fields it writes
+    // (`notes_date_filter`, status messages via
+    // `set_status_message`) are read back by the
+    // renderer / status bar; the per-mode free
+    // function mutates `app.notes_date_filter` and
+    // calls `app.set_status_message` directly so the
+    // existing field accessors continue to work.
 
-        // Strip the date-filter aliases
-        // (`@today`, `@week`, `@month`, `@year`)
-        // from the query body. The remaining
-        // text is passed to `parse_query`,
-        // which understands the Obsidian-like
-        // syntax: bare words are AND-matched
-        // against each todo line, `#tag` is
-        // matched against both the todo's own
-        // tags and the note's header fields,
-        // `[[link]]` is matched against the
-        // todo's links and the note's
-        // outgoing links, and `[attr:value]`
-        // is matched against the note's
-        // header fields. Going through
-        // `parse_query` instead of stuffing
-        // the raw pattern into `criteria.text`
-        // is what makes tags / links /
-        // attributes work — the user types
-        // `!#urgent older` and gets only the
-        // todos tagged `urgent` that also
-        // contain `older`.
-        let raw_pattern = self.todo_pattern().trim();
-        let (pattern, filter) = parse_notes_query(raw_pattern);
-        // The `filter` is applied
-        // post-query against each
-        // row's `timestamp`
-        // (populated by
-        // `fetch_file_updated_timestamps`)
-        // — see the post-sort
-        // block below. It's also
-        // recorded on `self` so the
-        // mode-strip chip lights up
-        // for both `@...` and `!...`
-        // queries identically.
-        let query_expr = if pattern.is_empty() {
-            None
-        } else {
-            match note_search::parse_query(&pattern) {
-                Ok(expr) => Some(expr),
-                Err(e) => {
-                    self.set_status_message(format!("Todo mode: invalid query: {}", e));
-                    return Ok(Vec::new());
-                }
-            }
-        };
 
-        // Build the criteria. We always pin
-        // `open: Some(true)` so the user sees
-        // only uncompleted todos — the user
-        // explicitly asked for "all open todo
-        // entries". The `SortOrder::Modified`
-        // matches the user's request to order
-        // by timestamp: the library emits
-        // `ORDER BY m.updated DESC, t.filename,
-        // t.line_number`, i.e. newest files
-        // first, then by filename and line
-        // number within a file. (The within-file
-        // tie-break by line number puts line 1
-        // before line 100 in the same file,
-        // matching natural top-to-bottom reading
-        // order.)
-        let criteria = note_search::SearchCriteria {
-            database_path: db_path.to_string_lossy().to_string(),
-            note_dir: self
-                .notes_dir
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            open: Some(true),
-            sort_order: Some(note_search::SortOrder::Modified),
-            query_expr,
-            ..Default::default()
-        };
-        // The `query_expr` field is the
-        // modern way to filter; we leave
-        // `criteria.text` unset so the
-        // library doesn't add a redundant
-        // text-LIKE clause on top of the
-        // expression tree. The two paths
-        // would otherwise AND together,
-        // which is harmless but wasteful.
-        debug_assert!(criteria.text.is_none());
+    // `fetch_file_updated_timestamps` was extracted to
+    // `crate::tui::mode::notes::fetch_file_updated_timestamps`
+    // (a free function — it has no `self` access — used
+    // by `todo::fetch` to populate the per-row `updated`
+    // timestamp).
 
-        // We use the same high-level entry
-        // point as `fetch_notes`: the library's
-        // `search_todos` method takes a
-        // `SearchCriteria`, runs the query
-        // (built internally by `QueryBuilder`),
-        // and returns the matching rows. The
-        // criteria is moved in (not borrowed)
-        // because some of the builder's
-        // accumulators consume it; this mirrors
-        // how the library's own callers use it.
-        let service =
-            note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
-        let results = match service.search_todos(&criteria) {
-            Ok(r) => r,
-            Err(e) => {
-                self.set_status_message(format!("Todo mode: search failed: {}", e));
-                return Ok(Vec::new());
-            }
-        };
 
-        // Map the library's `TodoResult` rows
-        // into our `HistoryRow` representation.
-        // Each todo line becomes its own row;
-        // the library's `line_number` is
-        // 1-based, which matches what the
-        // editor will use when it opens the
-        // file.
-        let mut rows: Vec<HistoryRow> = {
-            // Read each unique file's
-            // `updated` timestamp from the
-            // `markdown_data` table so the
-            // details pane can show a real
-            // age instead of the
-            // `9999M` placeholder. The
-            // library's `TodoResult` doesn't
-            // expose `updated` (only the
-            // note's `header_fields`), so we
-            // do one extra batched query:
-            // distinct filenames from the
-            // result set, fetch `updated`
-            // for each, build a lookup map,
-            // and use it when constructing
-            // the rows. Doing one query per
-            // file is much cheaper than the
-            // per-row N+1 we would otherwise
-            // have.
-            let mut unique_files: Vec<String> =
-                results.iter().map(|r| r.filename.clone()).collect();
-            unique_files.sort();
-            unique_files.dedup();
-            let mtimes = self.fetch_file_updated_timestamps(db_path, &unique_files);
-            results
-                .iter()
-                .map(|r| {
-                    let line_number: usize = r.line_number.max(1) as usize;
-                    // Fall back to `0` only
-                    // when the database has
-                    // no `updated` for this
-                    // file (the user has
-                    // never indexed it — a
-                    // transient state that
-                    // goes away on next
-                    // index). Anything better
-                    // than a placeholder is
-                    // preferable, so we
-                    // prefer the actual
-                    // `updated` value when
-                    // available.
-                    let ts = mtimes.get(&r.filename).copied().unwrap_or(0);
-                    HistoryRow {
-                        // Synthetic negative
-                        // id so it doesn't
-                        // collide with real
-                        // history rows; the
-                        // magnitude carries
-                        // the line number
-                        // for human
-                        // debugging
-                        // (`id = -42` means
-                        // line 42).
-                        id: -(line_number as i64),
-                        command: r.text.clone(),
-                        directory: self
-                            .notes_dir
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                        session_id: String::new(),
-                        exit_code: 0,
-                        timestamp: ts,
-                        comment: r.filename.clone(),
-                        // We don't have the
-                        // file's full
-                        // content in scope
-                        // here (the library
-                        // returns only the
-                        // single todo line).
-                        // The `output` pane
-                        // shows just the
-                        // todo text for now;
-                        // rendering
-                        // surrounding
-                        // context would
-                        // require either an
-                        // extra filesystem
-                        // read or a
-                        // library-side
-                        // context API that
-                        // doesn't exist
-                        // yet.
-                        output: r.text.clone(),
-                        mode: "todo".to_string(),
-                        source: String::new(),
+    // `fetch_directories` was extracted to
+    // `crate::tui::mode::directories::fetch` (the SQL
+    // `SELECT` over unique directories + sessiondirs
+    // subdirs + tmux/herdr pane cwd's + substring /
+    // fuzzy / regex token filter + canonicalization
+    // for the `#` mode). The function is large
+    // (700+ lines) but is a single coherent
+    // pipeline, so it moves as a unit.
 
-                        ..Default::default()
-                    }
-                })
-                .collect()
-        };
-        // The library already returned rows
-        // sorted by `m.updated DESC,
-        // t.filename, t.line_number` (newest
-        // files first, then by line within a
-        // file). With the real `updated`
-        // timestamps now in `row.timestamp`,
-        // a defensive re-sort is still
-        // useful — if two files share the
-        // same `updated` value (which
-        // happens when a single indexing
-        // pass touches several files at
-        // once), the library's tie-break by
-        // filename gives a stable order
-        // but it can differ from what we
-        // want here (the synthetic `id` is
-        // the line number, so reverse-id is
-        // a top-to-bottom read within the
-        // file).
-        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
-        // Apply the date-filter alias
-        // (if any) post-sort. Each
-        // row's `timestamp` is the
-        // file's `updated` epoch
-        // (populated by
-        // `fetch_file_updated_timestamps`),
-        // so the `cutoff` math is
-        // the same as in
-        // `fetch_notes`. Rows with
-        // `timestamp = 0` (the
-        // library never gave us a
-        // file mtime — a transient
-        // state that resolves on
-        // the next indexer run) are
-        // excluded from any active
-        // filter, the same way
-        // missing timestamps are
-        // handled in notes mode.
-        // The active filter value
-        // is stored on `self` so
-        // the mode-strip chip
-        // (TODO/notes) lights up
-        // identically for both
-        // modes.
-        if let Some(cutoff) = filter.cutoff(self.now_epoch()) {
-            rows.retain(|r| r.timestamp >= cutoff);
-        }
-        self.notes_date_filter = filter;
-        Ok(rows)
-    }
 
-    /// Read the `updated` column from
-    /// `markdown_data` for each filename in
-    /// `filenames`, returning a map of
-    /// `filename -> updated_epoch`. Used by
-    /// `fetch_todos` to populate the
-    /// Details-pane age column with a real
-    /// timestamp instead of the
-    /// `9999M` placeholder that
-    /// `format_diff(0)` would produce. The
-    /// query is `WHERE filename IN (?, ?, …)`
-    /// so it's O(unique-files), not
-    /// O(rows), regardless of how many todos
-    /// each file contains.
-    fn fetch_file_updated_timestamps(
-        &self,
-        db_path: &std::path::Path,
-        filenames: &[String],
-    ) -> std::collections::HashMap<String, i64> {
-        use rusqlite::Connection;
-        let mut map = std::collections::HashMap::new();
-        if filenames.is_empty() {
-            return map;
-        }
-        let Ok(conn) = Connection::open(db_path) else {
-            return map;
-        };
-        // Build the parameterized IN-list.
-        // SQLite has a default limit of 999
-        // parameters per statement; with a
-        // few hundred todos per page we're
-        // nowhere near that, but a
-        // short-circuit on an empty list
-        // keeps the SQL well-formed.
-        let placeholders = std::iter::repeat_n("?", filenames.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT filename, updated FROM markdown_data \
-             WHERE filename IN ({placeholders})"
-        );
-        let Ok(mut stmt) = conn.prepare(&sql) else {
-            return map;
-        };
-        let params: Vec<&dyn rusqlite::ToSql> = filenames
-            .iter()
-            .map(|f| f as &dyn rusqlite::ToSql)
-            .collect();
-        let Ok(rows) = stmt.query_map(params.as_slice(), |row| {
-            let f: String = row.get(0)?;
-            let u: Option<i64> = row.get(1)?;
-            Ok((f, u.unwrap_or(0)))
-        }) else {
-            return map;
-        };
-        for r in rows.flatten() {
-            map.insert(r.0, r.1);
-        }
-        map
-    }
+    // `fetch_session_panes` was extracted to
+    // `crate::tui::mode::panes::refresh_session_panes`
+    // (the lazy multiplexer snapshot that populates
+    // `app.session_panes` once per TUI session; called
+    // by `panes::fetch` before applying the
+    // panes-filter and token filter).
 
-    /// List every unique directory
-    /// that has been used in the
-    /// global history, sorted by
-    /// each directory's most-
-    /// recent history row's
-    /// timestamp DESC. Each row
-    /// also surfaces that
-    /// directory's most-recently-
-    /// executed command so the
-    /// user has context for "what
-    /// was I doing in there?" The
-    /// typed query (after the
-    /// prefix) is treated as a
-    /// space-separated AND-filter
-    /// against the directory path,
-    /// same contract as the
-    /// other query modes.
-    ///
-    /// The "recency" sort is
-    /// server-side: the SQL uses
-    /// an aggregate `MAX(timestamp)`
-    /// over each `directory`
-    /// group and orders by it
-    /// DESC, so a directory the
-    /// user visited yesterday
-    /// beats one visited last
-    /// week even if both have many
-    /// history rows.
-    ///
-    /// Output shape: reuses
-    /// `HistoryRow` so the rest of
-    /// the TUI (highlighting,
-    /// detail pane, key dispatch)
-    /// keeps working without a new
-    /// parallel rendering path.
-    /// The `command` field carries
-    /// the directory's latest
-    /// command (so the list rows
-    /// show a useful one-line
-    /// summary); `directory`
-    /// carries the absolute path
-    /// (used by the action layer
-    /// to stage the `cd`
-    /// command); `timestamp`
-    /// carries the directory's
-    /// `MAX(timestamp)`; `id` is
-    /// a synthetic negative
-    /// `(directory_index)` so we
-    /// don't collide with real
-    /// history ids.
-    fn fetch_directories(&mut self) -> Result<Vec<HistoryRow>> {
-        let filter = self.directories_pattern().trim();
-        // Build the SQL once, with
-        // a single optional
-        // `LIKE` filter per
-        // whitespace-split token
-        // (AND-matched). Empty
-        // pattern means "no
-        // filter". Parameter
-        // positions are computed
-        // along the way so
-        // rusqlite binds them in
-        // the same order as the
-        // `?` placeholders.
-        let filter_tokens: Vec<&str> = filter
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .collect();
-        // When the match algorithm is not Substring, skip the
-        // SQL LIKE pre-filter entirely. The LIKE uses substring
-        // matching which would exclude rows that a regex or fuzzy
-        // search SHOULD match. Instead, fetch without a SQL filter
-        // and let the `refresh()` post-filter (which branches on
-        // `match_algorithm`) apply the correct matching strategy.
-        let use_sql_like = self.match_algorithm == MatchAlgorithm::Substring;
-        let mut sql = String::from(
-            "SELECT h.directory, \
-                    h.command, \
-                    latest.max_ts \
-             FROM history h \
-             INNER JOIN ( \
-                 SELECT directory, \
-                        MAX(timestamp) AS max_ts \
-                 FROM history \
-                 WHERE directory != '' \
-                 GROUP BY directory \
-             ) latest \
-               ON h.directory = latest.directory \
-              AND h.timestamp = latest.max_ts \
-             WHERE h.directory != ''",
-        );
-        if use_sql_like && !filter_tokens.is_empty() {
-            sql.push_str(" AND (");
-            for (i, _tok) in filter_tokens.iter().enumerate() {
-                if i > 0 {
-                    sql.push_str(" AND ");
-                }
-                sql.push_str("h.directory LIKE ? ESCAPE '\\'");
-            }
-            sql.push(')');
-        }
-        // Tie-break: same-timestamp
-        // directories sort by
-        // directory ASC for stable
-        // output. We then
-        // canonicalise the
-        // directory in code so
-        // `/Users/har/foo` and
-        // `/Volumes/HUGE/har/foo`
-        // collapse to the same
-        // group (matching the
-        // DIR-mode filter logic
-        // elsewhere — see
-        // `canonicalize_directory`).
-        sql.push_str(
-            " GROUP BY h.directory \
-             ORDER BY latest.max_ts DESC, h.directory ASC \
-             LIMIT 1000",
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        // Build owned parameter
-        // strings so the lifetime
-        // requirements of
-        // `params_ref` are satisfied
-        // without needing to box-
-        // leak. Each token becomes
-        // a `%token%` substring
-        // for `LIKE`. Empty tokens
-        // are skipped so an
-        // accidental double-space
-        // doesn't blow up the
-        // bind count.
-        let filter_tokens: Vec<&str> = filter
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .collect();
-        let owned_params: Vec<String> = filter_tokens
-            .iter()
-            .map(|tok| format!("%{}%", crate::util::escape_like(tok)))
-            .collect();
-        let params_ref: Vec<&dyn rusqlite::ToSql> = owned_params
-            .iter()
-            .map(|s| s as &dyn rusqlite::ToSql)
-            .collect();
-        let raw_rows = stmt.query_map(params_ref.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        // Use the cached
-        // home-prefix list
-        // (computed once at App
-        // construction; see
-        // `build_home_list`) so
-        // we don't re-read
-        // `~/.config/smarthistory/config`
-        // on every
-        // `fetch_directories`
-        // call. The list
-        // already has `$HOME`
-        // first and homemap
-        // entries after, so
-        // `shorten_home_path`
-        // does the right thing.
-        let home_list = self.home_list.clone();
-        // Deduplicate on canonical
-        // path: a directory may
-        // appear under multiple
-        // forms (e.g. `/Users/har/x`
-        // and `/Volumes/HUGE/har/x`)
-        // because of macOS volume
-        // mounts. The first
-        // occurrence (which is the
-        // newest, since we sort by
-        // max_ts DESC) wins.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut rows: Vec<HistoryRow> = Vec::new();
-        let mut next_id: i64 = -1;
-        // The directory-source
-        // filter is applied
-        // *early*, not just at
-        // the end. If we let
-        // the SQL loop (or the
-        // sessiondir loop)
-        // populate the shared
-        // `seen` set first, a
-        // tmux pane whose path
-        // also appears in
-        // history would be
-        // silently deduped away
-        // — so in `DIR:TMUX`
-        // mode the user would
-        // only see the tmux
-        // panes whose paths
-        // they had *never*
-        // visited (exact bug
-        // reported: of 5 active
-        // panes, only 2 showed,
-        // the ones not in the
-        // history DB). Skip the
-        // irrelevant loops
-        // entirely instead.
-        let want_sql = matches!(
-            self.directory_source,
-            crate::tui::state::DirectorySource::All | crate::tui::state::DirectorySource::Config
-        );
-        let want_sessiondirs = matches!(
-            self.directory_source,
-            crate::tui::state::DirectorySource::All | crate::tui::state::DirectorySource::Config
-        );
-        let want_tmux = matches!(
-            self.directory_source,
-            crate::tui::state::DirectorySource::All | crate::tui::state::DirectorySource::Tmux
-        );
-        if !want_sql {
-            tmux_filter_debug_log("skipping SQL loop (directory_source != All/Config)");
-        }
-        for raw in raw_rows {
-            if !want_sql {
-                break;
-            }
-            let (directory, command, ts) = raw?;
-            let canonical = crate::util::canonicalize_directory(&directory);
-            if !seen.insert(canonical.clone()) {
-                if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-                    tmux_filter_debug_log(&format!(
-                        "SQL row deduped (dup canonical {:?}): {:?}",
-                        canonical, directory
-                    ));
-                }
-                continue;
-            }
-            // The visible list line
-            // shows the **directory**
-            // as the primary text
-            // and the last command
-            // as the secondary text
-            // (the inverse of how
-            // normal history rows
-            // are laid out). We
-            // achieve that by
-            // storing the directory
-            // in `command` (so the
-            // existing
-            // `highlight_matches(
-            //   &row.command, ...)`
-            // path applies
-            // unchanged) and the
-            // last command in
-            // `comment` (so the
-            // existing `# ...`
-            // secondary-slot
-            // rendering picks it
-            // up). The `directory`
-            // field still holds
-            // the full absolute
-            // path because the
-            // tmux-pane lookup
-            // (`directory_tmux_pane_id`)
-            // canonicalises against
-            // it.
-            //
-            // The directory in
-            // `command` is the
-            // shell-friendly `~/x`
-            // form (matching the
-            // user's typing
-            // convention) so the
-            // query highlighting
-            // shows matches in the
-            // short form they're
-            // used to.
-            let short_dir = crate::util::shorten_home_path(&directory, &home_list).into_owned();
-            // The command in
-            // `comment` is
-            // truncated because
-            // the secondary slot
-            // is narrow. The user
-            // can still see the
-            // full command in
-            // the Details pane.
-            let short_cmd = if command.is_empty() {
-                String::new()
-            } else if command.chars().count() > 60 {
-                let truncated: String = command.chars().take(57).collect();
-                format!("{}…", truncated)
-            } else {
-                command.clone()
-            };
-            // Synthetic row. `id`
-            // is negative to avoid
-            // colliding with real
-            // history ids (same
-            // convention as todo
-            // rows).
-            let id = next_id;
-            next_id -= 1;
-            rows.push(HistoryRow {
-                id,
-                command: short_dir,
-                directory,
-                session_id: String::new(),
-                exit_code: 0,
-                timestamp: ts,
-                comment: short_cmd,
-                output: String::new(),
-                mode: "directory".to_string(),
-                source: "history".to_string(),
 
-                ..Default::default()
-            });
-        }
-        // Augment with the user's
-        // `sessiondirs=...` entries.
-        // Every subdirectory of
-        // every configured root
-        // becomes a row, even if
-        // the user has never run
-        // a command there.
-        //
-        // Rows added by this loop
-        // get `timestamp = 0` so
-        // they sort to the bottom
-        // of the list (the
-        // history-driven rows
-        // have real recent
-        // timestamps and surface
-        // first). The user can
-        // still type `#<name>` to
-        // filter to one of these
-        // pinned rows.
-        //
-        // Dedup is via the same
-        // `seen` set the SQL loop
-        // used: a subdirectory
-        // that *also* has history
-        // (and thus already
-        // surfaced via SQL)
-        // won't appear twice. The
-        // history row wins
-        // (newer timestamp) and
-        // carries the last
-        // command; the
-        // sessiondirs row is
-        // suppressed.
-        //
-        // The secondary
-        // (`comment`) slot is
-        // empty for these rows,
-        // unless the directory
-        // (or an ancestor) has a
-        // `.command` file — in
-        // which case we surface
-        // "has .command" so the
-        // user knows the row
-        // will run a setup
-        // script on select.
-        if !want_sessiondirs {
-            tmux_filter_debug_log("skipping sessiondir loop (directory_source != All/Config)");
-        }
-        for sub in &self.session_subdirs {
-            if !want_sessiondirs {
-                break;
-            }
-            let canonical = crate::util::canonicalize_directory(&sub.to_string_lossy());
-            if !seen.insert(canonical.clone()) {
-                continue;
-            }
-            let directory_str = sub.to_string_lossy().into_owned();
-            // Apply the same
-            // substring filter
-            // the SQL fetch
-            // applied, so the
-            // sessiondirs rows
-            // are visible only
-            // when they match
-            // the user's typed
-            // pattern. The SQL
-            // `LIKE` uses the
-            // raw `directory`
-            // (e.g.
-            // `/Volumes/HUGE/har/foo`),
-            // and the user types
-            // a pattern that
-            // matches against
-            // that form (because
-            // the visible list
-            // shows the shortened
-            // form, but the
-            // filtering is on the
-            // raw form). For
-            // consistency, we
-            // also filter on the
-            // raw form here, so
-            // `#home` matches
-            // both a sessiondir at
-            // `~/work` (raw
-            // `/Users/har/work`)
-            // and an SQL row at
-            // `/Users/har/home`.
-            if !filter_tokens.is_empty()
-                && !filter_tokens
-                    .iter()
-                    .all(|tok| directory_str.to_lowercase().contains(&tok.to_lowercase()))
-            {
-                continue;
-            }
-            // Surface a hint when
-            // the row has a
-            // `.command` file
-            // (either in the
-            // directory itself or
-            // in an ancestor). The
-            // user can see at a
-            // glance "this row
-            // will run a setup
-            // script".
-            let has_command =
-                crate::util::find_command_file(std::path::Path::new(&directory_str)).is_some();
-            let short_dir = crate::util::shorten_home_path(&directory_str, &home_list).into_owned();
-            let hint = if has_command {
-                String::from("(has .command)")
-            } else {
-                String::new()
-            };
-            let id = next_id;
-            next_id -= 1;
-            rows.push(HistoryRow {
-                id,
-                command: short_dir,
-                directory: directory_str,
-                session_id: String::new(),
-                exit_code: 0,
-                // `0` = unix epoch.
-                // The list is sorted
-                // by timestamp DESC
-                // (most-recent first)
-                // elsewhere, so
-                // epoch-zero rows
-                // land at the bottom
-                // of the list. The
-                // user types a
-                // pattern to filter
-                // to one of these.
-                timestamp: 0,
-                comment: hint,
-                output: String::new(),
-                mode: "directory".to_string(),
-                source: "sessiondir".to_string(),
+    // `fetch_session_panes_impl` was extracted
+    // alongside `fetch_session_panes` (the test-injectable
+    // variant that takes `current_pane` directly, used
+    // by `refresh_session_panes` and by the panes-mode
+    // tests in `panes::tests`).
 
-                ..Default::default()
-            });
-        }
-        // Add rows for the
-        // cwds of every
-        // active tmux pane.
-        // These appear in
-        // the list even
-        // when the user has
-        // never run a
-        // command in the
-        // directory (e.g.
-        // a session they
-        // started months
-        // ago, or a session
-        // attached to a
-        // project that
-        // doesn't yet have
-        // history).
-        //
-        // The `T` marker
-        // (drawn in
-        // `render_row`)
-        // already shows
-        // which directories
-        // are active in
-        // tmux; this
-        // augmented list
-        // makes the same
-        // information
-        // available as
-        // filterable rows
-        // for the `TMUX`
-        // directory source
-        // (so the user can
-        // list "every
-        // directory I'm
-        // currently active
-        // in" without
-        // scrolling past
-        // their pinned
-        // projects or the
-        // global history).
-        //
-        // Each unique
-        // `pane_current_path`
-        // becomes one row.
-        // We dedup against
-        // `seen` so a
-        // directory that's
-        // already in the
-        // history (and so
-        // already got a
-        // row from the SQL
-        // loop) doesn't get
-        // a duplicate from
-        // the tmux side. The
-        // history row wins
-        // (newer timestamp)
-        // and carries the
-        // last command; the
-        // tmux row is
-        // suppressed.
-        //
-        // Sort order: by
-        // `pane_id`
-        // (deterministic
-        // since tmux
-        // returns panes in
-        // a stable order).
-        // We don't have a
-        // meaningful
-        // timestamp for a
-        // tmux pane
-        // (the pane itself
-        // doesn't expose
-        // one), so we
-        // use the current
-        // epoch for all
-        // tmux rows; the
-        // user can still
-        // type a pattern to
-        // filter to one.
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if !want_tmux {
-            tmux_filter_debug_log("skipping tmux loop (directory_source != All/Tmux)");
-        }
-        for window in &self.tmux_windows {
-            if !want_tmux {
-                break;
-            }
-            // Defensive filter: a
-            // `pane_current_path`
-            // that doesn't start
-            // with `/` is not a
-            // real absolute
-            // filesystem path.
-            // Tmux normally
-            // reports only real
-            // paths, but a
-            // custom tmux config
-            // or a wrapper could
-            // produce something
-            // like the command
-            // line that spawned
-            // the pane
-            // (`tmux list-windows
-            // -a ...`). Showing
-            // such a "path" as a
-            // directory row is
-            // wrong: the row
-            // wouldn't be a
-            // directory, the
-            // T-marker lookup
-            // would fail (no
-            // matching pane), and
-            // the visible primary
-            // text would be a
-            // shell command —
-            // confusing. The user
-            // reported exactly
-            // this: a `DIR:TMUX`
-            // entry whose text
-            // was the tmux
-            // command line, with
-            // no T flag. The
-            // fix: skip any
-            // `pane_current_path`
-            // that doesn't look
-            // like an absolute
-            // path.
-            if !window.path.starts_with('/') {
-                tmux_filter_debug_log(&format!(
-                    "filtered tmux pane %{}: pane_current_path {:?} does not start with `/`",
-                    window.pane_id, window.path
-                ));
-                continue;
-            }
-            // Also require the
-            // path to actually
-            // resolve to a
-            // directory on disk.
-            // A real tmux pane's
-            // cwd is a directory
-            // that exists; a
-            // non-path or a path
-            // to a non-existent
-            // file shouldn't
-            // surface. Without
-            // this, a tmux pane
-            // whose cwd was
-            // deleted while the
-            // TUI is running
-            // would still show
-            // as a row, but the
-            // user couldn't
-            // actually jump to
-            // it. The check is
-            // best-effort: a
-            // race just means
-            // the row disappears
-            // on the next
-            // refresh, which is
-            // the right behaviour
-            // anyway.
-            if !std::path::Path::new(&window.path).is_dir() {
-                tmux_filter_debug_log(&format!(
-                    "filtered tmux pane %{}: pane_current_path {:?} is not a directory",
-                    window.pane_id, window.path
-                ));
-                continue;
-            }
-            let canonical = crate::util::canonicalize_directory(&window.path);
-            if !seen.insert(canonical.clone()) {
-                tmux_filter_debug_log(&format!(
-                    "tmux pane %{} deduped (dup canonical {:?}, eaten by an earlier loop): {:?}",
-                    window.pane_id, canonical, window.path
-                ));
-                continue;
-            }
-            // Same substring
-            // filter as the SQL
-            // and sessiondirs
-            // loops above. The
-            // tmux-reported path
-            // is the raw absolute
-            // form, so filter on
-            // it directly.
-            if !filter_tokens.is_empty()
-                && !filter_tokens
-                    .iter()
-                    .all(|tok| window.path.to_lowercase().contains(&tok.to_lowercase()))
-            {
-                continue;
-            }
-            let short_dir = crate::util::shorten_home_path(&window.path, &home_list).into_owned();
-            // Build a
-            // synthetic
-            // command
-            // field for
-            // the
-            // secondary
-            // slot: the
-            // pane id.
-            // The user
-            // can copy
-            // / reuse
-            // it
-            // (e.g. as
-            // the
-            // `-t`
-            // argument
-            // to a
-            // custom
-            // tmux
-            // command)
-            // directly
-            // from the
-            // list.
-            let pane_hint = format!("(pane {})", window.pane_id);
-            let id = next_id;
-            next_id -= 1;
-            tmux_filter_debug_log(&format!(
-                "kept tmux pane %{}: pane_current_path {:?} (source=tmux)",
-                window.pane_id, window.path
-            ));
-            rows.push(HistoryRow {
-                id,
-                command: short_dir,
-                directory: window.path.clone(),
-                session_id: String::new(),
-                exit_code: 0,
-                timestamp: now_epoch,
-                comment: pane_hint,
-                output: String::new(),
-                mode: "directory".to_string(),
-                source: "tmux".to_string(),
-
-                ..Default::default()
-            });
-        }
-        // Apply the
-        // directory-source
-        // filter. The
-        // `ALL` mode is a
-        // no-op; the
-        // `TMUX` and
-        // `CONFIG` modes
-        // drop rows whose
-        // `source` doesn't
-        // match.
-        let rows: Vec<HistoryRow> = match self.directory_source {
-            crate::tui::state::DirectorySource::All => rows,
-            crate::tui::state::DirectorySource::Tmux => {
-                rows.into_iter().filter(|r| r.source == "tmux").collect()
-            }
-            crate::tui::state::DirectorySource::Config => rows
-                .into_iter()
-                .filter(|r| r.source == "sessiondir")
-                .collect(),
-        };
-        Ok(rows)
-    }
-
-    /// Populate `self.session_panes` from
-    /// `tmux list-panes -s` (the *current*
-    /// session only — `-s` limits to the
-    /// session the TUI is running in, unlike
-    /// `-a` which walks every session). The
-    /// current pane (`$TMUX_PANE`) is excluded
-    /// so the user never sees the pane they're
-    /// in. Idempotent — runs at most once per
-    /// TUI session; subsequent calls return
-    /// immediately (the pane set doesn't
-    /// change while the TUI is the foreground
-    /// process). Failure modes are silent
-    /// (same contract as `fetch_tmux_windows`):
-    /// `tmux` not on PATH, not in a tmux
-    /// session, or the subprocess hangs past
-    /// `TMUX_PANE_PROBE_TIMEOUT_MS` → the
-    /// cache stays empty and the user sees an
-    /// empty list.
-    ///
-    /// Each pane becomes a `HistoryRow`:
-    /// - `command` (primary text) = the
-    ///   pane's current command
-    ///   (`#{pane_current_command}`, e.g.
-    ///   `zsh`, `vim`, `cargo`).
-    /// - `comment` (secondary text) = the
-    ///   pane's cwd shortened to `~/x`.
-    /// - `directory` = the full canonical cwd.
-    /// - `session_id` = the pane id (`%N`),
-    ///   used as the `select-pane -t` target.
-    /// - `output` = the pane's global window
-    ///   id (`@N`), used as the
-    ///   `select-window -t` target so the
-    ///   jump works even when the pane is
-    ///   in a different window than the
-    ///   current one (plain `select-pane`
-    ///   does NOT switch windows).
-    /// - `source` = `"pane"`.
-    /// - `id` = synthetic decreasing negative.
-    fn fetch_session_panes(&mut self) {
-        if !self.session_panes.is_empty() {
-            return;
-        }
-        // The pane id the TUI is
-        // running in. tmux sets
-        // `$TMUX_PANE` for every
-        // pane; herdr sets
-        // `$HERDR_PANE_ID` for
-        // every pane. Either is
-        // a valid exclude-target
-        // (jumping to ourselves
-        // would be a no-op). We
-        // bail early only when
-        // NEITHER is set — that
-        // means the user isn't
-        // running inside a
-        // multiplexer pane at
-        // all (so there are no
-        // sibling panes to jump
-        // to and the snapshot
-        // would be wasted work).
-        //
-        // The previous code
-        // checked `$TMUX_PANE`
-        // only, which silently
-        // zeroed the panes list
-        // for herdr users (they
-        // have `HERDR_PANE_ID`
-        // set but not `TMUX_PANE`),
-        // surfacing as the
-        // user-reported bug
-        // "there are no panes
-        // visible when I switch
-        // to the panes prefix".
-        let current_pane = std::env::var("TMUX_PANE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("HERDR_PANE_ID")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            });
-        let current_pane = match current_pane {
-            Some(p) => p,
-            // Neither env var set —
-            // the user isn't inside
-            // a multiplexer pane.
-            // Bail rather than
-            // spawn a snapshot that
-            // would have nothing
-            // useful to return.
-            None => return,
-        };
-        self.fetch_session_panes_impl(&current_pane);
-    }
-
-    /// The implementation of `fetch_session_panes`,
-    /// separated so tests can inject the "current
-    /// pane" id directly (env-var mutation is
-    /// `unsafe` since Rust 1.66 and is racy under
-    /// the parallel test runner). `current_pane`
-    /// is the pane id to EXCLUDE from the list
-    /// (the one the TUI is running in). Reads
-    /// `list-panes -s` and caches the parsed
-    /// panes into `self.session_panes`.
-    fn fetch_session_panes_impl(&mut self, current_pane: &str) {
-        // Delegate the snapshot
-        // to the configured backend's
-        // `snapshot_current_panes`. The
-        // backend returns one row per
-        // pane the user can switch to
-        // (every pane across every
-        // session / workspace, excluding
-        // the one the TUI is running in).
-        // The backend's
-        // `CurrentPaneInfo` carries a
-        // `session_label` (tmux: the
-        // session name; herdr: the
-        // workspace id) and a
-        // `tab_id` (the parent window /
-        // tab the pane lives in).
-        //
-        // The display layout the user
-        // asked for is a **tree**:
-        // one "header" row per
-        // session / workspace, with
-        // its panes indented
-        // underneath. So we group the
-        // backend rows by
-        // `session_label` (preserving
-        // first-seen order) and emit
-        // a `workspace` row, then its
-        // `pane` rows, for each group.
-        //
-        // The pane the TUI is running
-        // in (passed as `current_pane`
-        // by the caller; for herdr
-        // this is `HERDR_PANE_ID` like
-        // `wB:p1`) is excluded — the
-        // user never sees a "switch to
-        // myself" row.
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let backend_rows = self.multiplexer.snapshot_current_panes(current_pane);
-
-        // First pass: build a
-        // (session_label → Vec<pane_record>)
-        // map preserving first-seen
-        // order. Panes with no resolvable
-        // absolute path are dropped (same
-        // defensive filter as the
-        // directories-mode fetch).
-        // The `is_last` flag is carried
-        // through so we can bubble the
-        // containing workspace to the
-        // top of the list afterwards.
-        use std::collections::BTreeMap;
-        let mut order: Vec<String> = Vec::new();
-        let mut grouped: BTreeMap<
-            String,
-            Vec<(crate::multiplexer::CurrentPaneInfo, String, String, i64)>,
-        > = BTreeMap::new();
-        // Decreasing synthetic ids so
-        // the rows sort consistently
-        // under any timestamp-DESC sort.
-        let mut next_id: i64 = -1;
-        let mut last_workspace: Option<String> = None;
-        for pr in backend_rows {
-            if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-                eprintln!(
-                    "[debug] pass 1: considering pr.pane_id={:?} session_label={:?} cwd={:?}",
-                    pr.pane_id, pr.session_label, pr.path
-                );
-            }
-            if pr.pane_id.is_empty() || pr.pane_id == current_pane {
-                if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-                    eprintln!(
-                        "[debug]   DROPPED: empty pane_id or matches current_pane={:?}",
-                        current_pane
-                    );
-                }
-                continue;
-            }
-            let path_raw = pr.path.clone();
-            if path_raw.is_empty() {
-                if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-                    eprintln!("[debug]   DROPPED: path_raw empty");
-                }
-                continue;
-            }
-            // herdr sometimes reports shell-shortened `~/x` paths.
-            // We expand them to absolute form here. NOTE: this uses
-            // `expand_home_to_absolute`, NOT `expand_home` —
-            // `expand_home` is misnamed and actually calls
-            // `shorten_home_path` (which goes the OTHER direction,
-            // absolute → `~/x`). The previous code used `expand_home`
-            // and silently shortened paths like
-            // `/Users/har/smarthistory/smarthistory` to
-            // `~/smarthistory/smarthistory`, which then failed the
-            // `starts_with('/')` check below and got dropped.
-            // That was the user's bug: only some workspaces' panes
-            // showed up in the `*` mode list because the others'
-            // cwds got shortened (and dropped) here.
-            let abs_path =
-                crate::util::expand_home_to_absolute(&path_raw, &self.home_list).into_owned();
-            if !abs_path.starts_with('/') {
-                if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-                    eprintln!(
-                        "[debug]   DROPPED: abs_path={:?} doesn't start with '/'",
-                        abs_path
-                    );
-                }
-                continue;
-            }
-            let full_path = crate::util::canonicalize_directory(&abs_path);
-            if full_path.is_empty() {
-                if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-                    eprintln!(
-                        "[debug]   DROPPED: canonicalize_directory({:?}) returned empty",
-                        abs_path
-                    );
-                }
-                continue;
-            }
-            let short_dir =
-                crate::util::shorten_home_path(&full_path, &self.home_list).into_owned();
-            let id = next_id;
-            next_id -= 1;
-            let label = pr.session_label.clone();
-            if !grouped.contains_key(&label) {
-                order.push(label.clone());
-            }
-            // The last pane gets a
-            // slightly newer timestamp
-            // so it sorts first within
-            // its group AND signals
-            // "bring this workspace to
-            // the top of the list".
-            if pr.is_last {
-                last_workspace = Some(label.clone());
-            }
-            grouped
-                .entry(label)
-                .or_default()
-                .push((pr.clone(), short_dir, full_path, id));
-        }
-
-        // Second pass: emit
-        // (workspace_header, then
-        // its pane children) for
-        // each group, in
-        // first-seen order. The
-        // workspace containing the
-        // "last" pane is emitted
-        // first so pressing Enter
-        // on the default selection
-        // flips back to where the
-        // user just was.
-        if let Some(ref last_ws) = last_workspace
-            && let Some(pos) = order.iter().position(|l| l == last_ws)
-            && pos > 0
-        {
-            let l = order.remove(pos);
-            order.insert(0, l);
-        }
-
-        let mut panes: Vec<HistoryRow> = Vec::new();
-        if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-            eprintln!(
-                "[debug] pass 2: order={:?}, grouped.keys={:?}",
-                order,
-                grouped.keys().collect::<Vec<_>>()
-            );
-            for (k, v) in &grouped {
-                eprintln!("[debug]   grouped[{:?}] has {} entries", k, v.len());
-            }
-        }
-        for label in &order {
-            let entries = grouped.get(label).cloned().unwrap_or_default();
-            if entries.is_empty() {
-                continue;
-            }
-            // Bubble any
-            // `is_last` pane to
-            // the front of this
-            // workspace's pane
-            // list so the user
-            // can flip back to it
-            // immediately.
-            let mut entries = entries;
-            if let Some(pos) = entries.iter().position(|(pr, _, _, _)| pr.is_last)
-                && pos > 0
-            {
-                let item = entries.remove(pos);
-                entries.insert(0, item);
-            }
-
-            // The workspace header
-            // row. `command` is the
-            // session/workspace label
-            // itself (what the user
-            // sees as the row's
-            // primary text);
-            // `session_id` is the
-            // label too (passed to
-            // `focus_session` on
-            // selection). The pane
-            // count + agent summary
-            // goes in `comment` as
-            // a secondary hint.
-            let agent_count = entries
-                .iter()
-                .filter(|(pr, _, _, _)| !pr.current_command.is_empty())
-                .count();
-            let summary = format!(
-                "{} pane{}{}, ",
-                entries.len(),
-                if entries.len() == 1 { "" } else { "s" },
-                if agent_count > 0 {
-                    format!(
-                        ", {} agent{}",
-                        agent_count,
-                        if agent_count == 1 { "" } else { "s" }
-                    )
-                } else {
-                    String::new()
-                }
-            );
-            panes.push(HistoryRow {
-                id: next_id,
-                command: label.clone(),
-                directory: entries
-                    .first()
-                    .map(|(_, _, full, _)| full.clone())
-                    .unwrap_or_default(),
-                // The workspace ID (`wB`, `wE`,
-                // etc.) — used as the focus
-                // target by `select_for_run`'s
-                // workspace-row branch
-                // (`self.multiplexer.focus_session(session_id)`).
-                // The DISPLAY text the
-                // user sees (e.g. "smarthistory",
-                // "dir: Downloads") is in
-                // `command` and is the backend's
-                // `session_label` (resolved from
-                // `herdr workspace list`'s `label`
-                // field). Keep these separate:
-                // `session_id` is what herdr's
-                // `workspace focus` accepts,
-                // `command` is what the user
-                // recognizes.
-                session_id: entries
-                    .first()
-                    .map(|(pr, _, _, _)| pr.window_id.clone())
-                    .unwrap_or_default(),
-                exit_code: 0,
-                timestamp: now_epoch,
-                comment: summary,
-                output: String::new(),
-                mode: "workspace".to_string(),
-                source: "workspace".to_string(),
-
-                ..Default::default()
-            });
-            next_id -= 1;
-            // Then the pane rows.
-            // Each is indented in the
-            // renderer (we drop the
-            // `[label]` badge since
-            // the workspace header
-            // above already identifies
-            // it). `tab_id` is stashed
-            // in `output` so
-            // `select_for_run`'s
-            // pane-row branch can pass
-            // it to `focus_pane`.
-            for (pr, short_dir, full_path, id) in entries {
-                panes.push(HistoryRow {
-                    id,
-                    command: pr.current_command.clone(),
-                    directory: full_path,
-                    session_id: pr.pane_id.clone(),
-                    exit_code: 0,
-                    timestamp: now_epoch,
-                    comment: short_dir,
-                    output: pr.tab_id.clone(),
-                    mode: "pane".to_string(),
-                    source: "pane".to_string(),
-
-                    ..Default::default()
-                });
-            }
-        }
-        // Diagnostic: dump
-        // the row count +
-        // structure right
-        // before we commit
-        // to `session_panes`.
-        // The grouping logic
-        // (BTreeMap + first-seen
-        // order) is subtle and
-        // a regression here
-        // would silently drop
-        // whole workspaces.
-        // The eprintln is
-        // gated on the
-        // `SMARTHISTORY_DEBUG_TMUX`
-        // env var (same flag
-        // the existing tmux-
-        // filter debug logs
-        // watch) so it doesn't
-        // run in production
-        // for users who don't
-        // want noise.
-        if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-            let ws_count = panes.iter().filter(|r| r.mode == "workspace").count();
-            let pane_count = panes.iter().filter(|r| r.mode == "pane").count();
-            eprintln!(
-                "[debug] fetch_session_panes_impl: emitting {} rows ({} workspace headers, {} pane children)",
-                panes.len(),
-                ws_count,
-                pane_count
-            );
-            for r in &panes {
-                eprintln!(
-                    "[debug]   mode={:?} session_id={:?} command={:?} comment={:?}",
-                    r.mode, r.session_id, r.command, r.comment
-                );
-            }
-        }
-        self.session_panes = panes;
-        // Append named sessions as additional
-        // workspace + pane rows, grouped under
-        // a `# sessions` header.
-        if !self.sessions.is_empty() {
-            self.session_panes.push(HistoryRow {
-                id: -20_000,
-                command: "sessions".to_string(),
-                directory: String::new(),
-                session_id: "sessions".to_string(),
-                exit_code: 0,
-                timestamp: 0,
-                comment: "configured sessions".to_string(),
-                output: String::new(),
-                mode: "workspace".to_string(),
-                source: "sessions".to_string(),
-
-                ..Default::default()
-            });
-            let mut next_session_id: i64 = -20_000;
-            for s in &self.sessions {
-                next_session_id -= 1;
-                self.session_panes.push(HistoryRow {
-                    id: next_session_id,
-                    command: s.command.clone(),
-                    directory: s.directory.clone(),
-                    session_id: s.command.clone(),
-                    exit_code: 0,
-                    timestamp: 0,
-                    comment: s.comment.clone(),
-                    output: String::new(),
-                    mode: "session".to_string(),
-                    source: "sessions".to_string(),
-
-                    ..Default::default()
-                });
-            }
-        }
-        // Append hosts as additional
-        // rows, grouped under a
-        // `# hosts` header. Each
-        // host row carries the
-        // display name in `command`
-        // and a `user@host:port`
-        // connection string in
-        // `directory` (the staging
-        // layer reads both for the
-        // matcher and the
-        // connection-argv
-        // construction).
-        if !self.hosts.is_empty() {
-            self.session_panes.push(HistoryRow {
-                id: -25_000,
-                command: "hosts".to_string(),
-                directory: String::new(),
-                session_id: "hosts".to_string(),
-                exit_code: 0,
-                timestamp: 0,
-                comment: "configured hosts".to_string(),
-                output: String::new(),
-                mode: "workspace".to_string(),
-                source: "hosts".to_string(),
-
-                ..Default::default()
-            });
-            let mut next_host_id: i64 = -25_000;
-            for h in &self.hosts {
-                next_host_id -= 1;
-                // The synthetic
-                // `id` is
-                // negative
-                // (consistent
-                // with
-                // `# sessions`)
-                // and stable
-                // across
-                // refreshes, so
-                // the staging
-                // layer can
-                // index
-                // `self.hosts`
-                // by
-                // `-(row.id) -
-                // 25_000 - 1`
-                // (the
-                // accessor in
-                // `Config::hosts`
-                // uses the
-                // same
-                // `id - 30_000`
-                // scheme,
-                // shifted by
-                // 5_000 to keep
-                // the two
-                // ranges
-                // disjoint).
-                self.session_panes.push(HistoryRow {
-                    id: next_host_id,
-                    command: h.command.clone(),
-                    directory: h.directory.clone(),
-                    session_id: String::new(),
-                    exit_code: 0,
-                    timestamp: 0,
-                    comment: h.comment.clone(),
-                    output: String::new(),
-                    mode: "host".to_string(),
-                    source: "hosts".to_string(),
-
-                    ..Default::default()
-                });
-            }
-        }
-        if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-            eprintln!(
-                "[debug] sessions count: {}, session_panes total: {}",
-                self.sessions.len(),
-                self.session_panes.len()
-            );
-        }
-        // Bump the snapshot id and spawn an
-        // asynchronous cmdline lookup for every
-        // pane row in the new snapshot. The
-        // background thread is the herdr path's
-        // way of getting the running process's
-        // command line (`nvim config.toml`,
-        // `ssh har@host`, …) without blocking
-        // the first render — the panes view is
-        // shown immediately with the agent name,
-        // and the cmdline is patched in later
-        // when the lookup completes (see
-        // `process_pane_cmdlines`).
-        //
-        // We also cancel any in-flight lookup
-        // from a previous snapshot — its results
-        // would be stale (the panes may have
-        // changed since) and could overwrite the
-        // new snapshot's rows.
-        self.panes_snapshot_id = self.panes_snapshot_id.wrapping_add(1);
-        // The background cmdlines lookup is spawned lazily
-        // from `process_pane_cmdlines` (called on every
-        // run-loop tick), NOT here. This avoids the
-        // spawn-and-immediately-cancel pattern that
-        // happened when `fetch_session_panes_impl` was
-        // called multiple times in quick succession during
-        // TUI initialization (sessions / hosts population
-        // triggers several refreshes, each bumping the
-        // snapshot id). The lazy spawn fires once,
-        // after the run loop settles, and the snapshot
-        // id at that point matches the current snapshot.
-    }
 
     /// Return the cached session-panes list,
     /// filtered by the `*`-body substring
@@ -3800,20 +2192,6 @@ impl App {
     // function via `ModeKind::Panes`.
 
 
-    /// Walk the current directory
-    /// recursively, collecting
-    /// every file path whose
-    /// relative path matches the
-    /// typed pattern (AND by
-    /// whitespace-separated
-    /// substring tokens, case-
-    /// insensitive). Hidden
-    /// directories (names
-    /// starting with `.`) are
-    /// skipped. Returns up to
-    /// 1000 rows, sorted by
-    /// path (directories first,
-    /// then alphabetical).
     // `fetch_files` was extracted to
     // `crate::tui::mode::files::fetch` (the
     // cached-rows clone is one line; the
@@ -3822,413 +2200,28 @@ impl App {
     // `spawn_files_walk` → `process_files_result`
     // manages).
 
-    /// Parse the `tags` file in the current directory
-    /// and return one `HistoryRow` per symbol entry.
-    /// Each row carries:
-    ///
-    /// - `command` — the source-line text (for display
-    ///   and search matching). This is the line of code
-    ///   the tag was found on, stripped of the trailing
-    ///   `symbol_name + line_number, byte_offset`
-    ///   suffix that the universal tag format appends.
-    /// - `directory` — the absolute path of the file the
-    ///   symbol was found in (from the section header).
-    /// - `comment` — the source file's basename.
-    ///   Shown as secondary text and used for search
-    ///   matching.
-    /// - `session_id` — the line number as a string
-    ///   (e.g. `"268"`). Used by the staging layer to
-    ///   build the `+LINE_NUMBER` editor argument.
-    /// - `mode` — `"tags"`.
-    /// - `source` — `"tags"` (or `"tags:<lang>"` when
-    ///   an `@lang` filter is active).
-    /// - `output` — the 5-line source context around
-    ///   the symbol. Populated lazily when the row is
-    ///   selected; see `crate::tui::mode::tags::ensure_selected_context`.
-    ///
-    /// The `tags` file format is:
-    /// ```text
-    /// \x0c
-    /// <filename>,<line_count>
-    /// <source_line><symbol_name><line>,<byte_offset>
-    /// <source_line><symbol_name><line>,<byte_offset>
-    /// ...
-    /// \x0c
-    /// <next_file>,<line_count>
-    /// ...
-    /// ```
-    ///
-    /// The `\x0c` (form feed) on its own line separates
-    /// file sections. The section header carries the
-    /// filename and the line count. Each symbol line
-    /// carries the source line, the symbol name, the
-    /// line number, and the byte offset — all
-    /// concatenated without delimiters. The parser
-    /// splits them by working backward from the end:
-    /// the last ``,``` separates the byte offset from
-    /// the rest; the digits before that comma are the
-    /// line number; everything before the digits is the
-    /// display text (source line + symbol name
-    /// concatenated — we keep the full text for
-    /// display so the user has context).
-    ///
-    /// The filter (the body after `$`) is matched as a
-    /// case-insensitive substring against the symbol
-    /// name (`comment`), the source line (`command`),
-    /// and the filename (`directory`). Multiple
-    /// whitespace-separated tokens are AND-combined.
-    /// An empty filter returns every symbol.
-    ///
-    /// Additionally, the query body may contain `@lang` tokens
-    /// (e.g. `@rust`) — mirroring the `ag` mode. The first
-    /// such token:
-    /// 1. filters the result set to files whose extension maps
-    ///    to the language (so `$MyStruct @rust` only shows
-    ///    symbols defined in `.rs` files);
-    /// 2. pipes the per-row source-context preview through
-    ///    `bat --language <lang> --color=always` so the
-    ///    output preview pane shows syntax-highlighted code
-    ///    instead of the raw text. The cap of 50 bat calls
-    ///    per fetch keeps the foreground responsive.
-    fn fetch_tags(&mut self) -> Result<Vec<HistoryRow>> {
-        // Search for a `tags` file in the current directory,
-        // then walk upward through parent directories until
-        // one is found (or we hit the filesystem root). This
-        // mirrors how editors like vim/nvim discover tag files:
-        // the first `tags` file found (closest to the cwd) is
-        // the one that's used. The file paths inside the tag
-        // file are relative to the directory containing the tag
-        // file, so we resolve them against that directory (not
-        // the cwd) to produce correct absolute paths.
-        //
-        // If no tag file is found anywhere up the tree, fall
-        // back to the CodeGraph index (`.codegraph/codegraph.db`)
-        // when one exists. The fallback rows are tagged with
-        // `mode: "tags"` so the existing tags dispatch (open at
-        // line, `@lang` filter, `crate::tui::mode::tags::ensure_selected_context`)
-        // all work unchanged — the user gets symbol navigation
-        // via CodeGraph data with the `$` UX they already know.
-        let tags_path = find_tags_file();
-        if !tags_path.is_file() {
-            return self.fetch_tags_via_codegraph();
-        }
-        let tags_dir = tags_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let contents = match std::fs::read_to_string(&tags_path) {
-            Ok(s) => s,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let pattern = self.tags_pattern().trim();
-        let case_sensitive = self.is_case_sensitive();
+    // `fetch_tags` was extracted to
+    // `crate::tui::mode::tags::fetch` (the TAGS-file parser +
+    // `@lang` filter + token filter for the `$` mode).
 
-        // Use the shared classifier so `$`, `,` (ag), and any
-        // future content modes share one set of rules. The
-        // first `@lang` token (if any) drives both the
-        // extension filter and the bat syntax-highlight; later
-        // `@lang` tokens are accepted by the parser but ignored
-        // here (consistent with ag mode using the first one).
-        let parsed = crate::highlight::parse_query_tokens(pattern);
-        let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
-        // Build the extension set for the language filter (if
-        // any). An unknown language — e.g. `@cobol` — yields
-        // `None`, in which case we still apply the bat
-        // highlighting (bat will fall back to its own
-        // extension-based detection, gracefully degrading), but
-        // we skip the extension filter so the user sees a
-        // (possibly empty) result rather than a silent zero.
-        let allowed_exts: Option<Vec<String>> = lang_filter
-            .and_then(crate::highlight::extensions_for_language)
-            .map(|exts| exts.iter().map(|s| s.to_string()).collect());
 
-        let tokens: Vec<String> = parsed
-            .terms
-            .into_iter()
-            .map(|t| if case_sensitive { t } else { t.to_lowercase() })
-            .collect();
-        let mut rows: Vec<HistoryRow> = Vec::new();
-        let mut next_id: i64 = -1;
-        let mut current_file: String = String::new();
-        let mut in_section = false;
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        for line in contents.lines() {
-            if line == "\x0c" || line.is_empty() {
-                in_section = false;
-                continue;
-            }
-            if !in_section {
-                // Section header: <filename>,<line_count>
-                if let Some(idx) = line.find(',') {
-                    current_file = line[..idx].to_string();
-                } else {
-                    current_file = line.to_string();
-                }
-                in_section = true;
-                continue;
-            }
-            // Symbol line: <display><line>,<offset>
-            // Parse from the end: last comma → offset,
-            // digits before it → line, rest → display.
-            let Some(comma_idx) = line.rfind(',') else {
-                continue;
-            };
-            let offset_str = &line[comma_idx + 1..];
-            if offset_str.is_empty() || !offset_str.chars().all(|c| c.is_ascii_digit()) {
-                continue;
-            }
-            let rest = &line[..comma_idx];
-            // Walk back from the end of `rest` to find
-            // where the line-number digits start.
-            let mut i = rest.len();
-            while i > 0 && rest.as_bytes()[i - 1].is_ascii_digit() {
-                i -= 1;
-            }
-            if i == rest.len() {
-                // No digits found — malformed line.
-                continue;
-            }
-            let line_number = &rest[i..];
-            let display = &rest[..i];
-            if display.is_empty() || line_number.is_empty() {
-                continue;
-            }
-            // Build the absolute file path. File paths in
-            // the tag file are relative to the directory
-            // containing the tag file (not necessarily
-            // the cwd), so we resolve against `tags_dir`.
-            let filepath = if std::path::Path::new(&current_file).is_absolute() {
-                current_file.clone()
-            } else {
-                tags_dir.join(&current_file).to_string_lossy().into_owned()
-            };
-            // Apply the `@lang` extension filter, if any.
-            // Extension comparison is case-insensitive
-            // (extensions are lowercased before lookup, so
-            // `.RS` matches `@rust` the same as `.rs`).
-            if let Some(ref exts) = allowed_exts {
-                let file_ext = std::path::Path::new(&current_file)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_ascii_lowercase());
-                let ext_ok = file_ext
-                    .as_deref()
-                    .map(|e| exts.iter().any(|a| a == e))
-                    .unwrap_or(false);
-                if !ext_ok {
-                    continue;
-                }
-            }
-            // Apply the token filter.
-            if !tokens.is_empty() {
-                let (display_check, file_check) = if case_sensitive {
-                    (display.to_string(), current_file.clone())
-                } else {
-                    (display.to_lowercase(), current_file.to_lowercase())
-                };
-                let all_match = tokens
-                    .iter()
-                    .all(|tok| display_check.contains(tok) || file_check.contains(tok));
-                if !all_match {
-                    continue;
-                }
-            }
-            // Source context is loaded lazily when the
-            // row is selected rather than read eagerly
-            // here. A large TAGS file can reference many
-            // symbols in the same source files, and
-            // reading every source file once per symbol
-            // made opening tags mode take tens of seconds
-            // on large repositories. The selected row's
-            // `output` is populated on demand by
-            // `crate::tui::mode::tags::ensure_selected_context` using the
-            // `tags_source_cache`.
-            // Tag the row's `source` with the language so the
-            // chips / source label match the ag-mode convention
-            // (`"tags"` when no language, `"tags:<lang>"` when
-            // one was supplied). This also lets the status bar
-            // surface the active language in a future iteration.
-            let source = match lang_filter {
-                Some(lang) => format!("tags:{}", lang),
-                None => "tags".to_string(),
-            };
-            rows.push(HistoryRow {
-                id: next_id,
-                command: display.to_string(),
-                directory: filepath,
-                session_id: line_number.to_string(),
-                exit_code: 0,
-                timestamp: now_epoch,
-                comment: std::path::Path::new(&current_file)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                output: String::new(),
-                mode: "tags".to_string(),
-                source,
-
-                ..Default::default()
-            });
-            next_id -= 1;
-        }
-        Ok(rows)
-    }
-
-    /// Ensure the currently selected tags-mode row has its
-    /// 5-line source context loaded into `output`. The context
-    /// is read lazily and cached per source file so navigating
-    /// tags rows in the same file doesn't repeatedly hit disk.
     // `ensure_selected_tag_context` was extracted to
     // `crate::tui::mode::tags::ensure_selected_context` (the
     // source-context + CodeGraph-fallback callers/callees
     // overlay for the selected `$`-mode row). The dispatch
     // in the call sites uses the per-mode function directly.
 
+    // `fetch_tags_via_codegraph` was extracted to
+    // `crate::tui::mode::tags::fetch_via_codegraph` (the `$`-mode
+    // fallback when no TAGS file exists: queries the CodeGraph
+    // index and tags the rows with `mode: "tags"` so the
+    // existing tags dispatch works unchanged).
 
-    /// `$` (tags) fallback when no `tags` / `TAGS` file exists.
-    /// Queries the CodeGraph index instead and returns rows tagged
-    /// with `mode: "tags"` so the existing tags dispatch (open at
-    /// line, `@lang` filter, `crate::tui::mode::tags::ensure_selected_context`) work
-    /// unchanged. The CodeGraph node id is stashed in
-    /// `codegraph_node_id` so `crate::tui::mode::tags::ensure_selected_context` can
-    /// append the callers/callees overlay for these rows too.
-    fn fetch_tags_via_codegraph(&mut self) -> Result<Vec<HistoryRow>> {
-        let pattern = self.tags_pattern().trim();
-        let parsed = crate::highlight::parse_query_tokens(pattern);
-        let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
-        let fts_pattern = parsed.terms.join(" ");
-        if self.codegraph_client.is_none() {
-            self.codegraph_client = crate::codegraph::CodeGraphClient::open();
-        }
-        let Some(client) = self.codegraph_client.as_ref() else {
-            return Ok(Vec::new());
-        };
-        // Empty query with no tag file: list nothing. The user can
-        // type a symbol fragment to start the FTS search.
-        if fts_pattern.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let nodes = client.search(&fts_pattern, lang_filter, 500);
-        let repo_root = client.repo_root();
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let source = match lang_filter {
-            Some(lang) => format!("tags:{}", lang),
-            None => "tags".to_string(),
-        };
-        let mut rows: Vec<HistoryRow> = Vec::with_capacity(nodes.len());
-        let mut next_id: i64 = -1;
-        for n in &nodes {
-            let abs = n.abs_path(repo_root);
-            rows.push(HistoryRow {
-                id: next_id,
-                command: if n.qualified_name.is_empty() {
-                    n.name.clone()
-                } else {
-                    n.qualified_name.clone()
-                },
-                directory: abs.to_string_lossy().into_owned(),
-                session_id: n.start_line.to_string(),
-                exit_code: 0,
-                timestamp: now_epoch,
-                comment: format!("{} · {}: {}", n.kind, n.file_path, n.start_line),
-                output: String::new(),
-                mode: "tags".to_string(),
-                source: source.clone(),
-                codegraph_node_id: n.id.clone(),
-                ..Default::default()
-            });
-            next_id -= 1;
-        }
-        Ok(rows)
-    }
 
-    /// Search the local CodeGraph index (`.codegraph/codegraph.db`)
-    /// for symbols matching the `&`-prefixed query body. The body is
-    /// parsed with the same `@lang` token convention as tags mode:
-    /// the first `@lang` filters `nodes.language` (matched verbatim,
-    /// case-insensitive) and the rest are FTS5 prefix terms.
-    ///
-    /// The connection is opened lazily on first use and cached on the
-    /// [`App`] for the rest of the session. A missing index returns
-    /// an empty list — `&` mode is a clean no-op in repos without
-    /// a `.codegraph/` directory.
-    ///
-    /// Each matching node becomes a row whose `directory` holds the
-    /// absolute source path, `session_id` holds the 1-based
-    /// `start_line`, and `codegraph_node_id` stashes the node id for
-    /// the callers/callees overlay loaded by
-    /// [`ensure_selected_codegraph_context`].
-    fn fetch_codegraph(&mut self) -> Result<Vec<HistoryRow>> {
-        let pattern = self.codegraph_pattern().trim();
-        let parsed = crate::highlight::parse_query_tokens(pattern);
-        let lang_filter: Option<&str> = parsed.languages.first().map(String::as_str);
-        // Rebuild the FTS pattern from the non-language terms so
-        // `@java getSymbol` searches for `getSymbol` filtered to
-        // java (the `@java` token itself must not become an FTS
-        // term).
-        let fts_pattern = parsed.terms.join(" ");
-        // Open (and cache) the read-only CodeGraph connection if we
-        // haven't already. We do this inside `fetch_codegraph`
-        // rather than `App::new` so a repo without an index never
-        // pays the discovery walk for users who never type `&`.
-        if self.codegraph_client.is_none() {
-            self.codegraph_client = crate::codegraph::CodeGraphClient::open();
-        }
-        let Some(client) = self.codegraph_client.as_ref() else {
-            return Ok(Vec::new());
-        };
-        // Empty query → empty list. Listing every symbol in a
-        // 350k-node index is useless and slow to render.
-        if fts_pattern.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        // The `@lang` token maps to CodeGraph's `language` column
-        // verbatim (e.g. `java`, `kotlin`). Unknown values simply
-        // return no rows — same graceful degradation as tags mode
-        // for an unknown `@cobol` filter.
-        let nodes = client.search(&fts_pattern, lang_filter, 500);
-        let repo_root = client.repo_root();
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let source = match lang_filter {
-            Some(lang) => format!("codegraph:{}", lang),
-            None => "codegraph".to_string(),
-        };
-        let mut rows: Vec<HistoryRow> = Vec::with_capacity(nodes.len());
-        let mut next_id: i64 = -1;
-        for n in &nodes {
-            let abs = n.abs_path(repo_root);
-            let file_display = n.file_path.clone();
-            rows.push(HistoryRow {
-                id: next_id,
-                command: if n.qualified_name.is_empty() {
-                    n.name.clone()
-                } else {
-                    n.qualified_name.clone()
-                },
-                directory: abs.to_string_lossy().into_owned(),
-                session_id: n.start_line.to_string(),
-                exit_code: 0,
-                timestamp: now_epoch,
-                comment: format!("{} · {}: {}", n.kind, file_display, n.start_line),
-                output: String::new(),
-                mode: "codegraph".to_string(),
-                source: source.clone(),
-                codegraph_node_id: n.id.clone(),
-                ..Default::default()
-            });
-            next_id -= 1;
-        }
-        Ok(rows)
-    }
+    // `fetch_codegraph` was extracted to
+    // `crate::tui::mode::codegraph::fetch` (the FTS5 search + result
+    // shaping for the `&` mode).
+
 
     // `ensure_selected_codegraph_context` was extracted to
     // `crate::tui::mode::codegraph::ensure_selected_context`
@@ -4369,388 +2362,29 @@ impl App {
             .map(|w| w.pane_id.clone())
     }
 
-    /// Run `tmux list-panes -a -F
-    /// '<fmt>'` once and parse the
-    /// output into `self.tmux_windows`.
-    /// Idempotent — runs at most
-    /// once per TUI session (the
-    /// snapshot stays cached unless
-    /// the user explicitly forces a
-    /// refresh).
-    ///
-    /// **Failure modes are silent**
-    /// (deliberately):
-    /// - `tmux` not on PATH →
-    ///   `Command::new` returns
-    ///   `Err(io::ErrorKind::NotFound)`
-    ///   → snapshot stays empty,
-    ///   no marker is ever
-    ///   shown, no error
-    ///   surfaces in the UI.
-    /// - The user isn't running a
-    ///   tmux server → `tmux`
-    ///   exits non-zero →
-    ///   snapshot stays empty.
-    /// - `tmux` is installed but
-    ///   the user runs in a
-    ///   different session
-    ///   (e.g. inside a remote
-    ///   pane or `screen`) →
-    ///   same as above.
-    /// - The subprocess takes too
-    ///   long → we cap it with
-    ///   a 1-second timeout
-    ///   (configurable via
-    ///   `TMUX_PANE_PROBE_TIMEOUT_MS`)
-    ///   so the snapshot fetch
-    ///   never blocks the TUI for
-    ///   more than that. On
-    ///   timeout the snapshot
-    ///   stays empty (we err on
-    ///   the side of "no marker
-    ///   shown" rather than
-    ///   "TUI frozen").
-    ///
-    /// This helper is called from
-    /// `refresh()` the first time
-    /// `is_directories_query()`
-    /// becomes true after the
-    /// snapshot is empty; the
-    /// surrounding `refresh()` is
-    /// wired so the snapshot is
-    /// populated *before* the
-    /// SQL query goes out, so the
-    /// first frame after the user
-    /// types `#` already has the
-    /// marker fully resolved.
-    fn fetch_tmux_windows(&mut self) {
-        // Skip if already populated.
-        // The snapshot is
-        // per-TUI-session;
-        // refreshing it would
-        // mean re-spawning
-        // the multiplexer
-        // (tmux `list-windows
-        // -a` or herdr
-        // `pane list`) for
-        // every keystroke the
-        // user makes while in
-        // directories mode,
-        // which is wasteful. A
-        // future "refresh"
-        // key binding could
-        // re-invoke this when
-        // the user wants
-        // freshness.
-        if !self.tmux_windows.is_empty() {
-            return;
-        }
-        // Delegate the
-        // snapshot to the
-        // configured backend.
-        // When the user has
-        // `multiplexer=herdr` in
-        // their config, the
-        // snapshot is built
-        // from
-        // `herdr pane list`
-        // (parsed as JSON;
-        // each pane becomes
-        // an `ActiveContext`
-        // carrying its
-        // workspace id and
-        // cwd); when the
-        // configured backend
-        // is tmux, it's the
-        // historical
-        // `tmux list-windows
-        // -a -F` text
-        // invocation. Either
-        // way, the
-        // `tmux_windows` cache
-        // (and the
-        // `directory_tmux_pane_id`
-        // T-marker lookup
-        // that reads it) is
-        // backend-agnostic.
-        //
-        // The field is named
-        // `tmux_windows` for
-        // historical reasons
-        // — it's now
-        // populated by
-        // whichever
-        // backend is
-        // configured. A
-        // rename is tempting
-        // but would touch a
-        // lot of test
-        // fixtures
-        // (`app.tmux_windows.push(...)`)
-        // for no functional
-        // benefit; the doc
-        // comment + the
-        // `multiplexer` field
-        // type make the new
-        // contract clear.
-        let tmux_debug = std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok();
-        let rows = self.multiplexer.snapshot();
-        if tmux_debug {
-            tmux_filter_debug_log(&format!(
-                "multiplexer snapshot: {} rows (backend={})",
-                rows.len(),
-                self.multiplexer.name()
-            ));
-        }
-        // `TmuxWindowInfo`
-        // carries the same
-        // two fields
-        // (`pane_id`, `path`)
-        // as the backend's
-        // `ActiveContext`, so
-        // the conversion is a
-        // plain field-by-field
-        // copy. The
-        // `pane_id` is the
-        // backend's id string
-        // (tmux: `%N`; herdr:
-        // `wA:p1`). The
-        // `T`-marker
-        // matching
-        // (`directory_tmux_pane_id`)
-        // only reads `path`
-        // for the match — the
-        // `pane_id` is
-        // surfaced to the
-        // staging layer (via
-        // `self.directory_tmux_pane_id`'s
-        // `Some(pane_id)` return)
-        // so
-        // `select_for_run`'s
-        // T-marked branch can
-        // call
-        // `self.multiplexer.focus_command(pane_id)`.
-        self.tmux_windows = rows
-            .into_iter()
-            .map(|r| TmuxWindowInfo {
-                pane_id: r.pane_id,
-                path: r.path,
-                // Carry the
-                // foreground
-                // command
-                // (tmux:
-                // `#{pane_current_command}`;
-                // herdr: empty)
-                // and the
-                // workspace /
-                // session label
-                // through to the
-                // staging layer.
-                // The `# hosts`
-                // matcher in
-                // `select_for_run_impl`
-                // reads both: tmux
-                // matches by
-                // `current_command`,
-                // herdr matches
-                // by
-                // `workspace_label`.
-                current_command: r.current_command,
-                workspace_label: r.workspace_label,
-            })
-            .collect();
-    }
+    // `fetch_tmux_windows` was extracted to
+    // `crate::tui::mode::directories::ensure_multiplexer_snapshot`
+    // (the lazy population of `app.tmux_windows` from the
+    // configured multiplexer backend; called once per
+    // directories-mode entry).
 
-    /// Search the note_search database for notes matching the
-    /// current query. Returns HistoryRow entries with the note
-    /// filename as `command`, the title as `comment`, and the
-    /// full content as `output`.
-    fn fetch_notes(&mut self) -> Result<Vec<HistoryRow>> {
-        let Some(ref db_path) = self.notes_database else {
-            return Ok(Vec::new());
-        };
-        let raw_pattern = self.notes_pattern().trim();
-        // Strip any date-filter aliases (`@today`,
-        // `@week`, `@month`, `@year`) from the
-        // pattern. The cleaned pattern is what we
-        // pass to `note_search.search_notes_by_query`
-        // (which doesn't know about these
-        // aliases); the filter is applied
-        // post-query in this method against the
-        // `updated` timestamp on each result.
-        let (pattern, filter) = parse_notes_query(raw_pattern);
-        // Record the resolved filter on `self` so
-        // the mode-strip chip renderer (and any
-        // future helper) can see what's active.
-        // We update this on every refresh, even
-        // when the pattern is empty (so the chip
-        // disappears the moment the user clears
-        // the alias token).
-        self.notes_date_filter = filter;
-        if pattern.is_empty() {
-            // The user typed only the
-            // date alias (e.g. `@today`).
-            // We still need to fetch
-            // *all* notes (no text
-            // filter) so the date
-            // filter has something to
-            // operate on, then apply
-            // the cutoff post-hoc. The
-            // previous behaviour was to
-            // return every note
-            // unfiltered, which made
-            // `@today` indistinguishable
-            // from `@` — the chip lit
-            // up but the rows ignored
-            // it.
-            return self.fetch_recent_notes_with_filter(db_path, filter);
-        }
 
-        let service =
-            note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
+    // `fetch_notes` was extracted to
+    // `crate::tui::mode::notes::fetch` (the note_search
+    // database query + date-filter / token-filter for the
+    // `@` mode). The two `App` fields it writes
+    // (`notes_date_filter`, `notes_query_error`) are read
+    // back by the renderer; the per-mode free function
+    // mutates `app.notes_date_filter` directly so the
+    // existing field accessors continue to work.
 
-        match service.search_notes_by_query(&pattern) {
-            Ok(results) => {
-                // Apply the date filter (if any) before
-                // building `HistoryRow` entries. Notes
-                // with `updated = None` fall back to
-                // `created`; if both are `None`, the
-                // note has no usable timestamp and we
-                // exclude it from any active filter
-                // (we have no way to know if it's
-                // recent). This matches the user's
-                // intent: aliases answer "what was
-                // updated *recently*", and a note
-                // without timestamps is by
-                // definition not "recently updated".
-                let cutoff = filter.cutoff(self.now_epoch());
-                let mut rows: Vec<HistoryRow> = results
-                    .iter()
-                    .filter(|note| match cutoff {
-                        None => true,
-                        Some(c) => {
-                            let ts = note.updated.or(note.created).unwrap_or(0);
-                            ts >= c
-                        }
-                    })
-                    .map(|note| {
-                        let title = note.title.as_deref().unwrap_or("");
-                        let comment = if title.is_empty() {
-                            note.filename.clone()
-                        } else {
-                            format!("{} — {}", title, note.filename)
-                        };
-                        let ts = note.updated.or(note.created).unwrap_or(0);
-                        HistoryRow {
-                            id: 0,
-                            command: note.filename.clone(),
-                            directory: String::new(),
-                            session_id: String::new(),
-                            exit_code: 0,
-                            timestamp: ts,
-                            comment,
-                            output: self.read_note_preview(&note.filename),
-                            mode: "note".to_string(),
-                            source: String::new(),
 
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
-                // Sort by timestamp descending (newest first)
-                rows.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
-                self.notes_query_error = false;
-                Ok(rows)
-            }
-            Err(_e) => {
-                self.notes_query_error = true;
-                Ok(Vec::new())
-            }
-        }
-    }
+    // `fetch_recent_notes_with_filter` was extracted to
+    // `crate::tui::mode::notes::fetch_recent_with_filter`
+    // (the no-pattern-all-notes path that the `fetch`
+    // dispatch takes when the user types a bare date
+    // alias like `@today`).
 
-    /// Fetch recent notes (when no query is entered).
-    /// Fetch every note in the
-    /// database (no text filter)
-    /// and apply the date-filter
-    /// alias (if any) against
-    /// each note's `updated`
-    /// timestamp. Used when the
-    /// user types a bare alias
-    /// (e.g. `@today`) —
-    /// `parse_notes_query` returns
-    /// an empty text pattern in
-    /// that case, so we can't push
-    /// the alias through the
-    /// library's text search; we
-    /// fetch every note and filter
-    /// by mtime post-hoc instead.
-    ///
-    /// `NotesDateFilter::All` is
-    /// the no-op case (no cutoff
-    /// applied); passing it gives
-    /// the same result as fetching
-    /// all notes unfiltered.
-    fn fetch_recent_notes_with_filter(
-        &self,
-        db_path: &std::path::Path,
-        filter: NotesDateFilter,
-    ) -> Result<Vec<HistoryRow>> {
-        let service =
-            note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
-        // Use default SearchCriteria to get all notes (no query filter).
-        let criteria = note_search::SearchCriteria::default();
-        match service.search_notes(&criteria) {
-            Ok(results) => {
-                let cutoff = filter.cutoff(self.now_epoch());
-                let mut rows: Vec<HistoryRow> = results
-                    .iter()
-                    .filter(|note| match cutoff {
-                        // No active filter:
-                        // every note qualifies.
-                        None => true,
-                        // Active filter:
-                        // require a recent
-                        // `updated` (falling
-                        // back to `created`
-                        // when missing). Notes
-                        // with neither are
-                        // excluded — we
-                        // can't know if they're
-                        // recent.
-                        Some(c) => note.updated.or(note.created).unwrap_or(0) >= c,
-                    })
-                    .map(|note| {
-                        let title = note.title.as_deref().unwrap_or("");
-                        let comment = if title.is_empty() {
-                            note.filename.clone()
-                        } else {
-                            format!("{} — {}", title, note.filename)
-                        };
-                        let ts = note.updated.or(note.created).unwrap_or(0);
-                        HistoryRow {
-                            id: 0,
-                            command: note.filename.clone(),
-                            directory: String::new(),
-                            session_id: String::new(),
-                            exit_code: 0,
-                            timestamp: ts,
-                            comment,
-                            output: self.read_note_preview(&note.filename),
-                            mode: "note".to_string(),
-                            source: String::new(),
-
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
-                // Sort by timestamp descending (newest first)
-                rows.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
-                Ok(rows)
-            }
-            Err(_e) => Ok(Vec::new()),
-        }
-    }
 
     /// Recompile the regex from the current query. Called whenever
     /// the query buffer changes. Failures (invalid regex) leave the
@@ -6658,7 +4292,7 @@ impl App {
         // flicker that's noticeable
         // but not catastrophic.
         if self.is_directories_query() {
-            self.fetch_tmux_windows();
+            crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         }
         // Same one-shot cache priming for the
         // `*`-prefix panes view: populate the
@@ -6666,7 +4300,7 @@ impl App {
         // reads it, so the first frame after the
         // user types `*` already shows the list.
         if self.is_panes_query() {
-            self.fetch_session_panes();
+            crate::tui::mode::panes::refresh_session_panes(self);
         }
         self.rows = self.fetch().unwrap_or_default();
         if self.match_algorithm != MatchAlgorithm::Substring
@@ -7037,7 +4671,7 @@ impl App {
 
     fn fetch(&mut self) -> Result<Vec<HistoryRow>> {
         if matches!(self.mode, Mode::Stats) {
-            return self.fetch_stats();
+            return crate::tui::stats::fetch(self);
         }
         // The per-mode fetch dispatch. The modes are
         // mutually exclusive (the first char of the
@@ -7050,14 +4684,14 @@ impl App {
         // no-prefix fall-through runs the SQL
         // `SELECT` below.
         match crate::tui::mode::active_mode(self) {
-            crate::tui::mode::ModeKind::Todo => return self.fetch_todos(),
-            crate::tui::mode::ModeKind::Notes => return self.fetch_notes(),
-            crate::tui::mode::ModeKind::Directories => return self.fetch_directories(),
+            crate::tui::mode::ModeKind::Todo => return crate::tui::mode::todo::fetch(self),
+            crate::tui::mode::ModeKind::Notes => return crate::tui::mode::notes::fetch(self),
+            crate::tui::mode::ModeKind::Directories => return crate::tui::mode::directories::fetch(self),
             crate::tui::mode::ModeKind::Panes => return crate::tui::mode::panes::fetch(self),
             crate::tui::mode::ModeKind::Jira => return crate::tui::mode::jira::fetch(self),
             crate::tui::mode::ModeKind::Files => return crate::tui::mode::files::fetch(self),
-            crate::tui::mode::ModeKind::Tags => return self.fetch_tags(),
-            crate::tui::mode::ModeKind::Codegraph => return self.fetch_codegraph(),
+            crate::tui::mode::ModeKind::Tags => return crate::tui::mode::tags::fetch(self),
+            crate::tui::mode::ModeKind::Codegraph => return crate::tui::mode::codegraph::fetch(self),
             crate::tui::mode::ModeKind::Ag => return crate::tui::mode::ag::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
@@ -7095,106 +4729,13 @@ impl App {
         Ok(rows)
     }
 
-    /// Fetch rows ordered by:
-    ///   1. probability of following the most-recently-executed
-    ///      command (computed via SQLite's `LEAD()` window
-    ///      function on the entire global history, ignoring
-    ///      session/directory filters),
-    ///   2. timestamp DESC (newest first).
-    ///
-    /// The user's query (when non-empty and not a regex) is honored
-    /// as a `LIKE` filter so the user can narrow down what's
-    /// ranked. The "last command" itself is the newest row in the
-    /// global history that matches the query — the view is
-    /// reproducible regardless of which session we're in.
-    ///
-    /// Tie-breaking within a probability bucket: more recent wins.
-    /// Tie-breaking across duplicate commands when the duplicate
-    /// filter is on: the most recent instance only.
-    fn fetch_stats(&self) -> Result<Vec<HistoryRow>> {
-        // 1) Determine the "last command" from the global history
-        //    (still respecting the user's query so the prediction
-        //    makes sense in context).
-        let last_cmd: Option<String> = {
-            let (where_clause, params) = self.build_where();
-            let sql = format!(
-                "SELECT h.command FROM history h{} \
-                 ORDER BY h.timestamp DESC, h.id DESC LIMIT 1",
-                where_clause
-            );
-            let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let mut stmt = self.conn.prepare(&sql)?;
-            let mut rows = stmt.query_map(&params_ref[..], |row| row.get::<_, String>(0))?;
-            rows.next().transpose()?
-        };
-        let Some(last_cmd) = last_cmd else {
-            // No matching history at all.
-            return Ok(Vec::new());
-        };
+    // `fetch_stats` was extracted to
+    // `crate::tui::stats::fetch` (the successor-frequency
+    // SQL query for `Mode::Stats` — not a prefix mode but
+    // a scope mode, so the per-prefix `ModeKind` dispatch
+    // doesn't apply; the caller branches on `Mode::Stats`
+    // before the per-mode match in `App::fetch`).
 
-        // 2) Pull the rows the user is going to see, ranked by:
-        //    (a) frequency as a successor of `last_cmd` DESC,
-        //    (b) timestamp DESC.
-        //    The user's typed query is honored (where possible).
-        let (where_clause, params) = self.build_where();
-        // The freq CTE compares against `last_cmd`. SQLite parameter
-        // binding works inside CTEs, but we splice the value
-        // directly here because it's an internal-only slug (not
-        // user input) and escaping via `replace('\'')` keeps the
-        // query plan simple. Single quotes are doubled to escape.
-        let last_sql = last_cmd.replace('\'', "''");
-        // We compute frequency in a single SQL query using a CTE so
-        // the entire ranking is one round trip. Predicted commands
-        // get a `freq` > 0; commands that never followed `last_cmd`
-        // get `freq = 0` and are sorted by timestamp DESC.
-        // `build_where` already starts with " WHERE 1=1", so we
-        // splice the user's filter in directly.
-        let sql = format!(
-            "WITH pairs AS ( \
-                 SELECT h.command AS cmd, \
-                        LEAD(h.command) OVER (ORDER BY h.timestamp ASC, h.id ASC) AS next_cmd \
-                 FROM history h \
-             ), \
-             freq AS ( \
-                 SELECT next_cmd AS cmd, COUNT(*) AS freq \
-                 FROM pairs \
-                 WHERE cmd = '{last_sql}' AND next_cmd IS NOT NULL \
-                 GROUP BY next_cmd \
-             ) \
-             SELECT h.id, h.command, h.directory, h.session_id, \
-                    h.exit_code, h.timestamp, c.comment, o.output, h.mode, \
-                    COALESCE(f.freq, 0) AS freq \
-             FROM history h \
-             LEFT JOIN command_comments c ON h.command = c.command \
-             LEFT JOIN history_output o ON h.id = o.history_id \
-             LEFT JOIN freq f ON h.command = f.cmd \
-             {where_clause} \
-             ORDER BY freq DESC, h.timestamp DESC \
-             LIMIT 1000",
-        );
-        // The user's typed query is the only bound parameter (if any).
-        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(&params_ref[..], |row| {
-                Ok(HistoryRow {
-                    id: row.get(0)?,
-                    command: row.get(1)?,
-                    directory: row.get(2)?,
-                    session_id: row.get(3)?,
-                    exit_code: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    comment: row.get(6).unwrap_or_default(),
-                    output: row.get(7).unwrap_or_default(),
-                    mode: row.get(8).unwrap_or_default(),
-                    source: String::new(),
-
-                    ..Default::default()
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
 
     /// Merge `labeled_rows` (entries with a comment that are NOT already
     /// in `rows`) into a single list ordered by timestamp. Labeled
@@ -12081,7 +9622,7 @@ impl App {
     /// Re-query the database for all rows that have an associated
     /// comment. This powers the always-available "labeled" pane.
     fn refresh_labeled(&mut self) {
-        self.labeled_rows = self.fetch_labeled().unwrap_or_default();
+        self.labeled_rows = crate::tui::labeled::fetch(self).unwrap_or_default();
         if self.labeled_rows.is_empty() {
             self.labeled_list_state.select(None);
         } else {
@@ -12089,33 +9630,13 @@ impl App {
         }
     }
 
-    fn fetch_labeled(&self) -> Result<Vec<HistoryRow>> {
-        let sql = "SELECT h.id, h.command, h.directory, h.session_id, h.exit_code, h.timestamp, c.comment, o.output, h.mode \
-                   FROM history h \
-                   JOIN command_comments c ON h.command = c.command \
-                   LEFT JOIN history_output o ON h.id = o.history_id \
-                   ORDER BY h.timestamp DESC LIMIT 1000";
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(HistoryRow {
-                    id: row.get(0)?,
-                    command: row.get(1)?,
-                    directory: row.get(2)?,
-                    session_id: row.get(3)?,
-                    exit_code: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    comment: row.get(6).unwrap_or_default(),
-                    output: row.get(7).unwrap_or_default(),
-                    mode: row.get(8).unwrap_or_default(),
-                    source: String::new(),
+    // `fetch_labeled` was extracted to
+    // `crate::tui::labeled::fetch` (the SQL query that
+    // returns every history row that has a comment —
+    // used to populate the labeled-rows partition that
+    // `build_merged_rows` mixes in alongside the primary
+    // fetch).
 
-                    ..Default::default()
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
 
     fn delete_selected(&mut self) -> Result<()> {
         // Delete ALL history items with the same command text
@@ -24429,7 +21950,7 @@ mod tests {
         // is non-empty. This is
         // the "don't re-spawn on
         // every refresh" contract.
-        app.fetch_tmux_windows();
+        crate::tui::mode::directories::ensure_multiplexer_snapshot(&mut app);
         assert_eq!(app.tmux_windows.len(), 1);
         assert_eq!(app.tmux_windows[0].pane_id, "%99");
         assert_eq!(app.tmux_windows[0].path, "/sentinel");
@@ -26302,7 +23823,7 @@ mod tests {
             let mut app = directories_test_app(&[]);
             app.query = String::from("$");
             app.refresh();
-            let rows = app.fetch_tags().unwrap();
+            let rows = crate::tui::mode::tags::fetch(&mut app).unwrap();
             // The synthetic
             // file has 150
             // entries.
@@ -26411,7 +23932,7 @@ test_ssh_config\t\t30,0\n";
             let mut app = directories_test_app(&[]);
             app.query = String::from("$ssh_config");
             app.refresh();
-            let rows = app.fetch_tags().unwrap();
+            let rows = crate::tui::mode::tags::fetch(&mut app).unwrap();
             // Every row should
             // match "ssh_config"
             // in either the
@@ -26511,7 +24032,7 @@ test_ssh_config\t\t30,0\n";
             let mut app = directories_test_app(&[]);
             app.query = String::from("$@rust");
             app.refresh();
-            let rows = app.fetch_tags().unwrap();
+            let rows = crate::tui::mode::tags::fetch(&mut app).unwrap();
             // Only the .rs entry should survive the
             // `@rust` extension filter.
             assert_eq!(
@@ -26597,7 +24118,7 @@ ssh_config_parse\t\t10,0\n";
             let mut app = directories_test_app(&[]);
             app.query = String::from("$ssh_config");
             app.refresh();
-            let rows = app.fetch_tags().unwrap();
+            let rows = crate::tui::mode::tags::fetch(&mut app).unwrap();
             assert!(!rows.is_empty());
             // Find the index of
             // the first row in
@@ -27773,7 +25294,7 @@ ssh_config_parse\t\t10,0\n";
         // multiplexer's snapshot.
         let tmux_pane = std::env::var("TMUX_PANE").ok();
         let herdr_pane = std::env::var("HERDR_PANE_ID").ok();
-        app.fetch_session_panes();
+        crate::tui::mode::panes::refresh_session_panes(&mut app);
         if tmux_pane.is_none() && herdr_pane.is_none() {
             assert!(
                 app.session_panes.is_empty(),
@@ -27799,7 +25320,7 @@ ssh_config_parse\t\t10,0\n";
         }
         let mut app = directories_test_app(&[]);
         app.session_panes.clear();
-        app.fetch_session_panes_impl(&current_pane);
+        crate::tui::mode::panes::refresh_session_panes_impl(&mut app, &current_pane);
         // The current pane must NOT appear.
         let ids: Vec<String> = app
             .session_panes
@@ -27934,7 +25455,7 @@ ssh_config_parse\t\t10,0\n";
         // first so the entry
         // point actually runs:
         app.session_panes.clear();
-        app.fetch_session_panes();
+        crate::tui::mode::panes::refresh_session_panes(&mut app);
         // The bug was that this
         // call returned without
         // populating the cache

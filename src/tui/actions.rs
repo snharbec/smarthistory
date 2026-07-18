@@ -776,7 +776,7 @@ impl App {
         // the cache is populated) so
         // re-Enter doesn't re-spawn
         // the multiplexer.
-        self.fetch_tmux_windows();
+        crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         // The `*` mode now shows
         // a **tree**:
         //   workspace_header
