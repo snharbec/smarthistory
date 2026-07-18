@@ -266,6 +266,57 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Draw a centered overlay with a bordered title bar, clearing the
+/// area underneath. Returns the inner content area (inside the
+/// border) for the caller to render into.
+///
+/// This helper collapses ~8 copies of the same
+/// `centered_rect → Clear → Block::default().borders(ALL)`
+/// boilerplate across `draw_command_menu`,
+/// `draw_prefix_picker`, `draw_theme_picker`,
+/// `draw_completion_menu`, `draw_confirm_delete`,
+/// `draw_add_entry_dialog`, `draw_help_view`, and
+/// `draw_codegraph_relations_picker`. Each of those call
+/// sites now calls this helper and renders only the content.
+fn overlay(
+    f: &mut Frame,
+    title: &str,
+    percent_x: u16,
+    percent_y: u16,
+) -> Rect {
+    let area = centered_rect(percent_x, percent_y, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title.to_string())
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    inner
+}
+
+/// Compute the visible-scroll window for a list of `total` items
+/// where the `selected` item must be on screen. Returns
+/// `(start, end)` — a half-open range into a zero-indexed slice.
+///
+/// Used by every overlay's scrollable list to avoid repeating the
+/// 6-line `visible_rows / start / end` calculation.
+fn scroll_window(selected: usize, total: usize, visible_rows: usize) -> (usize, usize) {
+    if total == 0 || visible_rows == 0 {
+        return (0, 0);
+    }
+    let start = selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(total.saturating_sub(visible_rows));
+    let end = (start + visible_rows).min(total);
+    (start, end)
+}
+
 /// Draw the add-session /
 /// add-host dialog. Renders
 /// as a centered overlay with
@@ -1739,52 +1790,21 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
 fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     use ratatui::widgets::List;
 
-    // The palette is centered horizontally and vertically. The
-    // width is generous so even long action names fit on one line.
-    let area = centered_rect(70, 70, f.area());
-    f.render_widget(ratatui::widgets::Clear, area);
-
-    let bg = PALETTE.with(|p| p.borrow().bg);
-    let fg = PALETTE.with(|p| p.borrow().fg);
-
-    // Render the user's configured
-    // `Cancel` bindings (default
-    // `Esc`, configurable via
-    // `key.cancel=...`) so the
-    // title always tells them how
-    // to close the palette. We
-    // used to hard-code
-    // "Esc/q to close" here —
-    // which both lied (the user
-    // couldn't actually close
-    // with `q` if they had bound
-    // Cancel to something else)
-    // and tripped users typing
-    // `q` into the filter box.
     let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
     let title = if cancel_keys.is_empty() {
-        // User unbound Cancel
-        // entirely. Still show
-        // something so the pane
-        // doesn't look unlabelled.
         String::from(" Command palette ")
     } else {
         format!(" Command palette — {} to close ", cancel_keys)
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(title)
-        .title_style(Theme::accent())
-        .border_style(Theme::dim())
-        .style(Style::default().bg(bg));
+    let inner = overlay(f, &title, 70, 70);
 
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
 
     // Split the inner area into:
-    //   [0] query input (3 lines: border, prompt+text, border)
+    //   [0] query input (1 line)
     //   [1] action list  (everything else)
+    //   [2] footer (1 line)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -1850,14 +1870,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     // Show only what fits, scrolling so the selected row is
     // always visible.
     let visible_rows = chunks[1].height as usize;
-    let start = if filtered.is_empty() || visible_rows == 0 {
-        0
-    } else {
-        menu.selected
-            .saturating_sub(visible_rows.saturating_sub(1))
-            .min(filtered.len().saturating_sub(visible_rows))
-    };
-    let end = (start + visible_rows).min(filtered.len());
+    let (start, end) = scroll_window(menu.selected, filtered.len(), visible_rows);
 
     let mut items: Vec<ListItem> = Vec::new();
     for (row_pos, &idx) in filtered.iter().enumerate().skip(start).take(end - start) {
