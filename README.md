@@ -71,6 +71,7 @@ smarthistory init  zsh                  # emit the zsh init snippet
 smarthistory config get <key>          # print a resolved config value
 smarthistory config list               # print all config values
 smarthistory config check              # validate the config file
+smarthistory check [--prefix <char>]   # health-check prefix modes (--prefix to check one)
 smarthistory import-atuin              # import from atuin
 smarthistory update                    # normalize stored directory paths
 ```

@@ -4,6 +4,7 @@
 //! directory for lines that look like todo items
 //! (markdown task-list checkboxes: `- [ ] text` / `- [x] text`)
 //! and lists each match as its own row in the TUI.
+use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
 use anyhow::Result;
@@ -14,6 +15,138 @@ use anyhow::Result;
 pub(crate) fn matches(app: &App) -> bool {
     let p = app.query_prefixes.todo;
     !app.query.is_empty() && app.query.starts_with(p)
+}
+
+/// Health check for the todos (`!`) mode. The todo
+/// mode uses the same `note_search` library and
+/// the same `notes.database` as the notes mode, so
+/// the configuration + DB-connection checks are
+/// identical. The mode-specific bit is the
+/// `search_todos` round-trip and the "are there
+/// actually any open todos?" question.
+///
+/// Mirrors `notes::check` step-for-step so the
+/// failure modes are easy to compare across the
+/// two modes (notes / todos). When the notes
+/// database is shared (the typical case) and
+/// notes is healthy, the user will see
+/// `todo: ok` immediately after `notes: ok`
+/// without redundant diagnostic depth.
+pub(crate) fn check(app: &App) -> CheckReport {
+    use crate::tui::mode::ModeKind;
+    let mode = ModeKind::Todo;
+
+    // 1. Configuration.
+    let Some(db_path) = app.notes_database.as_ref() else {
+        return CheckReport::err(
+            mode,
+            "notes.database is not configured (the todo index lives in the same database; set notes.database in ~/.config/smarthistory/config)",
+        );
+    };
+    // The todo mode also reads `notes.dir`
+    // (the live directory) when previewing
+    // todo-line context. A missing
+    // `notes.dir` doesn't break the search
+    // itself, but it does break the
+    // details-pane preview. Surface as a
+    // Warning so the user knows.
+    let dir_warning = if app.notes_dir.is_none() {
+        Some(CheckReport::warn(
+            mode,
+            "notes.dir is not configured; the todo-line preview pane will be empty (the search itself still works)",
+        ))
+    } else {
+        None
+    };
+
+    // 2-4. File / sqlite / required tables — reuse
+    //     the notes-mode probes (same DB).
+    if !db_path.exists() {
+        return CheckReport::err(
+            mode,
+            format!("notes.database file does not exist: {}", db_path.display()),
+        );
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckReport::err(
+                mode,
+                format!("failed to open notes database as sqlite: {e}"),
+            );
+        }
+    };
+    let required = ["markdown_data", "todo_entries"];
+    for table in &required {
+        let present: Result<i64, _> = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table],
+            |row| row.get(0),
+        );
+        if matches!(present, Ok(n) if n > 0) {
+            continue;
+        }
+        return CheckReport::err(
+            mode,
+            format!("required table `{table}` is missing (the notes DB is incomplete or from an incompatible note_search version)"),
+        );
+    }
+
+    // 5. Sample `search_todos` (open: Some(true),
+    //    no text filter). A success proves the
+    //    full search pipeline works. A failure
+    //    here is almost always a library
+    //    version mismatch (the SQL schema
+    //    changed).
+    let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
+    let criteria = note_search::SearchCriteria {
+        database_path: db_path.to_string_lossy().to_string(),
+        note_dir: app
+            .notes_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        open: Some(true),
+        sort_order: Some(note_search::SortOrder::Modified),
+        ..Default::default()
+    };
+    let todos = match service.search_todos(&criteria) {
+        Ok(r) => r,
+        Err(e) => {
+            return CheckReport::err(mode, format!("search_todos() failed: {e}"));
+        }
+    };
+
+    // 6. Informational: row count. Zero open
+    //    todos is a valid state but the user
+    //    probably wants to know.
+    let mut report = if todos.is_empty() {
+        CheckReport::warn(
+            mode,
+            "no open todos in the index (search itself is healthy; you may want to add some or run `note_search index`)",
+        )
+    } else {
+        CheckReport::ok(mode, format!("{} open todo(s) indexed", todos.len()))
+    };
+    if let Some(w) = dir_warning {
+        report = report.with(w);
+    }
+    report
+        .with(CheckReport::ok(
+            mode,
+            format!("opened {}", db_path.display()),
+        ))
+        .with(CheckReport::ok(
+            mode,
+            format!("required tables present: {}", required.join(", ")),
+        ))
+        .with(CheckReport::ok(
+            mode,
+            format!("sample search_todos() returned {} row(s)", todos.len()),
+        ))
 }
 
 /// The todo search body, i.e. everything

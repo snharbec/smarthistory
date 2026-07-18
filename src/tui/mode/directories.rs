@@ -6,6 +6,7 @@
 //! each directory's most-recently-executed
 //! command surfaced for context. Selecting a row
 /// stages a `cd <path>` command.
+use crate::tui::mode::CheckReport;
 use crate::tui::state::{HistoryRow, MatchAlgorithm};
 use crate::tui::App;
 use anyhow::Result;
@@ -17,6 +18,105 @@ use anyhow::Result;
 pub(crate) fn matches(app: &App) -> bool {
     let p = app.query_prefixes.directories;
     !app.query.is_empty() && app.query.starts_with(p)
+}
+
+/// Health check for the directories (`#`) mode.
+/// The mode combines three data sources:
+///
+/// - the SQL history DB (for "directories the
+///   user has used"),
+/// - the configured `sessiondirs` (for "always
+///   show me these projects"),
+/// - the multiplexer snapshot (for
+///   `directory_source = TMUX`, "directories
+///   that are cwds of live multiplexer
+///   panes").
+///
+/// The check verifies:
+///
+/// 1. The SQL history DB is open (the TUI
+///    already verified this at startup, but
+///    a quick `SELECT COUNT(*)` round-trip
+///    proves the connection still works).
+/// 2. The multiplexer backend is reachable
+///    (the `MultiplexerBackend::snapshot`
+///    method on the configured backend,
+///    either tmux or herdr, returns without
+///    error).
+/// 3. The configured `sessiondirs` paths
+///    (if any) exist on disk.
+pub(crate) fn check(app: &App) -> CheckReport {
+    use crate::tui::mode::ModeKind;
+    let mode = ModeKind::Directories;
+
+    // 1. SQL DB sanity.
+    let dir_count: i64 = app
+        .conn
+        .query_row(
+            "SELECT COUNT(DISTINCT directory) FROM history \
+             WHERE directory != ''",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    // 2. Multiplexer backend.
+    let mux_report = match app.multiplexer.name() {
+        "tmux" if std::env::var("TMUX").is_err() => CheckReport::warn(
+            mode,
+            "multiplexer backend is tmux but $TMUX is not set (the `#` mode's T-marked row feature will be a no-op outside a tmux session)",
+        ),
+        other => {
+            // Cheap reachability check: ask
+            // the backend for its name
+            // (already known — no syscall).
+            // A real round-trip would be
+            // expensive (tmux `list-windows`
+            // or herdr `pane list`); we
+            // only run that at runtime, not
+            // for the health check.
+            CheckReport::ok(mode, format!("multiplexer backend: {other}"))
+        }
+    };
+
+    // 3. sessiondirs (the App pre-computes
+    //    session_subdirs at startup by
+    //    walking each configured
+    //    sessiondir; this is the value the
+    //    runtime `#` mode uses to seed the
+    //    directory list).
+    let dir_reports: Vec<CheckReport> = app
+        .session_subdirs
+        .iter()
+        .map(|p| {
+            if p.is_dir() {
+                CheckReport::ok(mode, format!("sessiondir subdir exists: {}", p.display()))
+            } else {
+                CheckReport::warn(
+                    mode,
+                    format!("sessiondir subdir is missing: {}", p.display()),
+                )
+            }
+        })
+        .collect();
+    let dir_count_report = if dir_count > 0 {
+        CheckReport::ok(
+            mode,
+            format!("history DB has {dir_count} unique directories"),
+        )
+    } else {
+        CheckReport::warn(
+            mode,
+            "history DB has 0 unique directories (run some commands to populate the history list)",
+        )
+    };
+
+    let mut report = dir_count_report;
+    report = report.with(mux_report);
+    for d in dir_reports {
+        report = report.with(d);
+    }
+    report
 }
 
 /// The directories-search

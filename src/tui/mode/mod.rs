@@ -275,3 +275,237 @@ pub(crate) fn input_prompt_title(
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
+
+// ============================================================================
+// `smarthistory tui check` — prefix-mode health checks
+// ============================================================================
+//
+// Every per-mode module exposes a `check(...)` function that
+// returns a `CheckReport` describing whether the mode is
+// configured and operational. The check is *progressive* —
+// each mode digs down as far as it can:
+//
+//   1. Verify the configuration keys / env vars are set.
+//   2. Verify the referenced files / sockets / DBs are reachable.
+//   3. Verify the data layer (sqlite, FTS5, REST) accepts a
+//      trivial request.
+//   4. Run a representative query to surface deeper errors.
+//
+// The aggregate `CheckReport` (per `ModeKind`) is collected by
+// the `tui check` CLI subcommand and rendered as a human-
+// readable report. Exit code: 0 if all checks pass, 1 if any
+// `Warning`, 2 if any `Error`.
+
+/// The outcome of a single per-mode health check. The
+/// progression `Ok` → `Warning` → `Error` corresponds to "the
+/// mode is fully operational" / "the mode works but with
+/// caveats" / "the mode cannot be used right now".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStatus {
+    /// Mode is fully configured and operational. The
+    /// `details` field carries human-readable info
+    /// (row counts, version strings, etc.) for the report.
+    Ok,
+    /// Mode works but with caveats (e.g. the
+    /// configuration is fine but a sample query
+    /// returned an empty result, suggesting the data
+    /// layer is healthy but there's nothing to find).
+    Warning,
+    /// Mode cannot be used. The `message` field carries
+    /// the root-cause string (e.g. "notes.database
+    /// is not configured", "ollama is unreachable",
+    /// "tag file not found and CodeGraph index
+    /// missing").
+    Error,
+}
+
+/// A single per-mode health check. `mode` identifies
+/// which prefix mode was checked; `status` is the
+/// outcome; `message` is a one-line human-readable
+/// summary; `details` is an optional list of
+/// sub-checks (each with its own status + message)
+/// for diagnostic depth.
+///
+/// The `mode` is included so the aggregate reporter
+/// can group by mode and the JSON output can be
+/// machine-parseable.
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    pub mode: ModeKind,
+    pub status: CheckStatus,
+    pub message: String,
+    /// Sub-checks, in order of execution. The first
+    /// failure short-circuits the rest (no point
+    /// trying a sample query if the DB doesn't
+    /// open), so this is usually 1-3 entries.
+    pub details: Vec<CheckReport>,
+}
+
+impl CheckReport {
+    /// Build a successful report with no sub-checks.
+    pub(crate) fn ok(mode: ModeKind, message: impl Into<String>) -> Self {
+        Self {
+            mode,
+            status: CheckStatus::Ok,
+            message: message.into(),
+            details: Vec::new(),
+        }
+    }
+
+    /// Build a warning report with no sub-checks.
+    pub(crate) fn warn(mode: ModeKind, message: impl Into<String>) -> Self {
+        Self {
+            mode,
+            status: CheckStatus::Warning,
+            message: message.into(),
+            details: Vec::new(),
+        }
+    }
+
+    /// Build an error report with no sub-checks.
+    pub(crate) fn err(mode: ModeKind, message: impl Into<String>) -> Self {
+        Self {
+            mode,
+            status: CheckStatus::Error,
+            message: message.into(),
+            details: Vec::new(),
+        }
+    }
+
+    /// Push a sub-check onto this report. Returns
+    /// `self` for chaining. If the sub-check is an
+    /// `Error` and the parent is `Ok`, the parent
+    /// status is *not* automatically downgraded —
+    /// each level is independent (a sub-check
+    /// failure may be more specific / recoverable
+    /// than the parent). The aggregate reporter
+    /// considers the worst-case status across
+    /// the whole tree.
+    pub(crate) fn with(mut self, sub: CheckReport) -> Self {
+        self.details.push(sub);
+        self
+    }
+
+    /// The worst-case status across this report and
+    /// all its sub-checks. Used by the aggregate
+    /// reporter to compute the overall pass / warn /
+    /// fail verdict.
+    pub fn worst_status(&self) -> CheckStatus {
+        let mut worst = self.status;
+        for d in &self.details {
+            let sub = d.worst_status();
+            if rank(sub) > rank(worst) {
+                worst = sub;
+            }
+        }
+        worst
+    }
+
+    /// True if this report (or any sub-check)
+    /// contains an `Error` status. Used by the CLI
+    /// to compute the exit code.
+    #[allow(dead_code)] // convention API; kept for consumers that prefer the boolean form
+    pub fn has_errors(&self) -> bool {
+        self.worst_status() == CheckStatus::Error
+    }
+
+    /// True if this report (or any sub-check)
+    /// contains a `Warning` status (but not an
+    /// `Error`).
+    #[allow(dead_code)] // convention API; kept for consumers that prefer the boolean form
+    pub fn has_warnings(&self) -> bool {
+        matches!(self.worst_status(), CheckStatus::Warning)
+    }
+}
+
+/// Numeric rank for `CheckStatus` so
+/// `worst_status()` is straightforward. Higher = worse.
+fn rank(s: CheckStatus) -> u8 {
+    match s {
+        CheckStatus::Ok => 0,
+        CheckStatus::Warning => 1,
+        CheckStatus::Error => 2,
+    }
+}
+
+/// Run the full set of per-mode checks. When
+/// `only` is `Some`, only that single mode is
+/// checked. The result is a flat list of reports
+/// in the same order as `ModeKind::all()`.
+pub fn run_all_checks(
+    app: &App,
+    only: Option<ModeKind>,
+) -> Vec<CheckReport> {
+    let mut reports = Vec::new();
+    // When `only` is set, check just that mode.
+    // When `None`, check every mode in `all()`.
+    // (History / Output / Question modes are
+    // skipped inside the loop since they share
+    // the SQL history DB and have no external
+    // dependency to check.)
+    let modes: Vec<ModeKind> = only.into_iter().collect();
+    let modes = if modes.is_empty() {
+        ModeKind::all().to_vec()
+    } else {
+        modes
+    };
+    for mode in modes {
+        if matches!(
+            mode,
+            ModeKind::History | ModeKind::Output | ModeKind::Question
+        ) {
+            // The history / output / question modes
+            // share the SQL history DB and have no
+            // external dependencies. There's nothing
+            // to "check" beyond confirming the DB is
+            // open, which the TUI startup itself
+            // already verified. Skip them with an
+            // informational "Ok" so the user sees
+            // them in the report (no surprise
+            // "missing" mode) but doesn't see false
+            // positives.
+            reports.push(CheckReport::ok(
+                mode,
+                "no external dependencies; uses the local history DB",
+            ));
+            continue;
+        }
+        let report = match mode {
+            ModeKind::Notes => crate::tui::mode::notes::check(app),
+            ModeKind::Todo => crate::tui::mode::todo::check(app),
+            ModeKind::Tags => crate::tui::mode::tags::check(app),
+            ModeKind::Codegraph => crate::tui::mode::codegraph::check(app),
+            ModeKind::Files => crate::tui::mode::files::check(app),
+            ModeKind::Ag => crate::tui::mode::ag::check(app),
+            ModeKind::Llm => crate::tui::mode::llm::check(app),
+            ModeKind::Jira => crate::tui::mode::jira::check(app),
+            ModeKind::Directories => crate::tui::mode::directories::check(app),
+            ModeKind::Panes => crate::tui::mode::panes::check(app),
+            ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
+        };
+        reports.push(report);
+    }
+    reports
+}
+
+impl ModeKind {
+    /// The canonical list of modes for diagnostic
+    /// purposes (one entry per prefix). Excludes
+    /// `History` (the no-prefix default) and
+    /// `Output` / `Question` (which have no
+    /// external dependency to check).
+    pub fn all() -> &'static [ModeKind] {
+        &[
+            ModeKind::Notes,
+            ModeKind::Todo,
+            ModeKind::Tags,
+            ModeKind::Codegraph,
+            ModeKind::Files,
+            ModeKind::Ag,
+            ModeKind::Llm,
+            ModeKind::Jira,
+            ModeKind::Directories,
+            ModeKind::Panes,
+        ]
+    }
+}

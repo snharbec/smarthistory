@@ -690,3 +690,27 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 - **[docs/multiplexer.md](multiplexer.md)** — tmux / herdr backend setup, environment variable precedence, troubleshooting.
 - **[README.md](../README.md)** — the high-level overview; this file is the long-form config reference.
 - **[TECHNICAL.md](../TECHNICAL.md)** — implementation-level reference for the data model and code structure.
+
+---
+
+## Troubleshooting with `smarthistory check`
+
+```sh
+smarthistory check              # health-check every prefix mode
+smarthistory check --prefix @   # check only the notes mode
+smarthistory check --prefix '&' # check only the codegraph mode
+```
+
+The `check` command builds the same `App` as the TUI startup (so it reads the same config file, opens the same DB, resolves the same multiplexer backend) and then runs a **progressive** per-mode health check. Each mode digs down as far as it can before reporting:
+
+- **Notes (`@`)** / **Todos (`!`)**: `notes.database` is configured → the file exists → opens as sqlite → has the required tables (`markdown_data`, `todo_entries`) → a sample `search_notes` / `search_todos` round-trip succeeds → row count.
+- **Tags (`$`)**: a `tags`/`TAGS` file is discoverable (walk upward from cwd) → readable → parses (has `\x0c`-separated sections) → if no tags file, checks the CodeGraph fallback.
+- **CodeGraph (`&`)**: `.codegraph/codegraph.db` is discoverable → opens as sqlite → has `nodes` + `edges` tables + `nodes_fts` FTS5 virtual table → a trivial FTS5 search succeeds → row/edge counts.
+- **Files (`~`)**: cwd exists → `walk_dir` returns at least one entry (or the dir is genuinely empty → `Warning`).
+- **Ag (`,`)**: `ag` binary is on `$PATH` → `ag --version` succeeds.
+- **LLM (`=`)**: `ollama.url` + `ollama.model` are configured → ollama server is reachable (`GET /api/tags`) → the configured model is in the loaded-models list.
+- **JIRA (`-`)**: `JIRA_SERVER` + `JIRA_API_TOKEN` env vars are set → the server is reachable (`GET /rest/api/3/myself` with Bearer auth) → the `JIRA_PROJECT` (if set) exists.
+- **Directories (`#`)**: SQL history DB is open (with a `COUNT(DISTINCT directory)` round-trip) → multiplexer backend is configured → each `sessiondirs` entry exists on disk.
+- **Panes (`*`)**: the user is inside a multiplexer session (`$TMUX` or `$HERDR_PANE_ID` is set) → the backend's `snapshot_current_panes` returns at least one pane.
+
+**Exit code**: 0 = all checks pass, 1 = one or more warnings, 2 = one or more errors.

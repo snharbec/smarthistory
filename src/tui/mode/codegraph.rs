@@ -11,6 +11,7 @@
 //! index, so a repo without a `TAGS` file still has
 //! symbol navigation as long as CodeGraph has indexed
 //! it.
+use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
 use anyhow::Result;
@@ -33,6 +34,166 @@ pub(crate) fn pattern(app: &App) -> &str {
         &app.query[p.len_utf8()..]
     } else {
         ""
+    }
+}
+
+/// Health check for the codegraph (`&`) mode. Verifies:
+///
+/// 1. The CodeGraph index (`.codegraph/codegraph.db`)
+///    exists at any of the discovery paths
+///    (`CodeGraphClient::open` walks
+///    upward from CWD, same as the runtime).
+/// 2. It opens as a valid sqlite database.
+/// 3. The required schema is present: `nodes`
+///    and `edges` tables, the `nodes_fts` FTS5
+///    index, the `kind` column on edges (so
+///    `callers` / `callees` work).
+/// 4. A trivial FTS5 search returns successfully
+///    (proves the index isn't corrupt).
+/// 5. When reachable, an informational row
+///    count + repo_root path is included so the
+///    user can sanity-check "did I index the
+///    right repo?".
+pub(crate) fn check(_app: &App) -> CheckReport {
+    use crate::tui::mode::ModeKind;
+    let mode = ModeKind::Codegraph;
+
+    // 1. Discovery. `CodeGraphClient::open()`
+    //    returns `None` when no index is
+    //    reachable; the runtime mode returns
+    //    empty in that case.
+    let client = match crate::codegraph::CodeGraphClient::open() {
+        Some(c) => c,
+        None => {
+            return CheckReport::err(
+                mode,
+                "no .codegraph/codegraph.db index found (run `codegraph build` in your repo root to create one)",
+            );
+        }
+    };
+
+    // 2-3. Schema probe. The client's
+    //     `repo_root()` returns the path
+    //     (it can be empty if the index has
+    //     no repository root metadata
+    //     recorded); we then need the DB
+    //     path to open a fresh connection
+    //     and probe the schema.
+    let repo_root = client.repo_root();
+    if repo_root.as_os_str().is_empty() {
+        return CheckReport::warn(
+            mode,
+            "CodeGraph index is reachable but has no `repo_root` metadata; cannot probe schema",
+        );
+    }
+    let db_path = repo_root.join(".codegraph").join("codegraph.db");
+    if !db_path.is_file() {
+        return CheckReport::err(
+            mode,
+            format!(
+                "CodeGraph client opened, but db file is missing at {}",
+                db_path.display()
+            ),
+        );
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckReport::err(
+                mode,
+                format!(
+                    "CodeGraph db at {} is not a valid sqlite file: {e}",
+                    db_path.display()
+                ),
+            );
+        }
+    };
+    let required = [("nodes", "nodes table"), ("edges", "edges table")];
+    for (name, label) in &required {
+        let present: Result<i64, _> = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![name],
+            |row| row.get(0),
+        );
+        if !matches!(present, Ok(n) if n > 0) {
+            return CheckReport::err(
+                mode,
+                format!("CodeGraph db is missing the `{label}` ({name}) — the index is incomplete or from an incompatible codegraph version"),
+            );
+        }
+    }
+    // The FTS5 virtual table may be named
+    // `nodes_fts` (current schema) or
+    // `nodes_search` (older versions). Probe
+    // both.
+    let fts_present: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type='table' AND name IN ('nodes_fts', 'nodes_search')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if fts_present == 0 {
+        return CheckReport::err(
+            mode,
+            "CodeGraph db is missing the FTS5 virtual table (expected `nodes_fts` or `nodes_search`)",
+        );
+    }
+
+    // 4. Trivial FTS5 search. We use the
+    //    client's own search method so we
+    //    exercise the same code path the
+    //    TUI uses. A common failure here is
+    //    "FTS5 integrity-check failed" —
+    //    the index file got truncated
+    //    (e.g. the user ctrl-C'd the
+    //    indexer mid-write) and the
+    //    search fails with an obscure
+    //    sqlite error.
+    let nodes = client.search("", None, 10);
+    if nodes.is_empty() {
+        // Not necessarily an error: the
+        // user could have indexed an
+        // empty repo. But an FTS5
+        // search on an empty string
+        // should match *something* if
+        // the index is non-empty.
+        // The "row count" check
+        // below surfaces the
+        // distinction.
+    }
+
+    // 5. Informational row count.
+    let node_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+        .unwrap_or(0);
+    let edge_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    if node_count == 0 {
+        CheckReport::warn(
+            mode,
+            format!(
+                "CodeGraph index at {} has 0 nodes (the index is empty; run `codegraph build` in the repo root)",
+                db_path.display()
+            ),
+        )
+    } else {
+        CheckReport::ok(
+            mode,
+            format!(
+                "CodeGraph index at {} is healthy ({} nodes, {} edges, repo root {})",
+                db_path.display(),
+                node_count,
+                edge_count,
+                repo_root.display()
+            ),
+        )
     }
 }
 

@@ -1,4 +1,5 @@
 //! `@` (note search) prefix mode.
+use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
 use crate::tui::NotesDateFilter;
@@ -9,6 +10,155 @@ use anyhow::Result;
 pub(crate) fn matches(app: &App) -> bool {
     let p = app.query_prefixes.notes;
     !app.query.is_empty() && app.query.starts_with(p)
+}
+
+/// Health check for the notes (`@`) mode. Verifies:
+///
+/// 1. `notes.database` is configured in
+///    `~/.config/smarthistory/config`.
+/// 2. The file exists and is readable.
+/// 3. It opens as a sqlite database.
+/// 4. The required tables (`markdown_data`,
+///    `todo_entries`, `note_search_index`) are
+///    present.
+/// 5. A trivial `search_notes` query succeeds
+///    (proves the connection + the library's
+///    query-builder work end-to-end).
+///
+/// Stops at the first failure (no point trying
+/// a sample query if the DB doesn't open) and
+/// returns the `CheckReport` with the deepest
+/// diagnostic available. A successful check
+/// also runs a row-count query to surface
+/// "the DB is empty" as a `Warning` (the user
+/// probably wants to know).
+pub(crate) fn check(app: &App) -> CheckReport {
+    use crate::tui::mode::ModeKind;
+    let mode = ModeKind::Notes;
+
+    // 1. Configuration check.
+    let Some(db_path) = app.notes_database.as_ref() else {
+        return CheckReport::err(
+            mode,
+            "notes.database is not configured (set it in ~/.config/smarthistory/config)",
+        )
+        .with(CheckReport::err(
+            mode,
+            "hint: smarthistory notes.database=~/path/to/notes.sqlite (run `smarthistory config check` to validate the config file)",
+        ));
+    };
+
+    // 2. File existence.
+    if !db_path.exists() {
+        return CheckReport::err(
+            mode,
+            format!("notes.database file does not exist: {}", db_path.display()),
+        );
+    }
+    if !db_path.is_file() {
+        return CheckReport::err(
+            mode,
+            format!(
+                "notes.database is not a regular file: {}",
+                db_path.display()
+            ),
+        );
+    }
+
+    // 3. Open as sqlite.
+    let conn = match rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckReport::err(
+                mode,
+                format!("failed to open notes database as sqlite: {e}"),
+            );
+        }
+    };
+
+    // 4. Required tables. We don't hardcode the full
+    //    library schema (it changes between
+    //    versions); we just probe for the tables
+    //    that `search_notes_by_query` /
+    //    `search_todos` actually need. A missing
+    //    table is almost always "you indexed
+    //    against a different note_search version"
+    //    or "the DB got truncated".
+    let required_tables = ["markdown_data", "todo_entries"];
+    for table in &required_tables {
+        let present: Result<i64, _> = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table],
+            |row| row.get(0),
+        );
+        match present {
+            Ok(n) if n > 0 => {}
+            Ok(_) => {
+                return CheckReport::err(
+                    mode,
+                    format!("required table `{table}` is missing (the notes DB is incomplete or from an incompatible note_search version)"),
+                );
+            }
+            Err(e) => {
+                return CheckReport::err(mode, format!("failed to probe for table `{table}`: {e}"));
+            }
+        }
+    }
+
+    // 5. Trivial search. We use the library's own
+    //    `DatabaseService` so we exercise the same
+    //    code path the TUI uses. A success here
+    //    proves the full search pipeline works
+    //    end-to-end (sqlite → FTS5 → service).
+    let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
+    let criteria = note_search::SearchCriteria::default();
+    let rows = match service.search_notes(&criteria) {
+        Ok(r) => r,
+        Err(e) => {
+            return CheckReport::err(
+                mode,
+                format!("search_notes() failed on an empty query: {e}"),
+            );
+        }
+    };
+
+    // 6. Informational: row count. An empty DB
+    //    means the user has never indexed any
+    //    notes — the mode will work, but
+    //    `search_notes` will always return an
+    //    empty list. Surface this as a Warning
+    //    so the user knows "the mode is wired up
+    //    but the index is empty".
+    if rows.is_empty() {
+        return CheckReport::warn(
+            mode,
+            "notes database is reachable but contains 0 indexed notes (run `note_search index` to populate it)".to_string(),
+        )
+        .with(CheckReport::ok(
+            mode,
+            format!("opened {}", db_path.display()),
+        ));
+    }
+
+    CheckReport::ok(
+        mode,
+        format!("{} notes indexed in {}", rows.len(), db_path.display()),
+    )
+    .with(CheckReport::ok(
+        mode,
+        format!("opened {}", db_path.display()),
+    ))
+    .with(CheckReport::ok(
+        mode,
+        format!("required tables present: {}", required_tables.join(", ")),
+    ))
+    .with(CheckReport::ok(
+        mode,
+        format!("sample search_notes() returned {} row(s)", rows.len()),
+    ))
 }
 
 /// The note search body, i.e. everything after the

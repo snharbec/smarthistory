@@ -9959,6 +9959,133 @@ fn maybe_prefix_selection_with_space(sel: String, mode_char: char) -> String {
     }
 }
 
+/// Run `smarthistory tui check` — the prefix-mode health
+/// check. Builds a minimal `App` (same config / DB /
+/// multiplexer setup as the TUI startup, but no terminal
+/// rendering), runs the per-mode checks via
+/// [`crate::tui::mode::run_all_checks`], and prints a
+/// human-readable report.
+///
+/// When `prefix` is `Some`, only that prefix mode is
+/// checked. When `None`, every prefix mode is checked.
+///
+/// Exit code: 0 if all checks pass, 1 if any `Warning`,
+/// 2 if any `Error`.
+pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
+    use crate::tui::mode::{CheckStatus, ModeKind};
+
+    let conn = crate::init_db()?;
+    let app_cfg = Config::load();
+    let bindings = app_cfg.key_bindings().clone();
+    let query_prefixes = app_cfg.query_prefixes().clone();
+    let notes_database = app_cfg.notes_database().map(|p| p.to_path_buf());
+    let notes_dir = app_cfg.notes_dir().map(|p| p.to_path_buf());
+    let llm_config = app_cfg.llm().cloned();
+    let multiplexer = crate::multiplexer::backend_for(app_cfg.multiplexer());
+    // No theme rendering in check mode, but install
+    // the default palette anyway so `check` functions
+    // that read colours don't panic on a missing
+    // thread-local.
+    crate::tui::theme::install_palette(crate::tui::theme::SelectedTheme::None);
+
+    // Resolve which mode to check.
+    let only: Option<ModeKind> = prefix.as_deref().and_then(|c| {
+        let c = c.chars().next()?;
+        // Match against the configured prefix chars,
+        // not the defaults — so `--prefix @` works even
+        // after the user remapped `prefix.notes=.`.
+        match c {
+            _ if c == query_prefixes.notes => Some(ModeKind::Notes),
+            _ if c == query_prefixes.todo => Some(ModeKind::Todo),
+            _ if c == query_prefixes.tags => Some(ModeKind::Tags),
+            _ if c == query_prefixes.codegraph => Some(ModeKind::Codegraph),
+            _ if c == query_prefixes.files => Some(ModeKind::Files),
+            _ if c == query_prefixes.ag => Some(ModeKind::Ag),
+            _ if c == query_prefixes.llm => Some(ModeKind::Llm),
+            _ if c == query_prefixes.question => Some(ModeKind::Question),
+            _ if c == query_prefixes.output => Some(ModeKind::Output),
+            _ if c == query_prefixes.directories => Some(ModeKind::Directories),
+            _ if c == query_prefixes.panes => Some(ModeKind::Panes),
+            _ if c == query_prefixes.jira => Some(ModeKind::Jira),
+            _ => None,
+        }
+    });
+    if prefix.is_some() && only.is_none() {
+        anyhow::bail!(
+            "unknown prefix {:?}; expected one of the configured prefix characters",
+            prefix
+        );
+    }
+
+    let app = App::new(
+        conn,
+        Mode::Global,
+        String::new(),
+        true,                  // duplicate_filter
+        ExitFilter::default(),
+        SortOrder::default(),
+        false,                 // query_prefilled
+        crate::tui::theme::SelectedTheme::None,
+        bindings,
+        None,                  // llm client
+        llm_config,
+        query_prefixes,
+        notes_database,
+        notes_dir,
+        app_cfg.todo_line_option().to_string(),
+        app_cfg.jira_fragments().clone(),
+        app_cfg.files_ignores().to_vec(),
+        app_cfg.smart_open_file_commands().clone(),
+        multiplexer,
+        crate::tui::state::PaneVisibility::default(),
+    );
+
+    let reports = crate::tui::mode::run_all_checks(&app, only);
+    print_check_report(&reports);
+
+    // Exit code: 0 = all ok, 1 = warnings, 2 = errors.
+    let any_error = reports.iter().any(|r| r.worst_status() == CheckStatus::Error);
+    let any_warning = reports.iter().any(|r| r.worst_status() == CheckStatus::Warning);
+    if any_error {
+        std::process::exit(2);
+    } else if any_warning {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Print a human-readable check report.
+fn print_check_report(reports: &[crate::tui::mode::CheckReport]) {
+    use crate::tui::mode::CheckStatus;
+
+    println!("smarthistory prefix-mode health check");
+    println!("======================================");
+    println!();
+
+    for report in reports {
+        let (icon, _label) = match report.worst_status() {
+            CheckStatus::Ok => ("✓", "ok"),
+            CheckStatus::Warning => ("⚠", "WARN"),
+            CheckStatus::Error => ("✗", "FAIL"),
+        };
+        println!("  {} {} — {}", icon, report.mode.display_name(), report.message);
+        for detail in &report.details {
+            let (dicon, _) = match detail.worst_status() {
+                CheckStatus::Ok => ("  ✓", ""),
+                CheckStatus::Warning => ("  ⚠", ""),
+                CheckStatus::Error => ("  ✗", ""),
+            };
+            println!("      {} {}", dicon, detail.message);
+        }
+    }
+
+    println!();
+    let errors = reports.iter().filter(|r| r.worst_status() == CheckStatus::Error).count();
+    let warnings = reports.iter().filter(|r| r.worst_status() == CheckStatus::Warning).count();
+    let oks = reports.iter().filter(|r| r.worst_status() == CheckStatus::Ok).count();
+    println!("  {} ok, {} warning(s), {} error(s)", oks, warnings, errors);
+}
+
 pub fn run_tui_to_stdout(
     initial_mode: String,
     initial_query: String,

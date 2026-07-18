@@ -7,6 +7,7 @@
 //! (see [`crate::tui::mode::codegraph`]).
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
+use crate::tui::mode::CheckReport;
 use anyhow::Result;
 
 /// Whether the query is a tags-search request:
@@ -28,6 +29,151 @@ pub(crate) fn pattern(app: &App) -> &str {
         &app.query[p.len_utf8()..]
     } else {
         ""
+    }
+}
+
+/// Health check for the tags (`$`) mode. Verifies:
+///
+/// 1. A `tags` / `TAGS` file is reachable from
+///    the current working directory (we walk
+///    upward, mirroring how editors discover
+///    tag files).
+/// 2. When found, the file is readable and
+///    parses without error (we read the first
+///    few entries to confirm the format).
+/// 3. When NOT found, check the CodeGraph
+///    fallback: if `.codegraph/codegraph.db`
+///    exists and is a valid FTS5 sqlite
+///    database, the fallback will work; if
+///    neither is available, the mode can't
+///    list any symbols (Error).
+///
+/// The dig-down order is: tags-file presence →
+/// tags-file readability → tags-file parse
+/// sanity → CodeGraph fallback (only when no
+/// tags file).
+#[allow(unused_variables)] // `app` kept for symmetry with the other `check` signatures; not used here because the tags check is CWD-relative.
+pub(crate) fn check(app: &App) -> CheckReport {
+    use crate::tui::mode::ModeKind;
+    let mode = ModeKind::Tags;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // 1. Walk upward from CWD looking for a
+    //    `tags` / `TAGS` file. The
+    //    `find_tags_file` helper does the
+    //    walking.
+    let tags_path = crate::tui::find_tags_file();
+    if tags_path.is_file() {
+        // Tags file found. Verify readability
+        // and parse sanity.
+        let read_result = std::fs::read_to_string(&tags_path);
+        let (read_ok, section_count) = match read_result {
+            Ok(s) => {
+                // Parse sanity: count
+                // `\x0c` section
+                // separators (a
+                // universal-tags file
+                // has one per file).
+                // A file with zero
+                // separators is
+                // suspicious (empty
+                // file, or not a
+                // universal-tags file
+                // — ctags has other
+                // output formats).
+                (true, s.matches('\x0c').count())
+            }
+            Err(_e) => (false, 0_usize),
+        };
+        if !read_ok {
+            // `read_ok` is false precisely
+            // because `read_result` is `Err`;
+            // pattern-match to recover the
+            // error.
+            let err_msg = std::fs::read_to_string(&tags_path)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string());
+            return CheckReport::err(
+                mode,
+                format!("tags file found at {} but is unreadable: {}", tags_path.display(), err_msg),
+            );
+        }
+        if section_count == 0 {
+            return CheckReport::warn(
+                mode,
+                format!("tags file at {} has 0 entries (or is in a non-universal-tags format)", tags_path.display()),
+            );
+        }
+        return CheckReport::ok(
+            mode,
+            format!("tags file at {} parsed ({} sections, {} bytes)", tags_path.display(), section_count, std::fs::metadata(&tags_path).map(|m| m.len()).unwrap_or(0)),
+        );
+    }
+
+    // 2. No tags file: check the CodeGraph
+    //    fallback. The fallback is what the
+    //    `mode::tags::fetch` function uses when
+    //    no TAGS file is reachable; if it's
+    //    also unavailable, the mode returns an
+    //    empty list.
+    match crate::codegraph::find_codegraph_db() {
+        Some(codegraph_path) if codegraph_path.is_file() => {
+            // Probe the DB: must be a valid
+            // sqlite, must have a `nodes`
+            // table.
+            let conn = match rusqlite::Connection::open_with_flags(
+                &codegraph_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    return CheckReport::err(
+                        mode,
+                        format!(
+                            "no tags file found, and CodeGraph fallback at {} is not a valid sqlite DB: {e}",
+                            codegraph_path.display()
+                        ),
+                    );
+                }
+            };
+            let present: Result<i64, _> = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='nodes'",
+                [],
+                |row| row.get(0),
+            );
+            match present {
+                Ok(n) if n > 0 => CheckReport::ok(
+                    mode,
+                    format!(
+                        "no tags file in {} or any parent; CodeGraph fallback at {} is available",
+                        cwd.display(),
+                        codegraph_path.display()
+                    ),
+                ),
+                Ok(_) => CheckReport::err(
+                    mode,
+                    format!(
+                        "no tags file found, and CodeGraph fallback at {} has no `nodes` table (incomplete index)",
+                        codegraph_path.display()
+                    ),
+                ),
+                Err(e) => CheckReport::err(
+                    mode,
+                    format!(
+                        "no tags file found, and CodeGraph fallback at {} could not be probed: {e}",
+                        codegraph_path.display()
+                    ),
+                ),
+            }
+        }
+        _ => CheckReport::err(
+            mode,
+            format!(
+                "no tags file in {} or any parent, and no CodeGraph index at .codegraph/codegraph.db; the `$` mode has no symbol source to query",
+                cwd.display()
+            ),
+        ),
     }
 }
 

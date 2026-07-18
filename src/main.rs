@@ -299,6 +299,21 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Check the health of every prefix mode (notes, todos, tags,
+    /// codegraph, files, ag, LLM, JIRA, directories, panes).
+    /// Each mode's check verifies its external dependencies are
+    /// configured and reachable. When `--prefix` is given only
+    /// that mode is checked.
+    ///
+    /// Exit code: 0 = all ok, 1 = warnings, 2 = errors.
+    Check {
+        /// Only check the mode with this prefix character
+        /// (e.g. `--prefix @` for notes, `--prefix &` for
+        /// codegraph). When omitted, every prefix mode is
+        /// checked.
+        #[arg(long, value_name = "PREFIX")]
+        prefix: Option<String>,
+    },
     /// Return the most probable next commands that follow the given
     /// command in the global history, ordered by frequency (then
     /// lexicographically for ties). Used by the Ctrl-S line-editor
@@ -2071,6 +2086,12 @@ impl Config {
     #[allow(dead_code)]
     pub fn key_bindings(&self) -> &tui::bindings::KeyBindings {
         &self.key_bindings
+    }
+
+    /// Resolved LLM (ollama) configuration, if any. When
+    /// `None`, the `=` and `%` TUI modes are disabled.
+    pub fn llm(&self) -> Option<&llm::LlmConfig> {
+        self.llm.as_ref()
     }
 
     /// Resolved query prefix characters.
@@ -4318,6 +4339,9 @@ fn main() -> anyhow::Result<()> {
                 updated = updated,
                 skipped = skipped
             );
+        }
+        Commands::Check { prefix } => {
+            tui::run_tui_check(prefix, false)?;
         }
     }
     Ok(())

@@ -6,6 +6,7 @@
 //! Selecting a row stages a `select-pane` / `switch-client`
 //! command (or the herdr equivalent) and exits the TUI.
 use crate::tui::state::{HistoryRow, MatchAlgorithm, PanesFilter};
+use crate::tui::mode::CheckReport;
 use crate::tui::App;
 use anyhow::Result;
 
@@ -17,6 +18,67 @@ use anyhow::Result;
 pub(crate) fn matches(app: &App) -> bool {
     let p = app.query_prefixes.panes;
     !app.query.is_empty() && app.query.starts_with(p)
+}
+
+/// Health check for the panes (`*`) mode. The mode
+/// reads a snapshot from the configured multiplexer
+/// backend (tmux or herdr), so the check verifies:
+///
+/// 1. The multiplexer backend is configured
+///    (`multiplexer=tmux|herdr` in the config or
+///    `SMARTHISTORY_MULTIPLEXER` env var).
+/// 2. The user is running inside a multiplexer
+///    session (`$TMUX` or `$HERDR_PANE_ID` is set).
+/// 3. The backend's `snapshot_current_panes` returns
+///    without error (a cheap round-trip to
+///    `tmux list-panes -s` or `herdr pane list`).
+pub(crate) fn check(app: &App) -> CheckReport {
+    use crate::tui::mode::ModeKind;
+    let mode = ModeKind::Panes;
+
+    // 1. Backend is configured.
+    let backend = app.multiplexer.name();
+    let in_tmux = std::env::var("TMUX").is_ok();
+    let in_herdr = std::env::var("HERDR_PANE_ID").is_ok();
+    let current_pane_env = if in_tmux {
+        std::env::var("TMUX_PANE").ok()
+    } else if in_herdr {
+        std::env::var("HERDR_PANE_ID").ok()
+    } else {
+        None
+    };
+
+    // 2. Inside a multiplexer session?
+    if !in_tmux && !in_herdr {
+        return CheckReport::warn(
+            mode,
+            format!(
+                "multiplexer backend is `{backend}` but you are not inside a multiplexer session ($TMUX / $HERDR_PANE_ID both unset); the `*` mode will show an empty list"
+            ),
+        );
+    }
+
+    // 3. Snapshot round-trip.
+    let Some(ref current_pane) = current_pane_env else {
+        return CheckReport::warn(
+            mode,
+            format!(
+                "inside a `{backend}` session but the pane-id env var ($TMUX_PANE / $HERDR_PANE_ID) is not set; the `*` mode cannot exclude your own pane"
+            ),
+        );
+    };
+    let panes = app.multiplexer.snapshot_current_panes(current_pane);
+    if panes.is_empty() {
+        CheckReport::warn(
+            mode,
+            format!("`{backend}` backend returned 0 panes (you may be the only pane in this session)"),
+        )
+    } else {
+        CheckReport::ok(
+            mode,
+            format!("`{backend}` backend returned {} pane(s)", panes.len()),
+        )
+    }
 }
 
 /// The session-panes filter body, i.e. everything
