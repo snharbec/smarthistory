@@ -3173,7 +3173,27 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let mut render_state = ListState::default().with_offset(offset);
     render_state.select(rendered_idx);
 
-    let title = format!(" History — {} ", merged.len());
+    // The list title is mode-dependent. The
+    // historical "History" label is kept for the
+    // no-prefix history mode (users have been
+    // reading that for years); every other mode
+    // gets a title-case noun from
+    // `ModeKind::list_title()` so the user always
+    // knows which view they're looking at. The
+    // row count is appended after an em-dash so
+    // the title is `<Mode> — <count>` for every
+    // mode (e.g. "Notes — 42", "JIRA — 5",
+    // "Directories — 12"). The user's
+    // `pane_visibility` choice (Both / Details /
+    // Output) is unrelated to this title — the
+    // title reflects the data source, not the
+    // pane layout.
+    let active_mode = crate::tui::mode::active_mode(app);
+    let title = format!(
+        " {} — {} ",
+        active_mode.list_title(),
+        merged.len()
+    );
     let list = List::new(items)
         .block(
             Block::default()
