@@ -2719,11 +2719,31 @@ impl App {
     fn trigger_text_change_search(&mut self) {
         // JIRA has its own
         // debounce/idle/space
-        // machinery. Do nothing
-        // here; the JIRA
-        // search fires when its
-        // own timers elapse.
+        // machinery. But on the
+        // FIRST entry into JIRA
+        // mode (no search has
+        // ever fired AND the query
+        // body is empty — the user
+        // just typed `-`), fire
+        // immediately so the user
+        // sees a results list the
+        // moment they enter `-`
+        // mode, not after the 400ms
+        // debounce. Subsequent
+        // keystrokes (which add a
+        // non-empty body) use the
+        // normal debounce.
         if self.is_jira_query() {
+            if self.jira_last_jql.is_none()
+                && self.jira_pattern().trim().is_empty()
+            {
+                let past = std::time::Instant::now()
+                    - JIRA_DEBOUNCE
+                    - std::time::Duration::from_millis(50);
+                self.jira_debounce_started = Some(past);
+                self.jira_idle_started = Some(past);
+                self.jira_maybe_autocall();
+            }
             return;
         }
         // No query -> no search
@@ -4227,19 +4247,46 @@ impl App {
         // stays consistent regardless of which one fires
         // first.
         if app.is_jira_query() {
-            let now = std::time::Instant::now();
-            app.jira_debounce_started = Some(now);
-            app.jira_idle_started = Some(now);
+            // Set the debounce to the past so
+            // `jira_maybe_autocall` fires the
+            // initial search on the first frame
+            // rather than waiting `JIRA_DEBOUNCE`.
+            // The user expects to see a results list
+            // the moment they enter `-` mode, not
+            // after 400ms of quiet staring.
+            //
+            // NB: `spawn_jira_request` sets
+            // `jira_last_jql` when the search
+            // actually fires. We must NOT set it
+            // here — the old code did
+            // `app.jira_last_jql = Some(jql)` before
+            // the search fired, which tripped the
+            // "already have results for this JQL"
+            // guard in `jira_maybe_autocall` and
+            // the first search NEVER fired.
+            let past = std::time::Instant::now()
+                - JIRA_DEBOUNCE
+                - std::time::Duration::from_millis(50);
+            app.jira_debounce_started = Some(past);
+            app.jira_idle_started = Some(past);
             app.jira_maybe_autocall();
             // Eagerly build the JQL so the input
             // border title shows it on the first
-            // frame rather than waiting for the
-            // debounce tick. The field will be
-            // refreshed when the search actually
-            // fires if the user has typed more
-            // in the meantime.
+            // frame. `spawn_jira_request` will
+            // overwrite this with the same value
+            // when the search actually fires.
             let jql = app.jira_build_query();
-            app.jira_last_jql = Some(jql);
+            if app.jira_last_jql.is_none() {
+                // `jira_maybe_autocall` may have
+                // already set this (when the search
+                // fired synchronously via the test
+                // client path). Only set it when
+                // it's still `None` (the search is
+                // running in the background and
+                // hasn't completed yet — the JQL
+                // for display is the same).
+                app.jira_last_jql = Some(jql);
+            }
         }
         // If the restored query is an ag query, arm the
         // debounce and fire the search immediately so the
