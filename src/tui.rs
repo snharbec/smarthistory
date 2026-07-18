@@ -11,6 +11,7 @@ use std::time::Duration;
 
 pub mod actions;
 pub mod bindings;
+pub mod mode;
 pub mod render;
 pub mod state;
 pub mod theme;
@@ -853,7 +854,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 // `key.<action>=<key-spec>`, e.g. `key.help=C-h`.
 // (The enum itself lives in `bindings::Action`.)
 
-struct App {
+pub(crate) struct App {
     conn: Connection,
     mode: Mode,
     duplicate_filter: bool,
@@ -1648,8 +1649,7 @@ impl App {
     /// True if the current query is an output-content search
     /// (prefixed with configured output prefix).
     fn is_output_query(&self) -> bool {
-        let p = self.query_prefixes.output;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::output::matches(self)
     }
 
     /// True if the current query is an LLM command-generation
@@ -1657,8 +1657,7 @@ impl App {
     /// Only returns true if there's actual description text after
     /// the prefix (not just the prefix alone or with only whitespace).
     fn is_llm_query(&self) -> bool {
-        let p = self.query_prefixes.llm;
-        self.query.starts_with(p) && !self.query[p.len_utf8()..].trim().is_empty()
+        crate::tui::mode::llm::matches(self)
     }
 
     /// True if the current query is a general question
@@ -1666,8 +1665,7 @@ impl App {
     /// Only returns true if there's actual question text after
     /// the prefix (not just the prefix alone or with only whitespace).
     fn is_question_query(&self) -> bool {
-        let p = self.query_prefixes.question;
-        self.query.starts_with(p) && !self.query[p.len_utf8()..].trim().is_empty()
+        crate::tui::mode::question::matches(self)
     }
 
     /// The regex pattern. Returns the query body (the
@@ -1745,41 +1743,25 @@ impl App {
     /// The output-search body, i.e. everything after the
     /// leading output prefix.
     fn output_pattern(&self) -> &str {
-        if self.is_output_query() {
-            let p = self.query_prefixes.output;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::output::pattern(self)
     }
 
     /// The LLM query body, i.e. everything after the
     /// leading LLM prefix.
     fn llm_pattern(&self) -> &str {
-        if self.is_llm_query() {
-            let p = self.query_prefixes.llm;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::llm::pattern(self)
     }
 
     /// The question body, i.e. everything after the
     /// leading question prefix.
     fn question_pattern(&self) -> &str {
-        if self.is_question_query() {
-            let p = self.query_prefixes.question;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::question::pattern(self)
     }
 
     /// True if the current query is a note search request
     /// (prefixed with the configured notes prefix, default `@`).
     fn is_notes_query(&self) -> bool {
-        let p = self.query_prefixes.notes;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::notes::matches(self)
     }
 
     /// True if the current query is a todo search
@@ -1791,8 +1773,7 @@ impl App {
     /// `- [ ] text` / `- [x] text`) and lists each
     /// match as its own row in the TUI.
     fn is_todo_query(&self) -> bool {
-        let p = self.query_prefixes.todo;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::todo::matches(self)
     }
 
     /// True if the user typed the
@@ -1811,8 +1792,7 @@ impl App {
     /// stages a `cd <path>`
     /// command.
     fn is_directories_query(&self) -> bool {
-        let p = self.query_prefixes.directories;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::directories::matches(self)
     }
 
     /// The directories-search
@@ -1824,12 +1804,7 @@ impl App {
     /// when not in directories
     /// mode.
     fn directories_pattern(&self) -> &str {
-        if self.is_directories_query() {
-            let p = self.query_prefixes.directories;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::directories::pattern(self)
     }
 
     /// Whether the query is a session-panes request:
@@ -1838,20 +1813,14 @@ impl App {
     /// substring filter matched against each pane's
     /// current command and cwd.
     fn is_panes_query(&self) -> bool {
-        let p = self.query_prefixes.panes;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::panes::matches(self)
     }
 
     /// The session-panes filter body, i.e. everything
     /// after the leading `*` prefix. Empty when not in
     /// panes mode.
     fn panes_pattern(&self) -> &str {
-        if self.is_panes_query() {
-            let p = self.query_prefixes.panes;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::panes::pattern(self)
     }
 
     /// Whether the query is a files-view request:
@@ -1860,8 +1829,7 @@ impl App {
     /// substring filter matched against each file's
     /// path (relative to cwd).
     fn is_files_query(&self) -> bool {
-        let p = self.query_prefixes.files;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::files::matches(self)
     }
 
     /// Whether the query is a tags-search request:
@@ -1870,20 +1838,14 @@ impl App {
     /// symbol names AND the source-line text from the
     /// `tags` file in the current directory.
     fn is_tags_query(&self) -> bool {
-        let p = self.query_prefixes.tags;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::tags::matches(self)
     }
 
     /// The tags-search body, i.e. everything after the
     /// leading `$` prefix. Empty string when not in
     /// tags mode.
     fn tags_pattern(&self) -> &str {
-        if self.is_tags_query() {
-            let p = self.query_prefixes.tags;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::tags::pattern(self)
     }
 
     /// Whether the query is an ag content-search request:
@@ -1891,8 +1853,7 @@ impl App {
     /// default). The body is split into search terms
     /// and file-pattern globs (tokens containing `*`).
     fn is_ag_query(&self) -> bool {
-        let p = self.query_prefixes.ag;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::ag::matches(self)
     }
 
     /// The ag-search body, i.e. everything after the
@@ -1900,12 +1861,7 @@ impl App {
     /// ag mode.
     #[allow(dead_code)]
     fn ag_pattern(&self) -> &str {
-        if self.is_ag_query() {
-            let p = self.query_prefixes.ag;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::ag::pattern(self)
     }
 
     /// Whether the query is a CodeGraph symbol-search
@@ -1914,31 +1870,20 @@ impl App {
     /// against symbol names in the local
     /// `.codegraph/codegraph.db` index via FTS5.
     fn is_codegraph_query(&self) -> bool {
-        let p = self.query_prefixes.codegraph;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::codegraph::matches(self)
     }
 
     /// The codegraph-search body, i.e. everything after
     /// the leading `&` prefix. Empty string when not in
     /// codegraph mode.
     fn codegraph_pattern(&self) -> &str {
-        if self.is_codegraph_query() {
-            let p = self.query_prefixes.codegraph;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::codegraph::pattern(self)
     }
 
     /// The note search body, i.e. everything after the
     /// leading notes prefix.
     fn notes_pattern(&self) -> &str {
-        if self.is_notes_query() {
-            let p = self.query_prefixes.notes;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::notes::pattern(self)
     }
 
     /// Whether the query is a JIRA issue-search request:
@@ -1947,20 +1892,14 @@ impl App {
     /// `crate::jira::build_jql` (issue keys,
     /// `field=value` constraints, free text).
     fn is_jira_query(&self) -> bool {
-        let p = self.query_prefixes.jira;
-        !self.query.is_empty() && self.query.starts_with(p)
+        crate::tui::mode::jira::matches(self)
     }
 
     /// The JIRA search body, i.e. everything after the
     /// leading `-` prefix. Empty string when not in jira
     /// mode.
     fn jira_pattern(&self) -> &str {
-        if self.is_jira_query() {
-            let p = self.query_prefixes.jira;
-            &self.query[p.len_utf8()..]
-        } else {
-            ""
-        }
+        crate::tui::mode::jira::pattern(self)
     }
 
     /// The todo search body, i.e. everything
@@ -7132,13 +7071,7 @@ impl App {
         // here and is gate-checked by
         // `duplicate_filter` (default
         // on).
-        if self.is_directories_query()
-            || self.is_jira_query()
-            || self.is_files_query()
-            || self.is_tags_query()
-            || self.is_codegraph_query()
-            || self.is_ag_query()
-        {
+        if crate::tui::mode::active_mode(self).dedup_eligible() {
             let mut merged = self.rows.clone();
             if self.duplicate_filter || self.sort_order == SortOrder::Frequency {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -13899,79 +13832,95 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::SmartOpen => {
             // Context-aware "dive" key (default C-]):
-            // adapt to the active prefix mode. In `&` / `$`
-            // (codegraph-backed) symbol mode, open the
-            // callers/callees picker (same as CodegraphRelations).
-            // In `-` (JIRA) mode, open the selected issue's browse
-            // URL in the system browser **in the background** (same
-            // as pressing Enter, but spawned detached so the TUI
-            // stays open). In `!` (Todo) mode, toggle the
-            // checkbox of the selected todo (same as
-            // `Action::MarkTodoDone` / `Ctrl-X`) — a "smart"
-            // companion to the existing "open the file at
-            // the line" behaviour of `Enter` (which the
-            // fallback also handles). In `~` (Files) mode,
-            // open the selected file with a per-extension
-            // shell command configured via
-            // `smart-open.<ext>=<cmd>` in the config file
-            // (with an optional `smart-open.default` fallback
-            // for unrecognised extensions). Everywhere else,
-            // fall through to the normal `Run` action (select
-            // row / open editor / fire LLM), so the key is an
-            // ergonomic Enter replacement across all modes.
-            if app.is_codegraph_query() || app.is_tags_query() {
-                app.open_codegraph_relations();
-                false
-            } else if app.is_jira_query() {
-                app.open_jira_in_background();
-                false
-            } else if app.is_todo_query() {
-                // Same as `Action::MarkTodoDone` (`Ctrl-X`):
-                // flip `- [ ]` ↔ `- [x]` on the selected
-                // todo's line in the source file, then
-                // re-fetch the todo list so the row
-                // disappears (or the marker changes).
-                // `mark_todo_done` is no-op-safe (it
-                // surfaces a status message rather than
-                // staging a selection when no row is
-                // selected, or when the selection is not a
-                // todo row, or when `notes.dir` is
-                // unset), so dispatching directly is
-                // safe. Returning `false` (don't exit the
-                // TUI) matches the other SmartOpen
-                // branches' semantics — the user stays
-                // in the todo list to see the result
-                // (row removed / marker flipped) and
-                // can keep navigating.
-                app.mark_todo_done();
-                false
-            } else if app.is_files_query() {
-                // File-type-aware open. Looks up the
-                // selected file's extension in
-                // `app.smart_open_file_commands`
-                // (populated from
-                // `smart-open.<ext>=<cmd>` config
-                // lines) and stages the configured
-                // command with the file path appended.
-                // Returns `Some((staged, true))` on a
-                // match (we exit so the parent shell
-                // runs the staged command) or `None`
-                // on no match / no row / non-file
-                // (the caller falls through to the
-                // `Run` action — open in `$EDITOR`).
-                let (exited, quit) = match app.smart_open_for_file() {
-                    Some((_, quit)) => (true, quit),
-                    None => (false, false),
-                };
-                if !exited {
+            // adapt to the active prefix mode. The
+            // per-mode behaviour is dispatched through
+            // the `ModeKind` enum so adding a new mode
+            // only requires one new match arm here
+            // (the if/else version grew to 5 arms
+            // before this refactor and would have kept
+            // growing).
+            match crate::tui::mode::active_mode(app) {
+                crate::tui::mode::ModeKind::Codegraph | crate::tui::mode::ModeKind::Tags => {
+                    // In `&` / `$` (codegraph-backed) symbol
+                    // mode, open the callers/callees picker
+                    // (same as `Action::CodegraphRelations`).
+                    app.open_codegraph_relations();
+                    false
+                }
+                crate::tui::mode::ModeKind::Jira => {
+                    // In `-` (JIRA) mode, open the
+                    // selected issue's browse URL in
+                    // the system browser **in the
+                    // background** (same as pressing
+                    // Enter, but spawned detached so
+                    // the TUI stays open).
+                    app.open_jira_in_background();
+                    false
+                }
+                crate::tui::mode::ModeKind::Todo => {
+                    // In `!` (Todo) mode, toggle the
+                    // checkbox of the selected todo
+                    // (same as `Action::MarkTodoDone`
+                    // / `Ctrl-X`) — a "smart"
+                    // companion to the existing "open
+                    // the file at the line"
+                    // behaviour of `Enter` (which the
+                    // fallback also handles).
+                    // `mark_todo_done` is no-op-safe
+                    // (it surfaces a status message
+                    // rather than staging a
+                    // selection when no row is
+                    // selected, or when the
+                    // selection is not a todo row,
+                    // or when `notes.dir` is unset),
+                    // so dispatching directly is
+                    // safe. Returning `false` (don't
+                    // exit the TUI) matches the
+                    // other SmartOpen branches'
+                    // semantics — the user stays in
+                    // the todo list to see the
+                    // result (row removed / marker
+                    // flipped) and can keep
+                    // navigating.
+                    app.mark_todo_done();
+                    false
+                }
+                crate::tui::mode::ModeKind::Files => {
+                    // File-type-aware open. Looks up
+                    // the selected file's extension
+                    // in `app.smart_open_file_commands`
+                    // (populated from
+                    // `smart-open.<ext>=<cmd>` config
+                    // lines) and stages the configured
+                    // command with the file path
+                    // appended. Returns
+                    // `Some((staged, true))` on a
+                    // match (we exit so the parent
+                    // shell runs the staged command)
+                    // or `None` on no match / no row
+                    // / non-file (the caller falls
+                    // through to the `Run` action —
+                    // open in `$EDITOR`).
+                    let (exited, quit) = match app.smart_open_for_file() {
+                        Some((_, quit)) => (true, quit),
+                        None => (false, false),
+                    };
+                    if !exited {
+                        app.select_for_run();
+                        app.selection.is_some()
+                    } else {
+                        quit
+                    }
+                }
+                // Everywhere else, fall through to
+                // the normal `Run` action (select
+                // row / open editor / fire LLM),
+                // so the key is an ergonomic Enter
+                // replacement across all modes.
+                _ => {
                     app.select_for_run();
                     app.selection.is_some()
-                } else {
-                    quit
                 }
-            } else {
-                app.select_for_run();
-                app.selection.is_some()
             }
         }
         Action::PreviousHistory => {

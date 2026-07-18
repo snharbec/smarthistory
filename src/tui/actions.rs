@@ -6,21 +6,118 @@ use super::*;
 
 impl App {
     pub(crate) fn select_for_run_impl(&mut self) {
-        // `=...` queries are an LLM command-generation request,
-        // not a row selection. Short-circuit before any row
-        // lookup: there *is* no meaningful selected row when
-        // the user is composing a natural-language description.
-        if self.is_llm_query() {
-            self.run_llm_query();
-            return;
+        // The active prefix mode drives a flat `match`
+        // dispatch. Each arm is specialised for its
+        // mode's staging behaviour (LLM generates a
+        // command, todo opens the editor at a line,
+        // files / tags / ag / codegraph all open an
+        // editor at a path+line, jira opens the
+        // browser, etc.). The fall-through arm is the
+        // history / no-prefix row selection.
+        match crate::tui::mode::active_mode(self) {
+            crate::tui::mode::ModeKind::Llm => {
+                // `=...` queries are an LLM
+                // command-generation request, not a row
+                // selection. Short-circuit before any row
+                // lookup: there *is* no meaningful
+                // selected row when the user is
+                // composing a natural-language description.
+                self.run_llm_query();
+            }
+            crate::tui::mode::ModeKind::Question => {
+                // `%...` queries are general question
+                // requests. Open an overlay with the
+                // answer instead of running a command.
+                self.run_question_query();
+            }
+            crate::tui::mode::ModeKind::Files => {
+                if let Some(row) = self.selected_row() {
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "vi".to_string());
+                    // The absolute path is in
+                    // `row.directory` for files,
+                    // set during `fetch_files`.
+                    let filepath = &row.directory;
+                    let quoted = crate::util::shell_quote(filepath);
+                    self.selection = Some(format!("{} {}", editor, quoted));
+                    self.pick_mode = Some(PickMode::Run);
+                }
+            }
+            crate::tui::mode::ModeKind::Tags => {
+                if let Some(row) = self.selected_row() {
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "vi".to_string());
+                    // The absolute path is in
+                    // `row.directory`, the line
+                    // number is in `row.session_id`.
+                    let filepath = &row.directory;
+                    let line = &row.session_id;
+                    let quoted = crate::util::shell_quote(filepath);
+                    self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                    self.pick_mode = Some(PickMode::Run);
+                }
+            }
+            crate::tui::mode::ModeKind::Ag => {
+                // `,` queries are ag content-search
+                // requests. Selecting a match opens
+                // the file in $EDITOR at the
+                // matching line number.
+                if let Some(row) = self.selected_row() {
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "vi".to_string());
+                    let filepath = &row.directory;
+                    let line = &row.session_id;
+                    let quoted = crate::util::shell_quote(filepath);
+                    self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                    self.pick_mode = Some(PickMode::Run);
+                }
+            }
+            crate::tui::mode::ModeKind::Codegraph => {
+                // `&` queries are CodeGraph
+                // symbol-search requests. Selecting a
+                // symbol opens the source file in
+                // $EDITOR at the symbol's
+                // `start_line`, exactly like tags
+                // mode (the row's `directory` and
+                // `session_id` carry the absolute path
+                // and line).
+                if let Some(row) = self.selected_row() {
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "vi".to_string());
+                    let filepath = &row.directory;
+                    let line = &row.session_id;
+                    let quoted = crate::util::shell_quote(filepath);
+                    self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
+                    self.pick_mode = Some(PickMode::Run);
+                }
+            }
+            // The remaining modes (todo, notes,
+            // directories, panes, jira, output) keep
+            // their special-cased dispatch logic
+            // below — the `is_<mode>_query()` checks
+            // are preserved until those bodies move
+            // into per-mode modules in a follow-up.
+            _ => {
+                self.select_for_run_legacy_dispatch();
+            }
         }
-        // `%...` queries are general question requests.
-        // Open an overlay with the answer instead of running
-        // a command.
-        if self.is_question_query() {
-            self.run_question_query();
-            return;
-        }
+    }
+
+    /// The remaining mode dispatch logic for `select_for_run_impl`
+    /// — the modes that have substantial special-cased
+    /// behaviour (todo, notes, directories, panes, jira). Kept
+    /// separate so the simple modes' arms stay flat in
+    /// `select_for_run_impl` above; this function will shrink
+    /// as each mode moves into its own module.
+    fn select_for_run_legacy_dispatch(&mut self) {
         // `!...` queries are todo search requests.
         // Selecting a todo line opens the editor at
         // the exact line number so the user lands
@@ -137,83 +234,34 @@ impl App {
             return;
         }
 
-        // `~...` queries are file-search requests.
-        // Selecting a file opens it in the editor.
-        if self.is_files_query() {
-            if let Some(row) = self.selected_row() {
-                let editor = std::env::var("EDITOR")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "vi".to_string());
-                // The absolute path is in
-                // `row.directory` for files,
-                // set during `fetch_files`.
-                let filepath = &row.directory;
-                let quoted = crate::util::shell_quote(filepath);
-                self.selection = Some(format!("{} {}", editor, quoted));
-                self.pick_mode = Some(PickMode::Run);
-            }
-            return;
-        }
-        // `$...` queries are tags-search requests.
-        // Selecting a symbol opens the file in the
-        // editor at the correct line, using
-        // `+LINE_NUMBER` (the convention nvim, vim,
-        // and most CLI editors understand).
-        if self.is_tags_query() {
-            if let Some(row) = self.selected_row() {
-                let editor = std::env::var("EDITOR")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "vi".to_string());
-                // The absolute path is in
-                // `row.directory`, the line
-                // number is in `row.session_id`.
-                let filepath = &row.directory;
-                let line = &row.session_id;
-                let quoted = crate::util::shell_quote(filepath);
-                self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
-                self.pick_mode = Some(PickMode::Run);
-            }
-            return;
-        }
-        // `,` queries are ag content-search requests.
-        // Selecting a match opens the file in $EDITOR
-        // at the matching line number.
-        if self.is_ag_query() {
-            if let Some(row) = self.selected_row() {
-                let editor = std::env::var("EDITOR")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "vi".to_string());
-                let filepath = &row.directory;
-                let line = &row.session_id;
-                let quoted = crate::util::shell_quote(filepath);
-                self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
-                self.pick_mode = Some(PickMode::Run);
-            }
-            return;
-        }
-        // `&` queries are CodeGraph symbol-search
-        // requests. Selecting a symbol opens the
-        // source file in $EDITOR at the symbol's
-        // `start_line`, exactly like tags mode
-        // (the row's `directory` and `session_id`
-        // carry the absolute path and line).
-        if self.is_codegraph_query() {
-            if let Some(row) = self.selected_row() {
-                let editor = std::env::var("EDITOR")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "vi".to_string());
-                let filepath = &row.directory;
-                let line = &row.session_id;
-                let quoted = crate::util::shell_quote(filepath);
-                self.selection = Some(format!("{} +{} {}", editor, line, quoted,));
-                self.pick_mode = Some(PickMode::Run);
-            }
-            return;
-        }
+        // `~...` (files) queries are
+        // handled in the flat `match`
+        // dispatch in
+        // `select_for_run_impl`. The
+        // remaining legacy arms are
+        // the directories (`#`) and
+        // panes (`*`) views, which
+        // have substantial
+        // mode-specific behaviour
+        // (tmux workspace / window /
+        // pane selection logic) that
+        // doesn't fit the simple
+        // "open-in-editor-at-line"
+        // shape.
+        // `$...` / `,` / `&` (tags / ag / codegraph)
+        // queries are handled in the flat
+        // `match` dispatch in
+        // `select_for_run_impl`. The
+        // remaining legacy arms are the
+        // directories (`#`) and panes
+        // (`*`) views, which have
+        // substantial mode-specific
+        // behaviour (tmux workspace /
+        // window / pane selection
+        // logic) that doesn't fit the
+        // simple
+        // "open-in-editor-at-line"
+        // shape.
 
         // `#...` queries are directories-view
         // requests. Selecting a

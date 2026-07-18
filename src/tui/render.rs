@@ -5041,12 +5041,13 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     // is the secondary reinforcement.
     let is_regex = app.is_regex_query();
     let is_fuzzy = app.is_fuzzy_query();
-    let is_output = app.is_output_query();
-    let is_llm = app.is_llm_query();
-    let is_notes = app.is_notes_query();
-    let is_question = app.is_question_query();
-    let is_todo = app.is_todo_query();
-    let is_directories = app.is_directories_query();
+    // The active mode is resolved once via
+    // `mode::active_mode` and used for the
+    // per-mode prompt, title, border-style, and
+    // title-style lookups below. This replaces
+    // three identical `is_X_query()` if/else
+    // chains with a single match.
+    let active_mode = crate::tui::mode::active_mode(app);
     let (prompt, title, content) = match app.comment_edit {
         Some(ref buf) => {
             // The comment-edit buffer is
@@ -5098,73 +5099,9 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 crate::tui::state::MatchAlgorithm::Fuzzy => " · fuzzy",
                 crate::tui::state::MatchAlgorithm::Regex => " · regex",
             };
-            if is_output {
-                (
-                    "+".to_string(),
-                    format!(" output{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if is_llm {
-                ("=".to_string(), " LLM ".to_string(), app.query.as_str())
-            } else if is_notes {
-                (
-                    "@".to_string(),
-                    format!(" notes{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if is_question {
-                ("%".to_string(), " ? ".to_string(), app.query.as_str())
-            } else if is_todo {
-                (
-                    "!".to_string(),
-                    format!(" todo{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if is_directories {
-                (
-                    "#".to_string(),
-                    format!(" directories{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if app.is_panes_query() {
-                (
-                    "*".to_string(),
-                    format!(" panes{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if app.is_jira_query() {
-                let jql_title = app
-                    .jira_last_jql
-                    .as_deref()
-                    .map_or_else(|| " jira ".to_string(), |j| format!(" jira ({}) ", j));
-                ("-".to_string(), jql_title, app.query.as_str())
-            } else if app.is_files_query() {
-                (
-                    "~".to_string(),
-                    format!(" files{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if app.is_tags_query() {
-                (
-                    "$".to_string(),
-                    format!(" symbols{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if app.is_codegraph_query() {
-                (
-                    "&".to_string(),
-                    format!(" codegraph{} ", algo),
-                    app.query.as_str(),
-                )
-            } else if app.is_ag_query() {
-                (",".to_string(), format!(" ag{} ", algo), app.query.as_str())
-            } else {
-                (
-                    "> ".to_string(),
-                    format!(" history{} ", algo),
-                    app.query.as_str(),
-                )
-            }
+            let (prompt_str, title_str) =
+                crate::tui::mode::input_prompt_title(active_mode, algo, app.jira_last_jql.as_deref());
+            (prompt_str, title_str, app.query.as_str())
         }
     };
     let input = Paragraph::new(Line::from(vec![
@@ -5183,37 +5120,26 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             // character is off-screen (e.g.
             // you've typed more than fits in the
             // input box).
-            .title_style(if is_output {
-                Style::default().fg(Theme::info_color())
-            } else if is_llm {
-                Style::default().fg(Theme::accent_color())
-            } else if is_notes {
-                Style::default().fg(Theme::accent_color())
-            } else if is_question {
-                Style::default().fg(Theme::info_color())
-            } else if is_todo {
-                Style::default().fg(Theme::warning_color())
-            } else if is_directories {
-                Style::default().fg(Theme::accent_color())
-            } else if app.is_panes_query() {
-                Style::default().fg(Theme::success_color())
-            } else if app.is_jira_query() {
-                Style::default().fg(Theme::info_color())
-            } else if app.is_files_query() {
-                Style::default().fg(Theme::success_color())
-            } else if app.is_tags_query() {
-                Style::default().fg(Theme::success_color())
-            } else if app.is_codegraph_query() {
-                Style::default().fg(Theme::accent_color())
-            } else if app.is_ag_query() {
-                Style::default().fg(Theme::warning_color())
-            } else if is_regex {
-                Style::default().fg(Theme::warning_color())
-            } else if is_fuzzy {
-                Style::default().fg(Theme::success_color())
-            } else {
-                Theme::accent()
-            })
+            //
+            // The per-mode colour lookup is a
+            // single `match` in
+            // `mode::input_title_style`; the
+            // history / no-prefix mode falls
+            // through to the match-algorithm
+            // colours (regex = warning, fuzzy =
+            // success, plain = accent).
+            .title_style(
+                crate::tui::mode::input_title_style(active_mode)
+                    .unwrap_or_else(|| {
+                        if is_regex {
+                            Style::default().fg(Theme::warning_color())
+                        } else if is_fuzzy {
+                            Style::default().fg(Theme::success_color())
+                        } else {
+                            Theme::accent()
+                        }
+                    })
+            )
             // The border colour matches the title
             // colour for the same reason. We
             // additionally tint the border red
@@ -5229,36 +5155,16 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 }
             } else if app.notes_query_error {
                 Style::default().fg(Theme::error_color())
-            } else if is_output {
-                Style::default().fg(Theme::info_color())
-            } else if is_llm {
-                Style::default().fg(Theme::accent_color())
-            } else if is_notes {
-                Style::default().fg(Theme::accent_color())
-            } else if is_question {
-                Style::default().fg(Theme::info_color())
-            } else if is_todo {
-                Style::default().fg(Theme::warning_color())
-            } else if is_directories {
-                Style::default().fg(Theme::accent_color())
-            } else if app.is_panes_query() {
-                Style::default().fg(Theme::success_color())
-            } else if app.is_jira_query() {
-                Style::default().fg(Theme::info_color())
-            } else if app.is_files_query() {
-                Style::default().fg(Theme::success_color())
-            } else if app.is_tags_query() {
-                Style::default().fg(Theme::success_color())
-            } else if app.is_codegraph_query() {
-                Style::default().fg(Theme::accent_color())
-            } else if app.is_ag_query() {
-                Style::default().fg(Theme::warning_color())
-            } else if is_regex {
-                Style::default().fg(Theme::warning_color())
-            } else if is_fuzzy {
-                Style::default().fg(Theme::success_color())
             } else {
-                Theme::dim()
+                crate::tui::mode::input_title_style(active_mode).unwrap_or_else(|| {
+                    if is_regex {
+                        Style::default().fg(Theme::warning_color())
+                    } else if is_fuzzy {
+                        Style::default().fg(Theme::success_color())
+                    } else {
+                        Theme::dim()
+                    }
+                })
             })
             .style(Style::default().bg(PALETTE.with(|p| p.borrow().input_bg))),
     )
