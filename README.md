@@ -116,6 +116,7 @@ own config.
 | `F1` | Open the prefix picker to choose a query mode (history, output, LLM, …). |
 | `F6` | Add the selected directory as a new host (`*` mode). |
 | `F10` | Toggle pane visibility: BOTH → Details → Output Preview → BOTH. |
+| `F11` | Toggle pane height: default (8 lines) ↔ tall (~70% of list area). |
 | `F7` | Panes filter: show only live multiplexer windows (`*` mode). |
 | `F8` | Panes filter: show only the `# hosts` block (`*` mode). |
 | `F9` | Panes filter: show only the `# sessions` block (`*` mode). |

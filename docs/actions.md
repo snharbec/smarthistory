@@ -639,6 +639,17 @@ Filter the `*`-mode panes view to show only the `# sessions` block. Pressing the
 
 Toggle detail pane visibility. Cycles through: `BOTH` (details + output preview side-by-side) → `Details` only → `Output Preview` only → `BOTH`. When only one pane is visible, the remaining pane uses the full detail-row height — useful on narrow terminals where the side-by-side layout would be cramped.
 
+### `TogglePaneHeight`
+
+| Field | Value |
+| --- | --- |
+| Config key | `toggle-pane-height` |
+| Display name | Toggle pane height |
+| Default key | `F11` |
+| Category | layout |
+
+Toggle the detail / output-preview row height between two presets: **Default** (8 lines, ~50% of the list area) and **Tall** (~70% of the list area). The setting is persisted in the session file (`paneheight=default` / `paneheight=tall`) so the user's choice carries over to the next TUI startup. Useful when reading a long source-context preview: press `F11` to give the details / output panes more vertical room, then `F11` again to reclaim the space for the history list.
+
 ---
 
 ## codegraph

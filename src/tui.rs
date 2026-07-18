@@ -99,6 +99,13 @@ struct TuiSession {
     /// Unrecognised values
     /// are silently dropped.
     pane_visibility: Option<String>,
+    /// Which detail-pane height was
+    /// active at the end of the last
+    /// session (`default` /
+    /// `tall`). `None` means "no
+    /// preference" and falls back to
+    /// `PaneHeight::Default`.
+    pane_height: Option<String>,
 }
 
 /// All theme choices available in the TUI. The first entry, `None`,
@@ -212,6 +219,21 @@ impl TuiSession {
                         s.pane_visibility =
                             Some(value.to_string());
                     }
+                "paneheight"
+                    // Same pattern as
+                    // `pane_visibility`: only
+                    // accept values that
+                    // `PaneHeight::parse`
+                    // recognises (`default` /
+                    // `tall` plus aliases).
+                    if crate::tui::state::PaneHeight::parse(
+                        value,
+                    )
+                    .is_some()
+                    => {
+                        s.pane_height =
+                            Some(value.to_string());
+                    }
                 _ => {}
             }
         }
@@ -253,6 +275,9 @@ impl TuiSession {
         }
         if let Some(ref pv) = self.pane_visibility {
             out.push_str(&format!("panevisibility={}\n", pv));
+        }
+        if let Some(ref ph) = self.pane_height {
+            out.push_str(&format!("paneheight={}\n", ph));
         }
         if let Err(e) = std::fs::write(&path, out) {
             eprintln!("warning: failed to persist TUI session: {}", e);
@@ -1023,6 +1048,12 @@ pub(crate) struct App {
     /// Preview → BOTH with `F6`
     /// (configurable).
     pane_visibility: crate::tui::state::PaneVisibility,
+    /// Which detail-pane height preset is
+    /// active (`Default` 8 lines,
+    /// `Tall` ~70% of the list area).
+    /// Toggled by `Action::TogglePaneHeight`
+    /// and persisted in the session file.
+    pane_height: crate::tui::state::PaneHeight,
     /// The currently-selected TUI palette. Defaults to
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
@@ -4079,6 +4110,7 @@ impl App {
         smart_open_file_commands: std::collections::HashMap<String, String>,
         multiplexer: Box<dyn crate::multiplexer::MultiplexerBackend>,
         pane_visibility: crate::tui::state::PaneVisibility,
+        pane_height: crate::tui::state::PaneHeight,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -4128,6 +4160,7 @@ impl App {
             query_regex: None,
             match_algorithm: MatchAlgorithm::default(),
             pane_visibility,
+            pane_height,
             theme,
             bindings,
             status_message: None,
@@ -10085,6 +10118,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
         app_cfg.smart_open_file_commands().clone(),
         multiplexer,
         crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
     );
 
     let reports = crate::tui::mode::run_all_checks(&app, only);
@@ -10217,6 +10251,11 @@ pub fn run_tui_to_stdout(
         .as_deref()
         .and_then(crate::tui::state::PaneVisibility::parse)
         .unwrap_or_default();
+    let initial_pane_height = session
+        .pane_height
+        .as_deref()
+        .and_then(crate::tui::state::PaneHeight::parse)
+        .unwrap_or_default();
     let mut app = App::new(
         conn,
         effective_mode,
@@ -10238,6 +10277,7 @@ pub fn run_tui_to_stdout(
         app_cfg.smart_open_file_commands().clone(),
         crate::multiplexer::backend_for(app_cfg.multiplexer()),
         initial_pane_visibility,
+        initial_pane_height,
     );
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
@@ -10409,6 +10449,11 @@ pub fn run_tui_to_stdout(
             None
         } else {
             Some(app.pane_visibility.as_str().to_string())
+        },
+        pane_height: if app.pane_height == crate::tui::state::PaneHeight::Default {
+            None
+        } else {
+            Some(app.pane_height.as_str().to_string())
         },
     };
     session.save();
@@ -11201,6 +11246,15 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // Cycle through: BOTH → Details → OutputPreview → BOTH.
             app.pane_visibility = app.pane_visibility.next();
             app.set_status_message(format!("Pane layout: {}", app.pane_visibility.label()));
+            false
+        }
+        Action::TogglePaneHeight => {
+            // Toggle between `Default` (8 lines, ~50% of the
+            // list area) and `Tall` (~70% of the list area).
+            // Persisted in the session file so the user's
+            // choice carries over to the next TUI startup.
+            app.pane_height = app.pane_height.toggle();
+            app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
             false
         }
         Action::JiraFieldComplete => {
@@ -14055,6 +14109,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         app
@@ -14130,6 +14185,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         )
     }
 
@@ -14203,6 +14259,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         )
     }
 
@@ -14447,6 +14504,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         let all_count = app.merged_rows().len();
@@ -15067,6 +15125,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         // Restore the env var as soon as the initial
@@ -15190,6 +15249,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         unsafe {
@@ -16330,6 +16390,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         )
     }
 
@@ -16534,6 +16595,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.select_for_run();
         assert!(app.selection.is_none());
@@ -17400,6 +17462,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         )
     }
 
@@ -17979,6 +18042,7 @@ mod tests {
             theme: None,
             directory_source: None,
             pane_visibility: None,
+            pane_height: None,
         };
         let rendered = format!("{:?}", s);
         // The `Debug` output includes the
@@ -19071,6 +19135,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         // Restore env before any `?` can
         // short-circuit out of the test (so
@@ -19187,6 +19252,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         if let Some(prev) = prev_session {
@@ -19312,6 +19378,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         if let Some(prev) = prev_session {
@@ -19442,6 +19509,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.refresh();
         if let Some(prev) = prev_session {
@@ -21240,6 +21308,7 @@ mod tests {
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         // `App::new` calls
         // `build_session_subdirs`
@@ -27437,6 +27506,7 @@ ssh_config_parse\t\t10,0\n";
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         // The initial
         // `refresh()` should
@@ -27559,6 +27629,7 @@ ssh_config_parse\t\t10,0\n";
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         // Type `git` —
         // matching the
@@ -27668,6 +27739,7 @@ ssh_config_parse\t\t10,0\n";
 
             test_multiplexer(),
             crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
         );
         app.session_subdirs.clear();
         app.tmux_windows.clear();

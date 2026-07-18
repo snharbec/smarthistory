@@ -44,13 +44,22 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    // The details row height adapts to the user's
+    // `pane_height` setting (Default: 8 lines,
+    // Tall: ~70% of the list area). `page_size`
+    // is the total terminal height minus the
+    // fixed chrome; `detail_row_height` returns
+    // the right value for each variant.
+    let detail_h = app
+        .pane_height
+        .detail_row_height(f.area().height as usize);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
             [
                 Constraint::Length(1), // mode strip
                 Constraint::Fill(1),   // list
-                Constraint::Length(8), // details row
+                Constraint::Length(detail_h), // details row
                 Constraint::Length(3), // input
                 Constraint::Length(1), // status
             ]

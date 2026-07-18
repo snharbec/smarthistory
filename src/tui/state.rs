@@ -536,6 +536,97 @@ impl PaneVisibility {
     }
 }
 
+/// Which detail-pane height to use for
+/// the details row + output preview row.
+/// Toggles between two presets (50%
+/// and 70% of the list area) so the user
+/// can quickly give the details more
+/// room when reading a long source-
+/// context preview, or reclaim it for
+/// the history list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneHeight {
+    /// The default — details row
+    /// + output preview share ~50% of
+    /// the list area. Each pane is the
+    /// same fixed height (8 rows) as
+    /// the historical layout.
+    #[default]
+    Default,
+    /// Expanded — details row + output
+    /// preview share ~70% of the list
+    /// area. Each pane is taller so
+    /// more context is visible without
+    /// scrolling.
+    Tall,
+}
+
+impl PaneHeight {
+    /// Toggle between the two presets.
+    pub fn toggle(self) -> Self {
+        match self {
+            PaneHeight::Default => PaneHeight::Tall,
+            PaneHeight::Tall => PaneHeight::Default,
+        }
+    }
+
+    /// The row height (in terminal
+    /// lines) for the details row and
+    /// the output preview row. The
+    /// `page_size` is the total
+    /// available height minus the
+    /// fixed-height chrome (mode strip,
+    /// input, status — 5 lines).
+    pub fn detail_row_height(self, page_size: usize) -> u16 {
+        // The history list shares the
+        // vertical space with the details
+        // row. `Default` is the historical
+        // 8-line details row; `Tall` is
+        // 70% of the list area so a tall
+        // terminal gets a proportional
+        // expansion (not a fixed extra
+        // few lines).
+        let list_area = page_size.saturating_sub(8);
+        match self {
+            PaneHeight::Default => 8,
+            PaneHeight::Tall => {
+                // 70% of the list area, but
+                // never less than the default
+                // 8 (so a very short terminal
+                // doesn't make the details
+                // row shorter than the historic
+                // default).
+                ((list_area as u32 * 7) / 10) as u16 + 8
+            }
+        }
+    }
+
+    /// Human-readable label for the
+    /// status bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            PaneHeight::Default => "default",
+            PaneHeight::Tall => "tall",
+        }
+    }
+
+    /// Canonical string for persistence.
+    pub fn as_str(self) -> &'static str {
+        self.label()
+    }
+
+    /// Parse a string like "default" or
+    /// "tall" (case-insensitive).
+    /// Returns `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "default" | "normal" | "standard" | "short" => Some(PaneHeight::Default),
+            "tall" | "large" | "expanded" | "70" => Some(PaneHeight::Tall),
+            _ => None,
+        }
+    }
+}
+
 /// Which kind of entry the
 /// `AddEntryDialog` is
 /// constructing. The
