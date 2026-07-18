@@ -113,8 +113,14 @@ struct Args {
 
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
+    /// Record a completed command in the history database.
+    ///
+    /// Called by the zsh precmd hook after every command; not
+    /// normally invoked by hand.
     Add {
+        /// The command text to record.
         command: String,
+        /// The command's exit status.
         #[arg(short, long)]
         exit_code: i32,
         /// Optional comment attached to the history entry. Searchable
@@ -122,14 +128,18 @@ enum Commands {
         #[arg(long)]
         comment: Option<String>,
     },
+    /// Search history and print matching rows.
     Search {
+        /// Substring/pattern to match against the command text.
         #[arg(index = 1)]
         query: Option<String>,
+        /// Restrict results to this directory.
         #[arg(short, long)]
         directory: Option<String>,
         /// When set, restrict results to the current $SMART_HISTORY_SESSION.
         #[arg(short, long)]
         session: bool,
+        /// Restrict results by exit status: `OK` or `ERROR`.
         #[arg(long)]
         exit_code: Option<String>,
         /// Comma-separated list of columns to return. Available: command,
@@ -147,14 +157,22 @@ enum Commands {
         #[arg(long)]
         no_highlight: bool,
     },
+    /// Search history and print matching rows, like `search` but
+    /// with a 1000-row default limit.
+    ///
+    /// Exists primarily as an integration hook for external
+    /// pickers (e.g. `fzf`) rather than everyday interactive use.
     Select {
+        /// Substring/pattern to match against the command text.
         #[arg(index = 1)]
         query: Option<String>,
+        /// Restrict results to this directory.
         #[arg(short, long)]
         directory: Option<String>,
         /// When set, restrict results to the current $SMART_HISTORY_SESSION.
         #[arg(short, long)]
         session: bool,
+        /// Restrict results by exit status: `OK` or `ERROR`.
         #[arg(long)]
         exit_code: Option<String>,
         /// Comma-separated list of columns to return. Available: command,
@@ -171,7 +189,9 @@ enum Commands {
         #[arg(long)]
         no_highlight: bool,
     },
+    /// Launch the full-screen TUI picker.
     Tui {
+        /// Starting scope: SESS, DIR, or GLOBAL.
         #[arg(short, long)]
         mode: Option<String>,
         /// Start the TUI directly in a specific prefix mode
@@ -240,10 +260,13 @@ enum Commands {
         /// user's default pane height).
         #[arg(long, value_name = "HEIGHT")]
         pane_height: Option<String>,
+        /// Starting query text (overridden by `--prefix`).
         #[arg(index = 1)]
         query: Option<String>,
     },
+    /// One-time import of history from an existing atuin database.
     ImportAtuin,
+    /// Print every history entry (no filter).
     List {
         /// Comma-separated list of columns to return. Available: command,
         /// directory, session_id, exit_code, timestamp, id, comment, output,
@@ -251,52 +274,57 @@ enum Commands {
         /// -f directory.
         #[arg(short, long, value_delimiter = ',')]
         fields: Option<Vec<String>>,
+        /// Print as an aligned table instead of one row per line.
         #[arg(short, long)]
         table: bool,
     },
+    /// Print the zsh init snippet to `eval` from `.zshrc`.
+    ///
+    /// Sets up the preexec/precmd hooks, the Ctrl-R picker, and the
+    /// Up/Down line-editor bindings. `shell` must be `zsh` (the only
+    /// supported shell).
     Init {
+        /// Must be `zsh`.
         shell: String,
     },
-    /// Print the resolved value of a single configuration key. Used
-    /// by the zsh precmd hook to discover the tmux pane output
-    /// directory.
+    /// Read or validate the resolved configuration.
     ///
-    /// Sub-commands:
-    ///
-    ///   get <key>    Print the resolved value of a single key
-    ///                (used by the zsh precmd hook).
-    ///   check        Validate ~/.config/smarthistory/config and
-    ///                exit non-zero if any problems are found.
-    ///                Prints a human-readable report on stdout.
-    ///   list         Print every known key with its resolved value.
+    /// Used by the zsh precmd hook to discover the tmux pane output
+    /// directory. See the `Commands:` list below for the `get` /
+    /// `check` / `list` sub-commands.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Delete entries matching the given filter. With no filter, deletes
-    /// every entry in the database. Prompts for confirmation unless
-    /// --force is passed.
+    /// Delete entries matching the given filter.
+    ///
+    /// With no filter, deletes every entry in the database. Prompts
+    /// for confirmation unless `--force` is passed.
     Clean {
+        /// Substring/pattern to match against the command text.
         #[arg(index = 1)]
         query: Option<String>,
+        /// Restrict deletion to this directory.
         #[arg(short, long)]
         directory: Option<String>,
         /// When set, restrict deletion to the current $SMART_HISTORY_SESSION.
         #[arg(short, long)]
         session: bool,
+        /// Restrict deletion by exit status: `OK` or `ERROR`.
         #[arg(long)]
         exit_code: Option<String>,
         /// Skip the confirmation prompt.
         #[arg(short, long)]
         force: bool,
     },
-    /// Remove ALL history entries (and their captured output) older
-    /// than the given number of days. Unlike `clean` (which filters
-    /// by command/directory/exit-code), `prune` is a time-based
-    /// bulk delete: every row whose `timestamp` is older than
-    /// `now - N days` is removed, along with its `history_output`
-    /// row and its `command_comments` entry (if no other history row
-    /// shares the same command text after the prune).
+    /// Delete every history entry older than N days.
+    ///
+    /// Unlike `clean` (which filters by command/directory/exit-code),
+    /// `prune` is a time-based bulk delete: every row whose
+    /// `timestamp` is older than `now - N days` is removed, along
+    /// with its `history_output` row and its `command_comments`
+    /// entry (if no other history row shares the same command text
+    /// after the prune).
     ///
     /// Example: `smarthistory prune 30` deletes everything older
     /// than 30 days.
@@ -310,11 +338,12 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
-    /// Check the health of every prefix mode (notes, todos, tags,
-    /// codegraph, files, ag, LLM, JIRA, directories, panes).
-    /// Each mode's check verifies its external dependencies are
-    /// configured and reachable. When `--prefix` is given only
-    /// that mode is checked.
+    /// Check the health of every TUI prefix mode's dependencies.
+    ///
+    /// Verifies each mode's (notes, todos, tags, codegraph, files,
+    /// ag, LLM, JIRA, directories, panes) external dependencies are
+    /// configured and reachable. When `--prefix` is given only that
+    /// mode is checked.
     ///
     /// Exit code: 0 = all ok, 1 = warnings, 2 = errors.
     Check {
@@ -325,10 +354,11 @@ enum Commands {
         #[arg(long, value_name = "PREFIX")]
         prefix: Option<String>,
     },
-    /// Return the most probable next commands that follow the given
-    /// command in the global history, ordered by frequency (then
-    /// lexicographically for ties). Used by the Ctrl-S line-editor
-    /// widget to suggest likely next steps.
+    /// Suggest the most probable next command after the given one.
+    ///
+    /// Candidates are drawn from the global history and ordered by
+    /// frequency (then lexicographically for ties). Used by the
+    /// Ctrl-S line-editor widget to suggest likely next steps.
     Next {
         /// The command whose successors to look up.
         command: String,
@@ -336,39 +366,47 @@ enum Commands {
         #[arg(short, long)]
         limit: Option<usize>,
     },
-    /// Run a command, capture up to 20 lines of combined stdout/stderr,
-    /// and store the output in the database alongside the history entry.
+    /// Run a command and capture its output alongside the history entry.
+    ///
+    /// Captures up to 20 lines of combined stdout/stderr and stores
+    /// them in the database.
     Capture {
         /// The command to run (pass remaining args verbatim).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    /// Read a tmux pane log file, extract the command line and the
-    /// following output (up to 20 lines), and store it in the database.
-    /// Intended to be called automatically by the zsh precmd hook when
-    /// running inside tmux.
+    /// Capture a command's output from a tmux pane log file.
+    ///
+    /// Extracts the command line and the following output (up to 20
+    /// lines) and stores it in the database. Called automatically by
+    /// the zsh precmd hook when running inside tmux; not normally
+    /// invoked by hand.
     CaptureTmux {
         /// The command that was executed (as recorded by zsh preexec).
         command: String,
         /// Path to the tmux pane log file.
         file: PathBuf,
+        /// The command's exit status.
         #[arg(short, long)]
         exit_code: i32,
     },
-    /// Read the herdr pane scrollback via `herdr pane read`,
-    /// extract the command line and the following output,
-    /// and store it in the database. Intended to be called
-    /// automatically by the zsh precmd hook when running
-    /// inside a herdr workspace pane.
+    /// Capture a command's output from a herdr pane's scrollback.
+    ///
+    /// Reads via `herdr pane read`, extracts the command line and
+    /// the following output, and stores it in the database. Called
+    /// automatically by the zsh precmd hook when running inside a
+    /// herdr workspace pane; not normally invoked by hand.
     CaptureHerdr {
         /// The command that was executed (as recorded by zsh preexec).
         command: String,
+        /// The command's exit status.
         #[arg(short, long)]
         exit_code: i32,
     },
-    /// Export history data to a JSON file. The file contains all
-    /// history entries, command comments, and captured output so
-    /// that a complete import is possible.
+    /// Export all history data to a JSON file.
+    ///
+    /// The file contains every history entry, command comment, and
+    /// captured output, so a complete round-trip import is possible.
     Export {
         /// Path to the output JSON file.
         filename: PathBuf,
@@ -381,41 +419,27 @@ enum Commands {
         #[arg(long)]
         until: Option<i64>,
     },
-    /// Import history data from a JSON file previously created
-    /// with the `export` command. Existing entries with the same
-    /// (command, directory, session_id) are updated; new entries
-    /// are inserted.
+    /// Import history data from a JSON file created by `export`.
+    ///
+    /// Existing entries with the same (command, directory,
+    /// session_id) are updated; new entries are inserted.
     Import {
         /// Path to the input JSON file.
         filename: PathBuf,
     },
-    /// Walk the SQLite history
-    /// database and rewrite every
-    /// `directory` value to its
-    /// `~`-shorthened form (where
-    /// the directory is under
-    /// `$HOME` or any `homemap=...`
-    /// entry in the config file).
+    /// One-time migration: shorten every stored directory to `~` form.
     ///
-    /// `smarthistory add` (the
-    /// preexec hook entry point)
-    /// always records the
-    /// kernel-canonical absolute
-    /// path. For the directories
-    /// view and the staged `tmux
-    /// new-session` command, the
-    /// user wants the short `~`
-    /// form. `smarthistory update`
-    /// is a one-shot migration
-    /// that updates the rows in
-    /// place (preserving
-    /// `id`/`timestamp`); running
-    /// it twice is a no-op.
+    /// Rewrites every `directory` value in the database to its
+    /// `~`-shortened form (where the directory is under `$HOME` or
+    /// any `homemap=...` entry in the config file).
     ///
-    /// New rows added after the
-    /// migration are stored
-    /// `~`-shortened from the
-    /// start (see
+    /// `smarthistory add` (the preexec hook entry point) always
+    /// records the kernel-canonical absolute path. For the
+    /// directories view and the staged `tmux new-session` command,
+    /// the user wants the short `~` form. `smarthistory update`
+    /// updates existing rows in place (preserving `id`/`timestamp`);
+    /// running it twice is a no-op. New rows added after the
+    /// migration are stored `~`-shortened from the start (see
     /// `current_directory_for_storage`).
     Update,
 }
@@ -428,15 +452,17 @@ enum Commands {
 #[derive(clap::Subcommand, Debug)]
 enum ConfigAction {
     /// Print the resolved value of a single configuration key.
-    /// Used by the zsh precmd hook to discover the tmux pane
-    /// output directory.
+    ///
+    /// Used by the zsh precmd hook to discover the tmux pane output
+    /// directory.
     Get {
         /// One of: `tmuxpaneoutputdir`, `ignorecapture`, `capturelines`.
         key: String,
     },
-    /// Validate ~/.config/smarthistory/config and exit non-zero if
-    /// any problems are found. Prints a human-readable report on
-    /// stdout.
+    /// Validate the config file, printing a human-readable report.
+    ///
+    /// Checks `~/.config/smarthistory/config` and exits non-zero if
+    /// any problems are found.
     Check,
     /// Print every known configuration key with its resolved value.
     List,
