@@ -205,6 +205,23 @@ pub enum Action {
     /// common configuration. Rebindable
     /// via `key.download-jira-issue=...`.
     DownloadJiraIssue,
+    /// Download EVERY JIRA issue matching the current
+    /// query (not just the selected row) as local
+    /// markdown notes, via `note_search jira <JQL>`.
+    /// Only meaningful in JIRA search mode (`-...`).
+    /// Reuses the same JQL the TUI already built for
+    /// the live search (`App::jira_build_query`), so
+    /// `note_search`'s own pagination fetches
+    /// everything the query matches — unlike the
+    /// in-TUI result list, this is NOT limited by
+    /// `JIRA_MAX_RESULTS`.
+    ///
+    /// Ships unbound by default (see `default_key()`):
+    /// a bulk action over everything the current query
+    /// matches deserves an explicit opt-in key, the
+    /// same policy as `DeleteMatching`. Rebindable via
+    /// `key.download-jira-matching=...`.
+    DownloadJiraMatching,
     /// Run the selected command (Enter).
     Run,
     /// Prefill the line for editing, cursor at the start (Left).
@@ -578,6 +595,7 @@ impl Action {
             Action::Describe => "describe",
             Action::Correct => "correct",
             Action::DownloadJiraIssue => "download-jira-issue",
+            Action::DownloadJiraMatching => "download-jira-matching",
             Action::Run => "run",
             Action::EditStart => "edit-start",
             Action::EditEnd => "edit-end",
@@ -633,6 +651,7 @@ impl Action {
             Action::Describe => "Describe selected command",
             Action::Correct => "Correct selected command",
             Action::DownloadJiraIssue => "Download JIRA issue as note",
+            Action::DownloadJiraMatching => "Download all matching JIRA issues as notes",
             Action::Run => "Run",
             Action::EditStart => "Edit (cursor at start)",
             Action::EditEnd => "Edit (cursor at end)",
@@ -706,6 +725,7 @@ impl Action {
             Action::Describe => "llm",
             Action::Correct => "llm",
             Action::DownloadJiraIssue => "tools",
+            Action::DownloadJiraMatching => "tools",
             Action::CodegraphRelations => "codegraph",
             Action::PreviousHistory => "navigation",
             Action::NextHistory => "navigation",
@@ -791,6 +811,13 @@ impl Action {
             Action::Describe => "C-k",
             Action::Correct => "C-t",
             Action::DownloadJiraIssue => "C-M-s",
+            // Unbound by default — same policy as
+            // `DeleteMatching` above: a bulk action over
+            // EVERY issue the current query matches
+            // deserves an explicit opt-in key rather than
+            // an arbitrary default binding. Users who want
+            // it set `key.download-jira-matching=<spec>`.
+            Action::DownloadJiraMatching => "none",
             Action::Run => "Enter",
             Action::EditStart => "none",
             Action::EditEnd => "none",
@@ -1214,6 +1241,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::Describe,
     Action::Correct,
     Action::DownloadJiraIssue,
+    Action::DownloadJiraMatching,
     Action::Run,
     Action::EditStart,
     Action::EditEnd,

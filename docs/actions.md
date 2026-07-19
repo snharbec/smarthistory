@@ -473,6 +473,17 @@ Find a filename referenced in the selected history row and stage `$EDITOR <filen
 
 Download the selected JIRA issue as a markdown file via `note_search jira-issue <KEY>`. Only meaningful in JIRA search mode (`-...`) where the selected row's `command` field carries the issue key. The downloaded note becomes searchable in [`@` (Notes) mode](modes/notes.md) immediately.
 
+### `DownloadJiraMatching`
+
+| Field | Value |
+| --- | --- |
+| Config key | `download-jira-matching` |
+| Display name | Download all matching JIRA issues as notes |
+| Default key | `none` (unbound) |
+| Category | tools |
+
+Download **every** JIRA issue matching the current query, not just the selected row, via `note_search jira <JQL>` — the `note_search` bulk import subcommand. The JQL is the exact query the TUI already built for the live search (same `@me`/`@today`/`@week`/`@month`/fragment/`JIRA_PROJECT` resolution as the on-screen results). Unlike the in-TUI result list, this is NOT limited by `JIRA_MAX_RESULTS`: `note_search` paginates the JIRA API itself, so the download covers everything the query matches. Refuses to stage a command (with a status message) when the query references an undefined `@fragment`, same as the live search's own diagnostic. Ships unbound by default — same policy as `DeleteMatching` — since a bulk action over everything the current query matches deserves an explicit opt-in key; set `key.download-jira-matching=<spec>` to bind one. Downloaded notes become searchable in [`@` (Notes) mode](modes/notes.md) immediately.
+
 ### `JiraFieldComplete`
 
 | Field | Value |

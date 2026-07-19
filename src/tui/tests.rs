@@ -16478,6 +16478,120 @@ fn download_jira_issue_with_no_row_is_noop() {
     );
 }
 
+/// `Action::DownloadJiraMatching` ships unbound by
+/// default (the `none` sentinel) — same policy as
+/// `DeleteMatching`: a bulk action over every issue
+/// the current query matches deserves an explicit
+/// opt-in key rather than an arbitrary default
+/// binding.
+#[test]
+fn download_jira_matching_default_key_is_unbound() {
+    let bindings = KeyBindings::defaults();
+    assert!(
+        bindings.is_unbound(Action::DownloadJiraMatching),
+        "DownloadJiraMatching must ship unbound (default is the `none` sentinel), got: {:?}",
+        format_key_specs(bindings.specs(Action::DownloadJiraMatching))
+    );
+    assert_eq!(
+        Action::DownloadJiraMatching.default_key(),
+        "none",
+        "default_key() for DownloadJiraMatching must be the `none` sentinel"
+    );
+}
+
+/// In JIRA mode, the action stages `note_search jira
+/// <JQL>` (the bulk import subcommand) using the same
+/// JQL the TUI already built for the live search — NOT
+/// a loop over `app.jira_rows`, which is capped by
+/// `JIRA_MAX_RESULTS`. No JIRA client / network call is
+/// needed to build the JQL, so this test doesn't need a
+/// `FakeJira`.
+#[test]
+fn download_jira_matching_stages_command() {
+    // `jira_build_query` reads `$JIRA_PROJECT` directly
+    // (see `App::jira_build_query`), so pin it to unset
+    // for a deterministic empty-project JQL — otherwise
+    // a developer's real shell env would change the
+    // expected string. Guarded by ENV_LOCK so we don't
+    // race other tests mutating the same var.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_project = std::env::var("JIRA_PROJECT").ok();
+    // SAFETY: single-threaded within the ENV_LOCK guard.
+    unsafe {
+        std::env::remove_var("JIRA_PROJECT");
+    }
+    let mut app = directories_test_app(&[]);
+    app.query = String::from("-");
+    app.refresh();
+    app.download_jira_matching();
+    // Restore before asserting so a panic doesn't leak.
+    match prev_project {
+        // SAFETY: single-threaded within the ENV_LOCK guard.
+        Some(v) => unsafe { std::env::set_var("JIRA_PROJECT", v) },
+        None => unsafe { std::env::remove_var("JIRA_PROJECT") },
+    }
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("note_search jira 'ORDER BY updated DESC'"),
+        "expected note_search jira <JQL>, got: {:?}",
+        app.selection
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// Outside of JIRA mode, the action is a no-op with a
+/// status message, same as `download_jira_issue`.
+#[test]
+fn download_jira_matching_outside_jira_mode_is_noop() {
+    let mut app = directories_test_app(&[("ls", "/tmp", 0)]);
+    // `*` triggers panes mode, not JIRA mode.
+    app.query = String::from("*");
+    app.refresh();
+    app.download_jira_matching();
+    assert!(
+        app.selection.is_none(),
+        "no command should be staged outside JIRA mode"
+    );
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("JIRA search"),
+        "status should mention JIRA search: {:?}",
+        status
+    );
+}
+
+/// An undefined `@fragment` in the query must not
+/// silently download the (much broader) free-text
+/// fallback — the action refuses to stage a command and
+/// surfaces the same diagnostic as `jira_maybe_autocall`.
+#[test]
+fn download_jira_matching_with_undefined_fragment_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.query = String::from("-@nofrag");
+    app.refresh();
+    app.download_jira_matching();
+    assert!(
+        app.selection.is_none(),
+        "no command should be staged for an undefined fragment"
+    );
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("not configured"),
+        "status should mention the undefined fragment: {:?}",
+        status
+    );
+}
+
 /// Selecting a JIRA row stages `open "<URL>"` using
 /// `JIRA_URL` (falls back to `JIRA_SERVER`).
 #[test]

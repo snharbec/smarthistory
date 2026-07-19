@@ -8710,6 +8710,55 @@ impl App {
         self.pick_mode = Some(PickMode::Run);
     }
 
+    /// Download EVERY JIRA issue matching the current query (not
+    /// just the selected row) as local markdown notes, via
+    /// `note_search jira <JQL>`. Unlike `download_jira_issue`,
+    /// this does NOT loop over `app.jira_rows` — that list is
+    /// capped by `JIRA_MAX_RESULTS` (default 5, see
+    /// `src/jira.rs`) to keep the live search responsive.
+    /// Instead it reuses `jira_build_query()` (the same JQL the
+    /// TUI already built for the on-screen results) and lets
+    /// `note_search`'s own bulk `jira` subcommand paginate the
+    /// JIRA API itself, so the download is complete regardless
+    /// of the in-TUI result cap.
+    fn download_jira_matching(&mut self) {
+        // Re-gate here so a stray caller can't stage the wrong
+        // command from outside JIRA mode — same defence-in-depth
+        // rationale as `download_jira_issue`.
+        if !self.is_jira_query() {
+            self.set_status_message(
+                "Download-JIRA-matching is only available in JIRA search (type `-`)".to_string(),
+            );
+            return;
+        }
+        let jql = self.jira_build_query();
+        // Same gate as `jira_maybe_autocall`: an undefined
+        // `@fragment` falls through to free text, which would
+        // silently download the wrong (much broader) set of
+        // issues instead of failing loudly.
+        if !self.jira_undefined_fragments.is_empty() {
+            self.set_status_message(format!(
+                "JIRA fragment{} not configured: {}. \
+                 Define via jira.search.<name>=... in \
+                 ~/.config/smarthistory/config.",
+                if self.jira_undefined_fragments.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                self.jira_undefined_fragments
+                    .iter()
+                    .map(|n| format!("@{}", n))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+            return;
+        }
+        let staged = format!("note_search jira {}", crate::util::shell_quote(&jql));
+        self.selection = Some(staged);
+        self.pick_mode = Some(PickMode::Run);
+    }
+
     /// Open the selected JIRA issue's browse URL in the system
     /// browser **in the background** — the same action as pressing
     /// `Enter` on the row (`select_for_run_impl`), but spawned as a
@@ -11772,6 +11821,24 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // (returning `true`) once a
             // command is staged so the
             // parent shell can run it.
+            app.selection.is_some()
+        }
+        Action::DownloadJiraMatching => {
+            // Same mode gate as `DownloadJiraIssue`, for the
+            // same reason — a stray key press outside JIRA
+            // mode should surface a status message, not a
+            // silent no-op.
+            if !app.is_jira_query() {
+                app.set_status_message(
+                    "Download-JIRA-matching is only available in JIRA search (type `-`)"
+                        .to_string(),
+                );
+                return false;
+            }
+            app.download_jira_matching();
+            // Stay in the TUI on an undefined-fragment
+            // no-op so the user sees the diagnostic; exit
+            // once the bulk command is staged.
             app.selection.is_some()
         }
         Action::ToggleSearchMode => {

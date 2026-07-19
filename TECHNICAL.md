@@ -1270,7 +1270,7 @@ prefixes shown; rebindable in
 | Todo          | `!`    | List open todos from the note_search database (one per line, not one per file). Selecting a todo opens `$EDITOR <file> +<line>` at the right line. The details pane shows the first 50 lines of the note containing the selected todo, with the todo line in context. |
 | Directories   | `#`    | List every directory in the global history (sorted by most-recent activity). Selecting a row stages `cd <path>` and exits the TUI. |
 | Panes         | `*`    | List every pane across every tmux / herdr session (or workspace, for herdr), excluding the pane the TUI is running in. Layout: one workspace / session header per group, panes indented underneath. Selecting a pane stages a focus command and exits. The details pane shows the last 50 visible lines of the selected herdr pane (from `herdr pane read <id>`; tmux backend shows "no preview"). |
-| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser (`Enter`). `Ctrl-M-s` (the `download-jira-issue` action) stages `note_search jira-issue <KEY>` so the issue is downloaded as a local markdown note. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). The details pane shows a 3-line header (Status / Priority / Due / Assignee) plus the full issue description. |
+| JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser (`Enter`). `Ctrl-M-s` (the `download-jira-issue` action) stages `note_search jira-issue <KEY>` so the issue is downloaded as a local markdown note. `download-jira-matching` (unbound by default) stages `note_search jira <JQL>` to download EVERY issue the current query matches, bypassing the `JIRA_MAX_RESULTS` cap by delegating pagination to `note_search`. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). The details pane shows a 3-line header (Status / Priority / Due / Assignee) plus the full issue description. |
 | Files         | `~`    | Walk the current directory and all subdirectories, listing every file (skipping directories — directory navigation is `#` mode's job). Selecting a file opens it in `$EDITOR` (or the configured per-extension command via `smart-open.<ext>=<cmd>`). The details pane shows the first 50 lines, piped through `bat`. Honors `files.ignore=` (space-separated basename patterns). |
 | Tags          | `$`    | List every symbol from a local ctags `tags` file. Selecting a row opens the source file in `$EDITOR` at the symbol's line. The details pane shows 50 lines of source context around the symbol, piped through `bat` for syntax highlighting. Falls back to CodeGraph (`&` mode's data source) when no `TAGS` file exists in the current directory or any ancestor. See the CodeGraph row for the back-end details. |
 | CodeGraph     | `&`    | Search symbols in the local `.codegraph/codegraph.db` FTS5 index. Selecting a row shows 50 lines of source context + a callers / callees overlay in the details pane; `Ctrl-R` opens the full callers / callees list as a navigable overlay. See `docs/modes/codegraph.md` for the full mechanics. |
@@ -1982,7 +1982,18 @@ the environment, not the config file:
   all searches to. When set, every query — even
   free-text — is scoped via `project = "<proj>"`.
 - `JIRA_MAX_RESULTS` — max results per API
-  request (default: `5`).
+  request (default: `5`). Only bounds the
+  in-TUI result list — the bulk
+  `download-jira-matching` action (unbound
+  by default; `Ctrl-M-s`'s "download
+  everything matching" counterpart) stages
+  `note_search jira <JQL>` instead of
+  looping over the fetched rows, and
+  `note_search`'s own `jira` subcommand
+  paginates the JIRA API itself
+  (`startAt`/`maxResults=50` internally),
+  so the download isn't limited by this
+  setting.
 - `JIRA_HOST_CERTIFICATE` — path to a PKCS#12
   (`.p12`/`.pfx`) client certificate for mutual
   TLS.

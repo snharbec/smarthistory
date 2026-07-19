@@ -4,7 +4,7 @@
 | --- | --- |
 | Configurable | `prefix.jira=<char>` |
 
-JIRA mode searches issues on a self-hosted JIRA instance via the REST API. Issues matching the query are listed with their key, summary, and status. Selecting an issue opens its browse URL in the system browser; `Ctrl-M-s` downloads it as a local markdown note.
+JIRA mode searches issues on a self-hosted JIRA instance via the REST API. Issues matching the query are listed with their key, summary, and status. Selecting an issue opens its browse URL in the system browser; `Ctrl-M-s` downloads it as a local markdown note; `Action::DownloadJiraMatching` (unbound by default) downloads **every** issue matching the current query.
 
 ## What it does
 
@@ -19,6 +19,7 @@ JIRA mode searches issues on a self-hosted JIRA instance via the REST API. Issue
 - `Enter` on a JIRA row stages `open "<jira-server>/browse/<KEY>"` (macOS) or `xdg-open "<jira-server>/browse/<KEY>"` (other Unixes) and exits. The TUI is gone before the browser opens.
 - `Ctrl-O` (Show output) opens the captured-output overlay, which for a JIRA row fires the **background comments fetch** (a separate API call to `/rest/api/2/issue/{key}/comment`) and shows the description + every comment sorted newest-first. This is the primary way to read a JIRA issue inside the TUI.
 - `Ctrl-M-s` (Download JIRA issue as note) stages `note_search jira-issue <KEY>` and exits. The issue is downloaded as a local markdown note (via the `note_search` jira-issue command) and becomes searchable in [`@` (Notes) mode](notes.md).
+- `Action::DownloadJiraMatching` (unbound by default — bind via `key.download-jira-matching=<spec>`) stages `note_search jira <JQL>` and exits, downloading **every** issue the current query matches (not just the selected row). It reuses the exact JQL built for the live search, so it isn't capped by `JIRA_MAX_RESULTS` like the in-TUI result list — `note_search` paginates the JIRA API itself. Refuses to run (with a status message) if the query has an undefined `@fragment`.
 - `Ctrl-]` (Smart open) opens the issue's URL in the browser **in the background** — same action as `Enter`, but spawned as a detached child process so the TUI stays open. The default key is `C-]`, an ASCII control char every terminal emits reliably.
 - `Tab` (JIRA field complete) is a sub-action for JQL-style queries: in the middle of a `field=` token, pressing `Tab` completes the field name from the list of fields returned by the JIRA `/rest/api/2/field` endpoint.
 
