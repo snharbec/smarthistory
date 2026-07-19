@@ -2002,7 +2002,7 @@ dependencies = [
 [[package]]
 name = "note_search"
 version = "1.0.0"
-source = "git+https://github.com/snharbec/note_search.git?rev=18c3bd3#18c3bd3eee3774674dda107d6fc0d14a35ce2151"
+source = "git+https://github.com/snharbec/note_search.git"
 dependencies = [
  "axum",
  "chrono",

@@ -22,7 +22,7 @@ serde_json = "1"
 # `error[E0061]: this method takes 2 arguments but 1
 # argument was supplied` at the build of `cookie`.
 time = "=0.3.51"
-note_search = { git = "https://github.com/snharbec/note_search.git", rev = "18c3bd3" }
+note_search = { git = "https://github.com/snharbec/note_search.git" }
 # `reqwest` is ALSO a transitive dep of `note_search`
 # (it uses `reqwest` for its JIRA import feature). Adding
 # it directly here reuses the SAME already-compiled
