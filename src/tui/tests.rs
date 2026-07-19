@@ -5157,6 +5157,7 @@ fn session_round_trips_sort_order() {
         directory_source: None,
         pane_visibility: None,
         pane_height: None,
+        scheme: None,
     };
     let rendered = format!("{:?}", s);
     // The `Debug` output includes the

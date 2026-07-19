@@ -16,9 +16,10 @@ pub enum Action {
     ToggleDuplicateFilter,
     /// Toggle between the active color scheme
     /// (light / dark) and the OTHER one. The
-    /// "active" scheme is the one auto-detected at
-    /// startup (via `detect_color_scheme()` in
-    /// `src/tui/theme/mod.rs`); the "other" scheme
+    /// "active" scheme defaults to `Dark` and is
+    /// persisted in the session file's
+    /// `colorscheme=` line across TUI invocations
+    /// (`src/tui/theme/mod.rs`); the "other" scheme
     /// is its complement. After toggling, the TUI
     /// re-resolves the theme from the config file
     /// (`theme.<scheme>=<slug>` first, then

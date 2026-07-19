@@ -106,6 +106,13 @@ pub(crate) struct TuiSession {
     /// back to `PaneHeight::default()`
     /// (the 8-line historical floor).
     pane_height: Option<String>,
+    /// The active color scheme (`"light"` /
+    /// `"dark"`) at the end of the last
+    /// session, toggled via
+    /// `Action::ToggleColorScheme`. `None`
+    /// means "no preference" and falls back
+    /// to `ColorScheme::default()` (`Dark`).
+    scheme: Option<String>,
 }
 
 /// Flags the user passed to `smarthistory tui <flags>...` on
@@ -329,6 +336,16 @@ impl TuiSession {
                         s.pane_height =
                             Some(value.to_string());
                     }
+                // Same pattern as the other session
+                // fields: only accept values that
+                // `ColorScheme::parse` recognises
+                // (`"light"` / `"dark"`,
+                // case-insensitive).
+                "colorscheme"
+                    if crate::tui::theme::ColorScheme::parse(value).is_some() =>
+                {
+                    s.scheme = Some(value.to_string());
+                }
                 _ => {}
             }
         }
@@ -385,6 +402,9 @@ impl TuiSession {
         }
         if let Some(ref ph) = self.pane_height {
             out.push_str(&format!("paneheight={}\n", ph));
+        }
+        if let Some(ref sc) = self.scheme {
+            out.push_str(&format!("colorscheme={}\n", sc));
         }
         std::fs::write(path, out)
     }
@@ -1164,16 +1184,15 @@ pub(crate) struct App {
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
     theme: SelectedTheme,
-    /// The terminal's detected color scheme (light / dark
-    /// / unknown). Stored on the App so the theme picker
-    /// and status bar can show the active scheme and so
-    /// the picker's commit hook knows which
-    /// `theme.<scheme>=` slot to write to. Refreshed at
-    /// startup via `detect_color_scheme()`; never
-    /// changes during a single TUI session (a runtime
-    /// scheme change would require re-querying the
-    /// terminal via OSC 10/11, which is out of scope for
-    /// the env-var-based detection).
+    /// The active color scheme (light / dark). Stored on
+    /// the App so the theme picker and status bar can
+    /// show the active scheme and so the picker's commit
+    /// hook knows which `theme.<scheme>=` slot to write
+    /// to. Loaded at startup from the session file's
+    /// `colorscheme=` line (defaulting to `Dark` if
+    /// unset), and updated in-memory by
+    /// `Action::ToggleColorScheme`; the new value is
+    /// persisted back to the session file on exit.
     detected_scheme: crate::tui::theme::ColorScheme,
     /// Active key bindings, resolved from the user's config file.
     /// Defaults match the original hard-coded Ctrl-* shortcuts.
@@ -1841,14 +1860,10 @@ fn write_theme_to_config(
             e
         )
     })?;
-    // Pick the canonical key (`theme.light` /
-    // `theme.dark`). The `Unknown` case is mapped to
-    // `dark` upstream (in the caller) so we don't
-    // need to handle it here.
+    // Pick the canonical key (`theme.light` / `theme.dark`).
     let key = match scheme {
         crate::tui::theme::ColorScheme::Light => "theme.light",
         crate::tui::theme::ColorScheme::Dark => "theme.dark",
-        crate::tui::theme::ColorScheme::Unknown => "theme.dark",
     };
     // Walk the existing file line by line. We replace
     // the FIRST occurrence of `theme.<scheme>=` (the
@@ -3342,10 +3357,11 @@ impl App {
 
     /// Toggle between the active color scheme
     /// (light / dark) and the OTHER one. The
-    /// "active" scheme is the one auto-detected at
-    /// startup (via `detect_color_scheme()` in
-    /// `src/tui/theme/mod.rs`); the "other" scheme
-    /// is its complement. After toggling, the TUI
+    /// "active" scheme defaults to `Dark` and
+    /// carries over from the previous TUI
+    /// invocation via the session file's
+    /// `colorscheme=` line; the "other" scheme is
+    /// its complement. After toggling, the TUI
     /// re-resolves the theme from the config file
     /// (`theme.<scheme>=<slug>` first, then
     /// `theme.<other-scheme>=<slug>`, then the
@@ -3356,16 +3372,12 @@ impl App {
     ///
     /// Behaviour:
     ///
-    /// - `Unknown` is mapped to `Dark` for the
-    ///   purpose of the toggle (matches the
-    ///   loader's fallback). The first toggle
-    ///   from `Unknown` always goes to `Light`.
     /// - The toggle re-reads the config file via
     ///   `Config::load()` so the just-toggled
     ///   scheme's `theme.<scheme>=<slug>` value
     ///   is picked up. A user with
     ///   `theme.light=catppuccin-latte
-    ///   theme.dark=dracula` on a dark terminal
+    ///   theme.dark=dracula` on the dark default
     ///   starts with `dracula`; pressing `C-l`
     ///   swaps the active scheme to `Light`,
     ///   re-resolves to `catppuccin-latte`, and
@@ -3377,8 +3389,11 @@ impl App {
     ///   now active (the status bar also shows
     ///   the active scheme next to the theme
     ///   name; both update in lockstep).
-    /// - This does NOT write to the config
-    ///   file. The `theme.<scheme>=<slug>`
+    /// - The new active scheme is persisted to
+    ///   the session file's `colorscheme=` line
+    ///   on exit, so it carries over to the next
+    ///   TUI launch. This does NOT write to the
+    ///   config file: the `theme.<scheme>=<slug>`
     ///   values are set when the user picks a
     ///   specific theme from the in-TUI picker
     ///   (see `App::close_theme_picker_commit`).
@@ -3388,20 +3403,7 @@ impl App {
     ///   configured; the picker is the right
     ///   tool for picking a new theme.
     fn toggle_color_scheme(&mut self) {
-        use crate::tui::theme::ColorScheme;
-        // Map `Unknown` to `Dark` for the
-        // comparison so the first toggle from
-        // `Unknown` always goes to `Light` (the
-        // user-facing "I want to see the light
-        // version of my themes" intent). This
-        // matches the loader's `Dark` default.
-        let active = match self.detected_scheme {
-            ColorScheme::Light => ColorScheme::Light,
-            ColorScheme::Dark | ColorScheme::Unknown => {
-                ColorScheme::Dark
-            }
-        };
-        let new_scheme = active.other();
+        let new_scheme = self.detected_scheme.other();
         self.detected_scheme = new_scheme;
         // Re-resolve the theme against the new
         // scheme. The lookup chain is the same as
@@ -10178,29 +10180,11 @@ impl App {
         self.theme_picker = None;
         // Resolve the active scheme — the picker is
         // showing the live preview, so the scheme is
-        // whatever the auto-detector returned at startup
-        // (it never changes during a single TUI
-        // session). Fall back to Dark if the field is
-        // somehow unset (defensive — should never happen
-        // because `App::new` always sets it).
+        // whatever's currently active (loaded from the
+        // session file at startup, or toggled since via
+        // `Action::ToggleColorScheme`).
         let scheme = self.detected_scheme;
-        let scheme_label = match scheme {
-            crate::tui::theme::ColorScheme::Light => "light",
-            crate::tui::theme::ColorScheme::Dark => "dark",
-            crate::tui::theme::ColorScheme::Unknown => {
-                // The user is on an
-                // undetectable terminal.
-                // Pick the dark slot
-                // by convention
-                // (matches the
-                // `install_palette`
-                // fallback). The
-                // status message
-                // tells the user
-                // what happened.
-                "dark"
-            }
-        };
+        let scheme_label = scheme.label();
         // Compute the slug to write. `SelectedTheme::None`
         // is a special case: it means "the manual
         // `tuicolor.*` palette" and is not a valid value
@@ -10747,22 +10731,30 @@ pub fn run_tui_to_stdout(
     let notes_dir = app_cfg.notes_dir().map(|p| p.to_path_buf());
     let session = TuiSession::load();
     let duplicate_filter = session.duplicate_filter.unwrap_or(app_cfg.duplicate_filter);
+    // Resolve the active color scheme. There is no
+    // terminal auto-detection: the scheme defaults to
+    // `Dark` and is carried over from the previous TUI
+    // invocation via the session file's `colorscheme=`
+    // line (written on exit whenever the user toggles it
+    // with `Action::ToggleColorScheme`).
+    let active_scheme = session
+        .scheme
+        .as_deref()
+        .and_then(crate::tui::theme::ColorScheme::parse)
+        .unwrap_or_default();
     // Resolve the initial theme. The precedence order is:
     //
     //   1. The `theme.<scheme>=<slug>` config value
-    //      for the auto-detected terminal scheme
-    //      (`theme.light=` on a light terminal,
-    //      `theme.dark=` on a dark terminal). The
-    //      scheme is detected from the environment
-    //      via `detect_color_scheme()`. Users with
-    //      a weird setup that doesn't expose a
-    //      signal can set BOTH `theme.light=` and
-    //      `theme.dark=` to opt in explicitly.
+    //      for the active scheme (`theme.light=` when
+    //      `active_scheme` is `Light`, `theme.dark=`
+    //      when it's `Dark`). Users can set BOTH
+    //      `theme.light=` and `theme.dark=` to opt in
+    //      explicitly for both schemes.
     //   2. Fallback to the OTHER scheme's
     //      `theme.<other-scheme>=<slug>` value
     //      (so a user who only set `theme.dark=`
-    //      gets the same theme on a light
-    //      terminal — the existing behaviour).
+    //      gets the same theme regardless of the
+    //      active scheme — the existing behaviour).
     //   3. The legacy `theme=<slug>` line in the
     //      session file. The session file's
     //      `theme=` line is unchanged by this
@@ -10779,16 +10771,15 @@ pub fn run_tui_to_stdout(
     //      built-in defaults if the user hasn't
     //      set any `tuicolor.*` keys).
     //
-    // The detected scheme is also stored on the
+    // The active scheme is also stored on the
     // `App` so the theme picker can show it as
     // a hint ("you're editing the LIGHT slot;
     // the DARK slot is currently gruvbox-light")
     // and so the status bar can show "scheme:
     // light" / "scheme: dark".
-    let detected = crate::tui::theme::detect_color_scheme();
     let cfg = Config::load();
     let initial_theme = cfg
-        .theme_for(detected)
+        .theme_for(active_scheme)
         .map(SelectedTheme::from_slug)
         .or_else(|| {
             session
@@ -10798,7 +10789,7 @@ pub fn run_tui_to_stdout(
         })
         .unwrap_or(SelectedTheme::None);
     install_palette(initial_theme);
-    // Remember the detected scheme for the theme
+    // Remember the active scheme for the theme
     // picker and status bar. We also pass the
     // `Config` by reference into `App::new` so
     // the picker can re-resolve the OTHER slot's
@@ -10871,7 +10862,7 @@ pub fn run_tui_to_stdout(
         initial_sort_order,
         prefilled_query.is_some(),
         initial_theme,
-        detected,
+        active_scheme,
         bindings,
         llm,
         llm_config,
@@ -11139,6 +11130,19 @@ pub fn run_tui_to_stdout(
             None
         } else {
             Some(app.pane_height.as_str())
+        },
+        // Persist only when the user has toggled away
+        // from the default (`Dark`) — same
+        // persist-only-if-non-default policy as
+        // `sort_order` / `exit_filter` /
+        // `directory_source`. This is what makes
+        // `Action::ToggleColorScheme` stick across TUI
+        // invocations instead of resetting to `Dark`
+        // on every launch.
+        scheme: if app.detected_scheme == crate::tui::theme::ColorScheme::default() {
+            None
+        } else {
+            Some(app.detected_scheme.label().to_string())
         },
     };
     session.save();
@@ -13834,6 +13838,7 @@ mod tui_session_tests {
             directory_source: Some("tmux".to_string()),
             pane_visibility: Some("output".to_string()),
             pane_height: Some("20".to_string()),
+            scheme: Some("light".to_string()),
         };
         let _ = original.save_to(&tmp);
         let loaded = TuiSession::load_from(&tmp);
@@ -13847,6 +13852,7 @@ mod tui_session_tests {
         assert_eq!(loaded.directory_source.as_deref(), Some("tmux"));
         assert_eq!(loaded.pane_visibility.as_deref(), Some("output"));
         assert_eq!(loaded.pane_height.as_deref(), Some("20"));
+        assert_eq!(loaded.scheme.as_deref(), Some("light"));
     }
 
     /// The save function should not write a `query=`
@@ -14173,6 +14179,7 @@ mod tui_session_tests {
             } else {
                 Some(app_pane_height.as_str())
             },
+            scheme: None,
         }
     }
 }

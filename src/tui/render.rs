@@ -5542,27 +5542,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
     // Active theme badge. Rendered at the right edge of the status
     // bar so the help text keeps its existing left-anchored layout.
-    // The badge shows BOTH the theme name AND the auto-detected
-    // terminal scheme (light / dark) so the user always knows
-    // which `theme.<scheme>=` config slot is currently active.
-    // The "scheme" part is omitted for the `Unknown` detection
-    // case (it would be confusing to label something we don't
-    // actually know — the dark default still applies, and the
-    // theme picker shows the real scheme on demand).
-    let scheme_label = match app.detected_scheme {
-        crate::tui::theme::ColorScheme::Light => "light",
-        crate::tui::theme::ColorScheme::Dark => "dark",
-        crate::tui::theme::ColorScheme::Unknown => "",
-    };
-    let theme_label = if scheme_label.is_empty() {
-        format!(" theme: {} ", app.theme.display_name())
-    } else {
-        format!(
-            " theme: {} · {} ",
-            app.theme.display_name(),
-            scheme_label
-        )
-    };
+    // The badge shows BOTH the theme name AND the active color
+    // scheme (light / dark) so the user always knows which
+    // `theme.<scheme>=` config slot is currently active.
+    let theme_label = format!(
+        " theme: {} · {} ",
+        app.theme.display_name(),
+        app.detected_scheme.label()
+    );
 
     // Transient feedback (e.g. "Yanked 12 chars") takes
     // precedence over the help hint when present, so the user

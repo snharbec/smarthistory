@@ -47,26 +47,6 @@ reqwest = { version = "0.12", features = [
 ] }
 ureq = { version = "2", features = ["json"] }
 
-# `terminal-colorsaurus` is used by the TUI's
-# `detect_color_scheme()` to query the terminal
-# directly via the OSC 10 / OSC 11 escape sequences
-# (cross-platform, supported by xterm, iTerm2,
-# kitty, alacritty, gnome-terminal, wezterm, and
-# every other modern terminal). The env-var-only
-# detection we had before (`$COLORFGBG` /
-# `$TERM_PROGRAM` / `$WT_SESSION`) is good enough
-# for ~80% of users but fails on setups like a
-# bare `xterm-256color` shell where none of those
-# vars are set. The OSC query is the standard
-# cross-platform answer. The crate's only
-# dependency is `anstyle` (a trivial enum-only
-# type) when the `anstyle` feature is on, or
-# `rgb` (a small RGB type) when `rgb` is on —
-# both are zero-cost for the binary. We enable
-# both so the consumer can pick whichever
-# matches the rest of their color stack.
-terminal-colorsaurus = { version = "1.0", features = ["anstyle", "rgb"] }
-
 # Feature flag for the
 # alternative `herdr`
 # multiplexer backend.

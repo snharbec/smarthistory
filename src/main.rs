@@ -2130,11 +2130,12 @@ impl Config {
     /// then falls back to the active scheme's
     /// `theme.dark=` value, then to the built-in
     /// default, then to `SelectedTheme::None` (the
-    /// manual `tuicolor.*` palette). The scheme for
-    /// which this applies is auto-detected at startup
-    /// via `detect_color_scheme()`; the TUI shows the
-    /// detected scheme in the status bar so the user
-    /// always knows which slot is in effect.
+    /// manual `tuicolor.*` palette). The active scheme
+    /// defaults to `Dark` and is persisted in the
+    /// session file's `colorscheme=` line once the user
+    /// toggles it (`Action::ToggleColorScheme`); the TUI
+    /// shows the active scheme in the status bar so the
+    /// user always knows which slot is in effect.
     pub fn theme_light(&self) -> Option<&str> {
         self.theme_light.as_deref()
     }
@@ -2161,10 +2162,6 @@ impl Config {
                 .as_deref()
                 .or(self.theme_dark.as_deref()),
             crate::tui::theme::ColorScheme::Dark => self
-                .theme_dark
-                .as_deref()
-                .or(self.theme_light.as_deref()),
-            crate::tui::theme::ColorScheme::Unknown => self
                 .theme_dark
                 .as_deref()
                 .or(self.theme_light.as_deref()),
@@ -5578,23 +5575,5 @@ tmuxpaneoutputdir=~/custom-tmux
         assert!(cfg.theme_dark.is_none());
         assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Light).is_none());
         assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Dark).is_none());
-        assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Unknown).is_none());
-    }
-
-    /// `Unknown` scheme behaves the same as `Dark` in
-    /// the fallback chain — the detection couldn't tell
-    /// which scheme the terminal is, so we treat it as
-    /// the historical default (Dark) and look at the
-    /// dark slot first.
-    #[test]
-    fn theme_for_unknown_uses_dark_slot_first() {
-        let mut cfg = Config::default();
-        cfg.theme_light = Some("light-only".to_string());
-        cfg.theme_dark = Some("dark-only".to_string());
-        // Unknown → dark slot wins (the convention).
-        assert_eq!(
-            cfg.theme_for(crate::tui::theme::ColorScheme::Unknown),
-            Some("dark-only")
-        );
     }
 }
