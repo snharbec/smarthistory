@@ -18,11 +18,11 @@ Files mode lists every file under the current working directory (recursively wal
 
 - `Enter` stages `$EDITOR <abs-path>` and exits. The parent shell runs the command.
 - `Ctrl-E` opens the comment editor for the file (a smarthistory-side annotation, separate from the file's own contents).
-- `Ctrl-]` (Smart open) opens the file with a per-extension command configured via `smart-open.<ext>=<cmd>` in the config file. See [File-type-aware open](#file-type-aware-open-smart-open) below.
+- `Ctrl-]` (Smart open) opens the marked files (or just the selected one when nothing is marked) with their per-extension commands configured via `smart-open.<ext>=<cmd>` in the config file. See [File-type-aware open](#file-type-aware-open-smart-open) below.
 
 ## File-type-aware open (Smart open)
 
-`Ctrl-]` (the default `Action::SmartOpen` binding) adapts to the active mode. In `~` (files) mode it looks up the selected file's extension (lowercase, no leading `.`) in a per-extension command table and runs the matched command with the file path appended. The match then exits so the parent shell runs the staged command.
+`Ctrl-]` (the default `Action::SmartOpen` binding) adapts to the active mode. In `~` (files) mode it looks up each **marked** file's extension (lowercase, no leading `.`) in a per-extension command table — or, when nothing is marked, just the selected file's — and stages one command per matched file, chained with `; ` when there's more than one. The staged batch then exits so the parent shell runs it. Non-file rows (directories) and files with no mapping are silently skipped rather than aborting the whole batch; only when NOTHING in the batch has a mapping does the dispatch fall through to `Run` (open in `$EDITOR`).
 
 This is the typical "smart-open" workflow: `Ctrl-]` on a `.md` file runs `leaf` (a markdown viewer), on a `.rs` file runs `bat` (a syntax-highlighted read), on a `.png` file runs `xdg-open` (open in the system viewer), etc. — without the user having to remember the per-extension command. The default `Enter` (open in `$EDITOR`) is preserved for files that don't have a mapping, and the user can rebind `key.smart-open=...` to anything.
 

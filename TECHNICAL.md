@@ -760,8 +760,7 @@ touched by the herdr backend:
 | `Left`    | TUI     | Prefill the line with the selection, cursor at the start.      |
 | `Right`   | TUI     | Prefill the line with the selection, cursor at the end.        |
 | `Ctrl+D`  | TUI     | Delete the selected entry (with confirmation).                 |
-| `Ctrl+X`  | TUI     | **Todo mode only** — mark the selected todo as done. The action toggles the checkbox on its line in the source note file from `[ ]` to `[x]`, then calls the note_search library's `update_files_in_db` to re-index the file (the same path the external indexer uses), and finally re-fetches the todo list — the row disappears in the same frame because the underlying query filters `open: true`. Outside of todo mode (`!...`), the action is a no-op with a status message so the user knows why their key did nothing. Rebindable via `key.mark-todo-done=...`. |
-| `Ctrl+MD` | TUI     | Delete all matching entries (with confirmation). The previous default binding for this action was `Ctrl+X`; the binding moved to `Ctrl+M-D` so the todo-mode mark-done action could claim `Ctrl+X`. Configure with `key.delete-matching=...` if you want a different key. |
+| `Ctrl+X`  | TUI     | Toggle the marked state of the selected row (multi-select, `Action::ToggleMark`). Marked rows render a `[x]` prefix; the status bar shows the mark count. Marks are consulted by `Action::SmartOpen`'s JIRA/Todo/Files branches (act on every marked row instead of just the selected one) and by `Action::BulkDeleteMarked` (with confirmation, unbound by default). **This key previously defaulted to `MarkTodoDone`** (todo-mode "mark done"); that action now ships unbound by default and is reachable via `Ctrl-]` (`SmartOpen`) in `!` mode instead — see the `Action::MarkTodoDone` doc comment in `src/tui/bindings.rs`. |
 | `Ctrl+MG` | TUI     | Cycle the directory-source filter for the `#`-mode list: `ALL` → `TMUX` → `CFG` → `ALL`. `ALL` (default) shows every row regardless of source; `TMUX` shows only the active tmux panes' cwds; `CFG` shows only the `sessiondirs=...` rows. The current source is shown in the mode strip as a `DIR:ALL` / `DIR:TMUX` / `DIR:CFG` chip. Works from **any** mode: if pressed outside directories (`#`) mode, switches INTO directories mode first (prepends `#`, stripping any existing search prefix and preserving the body), then cycles the source. Configure with `key.cycle-directory-source=...`. |
 | `Esc`     | TUI     | Cancel the picker (no command printed).                        |
 
@@ -1659,8 +1658,19 @@ search term, not as the `@today` alias.
 
 #### Marking a todo as done
 
-Press `Ctrl+X` while a todo row is selected to mark
-that todo as done. The action:
+Press `Ctrl-]` (`Action::SmartOpen`) while a todo
+row is selected to mark that todo as done. (`Ctrl+X`
+used to be the dedicated key for this — it now
+defaults to `Action::ToggleMark`, the multi-select
+mark toggle; `MarkTodoDone` itself ships unbound and
+is reachable through `SmartOpen`'s todo-mode branch,
+or via a manual `key.mark-todo-done=<spec>` rebind.)
+
+`SmartOpen`'s todo branch acts on every **marked**
+todo when at least one is marked (mark rows with
+`Ctrl-X` first, across as many different note files
+as you like), or just the selected row when nothing
+is marked. For each target row, the action:
 
 1. **Toggles the checkbox** marker on the todo's
    line in the source note file from `[ ]` to
@@ -1682,15 +1692,31 @@ that todo as done. The action:
    sees the row disappear in the same frame as
    the action.
 
+With a single target, the status message is the
+precise per-row result (`"Marked done: <file>:<line>"`
+or a specific failure reason). With multiple marked
+targets, the per-row messages are superseded by an
+aggregate `"Marked N of M todos done"` summary once
+the batch finishes.
+
 The action is **only available inside the todo
 search mode** (`!...`). Outside of todo mode,
-`Ctrl+X` is a no-op with a status message so the
-user understands why their key did nothing — the
-binding is otherwise discoverable from the help
-overlay regardless of mode. The previously-default
-`Ctrl+X` binding for "delete all matching entries"
-moved to `Ctrl+M-D` so the two actions don't share
-a key.
+`Ctrl-]` falls through to `SmartOpen`'s generic `Run`
+behavior for whatever mode IS active — it's a
+cross-mode key, not todo-specific, so there's no
+"wrong mode" status message the way the old
+dedicated `Ctrl+X` binding had.
+
+**Why `id` alone can't key the mark set**: a todo
+row's `id` is `-(line_number)`, which is only unique
+*within one file* — two different note files can both
+have an open todo on, say, line 3, and both would get
+`id = -3`. `App.marked_ids` therefore keys on the pair
+`(id, comment)` (`comment` carries the todo's source
+filename for todo rows), not `id` alone, so marking a
+todo in one file never accidentally also marks a
+same-numbered todo in another. See the `marked_ids`
+field doc comment on `App` in `src/tui.rs`.
 
 If the file's content has changed since the indexer
 last looked at it (e.g. the user manually toggled

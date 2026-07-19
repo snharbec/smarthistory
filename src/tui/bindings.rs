@@ -119,6 +119,27 @@ pub enum Action {
     DeleteSelected,
     /// Delete all matching entries (with confirmation).
     DeleteMatching,
+    /// Toggle the marked state of the selected row (multi-select).
+    /// Marked rows render a checkbox prefix and are the target set
+    /// for `BulkDeleteMarked`. Marks are cleared automatically on a
+    /// prefix-mode switch (see `App`'s `marked_ids` doc comment)
+    /// but survive plain query-text edits within the same mode.
+    ///
+    /// The default key (`Ctrl-X`) was explicitly free — see the
+    /// `MarkTodoDone` doc comment below, which notes leaving that
+    /// action unbound frees `C-x` "for the user's own use". This is
+    /// that use: `C-x` is a common mnemonic for "mark/select" in
+    /// terminal file managers.
+    ToggleMark,
+    /// Clear every mark without deleting anything.
+    ClearMarks,
+    /// Delete every marked row (with confirmation, same
+    /// `ConfirmMode` dialog machinery as `DeleteMatching`).
+    ///
+    /// Ships unbound by default — same policy as `DeleteMatching`:
+    /// a bulk destructive action deserves an explicit opt-in key.
+    /// Users who want it set `key.bulk-delete-marked=<spec>`.
+    BulkDeleteMarked,
     /// Clear the search query.
     ClearQuery,
     /// Cycle the exit-code filter.
@@ -583,6 +604,9 @@ impl Action {
             Action::OpenHelp => "open-help",
             Action::DeleteSelected => "delete-selected",
             Action::DeleteMatching => "delete-matching",
+            Action::ToggleMark => "toggle-mark",
+            Action::ClearMarks => "clear-marks",
+            Action::BulkDeleteMarked => "bulk-delete-marked",
             Action::ClearQuery => "clear-query",
             Action::CycleExitFilter => "cycle-exit-filter",
             Action::CycleSortOrder => "cycle-sort-order",
@@ -639,6 +663,9 @@ impl Action {
             Action::OpenHelp => "Open help",
             Action::DeleteSelected => "Delete entry",
             Action::DeleteMatching => "Delete matches",
+            Action::ToggleMark => "Toggle mark on selected row",
+            Action::ClearMarks => "Clear all marks",
+            Action::BulkDeleteMarked => "Delete all marked entries",
             Action::ClearQuery => "Clear query",
             Action::CycleExitFilter => "Cycle exit filter",
             Action::CycleSortOrder => "Cycle sort order",
@@ -732,6 +759,7 @@ impl Action {
             Action::SmartOpen => "tools",
             Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
+            Action::ToggleMark | Action::ClearMarks | Action::BulkDeleteMarked => "delete",
             // Adding new entries to the config file
             // (session / host). The dialog state
             // machine lives in `tui.rs`; these
@@ -804,6 +832,16 @@ impl Action {
             Action::OpenHelp => "C-a",
             Action::DeleteSelected => "C-d",
             Action::DeleteMatching => "none",
+            Action::ToggleMark => "C-x",
+            // Unbound by default — clearing marks is a rare,
+            // low-stakes convenience action; discoverable via
+            // the command palette or `key.clear-marks=<spec>`.
+            Action::ClearMarks => "none",
+            // Unbound by default — same policy as `DeleteMatching`
+            // above: a bulk destructive action deserves an
+            // explicit opt-in key. Users who want it set
+            // `key.bulk-delete-marked=<spec>`.
+            Action::BulkDeleteMarked => "none",
             Action::ClearQuery => "C-u",
             Action::CycleExitFilter => "C-j",
             Action::CycleSortOrder => "F4",
@@ -1234,6 +1272,9 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::OpenHelp,
     Action::DeleteSelected,
     Action::DeleteMatching,
+    Action::ToggleMark,
+    Action::ClearMarks,
+    Action::BulkDeleteMarked,
     Action::ClearQuery,
     Action::CycleExitFilter,
     Action::CycleSortOrder,

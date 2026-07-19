@@ -18,7 +18,7 @@ use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
     AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView, NotesDateFilter, OutputView, PrefixPicker, QuestionView,
-    format_diff, format_time,
+    format_diff, format_time, mark_key,
 };
 use super::CodeGraphRelationsPicker;
 use regex::Regex;
@@ -182,6 +182,14 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
                 "This will delete ALL {} history entries in:\n  {}\n\nEvery command ever run in that directory will be removed.",
                 count,
                 crate::util::shorten_home_path(directory, &app.home_list),
+            ),
+        ),
+        ConfirmMode::DeleteMarked { count } => (
+            " Delete marked entries ",
+            format!(
+                "Are you sure you want to delete all {} marked {}?",
+                count,
+                if *count == 1 { "entry" } else { "entries" },
             ),
         ),
     };
@@ -3073,6 +3081,31 @@ fn mode_badge(mode: Mode) -> Span<'static> {
     )
 }
 
+/// The selected row's 1-based position in natural top-to-bottom
+/// reading order, given the raw data index (`0` = newest for
+/// every mode except panes, which is already top-to-bottom) and
+/// the total row count. Returns `None` when nothing is selected
+/// or the list is empty. Used by `draw_list` to build the
+/// title's "N/M" suffix and to position the scrollbar thumb —
+/// pulled out as a pure function so both agree and so the
+/// index-flip math is unit-testable without a live `Frame`.
+fn list_display_position(
+    selected_data_idx: Option<usize>,
+    real_count: usize,
+    is_panes: bool,
+) -> Option<usize> {
+    if real_count == 0 {
+        return None;
+    }
+    selected_data_idx.map(|data_idx| {
+        if is_panes {
+            data_idx + 1
+        } else {
+            real_count.saturating_sub(data_idx)
+        }
+    })
+}
+
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let merged = app.merged_rows();
     let age_width = merged
@@ -3196,11 +3229,29 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // title reflects the data source, not the
     // pane layout.
     let active_mode = crate::tui::mode::active_mode(app);
-    let title = format!(
-        " {} — {} ",
-        active_mode.list_title(),
-        merged.len()
-    );
+    // Selected row's 1-based position in NATURAL top-to-bottom
+    // reading order (oldest-at-top for the history list, or
+    // tree order for panes mode) — NOT the raw data index, which
+    // is newest-first (0 = newest) for every mode except panes.
+    // `app.list_state.selected()` still holds the PREVIOUS
+    // frame's data index at this point (it's only overwritten
+    // at the end of this function), so this reads the position
+    // the user is currently looking at.
+    let selected_display_pos =
+        list_display_position(app.list_state.selected(), real_count, is_panes);
+    let title = match selected_display_pos {
+        Some(pos) if real_count > 0 => format!(
+            " {} — {}/{} ",
+            active_mode.list_title(),
+            pos,
+            merged.len()
+        ),
+        _ => format!(
+            " {} — {} ",
+            active_mode.list_title(),
+            merged.len()
+        ),
+    };
     let list = List::new(items)
         .block(
             Block::default()
@@ -3241,6 +3292,29 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .repeat_highlight_symbol(true);
 
     f.render_stateful_widget(list, area, &mut render_state);
+
+    // Scrollbar, only when there's actually something to scroll —
+    // an always-visible scrollbar on a list that fits entirely on
+    // screen would just be visual noise. Tracks the SAME
+    // natural-order position as the title's "N/M" indicator (not
+    // ratatui's internal render offset, which is in padded/
+    // reversed coordinates for history mode — see the comment on
+    // `selected_display_pos` above), so the thumb position always
+    // agrees with the title.
+    if real_count > visible_height {
+        let mut scrollbar_state = ratatui::widgets::ScrollbarState::new(real_count)
+            .position(selected_display_pos.map(|p| p - 1).unwrap_or(0))
+            .viewport_content_length(visible_height);
+        let scrollbar = ratatui::widgets::Scrollbar::new(
+            ratatui::widgets::ScrollbarOrientation::VerticalRight,
+        )
+        .style(Theme::dim());
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(ratatui::layout::Margin::new(0, 1)),
+            &mut scrollbar_state,
+        );
+    }
 
     // ratatui may have scrolled the state; read its final offset and
     // selection back into app.list_state in data coordinates.
@@ -3391,7 +3465,25 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         Span::raw("")
     };
 
+    // Multi-select checkbox marker. A highlighted `[x]` shows the
+    // row is in `app.marked_ids` (toggled via `Action::ToggleMark`,
+    // `C-x` by default); a dim `[ ]` otherwise, matching the
+    // fixed-width-placeholder convention `capture_span`/`tmux_span`
+    // already use so columns stay aligned whether or not anything
+    // is marked.
+    let mark_span = if app.marked_ids.contains(&mark_key(row)) {
+        Span::styled(
+            "[x]",
+            Style::default()
+                .fg(Theme::highlight_color())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("[ ]", Theme::dim())
+    };
+
     let mut spans = vec![
+        mark_span,
         capture_span,
         tmux_span,
         llm_preview_span,
@@ -5524,11 +5616,19 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let n = app.rows.len();
-    let count = match n {
+    let mut count = match n {
         0 => "0 matches".to_string(),
         1 => "1 match".to_string(),
         x => format!("{} matches", x),
     };
+    // Fold the marked count into the existing left-anchored
+    // segment (rather than adding a 4th span) — the status bar
+    // already packs 3 unmanaged segments with no overflow
+    // handling, so growing the count string in place is the
+    // lower-risk way to surface this.
+    if !app.marked_ids.is_empty() {
+        count.push_str(&format!(" · {} marked", app.marked_ids.len()));
+    }
 
     // Build the help hint from the actual configured key bindings
     // so it always reflects what the user has configured.
@@ -5585,7 +5685,40 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_cmd_for_details_pane;
+    use super::{list_display_position, truncate_cmd_for_details_pane};
+
+    /// History-mode (non-panes) rows are stored newest-first
+    /// (data index 0 = newest), but the list DISPLAYS them
+    /// oldest-at-top. So data index 0 (newest) is the LAST
+    /// on-screen position (`real_count`), and the last data
+    /// index (oldest) is on-screen position 1.
+    #[test]
+    fn list_display_position_flips_index_for_history_mode() {
+        // 5 rows, data index 0 (newest) -> on-screen position 5
+        // (bottom-most).
+        assert_eq!(list_display_position(Some(0), 5, false), Some(5));
+        // data index 4 (oldest) -> on-screen position 1 (top-most).
+        assert_eq!(list_display_position(Some(4), 5, false), Some(1));
+        // A middle index.
+        assert_eq!(list_display_position(Some(2), 5, false), Some(3));
+    }
+
+    /// Panes mode is already top-to-bottom (tree order), so the
+    /// data index maps directly to the 1-based on-screen position
+    /// with no flip.
+    #[test]
+    fn list_display_position_is_unflipped_for_panes_mode() {
+        assert_eq!(list_display_position(Some(0), 5, true), Some(1));
+        assert_eq!(list_display_position(Some(4), 5, true), Some(5));
+    }
+
+    /// No selection or an empty list both yield `None` — the
+    /// title falls back to just the total count, no "N/M" suffix.
+    #[test]
+    fn list_display_position_none_when_unselected_or_empty() {
+        assert_eq!(list_display_position(None, 5, false), None);
+        assert_eq!(list_display_position(Some(0), 0, false), None);
+    }
 
     /// The `DIR:HERDR` chip
     /// rename is the

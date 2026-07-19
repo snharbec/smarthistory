@@ -5874,6 +5874,347 @@ fn unbound_by_default_actions_ship_without_a_binding() {
     );
 }
 
+// --- Multi-select / bulk actions -----------------------------
+
+/// `smart_action_targets` returns every marked row (matched by
+/// id against `merged_rows`) when at least one row is marked —
+/// order doesn't matter for correctness here, only membership.
+#[test]
+fn smart_action_targets_returns_marked_rows() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1), ("c", 2)]);
+    app.refresh();
+    let rows: Vec<crate::tui::state::HistoryRow> = app.merged_rows().to_vec();
+    app.marked_ids.insert(mark_key(&rows[0]));
+    app.marked_ids.insert(mark_key(&rows[2]));
+
+    let targets = app.smart_action_targets();
+    let target_ids: std::collections::HashSet<i64> = targets.iter().map(|r| r.id).collect();
+
+    assert_eq!(targets.len(), 2);
+    assert!(target_ids.contains(&rows[0].id));
+    assert!(target_ids.contains(&rows[2].id));
+    assert!(!target_ids.contains(&rows[1].id));
+}
+
+/// With nothing marked, `smart_action_targets` falls back to
+/// just the currently selected row.
+#[test]
+fn smart_action_targets_falls_back_to_selection_when_nothing_marked() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1)]);
+    app.refresh();
+    app.list_state.select(Some(0));
+    let expected_id = app.selected_row().expect("row selected").id;
+
+    let targets = app.smart_action_targets();
+
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, expected_id);
+}
+
+/// With nothing marked AND nothing selected (empty list),
+/// `smart_action_targets` returns an empty `Vec`.
+#[test]
+fn smart_action_targets_empty_when_nothing_marked_or_selected() {
+    let mut app = global_test_app(&[]);
+    app.refresh();
+    assert!(app.smart_action_targets().is_empty());
+}
+
+/// With multiple JIRA issues marked, `Action::SmartOpen`
+/// (`open_jira_in_background`) opens ALL of them — not just the
+/// selected row — and the status message names every opened
+/// key. This is the concrete case the multi-select feature was
+/// built for.
+#[test]
+fn smart_open_jira_opens_all_marked_issues() {
+    // Guard the JIRA env vars like `select_for_run_in_jira_mode_stages_open_url`
+    // does — `open_jira_in_background` reads `JiraConfig::from_env()`
+    // directly, independent of any injected test client.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_server = std::env::var("JIRA_SERVER").ok();
+    let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+    let prev_url = std::env::var("JIRA_URL").ok();
+    // SAFETY: single-threaded within the ENV_LOCK guard.
+    unsafe {
+        std::env::set_var("JIRA_SERVER", "https://jira.example.com");
+        std::env::set_var("JIRA_API_TOKEN", "tok");
+        std::env::set_var("JIRA_URL", "https://browse.example.com/browse");
+    }
+    let mut app = directories_test_app(&[]);
+    app.jira_rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "PROJ-1".to_string(),
+        mode: "jira".to_string(),
+        source: "jira".to_string(),
+        ..Default::default()
+    });
+    app.jira_rows.push(crate::tui::state::HistoryRow {
+        id: -2,
+        command: "PROJ-2".to_string(),
+        mode: "jira".to_string(),
+        source: "jira".to_string(),
+        ..Default::default()
+    });
+    app.query = String::from("-");
+    app.refresh();
+    let rows: Vec<crate::tui::state::HistoryRow> = app.merged_rows().to_vec();
+    assert_eq!(rows.len(), 2);
+    app.marked_ids.insert(mark_key(&rows[0]));
+    app.marked_ids.insert(mark_key(&rows[1]));
+
+    app.open_jira_in_background();
+
+    // Restore before asserting so a panic doesn't leak the env
+    // to other tests.
+    let restore = |name: &str, prev: Option<String>| unsafe {
+        match prev {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    };
+    restore("JIRA_SERVER", prev_server);
+    restore("JIRA_API_TOKEN", prev_token);
+    restore("JIRA_URL", prev_url);
+
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("Opened 2 JIRA issues in browser"),
+        "got: {:?}",
+        msg
+    );
+    assert!(
+        msg.contains("PROJ-1") && msg.contains("PROJ-2"),
+        "expected both issue keys named in the status message; got: {:?}",
+        msg
+    );
+}
+
+/// `Action::ToggleMark` ships bound to `C-x` by default (the key
+/// was explicitly documented as free — see the `MarkTodoDone`
+/// `default_key()` comment); `ClearMarks` and `BulkDeleteMarked`
+/// ship unbound, same policy as `DeleteMatching`.
+#[test]
+fn multi_select_actions_default_keys() {
+    let bindings = KeyBindings::defaults();
+    assert_eq!(
+        format_key_specs(bindings.specs(Action::ToggleMark)),
+        "C-x".to_string()
+    );
+    assert!(
+        bindings.is_unbound(Action::ClearMarks),
+        "ClearMarks must ship unbound (default is the `none` sentinel), got: {:?}",
+        format_key_specs(bindings.specs(Action::ClearMarks))
+    );
+    assert!(
+        bindings.is_unbound(Action::BulkDeleteMarked),
+        "BulkDeleteMarked must ship unbound (default is the `none` sentinel), got: {:?}",
+        format_key_specs(bindings.specs(Action::BulkDeleteMarked))
+    );
+}
+
+/// `toggle_mark` marks the selected row on the first call and
+/// unmarks it on the second — a plain toggle, keyed by
+/// `HistoryRow::id`.
+#[test]
+fn toggle_mark_marks_and_unmarks_selected_row() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1)]);
+    app.refresh();
+    app.list_state.select(Some(0));
+    let key = mark_key(app.selected_row().expect("row selected"));
+
+    app.toggle_mark();
+    assert!(app.marked_ids.contains(&key), "first toggle should mark");
+
+    app.toggle_mark();
+    assert!(
+        !app.marked_ids.contains(&key),
+        "second toggle should unmark"
+    );
+}
+
+/// With no row selected (empty list), `toggle_mark` is a quiet
+/// no-op — nothing to mark, no status message worth surfacing
+/// for a non-destructive action.
+#[test]
+fn toggle_mark_with_no_selection_is_noop() {
+    let mut app = global_test_app(&[]);
+    app.refresh();
+    assert!(app.selected_row().is_none());
+    app.toggle_mark();
+    assert!(app.marked_ids.is_empty());
+}
+
+/// `clear_marks` empties the set and reports how many were
+/// cleared via a status message.
+#[test]
+fn clear_marks_empties_set_and_reports_count() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1)]);
+    app.refresh();
+    app.marked_ids.insert((1, String::new()));
+    app.marked_ids.insert((2, String::new()));
+
+    app.clear_marks();
+
+    assert!(app.marked_ids.is_empty());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("Cleared 2 marks"),
+        "status should report the count cleared: {:?}",
+        status
+    );
+}
+
+/// Marks survive a plain query-text edit within the SAME prefix
+/// mode (e.g. narrowing a history filter) — `refresh()` only
+/// clears marks when the active `ModeKind` itself changes.
+#[test]
+fn refresh_preserves_marks_across_same_mode_query_edit() {
+    let mut app = global_test_app(&[("alpha", 0), ("beta", 1)]);
+    app.query = String::new();
+    app.refresh();
+    let key = mark_key(app.rows.first().expect("seeded row"));
+    app.marked_ids.insert(key.clone());
+
+    // Still history mode (no prefix char) — just a narrower
+    // filter.
+    app.query = "alpha".to_string();
+    app.refresh();
+
+    assert!(
+        app.marked_ids.contains(&key),
+        "marks must survive a same-mode query edit"
+    );
+}
+
+/// Marks are cleared when the active prefix mode changes (e.g.
+/// switching from plain history to `!` todo mode) — synthetic
+/// `HistoryRow::id` values from a different mode's row source
+/// aren't meaningfully comparable, so carrying marks across the
+/// switch risks a bulk action acting on the wrong row.
+#[test]
+fn refresh_clears_marks_on_mode_switch() {
+    let mut app = global_test_app(&[("alpha", 0)]);
+    app.query = String::new();
+    app.refresh();
+    let key = mark_key(app.rows.first().expect("seeded row"));
+    app.marked_ids.insert(key);
+    assert!(!app.marked_ids.is_empty());
+
+    // Switch to todo mode (`!`) — a different `ModeKind`.
+    app.query = "!".to_string();
+    app.refresh();
+
+    assert!(
+        app.marked_ids.is_empty(),
+        "marks must be cleared on a prefix-mode switch"
+    );
+}
+
+/// `Action::BulkDeleteMarked` opens the `ConfirmMode::DeleteMarked`
+/// dialog with the current mark count when there's at least one
+/// marked row.
+#[test]
+fn bulk_delete_marked_action_opens_confirm_dialog_with_count() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1)]);
+    app.refresh();
+    app.marked_ids.insert((1, String::new()));
+    app.marked_ids.insert((2, String::new()));
+
+    dispatch_action(&mut app, Action::BulkDeleteMarked);
+
+    assert_eq!(
+        app.confirm_delete,
+        Some(ConfirmMode::DeleteMarked { count: 2 })
+    );
+}
+
+/// With nothing marked, `Action::BulkDeleteMarked` is a no-op
+/// with a status message instead of opening an empty
+/// confirmation dialog.
+#[test]
+fn bulk_delete_marked_action_with_no_marks_is_noop() {
+    let mut app = global_test_app(&[("a", 0)]);
+    app.refresh();
+    assert!(app.marked_ids.is_empty());
+
+    dispatch_action(&mut app, Action::BulkDeleteMarked);
+
+    assert!(app.confirm_delete.is_none());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("No marked rows"),
+        "status should explain there was nothing to delete: {:?}",
+        status
+    );
+}
+
+/// `delete_marked` removes exactly the marked rows from the
+/// `history` table (by explicit id list, not a derived WHERE
+/// clause), leaves unmarked rows untouched, and clears both the
+/// mark set and the confirmation dialog afterward — the same
+/// post-conditions `delete_matching`/`delete_directory` leave.
+#[test]
+fn delete_marked_removes_only_marked_rows_and_clears_state() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1), ("c", 2)]);
+    app.refresh();
+    app.marked_ids.insert((1, String::new()));
+    app.marked_ids.insert((2, String::new()));
+    app.confirm_delete = Some(ConfirmMode::DeleteMarked { count: 2 });
+
+    app.delete_marked().expect("delete_marked should succeed");
+
+    let remaining: Vec<String> = app
+        .conn
+        .prepare("SELECT command FROM history ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        remaining,
+        vec!["c".to_string()],
+        "only the two marked rows (ids 1, 2) should be deleted"
+    );
+    assert!(app.marked_ids.is_empty());
+    assert!(app.confirm_delete.is_none());
+}
+
+/// `y` in the `ConfirmMode::DeleteMarked` dialog runs the
+/// deletion via the same `handle_confirm_delete_key` dispatch
+/// every other delete confirmation uses.
+#[test]
+fn confirm_delete_marked_key_y_deletes_and_closes_dialog() {
+    let mut app = global_test_app(&[("a", 0), ("b", 1)]);
+    app.refresh();
+    app.marked_ids.insert((1, String::new()));
+    app.confirm_delete = Some(ConfirmMode::DeleteMarked { count: 1 });
+
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty());
+    handle_confirm_delete_key(&mut app, y, ConfirmMode::DeleteMarked { count: 1 });
+
+    assert!(app.confirm_delete.is_none());
+    let count: i64 = app
+        .conn
+        .query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "the one marked row should have been deleted");
+}
+
 /// Basic case: cursor at end of `git status`,
 /// press `Ctrl-W`, get `git `. The trailing
 /// word `status` is eaten; the space between
@@ -8312,6 +8653,82 @@ fn mark_todo_done_preserves_no_trailing_newline() {
     assert_eq!(contents, "# Title\n\n- [x] open todo");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_file(&db_path);
+}
+
+/// With multiple todos marked, `mark_todo_done` toggles ALL of
+/// them (not just the selected one) and reports an aggregate
+/// count — the todo-mode instance of `SmartOpen`'s "act on
+/// marks, else the selection" contract.
+#[test]
+fn mark_todo_done_toggles_all_marked_todos() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = "!".to_string();
+    app.refresh();
+    let rows: Vec<crate::tui::state::HistoryRow> = app.merged_rows().to_vec();
+    assert_eq!(rows.len(), 4, "seed fixture has 4 open todos");
+    // Marking by `mark_key` (id + comment/filename), not bare
+    // id — todo rows encode `id = -(line_number)`, and this
+    // fixture's two files both have an open todo on the same
+    // line number, so a bare-id mark would ambiguously match
+    // rows in BOTH files (the bug this composite key exists to
+    // prevent — see the `marked_ids` doc comment on `App`).
+    app.marked_ids.insert(mark_key(&rows[0]));
+    app.marked_ids.insert(mark_key(&rows[1]));
+
+    app.mark_todo_done();
+
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("Marked 2 of 2 todos done"),
+        "got: {:?}",
+        msg
+    );
+    assert_eq!(
+        app.merged_rows().len(),
+        2,
+        "the 2 marked todos should now be closed and excluded from the open-todo list"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// With exactly one row marked, `mark_todo_done` takes the
+/// single-target path and keeps `mark_todo_done_for_row`'s own
+/// precise status message (`"Marked done: <file>:<line>"`)
+/// rather than overwriting it with a generic aggregate count —
+/// only 2+ marks switch to the "N of M" summary.
+#[test]
+fn mark_todo_done_with_single_mark_preserves_precise_message() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = "!".to_string();
+    app.refresh();
+    let key = mark_key(&app.merged_rows()[0]);
+    app.marked_ids.insert(key);
+
+    app.mark_todo_done();
+
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.starts_with("Marked done:"),
+        "single-mark path should keep the precise per-row message, got: {:?}",
+        msg
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
 }
 
 // --- Directories mode (`#` prefix) ----
@@ -18025,6 +18442,57 @@ fn smart_open_in_files_mode_uses_configured_extension_command() {
         app.pick_mode,
         Some(PickMode::Run),
         "pick_mode must be set so the run-loop treats this as a Run-equivalent selection"
+    );
+}
+
+/// With multiple files marked, files-mode `SmartOpen` stages
+/// ONE chained command covering every marked file that has a
+/// configured extension mapping (joined with `" ; "`), not just
+/// the selected one — the files-mode instance of the general
+/// "act on marks, else the selection" `SmartOpen` contract.
+#[test]
+fn smart_open_in_files_mode_opens_all_marked_files() {
+    let mut app = files_test_app("/home/user/notes/a.md");
+    app.smart_open_file_commands
+        .insert("md".to_string(), "leaf".to_string());
+    app.smart_open_file_commands
+        .insert("txt".to_string(), "cat".to_string());
+    let second = crate::tui::state::HistoryRow {
+        id: -2,
+        command: "/home/user/notes/b.txt".to_string(),
+        directory: "/home/user/notes/b.txt".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "file".to_string(),
+        source: String::new(),
+        ..Default::default()
+    };
+    app.merged_rows.push(second);
+    let rows: Vec<crate::tui::state::HistoryRow> = app.merged_rows.clone();
+    app.marked_ids.insert(mark_key(&rows[0]));
+    app.marked_ids.insert(mark_key(&rows[1]));
+
+    let quit = dispatch_action(&mut app, Action::SmartOpen);
+
+    assert!(quit, "SmartOpen must exit the TUI after staging");
+    let staged = app.selection.as_deref().expect("staged command");
+    assert!(
+        staged.contains("leaf ") && staged.contains("/home/user/notes/a.md"),
+        "expected the `.md` file's `leaf` command in the staged string; got: {:?}",
+        staged
+    );
+    assert!(
+        staged.contains("cat ") && staged.contains("/home/user/notes/b.txt"),
+        "expected the `.txt` file's `cat` command in the staged string; got: {:?}",
+        staged
+    );
+    assert!(
+        staged.contains(" ; "),
+        "the two per-file commands should be chained with ' ; '; got: {:?}",
+        staged
     );
 }
 

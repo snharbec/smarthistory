@@ -371,7 +371,7 @@ Open the prefix picker. Centred overlay listing every configured prefix mode (hi
 | Default key | `none` |
 | Category | todo |
 
-Mark the currently-selected todo entry as done inside its note file. Available only when the active query is a todo search (`!...`); outside of todo mode the action is a no-op with a status message so the user knows why their key did nothing. Ships **unbound by default** — the functionality is reachable via `SmartOpen` (`Ctrl-]` by default) in `!` mode. Users who want a dedicated key can rebind via `key.mark-todo-done=<spec>` (e.g. `C-x` restores the historical binding).
+Mark the currently-selected todo entry as done inside its note file (or, via `SmartOpen`, every marked todo — see below). Available only when the active query is a todo search (`!...`); outside of todo mode the action is a no-op with a status message so the user knows why their key did nothing. Ships **unbound by default** — the functionality is reachable via `SmartOpen` (`Ctrl-]` by default) in `!` mode, which additionally acts on every marked row when at least one is marked. Users who want a dedicated key can rebind via `key.mark-todo-done=<spec>`; note that `C-x`, the historical default, is now `ToggleMark`'s default key, so pick a different spec.
 
 The implementation reads the line on disk, replaces `[ ]` with `[x]`, writes the file back, and refreshes the in-memory `todo_entries` table via `note_search::update_files_in_db` so the row disappears from the list on the next render.
 
@@ -510,11 +510,13 @@ Context-aware "dive" key — a single binding that adapts to the active prefix m
 
 | Active mode | SmartOpen behavior |
 | --- | --- |
-| `&` / `$` (codegraph-backed symbol) | opens the callers / callees picker (`CodegraphRelations`) |
-| `-` (JIRA) | opens the selected issue's browse URL in the system browser **in the background** (same as pressing Enter, but spawned detached so the TUI stays open) |
-| `!` (Todo) | toggles the checkbox of the selected todo (same as `MarkTodoDone`, reusing the shared `mark_todo_done` helper) |
-| `~` (Files) | opens the selected file with a per-extension shell command configured via `smart-open.<ext>=<cmd>` in the config file (with an optional `smart-open.default` fallback) |
-| every other mode | falls through to `Run` (select row / open editor / fire LLM) — an ergonomic Enter replacement |
+| `&` / `$` (codegraph-backed symbol) | opens the callers / callees picker (`CodegraphRelations`) for the **selected** row only — a picker overlay can't show N rows' relations at once, so marks are ignored here |
+| `-` (JIRA) | opens every **marked** issue's browse URL in the system browser **in the background** (or just the selected one when nothing is marked) — same as pressing Enter on a single row, but spawned detached so the TUI stays open |
+| `!` (Todo) | toggles the checkbox of every **marked** todo (or just the selected one when nothing is marked), reusing the shared `mark_todo_done_for_row` helper; reports an aggregate "Marked N of M todos done" when acting on more than one |
+| `~` (Files) | stages one chained command (`cmd1 ; cmd2 ; ...`) covering every **marked** file that has a configured `smart-open.<ext>=<cmd>` mapping (or just the selected file when nothing is marked) |
+| every other mode | falls through to `Run` (select row / open editor / fire LLM) — an ergonomic Enter replacement; acts on the selected row only, marks are not consulted |
+
+**Multi-select**: the JIRA, Todo, and Files branches act on every row marked via `Action::ToggleMark` (`C-x` by default) when at least one row is marked, falling back to just the currently selected row when nothing is marked. This is the general "act on marks, else the selection" contract shared by `App::smart_action_targets`. The overlay-opening codegraph/tags branch and the generic `Run` fallback are single-row only — see the source doc comment on `smart_action_targets` in `src/tui.rs` for why.
 
 The default `C-]` (ASCII GS, 0x1D) is a single-byte control char every terminal emits reliably. Chosen over the more semantic `S-Return` because many terminals emit Shift-Return as a non-standard sequence crossterm 0.29 can't decode. Users on kitty-protocol terminals (Kitty / WezTerm / Alacritty / iTerm2+CSI-u) who prefer Shift-Return can rebind via `key.smart-open=S-Return` in the config file.
 
@@ -569,6 +571,39 @@ Delete the selected entry (with confirmation). Opens a `y / n` confirmation over
 | Category | delete |
 
 Delete all entries matching the current query (with confirmation). Unbound by default — users who want a "delete every match" key can rebind via `key.delete-matching=<spec>`. The confirmation dialog shows the match count so the user can verify before committing.
+
+### `ToggleMark`
+
+| Field | Value |
+| --- | --- |
+| Config key | `toggle-mark` |
+| Display name | Toggle mark on selected row |
+| Default key | `C-x` |
+| Category | delete |
+
+Mark (or unmark) the currently selected row for a bulk action. Marked rows render a `[x]` checkbox prefix (unmarked rows show `[ ]`); the status bar shows the current mark count when non-zero. Marks are keyed by `HistoryRow::id` and are cleared automatically whenever the active prefix mode changes (e.g. switching from plain history to `!` todo mode) — synthetic ids from other prefix modes aren't guaranteed unique across mode boundaries. Marks DO survive plain query-text edits within the same mode. A no-op when no row is selected.
+
+### `ClearMarks`
+
+| Field | Value |
+| --- | --- |
+| Config key | `clear-marks` |
+| Display name | Clear all marks |
+| Default key | `none` |
+| Category | delete |
+
+Clear every mark without deleting anything. Unbound by default; reachable via the command palette or `key.clear-marks=<spec>`. Surfaces a status message reporting how many marks were cleared.
+
+### `BulkDeleteMarked`
+
+| Field | Value |
+| --- | --- |
+| Config key | `bulk-delete-marked` |
+| Display name | Delete all marked entries |
+| Default key | `none` |
+| Category | delete |
+
+Delete every marked row (with confirmation) — same `y`/`n`/`Esc`/`Ctrl-C` dialog machinery as `DeleteMatching`, deleting by the explicit marked-id list rather than a derived query. Unbound by default, same policy as `DeleteMatching`: a bulk destructive action deserves an explicit opt-in key (`key.bulk-delete-marked=<spec>`). A status message explains the no-op when nothing is marked.
 
 ---
 

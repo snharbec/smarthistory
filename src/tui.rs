@@ -410,6 +410,15 @@ impl TuiSession {
     }
 }
 
+/// The key `App.marked_ids` uses to identify a row — see the
+/// `marked_ids` field doc comment on `App` for why this is a
+/// pair rather than just `HistoryRow::id` (synthetic ids, e.g.
+/// todo line numbers, collide across different underlying
+/// sources within the same prefix mode; `comment` disambiguates).
+fn mark_key(row: &HistoryRow) -> (i64, String) {
+    (row.id, row.comment.clone())
+}
+
 /// True if every character of `pattern` appears in `text` in
 /// order (a "subsequence" match), case-insensitive. This is the
 /// same shape as `fzf` and similar fuzzy finders: the user types
@@ -1120,6 +1129,42 @@ pub(crate) struct App {
     /// from `self.rows` alone and silently returned `None` for
     /// such rows, which is the bug the cache fixes.
     merged_rows: Vec<HistoryRow>,
+    /// The set of rows the user has marked via `Action::ToggleMark`,
+    /// keyed by `(HistoryRow::id, HistoryRow::comment)`. Consulted
+    /// by `render_row` (draws a checkbox marker), `smart_action_targets`
+    /// (the general "act on marks, else the selection" helper used by
+    /// `Action::SmartOpen`), and `Action::BulkDeleteMarked`.
+    ///
+    /// **Why the pair, not just `id`**: `HistoryRow::id` is only
+    /// globally unique for real history-table rows. Synthetic ids
+    /// used by other prefix modes are NOT unique across different
+    /// underlying sources within the SAME mode — todo rows in
+    /// particular encode `id = -(line_number)`, so two todos at the
+    /// same line number in two different `.md` files collide on a
+    /// bare `id`. `comment` holds the todo's source filename (or,
+    /// for JIRA rows, the issue summary), which disambiguates in
+    /// practice. This was found the hard way: a test that marked one
+    /// todo and expected exactly one mark ended up matching two,
+    /// because both files happened to have an open todo on the same
+    /// line. Real history rows aren't affected (their `id` alone is
+    /// already unique; `comment` is just redundant belt-and-braces
+    /// there).
+    ///
+    /// This does NOT fully solve cross-mode collisions (see
+    /// `marked_mode_kind` below) — it only fixes the WITHIN-mode
+    /// case. Marks are therefore still a "within the current prefix
+    /// mode" concept, not a global one.
+    marked_ids: std::collections::HashSet<(i64, String)>,
+    /// The prefix mode (`ModeKind`) that was active the last time
+    /// `refresh()` ran. `refresh()` clears `marked_ids` whenever
+    /// this changes (i.e. the user switched from, say, `!` todo
+    /// mode to `-` JIRA mode) — synthetic `HistoryRow::id` values
+    /// are only meaningfully unique within one mode's row source,
+    /// so carrying marks across a mode switch risks acting on the
+    /// wrong row. Marks DO survive plain query-text edits within
+    /// the same mode (e.g. narrowing a filter), since real
+    /// history-table ids stay stable and useful across that.
+    marked_mode_kind: Option<crate::tui::mode::ModeKind>,
     /// True when the initial query was loaded from the persisted
     /// session file (so the user is editing a previously-saved query
     /// rather than typing fresh text). The first character typed
@@ -3534,6 +3579,13 @@ enum ConfirmMode {
         directory: String,
         count: usize,
     },
+    /// Delete every marked row (`Action::BulkDeleteMarked`). The
+    /// count is pre-computed when the dialog opens (same pattern
+    /// as `DeleteDirectory`) so the confirmation message can show
+    /// it without re-reading `app.marked_ids` at render time.
+    DeleteMarked {
+        count: usize,
+    },
 }
 
 /// State for the captured-output overlay: the captured text plus a
@@ -4532,6 +4584,11 @@ impl App {
             // `selected_row()` call before the first refresh
             // returns `None` cleanly.
             merged_rows: Vec::new(),
+            marked_ids: std::collections::HashSet::new(),
+            // `None` so the first `refresh()` call always primes
+            // it (rather than special-casing `ModeKind::History`
+            // as the implicit starting mode).
+            marked_mode_kind: None,
             query_prefilled,
             query_touched: false,
             // Start the cursor at the end of the query so the
@@ -4743,6 +4800,21 @@ impl App {
     /// `query_matches_text` so the regex can match anywhere in the
     /// command or comment text.
     fn refresh(&mut self) {
+        // Clear multi-select marks on a prefix-mode switch (e.g.
+        // `!` todo mode -> `-` JIRA mode). Synthetic
+        // `HistoryRow::id` values are only meaningfully unique
+        // within one mode's row source (see `marked_ids` doc
+        // comment), so carrying marks across a mode switch risks
+        // a bulk action acting on the wrong row. Marks survive
+        // plain query-text edits within the same mode — this
+        // check is independent of (broader than) the SQL cache
+        // key below, and runs on every `refresh()` call so it
+        // takes effect on both the cache-hit and cache-miss paths.
+        let current_mode_kind = crate::tui::mode::active_mode(self);
+        if self.marked_mode_kind != Some(current_mode_kind) {
+            self.marked_ids.clear();
+            self.marked_mode_kind = Some(current_mode_kind);
+        }
         // Short-circuit: if the query text, mode, match
         // algorithm, exit filter, sort order, and directory
         // source are all unchanged since the last `fetch()`, the
@@ -8778,35 +8850,57 @@ impl App {
             );
             return;
         }
-        let key: String = match self.selected_row() {
-            Some(r) => r.command.clone(),
-            None => {
-                self.set_status_message("No JIRA issue selected".to_string());
-                return;
-            }
-        };
-        let key = key.trim().to_string();
-        if key.is_empty() {
-            self.set_status_message("Selected JIRA row has no issue key".to_string());
+        // `smart_action_targets()` returns every marked row when
+        // at least one is marked, otherwise just the selected
+        // row — this is what lets `Ctrl-]` open ALL marked JIRA
+        // issues at once instead of only the highlighted one.
+        let targets = self.smart_action_targets();
+        if targets.is_empty() {
+            self.set_status_message("No JIRA issue selected".to_string());
             return;
         }
         let Some(cfg) = crate::jira::JiraConfig::from_env() else {
             self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
             return;
         };
-        let url = cfg.browse_url(&key);
         let opener = if cfg!(target_os = "macos") {
             "open"
         } else {
             "xdg-open"
+        };
+        // One opener process per issue (spawned individually
+        // rather than passed as multiple args to a single
+        // invocation): `xdg-open` on Linux only reliably opens
+        // one URL per call, so looping is the portable choice.
+        let mut opened_keys: Vec<String> = Vec::new();
+        for row in &targets {
+            let key = row.command.trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            let url = cfg.browse_url(&key);
+            let opener = opener.to_string();
+            // Spawn a thread that runs the opener and reaps the
+            // child. The TUI thread never blocks on the browser
+            // launch.
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new(&opener).arg(&url).status();
+            });
+            opened_keys.push(key);
         }
-        .to_string();
-        // Spawn a thread that runs the opener and reaps the child.
-        // The TUI thread never blocks on the browser launch.
-        std::thread::spawn(move || {
-            let _ = std::process::Command::new(&opener).arg(&url).status();
+        if opened_keys.is_empty() {
+            self.set_status_message("Selected JIRA row has no issue key".to_string());
+            return;
+        }
+        self.set_status_message(if opened_keys.len() == 1 {
+            format!("Opened {} in browser", opened_keys[0])
+        } else {
+            format!(
+                "Opened {} JIRA issues in browser: {}",
+                opened_keys.len(),
+                opened_keys.join(", ")
+            )
         });
-        self.set_status_message(format!("Opened {} in browser", key));
     }
 
     /// Mark the currently-selected todo
@@ -8858,13 +8952,45 @@ impl App {
             );
             return;
         }
-        let Some(row) = self.selected_row().cloned() else {
+        let targets = self.smart_action_targets();
+        let Some((first, rest)) = targets.split_first() else {
             self.set_status_message("No todo selected".to_string());
             return;
         };
-        self.mark_todo_done_for_row(&row);
+        if rest.is_empty() {
+            // Single target: preserve `mark_todo_done_for_row`'s
+            // own precise status message (e.g. "Marked done:
+            // file:line", or a specific failure reason) rather
+            // than overwriting it with a generic aggregate count.
+            self.mark_todo_done_for_row(first);
+            return;
+        }
+        // Multiple marked todos: run each (captured line numbers
+        // stay valid across the loop's per-row `refresh()` calls
+        // — toggling a checkbox doesn't add/remove lines, so
+        // other rows' line numbers don't shift), then report an
+        // aggregate count. Marks are left as-is afterward (the
+        // rows still exist, just closed — unlike bulk delete,
+        // there's no reason to force the user to re-mark them
+        // for a follow-up action).
+        let mut done = 0usize;
+        let total = targets.len();
+        for row in &targets {
+            if self.mark_todo_done_for_row(row) {
+                done += 1;
+            }
+        }
+        self.set_status_message(format!("Marked {} of {} todos done", done, total));
     }
 
+    /// Returns `true` on full success (file written AND, when
+    /// notes.database is configured, the DB re-sync succeeded)
+    /// so `mark_todo_done`'s multi-target loop can count
+    /// successes for its aggregate status message; `false` on
+    /// every early-exit / failure branch. Each branch still sets
+    /// its own precise `status_message` — the bool is purely for
+    /// the caller's tally, not a replacement for that messaging.
+    ///
     /// Core implementation of
     /// `mark_todo_done`, factored out
     /// so tests can drive it with a
@@ -8877,7 +9003,7 @@ impl App {
     /// `TODO_REGEX` is `^`-anchored
     /// and skips indented
     /// checkboxes).
-    fn mark_todo_done_for_row(&mut self, row: &HistoryRow) {
+    fn mark_todo_done_for_row(&mut self, row: &HistoryRow) -> bool {
         // `id = -(line_number)` is the
         // synthetic-id contract from
         // `fetch_todos`. A row that
@@ -8890,16 +9016,16 @@ impl App {
             i if i < 0 => (i.unsigned_abs() as usize).max(1),
             _ => {
                 self.set_status_message("Selected row is not a todo entry".to_string());
-                return;
+                return false;
             }
         };
         if row.comment.is_empty() {
             self.set_status_message("Selected todo has no source filename".to_string());
-            return;
+            return false;
         }
         let Some(ref notes_dir) = self.notes_dir else {
             self.set_status_message("Cannot mark done: notes.dir is not configured".to_string());
-            return;
+            return false;
         };
         let path = notes_dir.join(&row.comment);
         // Read the file. We use the
@@ -8911,7 +9037,7 @@ impl App {
             Ok(s) => s,
             Err(e) => {
                 self.set_status_message(format!("Cannot read {}: {}", row.comment, e));
-                return;
+                return false;
             }
         };
         // Locate the targeted line.
@@ -8948,7 +9074,7 @@ impl App {
                         "Line {} of {} is no longer an open todo: {:?}",
                         line_number, row.comment, line
                     ));
-                    return;
+                    return false;
                 }
                 // Replace the first
                 // occurrence of `[ ]` on
@@ -8999,7 +9125,7 @@ impl App {
                         "Cannot locate checkbox bracket on line {} of {}",
                         line_number, row.comment
                     ));
-                    return;
+                    return false;
                 }
                 let mut new_line = String::with_capacity(line.len());
                 new_line.push_str(&line[..bracket_at]);
@@ -9024,7 +9150,7 @@ impl App {
                 "Line {} not found in {} (file shorter than expected)",
                 line_number, row.comment
             ));
-            return;
+            return false;
         }
         // Preserve the file's trailing
         // newline convention. `lines()`
@@ -9037,7 +9163,7 @@ impl App {
         }
         if let Err(e) = std::fs::write(&path, out) {
             self.set_status_message(format!("Cannot write {}: {}", row.comment, e));
-            return;
+            return false;
         }
         // Refresh the in-memory
         // `todo_entries` database
@@ -9101,7 +9227,7 @@ impl App {
                             "Marked done on disk, but DB refresh failed: {}",
                             e
                         ));
-                        return;
+                        return false;
                     }
                 }
                 Err(e) => {
@@ -9109,7 +9235,7 @@ impl App {
                         "Marked done on disk, but DB open failed: {}",
                         e
                     ));
-                    return;
+                    return false;
                 }
             }
         }
@@ -9124,6 +9250,7 @@ impl App {
         // underlying SQL excludes
         // it.
         self.refresh();
+        true
     }
 
     /// File-type-aware file open for the `~` (files)
@@ -9155,96 +9282,81 @@ impl App {
         if !self.is_files_query() {
             return None;
         }
-        let Some(row) = self.selected_row() else {
-            // No row selected —
-            // surface a soft
-            // diagnostic rather than
-            // staging a wrong
-            // command. The dispatch
-            // site falls through to
-            // `select_for_run` if
-            // we return `None`, but
-            // `select_for_run` is
-            // also a no-op on an
-            // empty list (it
-            // surfaces "no row
-            // selected" itself). To
-            // avoid two status
-            // messages, we just
-            // fall through.
-            return None;
-        };
-        // Only files trigger the
-        // extension lookup —
-        // directories fall through
-        // to the default
-        // (cd / workspace
-        // create).
-        if row.mode != "file" {
+        // `smart_action_targets()` returns every marked row when
+        // at least one is marked, otherwise just the selected
+        // row — same "act on the marked set, else the single
+        // selection" contract as the JIRA and todo `SmartOpen`
+        // branches. An empty result (nothing selected) falls
+        // through to `None` — the dispatch site falls through to
+        // `select_for_run`, which is also a no-op on an empty
+        // list and surfaces its own "no row selected" message,
+        // so we don't duplicate that here.
+        let targets = self.smart_action_targets();
+        if targets.is_empty() {
             return None;
         }
-        // Extract the extension.
-        // `Path::extension()` returns
-        // the part after the last
-        // `.` of the file name, or
-        // `None` for dotfiles
-        // (which the files-mode
-        // walk skips by default
-        // anyway) and files with
-        // no extension.
-        let ext = std::path::Path::new(&row.directory)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase());
-        // Look up the command:
-        // 1. exact extension
-        //    match (case-
-        //    insensitive) if
-        //    the file has one,
-        // 2. `default` fallback
-        //    otherwise.
-        //
-        // A file without an extension
-        // (e.g. a `Makefile`,
-        // `LICENSE`) is matched
-        // against `default` only,
-        // not the empty-string
-        // mapping. The user who
-        // wants "all extensionless
-        // files use `bat`" writes
-        // `smart-open.default=bat`
-        // — they don't need to
-        // add a separate empty-key
-        // mapping.
-        let cmd = ext
-            .as_ref()
-            .and_then(|e| self.smart_open_file_commands.get(e))
-            .or_else(|| self.smart_open_file_commands.get("default"))
-            .cloned();
-        let Some(cmd) = cmd else {
-            // No mapping for this
-            // extension and no
-            // `default` fallback —
-            // fall through to
-            // `Run` (open in
-            // editor).
+        // Build one staged command per marked file that has a
+        // configured mapping; non-file rows (directories) and
+        // files with no mapping are silently skipped rather than
+        // aborting the whole batch — the user marked a mix, we
+        // open what we can. Only if NOTHING in the batch has a
+        // mapping do we return `None` (matches the single-row
+        // contract: "nothing to smart-open here, fall through to
+        // Run").
+        let mut staged_commands: Vec<String> = Vec::new();
+        for row in &targets {
+            // Only files trigger the extension lookup —
+            // directories fall through to the default
+            // (cd / workspace create).
+            if row.mode != "file" {
+                continue;
+            }
+            // Extract the extension. `Path::extension()` returns
+            // the part after the last `.` of the file name, or
+            // `None` for dotfiles (which the files-mode walk
+            // skips by default anyway) and files with no
+            // extension.
+            let ext = std::path::Path::new(&row.directory)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            // Look up the command:
+            // 1. exact extension match (case-insensitive) if
+            //    the file has one,
+            // 2. `default` fallback otherwise.
+            //
+            // A file without an extension (e.g. a `Makefile`,
+            // `LICENSE`) is matched against `default` only, not
+            // the empty-string mapping. The user who wants "all
+            // extensionless files use `bat`" writes
+            // `smart-open.default=bat` — they don't need to add
+            // a separate empty-key mapping.
+            let cmd = ext
+                .as_ref()
+                .and_then(|e| self.smart_open_file_commands.get(e))
+                .or_else(|| self.smart_open_file_commands.get("default"))
+                .cloned();
+            let Some(cmd) = cmd else {
+                continue;
+            };
+            // Stage the command with the file's absolute path
+            // appended. The command is taken verbatim (the user
+            // owns the formatting — `bat --style=plain` works as
+            // expected) and the path is POSIX-single-quote
+            // escaped so paths with spaces, quotes, or
+            // backslashes can't break the staged command.
+            let quoted = crate::util::shell_quote(&row.directory);
+            staged_commands.push(format!("{} {}", cmd.trim(), quoted));
+        }
+        if staged_commands.is_empty() {
             return None;
-        };
-        // Stage the command with
-        // the file's absolute path
-        // appended. The command
-        // is taken verbatim (the
-        // user owns the formatting
-        // — `bat --style=plain`
-        // works as expected) and
-        // the path is POSIX-
-        // single-quote escaped so
-        // paths with spaces,
-        // quotes, or backslashes
-        // can't break the staged
-        // command.
-        let quoted = crate::util::shell_quote(&row.directory);
-        let staged = format!("{} {}", cmd.trim(), quoted);
+        }
+        // Chain multiple files' commands with the same `; `
+        // idiom used elsewhere for multi-step staged execution
+        // (see the multiplexer bootstrap chaining in
+        // `src/tui/actions.rs`) — each runs regardless of the
+        // previous one's exit status.
+        let staged = staged_commands.join(" ; ");
         // Set pick_mode so the run-
         // loop treats this as a
         // normal `Run`-equivalent
@@ -9318,6 +9430,29 @@ impl App {
         self.list_state
             .selected()
             .and_then(|i| self.merged_rows.get(i))
+    }
+
+    /// Rows to act on for a "smart" bulk-capable action: every
+    /// marked row (in `merged_rows` order, so the result matches
+    /// on-screen order) when at least one row is marked,
+    /// otherwise just the currently selected row (empty when
+    /// nothing is selected). Shared by the `Action::SmartOpen`
+    /// branches that can meaningfully act on more than one row
+    /// (JIRA open, todo mark-done, files smart-open) — the
+    /// overlay-opening branches (codegraph/tags callers-callees
+    /// picker) don't use this and stay single-row, since a
+    /// picker overlay can't sensibly show N rows' relations at
+    /// once.
+    fn smart_action_targets(&self) -> Vec<HistoryRow> {
+        if self.marked_ids.is_empty() {
+            self.selected_row().cloned().into_iter().collect()
+        } else {
+            self.merged_rows
+                .iter()
+                .filter(|r| self.marked_ids.contains(&mark_key(r)))
+                .cloned()
+                .collect()
+        }
     }
 
     fn is_comment_editing(&self) -> bool {
@@ -10362,6 +10497,68 @@ impl App {
     fn delete_directory(&mut self, dir: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM history WHERE directory = ?1", params![dir])?;
+        self.refresh();
+        self.refresh_labeled();
+        self.confirm_delete = None;
+        Ok(())
+    }
+
+    /// Toggle the marked state of the currently selected row
+    /// (`Action::ToggleMark`, `C-x` by default). A quiet no-op
+    /// when nothing is selected — marking isn't destructive, so
+    /// there's nothing worth a status message for.
+    fn toggle_mark(&mut self) {
+        let Some(key) = self.selected_row().map(mark_key) else {
+            return;
+        };
+        if !self.marked_ids.remove(&key) {
+            self.marked_ids.insert(key);
+        }
+    }
+
+    /// Clear every mark (`Action::ClearMarks`). Always succeeds;
+    /// a status message confirms the count cleared so the user
+    /// gets feedback even when the list itself doesn't visibly
+    /// change (e.g. the marked rows are currently scrolled out
+    /// of view).
+    fn clear_marks(&mut self) {
+        let n = self.marked_ids.len();
+        self.marked_ids.clear();
+        self.set_status_message(if n == 0 {
+            "No marks to clear".to_string()
+        } else {
+            format!("Cleared {} mark{}", n, if n == 1 { "" } else { "s" })
+        });
+    }
+
+    /// Delete every marked row (`Action::BulkDeleteMarked`,
+    /// after the `ConfirmMode::DeleteMarked` confirmation
+    /// dialog). Deletes by an explicit id list — unlike
+    /// `delete_matching`, the marked set already IS the
+    /// explicit list, so there's no `build_where()` clause to
+    /// derive. Synthetic ids from non-history-table modes
+    /// (todo/panes/etc. — see the `marked_ids` doc comment on
+    /// `App`) simply match zero rows here: the `history` table's
+    /// `INTEGER PRIMARY KEY` is always positive, so a negative
+    /// synthetic id can never collide with a real row.
+    fn delete_marked(&mut self) -> Result<()> {
+        if self.marked_ids.is_empty() {
+            self.confirm_delete = None;
+            return Ok(());
+        }
+        // Extract the raw ids for the SQL `IN` list — the
+        // `comment` half of the mark key only matters for
+        // disambiguating same-id rows in-memory (see the
+        // `marked_ids` doc comment); a duplicate id in the `IN`
+        // list (possible if two marked rows happen to share a
+        // synthetic id, e.g. two todos) is a harmless no-op for
+        // SQL, not a double-delete.
+        let ids: Vec<i64> = self.marked_ids.iter().map(|(id, _)| *id).collect();
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!("DELETE FROM history WHERE id IN ({})", placeholders);
+        self.conn
+            .execute(&sql, rusqlite::params_from_iter(ids.iter()))?;
+        self.marked_ids.clear();
         self.refresh();
         self.refresh_labeled();
         self.confirm_delete = None;
@@ -11763,6 +11960,24 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.confirm_delete = Some(ConfirmMode::DeleteMatching);
             false
         }
+        Action::ToggleMark => {
+            app.toggle_mark();
+            false
+        }
+        Action::ClearMarks => {
+            app.clear_marks();
+            false
+        }
+        Action::BulkDeleteMarked => {
+            if app.marked_ids.is_empty() {
+                app.set_status_message("No marked rows to delete".to_string());
+            } else {
+                app.confirm_delete = Some(ConfirmMode::DeleteMarked {
+                    count: app.marked_ids.len(),
+                });
+            }
+            false
+        }
         Action::ClearQuery => {
             app.clear_query();
             false
@@ -12225,6 +12440,9 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
                 ConfirmMode::DeleteDirectory { directory, .. } => {
                     let dir = directory.clone();
                     let _ = app.delete_directory(&dir);
+                }
+                ConfirmMode::DeleteMarked { .. } => {
+                    let _ = app.delete_marked();
                 }
             }
             false

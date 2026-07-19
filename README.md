@@ -20,7 +20,8 @@ Smart History replaces the shell's native history with a single SQLite database 
 
 - **SQLite-backed history** at `~/.local/cache/smarthistory/smarthistory.db` — one row per command, with directory, session UUID, exit code, captured output, and timestamp.
 - **Match-algorithm toggle** (`C-f`): cycle between SUBSTRING → FUZZY → REGEX for the current search. The algorithm applies to all prefix modes (history, directories, panes, notes, todos, files, output) except JIRA.
-- **Context-aware picker** (`Ctrl+R`): a full-screen TUI for searching, picking, and editing. Supports multiple *scopes* (`SESS` → `DIR` → `GLOBAL` → `STATS`), each narrowing the same underlying database to a different slice.
+- **Context-aware picker** (`Ctrl+R`): a full-screen TUI for searching, picking, and editing. Supports multiple *scopes* (`SESS` → `DIR` → `GLOBAL` → `STATS`), each narrowing the same underlying database to a different slice. The list shows a live "position/total" indicator in its title and a scrollbar once the list is taller than the visible window.
+- **Multi-select** (`Ctrl+X` to toggle a mark): mark several rows and delete them all at once (`key.bulk-delete-marked=...`, unbound by default, with confirmation) instead of deleting one at a time.
 - **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`%`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`~`), and tags (`$`).
 - **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate natural-language into a runnable command (`=`), describe a command in plain prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
@@ -107,6 +108,7 @@ own config.
 | `Ctrl+E` | Edit the selected row's comment. |
 | `Ctrl+O` | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
 | `Ctrl+D` | Delete the selected entry (with confirmation). |
+| `Ctrl+X` | Toggle mark on the selected row (multi-select). Marked rows show a `[x]` prefix. |
 | `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `~`, else runs the selected row. |
 | `Ctrl+R` | Open the callers / callees picker for the selected `&` / `$` symbol. |
 | `Ctrl+P` / `Ctrl+N` | Per-mode query history recall (readline `previous-history` / `next-history`). |
@@ -126,7 +128,10 @@ The duplicate filter and the "delete matching" actions
 ship **unbound** by default (set them via
 `key.toggle-duplicate-filter=...` and
 `key.delete-matching=...` in your config to
-re-enable them).
+re-enable them). Same for the bulk multi-select
+actions: `key.clear-marks=...` and
+`key.bulk-delete-marked=...` (delete every marked
+row, with confirmation).
 
 All keybindings are user-configurable via `key.<action>=<spec>` in the config file. See [docs/actions.md](docs/actions.md) for the full reference (all 48 actions, grouped by category, with config keys and default keys); see [docs/configuration.md](docs/configuration.md) for the full config-file reference (every `key.<action>`, `prefix.<name>`, `tuicolor.*`, `capturelines.*`, `smart-open.*`, `jira.search.*`, `session.*`, `host.*`, `notes.*`, `ollama.*`, and env-var override); see [TECHNICAL.md](TECHNICAL.md) for the deeper implementation reference.
 
