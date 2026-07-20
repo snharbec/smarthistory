@@ -4175,43 +4175,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create dir");
         let db_path = dir.join("notes.sqlite");
+        // Write a real markdown file with `#tag` / `[[link]]`
+        // tokens in the body and index it through
+        // `process_markdown_file` + `write_markdown_data_to_sqlite_with_conn`
+        // (the real indexer's write path), rather than a raw
+        // `INSERT INTO markdown_data (...) VALUES (...)`
+        // bypass. `notes_tag_complete`/`notes_link_complete`
+        // read from the `note_tags`/`note_links` junction
+        // tables via `note_search::commands::metadata::get_unique_values`,
+        // which are only populated by that write path — the
+        // markdown_data/todo_entries JSON columns a hand-rolled
+        // INSERT can fill in are not what completion reads.
+        let tag_tokens: String = tags.iter().map(|t| format!("#{} ", t)).collect();
+        let link_tokens: String = links.iter().map(|l| format!("[[{}]] ", l)).collect();
+        let body = format!("---\ntitle: test\n---\n\n{}{}\n", tag_tokens, link_tokens);
+        std::fs::write(dir.join("test.md"), &body).expect("write test.md");
+
         let conn = Connection::open(&db_path).expect("open db");
         note_search::init_database_schema(&conn).expect("schema");
-        // Insert a `markdown_data` row first
-        // (the `todo_entries` table has a
-        // foreign key to it).
-        let tags_json = serde_json::Value::Array(
-            tags.iter()
-                .map(|t| serde_json::Value::String(t.to_string()))
-                .collect(),
-        );
-        let links_json = serde_json::Value::Array(
-            links
-                .iter()
-                .map(|l| serde_json::Value::String(l.to_string()))
-                .collect(),
-        );
-        conn.execute(
-            "INSERT INTO markdown_data \
-             (filename, title, tags, links) \
-             VALUES ('test.md', 'test', ?1, ?2)",
-            rusqlite::params![
-                serde_json::to_string(&tags_json).unwrap(),
-                serde_json::to_string(&links_json).unwrap(),
-            ],
-        )
-        .expect("insert markdown_data");
-        // Insert one synthetic todo row
-        // referencing the markdown_data row.
-        conn.execute(
-            "INSERT INTO todo_entries (filename, text, tags, links) \
-             VALUES ('test.md', 'test', ?1, ?2)",
-            rusqlite::params![
-                serde_json::to_string(&tags_json).unwrap(),
-                serde_json::to_string(&links_json).unwrap(),
-            ],
-        )
-        .expect("insert todo");
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join("test.md"), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
         drop(conn);
         (dir, db_path)
     }

@@ -29,6 +29,8 @@ note_search create-note <text> --type daily --timestamp --todo --database <notes
 
 The `--todo` flag is what marks the appended line as a todo entry. The TUI exits and the parent shell runs the command. The new todo appears next time you enter `!` mode.
 
+For a todo body longer than fits on the query line, press `F2` (`Action::ComposeNoteEntry`) instead of typing `!@new <text>` — this opens a multi-line compose overlay (`Enter` inserts a newline, `Ctrl-S` saves and exits, `Esc` cancels) that stages the same `note_search create-note ... --todo` command, with the buffer's embedded newlines re-indented so the entry stays a single valid markdown list item. Purely additive: `!@new <text>` still works unchanged. See [`docs/actions.md`](../actions.md#composenoteentry).
+
 ## Required configuration
 
 Same as `@` mode: `notes.database` and `notes.dir`. See [notes.md](notes.md#required-configuration).

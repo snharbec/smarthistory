@@ -1003,6 +1003,14 @@ pub struct QueryPrefixes {
     /// CodeGraph has indexed it.
     pub codegraph: char,
     pub jira: char,
+    /// Prefix for the element-search mode (default `:`).
+    /// Searches individual paragraphs, list items (with
+    /// nested children folded in), and headings via
+    /// `note_search`'s `elements` table — finer-grained
+    /// than `notes` (`@`), which searches whole files.
+    /// Selecting a row opens the file in `$EDITOR` at the
+    /// element's start line, same as `tags` / `codegraph`.
+    pub elements: char,
 }
 
 impl Default for QueryPrefixes {
@@ -1020,6 +1028,7 @@ impl Default for QueryPrefixes {
             ag: ',',
             codegraph: '&',
             jira: '-',
+            elements: ':',
         }
     }
 }
@@ -2554,6 +2563,7 @@ impl Config {
             "ag" => prefixes.ag = c,
             "codegraph" => prefixes.codegraph = c,
             "jira" => prefixes.jira = c,
+            "elements" => prefixes.elements = c,
             _ => {}
         }
     }

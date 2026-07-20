@@ -1,7 +1,7 @@
 //! Per-prefix-mode modules.
 //!
 //! Each prefix mode (output, llm, question, notes, todo, directories,
-//! panes, files, tags, ag, codegraph, jira — and the implicit
+//! panes, files, tags, ag, codegraph, jira, elements — and the implicit
 //! "history" no-prefix mode) is a module of free functions in this
 //! directory. The [`ModeKind`] enum is the single dispatch point:
 //! every `if app.is_X_query() { ... } else if app.is_Y_query() { ... }`
@@ -75,6 +75,11 @@ pub enum ModeKind {
     Codegraph,
     /// `-` (default). JIRA issue search.
     Jira,
+    /// `:` (default). Element search — finer-grained than `Notes`:
+    /// searches individual paragraphs, list items (with nested
+    /// children folded in), and headings via `note_search`'s
+    /// `elements` table, rather than whole files.
+    Elements,
 }
 
 impl ModeKind {
@@ -96,6 +101,7 @@ impl ModeKind {
             ModeKind::Ag => ',',
             ModeKind::Codegraph => '&',
             ModeKind::Jira => '-',
+            ModeKind::Elements => ':',
         }
     }
 
@@ -117,6 +123,7 @@ impl ModeKind {
             ModeKind::Ag => "ag",
             ModeKind::Codegraph => "codegraph",
             ModeKind::Jira => "jira",
+            ModeKind::Elements => "elements",
         }
     }
 
@@ -147,6 +154,7 @@ impl ModeKind {
             ModeKind::Ag => "Ag search",
             ModeKind::Codegraph => "CodeGraph",
             ModeKind::Jira => "JIRA",
+            ModeKind::Elements => "Elements",
         }
     }
 
@@ -170,6 +178,7 @@ impl ModeKind {
             ModeKind::Ag => prefixes.ag,
             ModeKind::Codegraph => prefixes.codegraph,
             ModeKind::Jira => prefixes.jira,
+            ModeKind::Elements => prefixes.elements,
         }
     }
 
@@ -230,6 +239,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Codegraph
     } else if c == p.jira {
         ModeKind::Jira
+    } else if c == p.elements {
+        ModeKind::Elements
     } else {
         ModeKind::History
     }
@@ -238,6 +249,7 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
 pub mod ag;
 pub mod codegraph;
 pub mod directories;
+pub mod elements;
 pub mod files;
 pub mod jira;
 pub mod llm;
@@ -249,12 +261,12 @@ pub mod tags;
 pub mod todo;
 
 /// Lazy-load the selected row's preview context for every mode that
-/// needs it (tags/codegraph/notes/todo/files/panes). Each mode's own
-/// `ensure_selected_context` bails out immediately via its own
-/// `matches(app)` check, so calling all six unconditionally is cheap
-/// and correct regardless of which mode is active — this is the
+/// needs it (tags/codegraph/notes/todo/files/panes/elements). Each
+/// mode's own `ensure_selected_context` bails out immediately via its
+/// own `matches(app)` check, so calling all seven unconditionally is
+/// cheap and correct regardless of which mode is active — this is the
 /// single dispatch point every call site should use instead of
-/// re-listing the six calls inline (previously duplicated across
+/// re-listing the calls inline (previously duplicated across
 /// `App::refresh`, `App::move_selection`, `App::show_output_view`,
 /// and `run_loop`).
 pub(crate) fn ensure_selected_context(app: &mut App) {
@@ -264,6 +276,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     crate::tui::mode::todo::ensure_selected_context(app);
     crate::tui::mode::files::ensure_selected_context(app);
     crate::tui::mode::panes::ensure_selected_context(app);
+    crate::tui::mode::elements::ensure_selected_context(app);
 }
 
 /// The colour used to tint the input border / title for a given
@@ -288,6 +301,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Codegraph => Some(Theme::accent()),
         ModeKind::Ag => Some(Theme::warning()),
         ModeKind::Jira => Some(Theme::info()),
+        ModeKind::Elements => Some(Theme::accent()),
         ModeKind::History => None,
     }
 }
@@ -320,6 +334,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Tags => ("$".to_string(), format!(" symbols{} ", algo)),
         ModeKind::Codegraph => ("&".to_string(), format!(" codegraph{} ", algo)),
         ModeKind::Ag => (",".to_string(), format!(" ag{} ", algo)),
+        ModeKind::Elements => (":".to_string(), format!(" elements{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -521,6 +536,7 @@ pub fn run_all_checks(
         let report = match mode {
             ModeKind::Notes => crate::tui::mode::notes::check(app),
             ModeKind::Todo => crate::tui::mode::todo::check(app),
+            ModeKind::Elements => crate::tui::mode::elements::check(app),
             ModeKind::Tags => crate::tui::mode::tags::check(app),
             ModeKind::Codegraph => crate::tui::mode::codegraph::check(app),
             ModeKind::Files => crate::tui::mode::files::check(app),
@@ -546,6 +562,7 @@ impl ModeKind {
         &[
             ModeKind::Notes,
             ModeKind::Todo,
+            ModeKind::Elements,
             ModeKind::Tags,
             ModeKind::Codegraph,
             ModeKind::Files,
@@ -585,6 +602,7 @@ mod tests {
             ModeKind::Ag,
             ModeKind::Codegraph,
             ModeKind::Jira,
+            ModeKind::Elements,
         ] {
             let title = kind.list_title();
             assert!(!title.is_empty(), "{:?} returned empty title", kind);

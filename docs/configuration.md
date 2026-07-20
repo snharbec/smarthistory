@@ -294,6 +294,7 @@ The first character the user types to enter a mode. The default keymap covers ev
 | `prefix.ag` | ag content search | `,` | silver-searcher |
 | `prefix.codegraph` | codegraph | `&` | FTS5 symbol search |
 | `prefix.jira` | JIRA | `-` | JIRA issue search |
+| `prefix.elements` | element search | `:` | note_search `elements` table (paragraphs/list-items/headings) |
 
 ```ini
 # Move JIRA off `-` (a frequently mistyped key) to backtick:
@@ -656,6 +657,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `prefix.ag` | char | `,` | [Query prefixes](#query-prefixes) |
 | `prefix.codegraph` | char | `&` | [Query prefixes](#query-prefixes) |
 | `prefix.jira` | char | `-` | [Query prefixes](#query-prefixes) |
+| `prefix.elements` | char | `:` | [Query prefixes](#query-prefixes) |
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |
 | `homemap` | path prefix list | — | [Multiplexer integration](#multiplexer-integration) |

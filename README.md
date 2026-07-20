@@ -22,7 +22,7 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Match-algorithm toggle** (`C-f`): cycle between SUBSTRING → FUZZY → REGEX for the current search. The algorithm applies to all prefix modes (history, directories, panes, notes, todos, files, output) except JIRA.
 - **Context-aware picker** (`Ctrl+R`): a full-screen TUI for searching, picking, and editing. Supports multiple *scopes* (`SESS` → `DIR` → `GLOBAL` → `STATS`), each narrowing the same underlying database to a different slice. The list shows a live "position/total" indicator in its title and a scrollbar once the list is taller than the visible window.
 - **Multi-select** (`Ctrl+X` to toggle a mark): mark several rows and delete them all at once (`key.bulk-delete-marked=...`, unbound by default, with confirmation) instead of deleting one at a time.
-- **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`%`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`~`), and tags (`$`).
+- **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`%`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`~`), tags (`$`), CodeGraph (`&`), ag content search (`,`), and note-element search (`:`).
 - **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate natural-language into a runnable command (`=`), describe a command in plain prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
@@ -109,7 +109,8 @@ own config.
 | `Ctrl+O` | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
 | `Ctrl+D` | Delete the selected entry (with confirmation). |
 | `Ctrl+X` | Toggle mark on the selected row (multi-select). Marked rows show a `[x]` prefix. |
-| `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `~`, else runs the selected row. |
+| `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `~`, else runs the selected row. In `-`/`!`/`~` mode, acts on every **marked** row when at least one is marked, not just the selected one. |
+| `F2` | Open the multi-line note/todo compose overlay in `@`/`!` mode (`Enter` = newline, `Ctrl-S` = save). Complements the one-line `@new <text>` / `!@new <text>` quick-create. |
 | `Ctrl+R` | Open the callers / callees picker for the selected `&` / `$` symbol. |
 | `Ctrl+P` / `Ctrl+N` | Per-mode query history recall (readline `previous-history` / `next-history`). |
 | `Ctrl+A` | Open the help overlay. |
@@ -175,8 +176,9 @@ The first character of the query selects the prefix mode. Each mode answers a di
 
 - `@new <text>` — append a timestamped line to today's daily note.
 - `!@new <text>` — append a timestamped todo entry (`- [ ] text`) to today's daily note.
+- `F2` — open a multi-line compose overlay instead, for a body longer than one line (`Enter` inserts a newline, `Ctrl-S` saves, `Esc` cancels). Works the same way in both `@` and `!` mode; purely additive to the one-liners above.
 
-Both stage a `note_search create-note` command and require `notes.database` to be configured.
+All three stage a `note_search create-note` command and require `notes.database` to be configured.
 
 ### Multiplexer integration (tmux + herdr)
 

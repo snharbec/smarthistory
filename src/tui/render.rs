@@ -13,12 +13,12 @@ use ratatui::{
 };
 
 use super::bindings::{Action, format_key_specs};
-use super::state::{ExitFilter, HistoryRow, Mode, SortOrder};
+use super::state::{ExitFilter, HistoryRow, Mode, NoteComposeDialog, SortOrder};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
     AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView, NotesDateFilter, OutputView, PrefixPicker, QuestionView,
-    format_diff, format_time, mark_key,
+    char_to_byte_index, format_diff, format_time, mark_key,
 };
 use super::CodeGraphRelationsPicker;
 use regex::Regex;
@@ -153,6 +153,18 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_add_entry_dialog(f, app, dialog);
     }
 
+    // The note/todo compose overlay is a sibling of the
+    // add-entry dialog: also drawn last (topmost). The two are
+    // mutually exclusive in practice (each opens via its own
+    // dedicated key and `handle_key`'s precedence chain routes
+    // all input to whichever is open), so draw order between
+    // them doesn't matter for correctness — this is just
+    // "newest overlay wins" for consistency with the pattern
+    // above.
+    if let Some(dialog) = app.note_compose.as_ref() {
+        draw_note_compose(f, app, dialog);
+    }
+
     // If a comment exists, draw the labeled entries pane as an overlay
     // so that labeled history elements are always available.
     // (Labeled entries are now merged into the main list instead.)
@@ -272,6 +284,80 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             .as_ref(),
         )
         .split(popup_layout[1])[1]
+}
+
+/// Draw the multi-line note/todo compose overlay
+/// (`Action::ComposeNoteEntry`). The buffer is rendered as
+/// literal lines split on `'\n'` — no soft-wrap — so long
+/// lines simply extend past the visible width; this keeps the
+/// cursor-position math a straightforward line/column count
+/// instead of having to account for ratatui's wrap points too.
+/// A simple bottom-anchored auto-scroll keeps the cursor's line
+/// visible when the buffer grows taller than the box.
+fn draw_note_compose(f: &mut Frame, app: &App, dialog: &NoteComposeDialog) {
+    let area = centered_rect(70, 60, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let title = if dialog.todo {
+        " New todo (multi-line) — Ctrl-S save "
+    } else {
+        " New note (multi-line) — Ctrl-S save "
+    };
+
+    let cursor_byte = char_to_byte_index(&dialog.text, dialog.cursor);
+    let before_cursor = &dialog.text[..cursor_byte];
+    let cursor_line = before_cursor.matches('\n').count();
+    let cursor_col = before_cursor.rsplit('\n').next().unwrap_or("").chars().count();
+
+    let display_lines: Vec<Line> = dialog.text.split('\n').map(Line::from).collect();
+    // Reserve 2 rows for the top/bottom border and 1 for the
+    // footer hint (which overwrites the bottom border row, same
+    // convention as the describe/help overlays' scroll footer).
+    let inner_height = area.height.saturating_sub(3).max(1) as usize;
+    let scroll_y = cursor_line.saturating_sub(inner_height.saturating_sub(1)) as u16;
+
+    let paragraph = Paragraph::new(display_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(title)
+            .title_style(Theme::accent())
+            .border_style(Theme::accent())
+            .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg))),
+    );
+    f.render_widget(paragraph.scroll((scroll_y, 0)), area);
+
+    if area.height >= 4 {
+        let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+        let cancel_hint = if cancel_keys.is_empty() {
+            "no key bound".to_string()
+        } else {
+            cancel_keys
+        };
+        let footer = format!(
+            " Ctrl-S save · {} cancel · Enter newline ",
+            cancel_hint
+        );
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer, Theme::dim()))),
+            footer_area,
+        );
+    }
+
+    let inner_x = area.x + 1;
+    let inner_y = area.y + 1;
+    let visible_cursor_line = cursor_line.saturating_sub(scroll_y as usize);
+    let cursor_x =
+        (inner_x + cursor_col as u16).min(area.x + area.width.saturating_sub(2));
+    let cursor_y = (inner_y + visible_cursor_line as u16)
+        .min(area.y + area.height.saturating_sub(2));
+    f.set_cursor_position((cursor_x, cursor_y));
 }
 
 /// Draw a centered overlay with a bordered title bar, clearing the
@@ -3106,18 +3192,64 @@ fn list_display_position(
     })
 }
 
+/// Given the same `(selected, offset, viewport, total)` inputs
+/// ratatui's `List` widget would receive, returns the `[first,
+/// last)` half-open range of item indices it will actually paint —
+/// i.e. the same window `List::get_items_bounds` computes
+/// internally (bottom-anchored at `offset`, then shifted just
+/// enough to keep `selected` in view), specialized for the case
+/// where every item has a uniform height of 1 line (true here:
+/// `render_row` always returns a single `Line`, for every mode).
+///
+/// `draw_list` used to build a `ListItem` for every row in
+/// `merged_rows` before handing them to `List::new` — ratatui's
+/// widget only ever *paints* the visible slice, but by then the
+/// (expensive: string formatting + styled spans) construction cost
+/// for the other thousands of off-screen rows was already paid, on
+/// every keystroke. A large notes vault easily indexes tens of
+/// thousands of elements (`:` mode), which measured at ~400ms of
+/// list-building work per keystroke — the actual dominant cost
+/// behind reports of `:` mode typing lag, well past the (already
+/// debounced, backgrounded) search itself. Calling this function
+/// first and only constructing `ListItem`s for `[first, last)`
+/// fixes that without changing what ends up on screen.
+///
+/// Verified against the real widget in `tests::list_visible_window_matches_real_ratatui_scroll`.
+fn list_visible_window(
+    selected: Option<usize>,
+    offset: usize,
+    viewport: usize,
+    total: usize,
+) -> (usize, usize) {
+    if total == 0 || viewport == 0 {
+        return (0, 0);
+    }
+    let offset = offset.min(total - 1);
+    let mut first = offset;
+    let mut last = (offset + viewport).min(total);
+    if let Some(sel) = selected {
+        let sel = sel.min(total - 1);
+        if sel >= last {
+            last = sel + 1;
+            first = last.saturating_sub(viewport);
+        } else if sel < first {
+            first = sel;
+            last = (first + viewport).min(total);
+        }
+    }
+    (first, last)
+}
+
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let merged = app.merged_rows();
-    let age_width = merged
-        .iter()
-        .map(|r| format_diff(r.timestamp).chars().count())
-        .max()
-        .unwrap_or(3)
-        .max(3);
 
-    // Build the real row items. Rows are stored newest-first; for
-    // display we want oldest at the top and newest at the bottom,
-    // so reverse the order. Pass `is_selected` based on the data index.
+    // Rows are stored newest-first; for display we want oldest at
+    // the top and newest at the bottom, so the CONCEPTUAL (padding
+    // + reversed) list is what "rendered index" coordinates below
+    // refer to. We no longer materialize a `ListItem` for every
+    // entry in it up front — only for whichever slice of it
+    // `list_visible_window` says will actually be painted (see
+    // that function's doc comment for why).
     //
     // **Panes mode (`*`) is different.** The rows are produced by
     // `fetch_session_panes_impl` as a tree: `workspace` header row,
@@ -3126,28 +3258,9 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // top-to-bottom (header, then the panes it owns). Reversing it
     // would put a workspace's pane rows ABOVE that workspace's header,
     // which destroys the visual grouping. So panes mode skips the
-    // `.rev()` and treats the rows as already display-ordered.
+    // reversal and treats the rows as already display-ordered.
     let is_panes = app.is_panes_query();
-    let real_items: Vec<ListItem> = if is_panes {
-        merged
-            .iter()
-            .enumerate()
-            .map(|(data_idx, r)| {
-                let is_selected = app.list_state.selected() == Some(data_idx);
-                ListItem::new(render_row(r, app, is_selected, age_width))
-            })
-            .collect()
-    } else {
-        merged
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(data_idx, r)| {
-                let is_selected = app.list_state.selected() == Some(data_idx);
-                ListItem::new(render_row(r, app, is_selected, age_width))
-            })
-            .collect()
-    };
+    let real_count = merged.len();
 
     // Bottom-align: when there are fewer real rows than the visible
     // height, pad the top with empty items so the real rows sit at
@@ -3159,19 +3272,12 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // behavior matches the user's mental model of a tree view
     // (header at the top, indentation underneath).
     let visible_height = area.height.saturating_sub(2) as usize;
-    let real_count = real_items.len();
     let pad = if is_panes {
         0
     } else {
         visible_height.saturating_sub(real_count)
     };
-
-    let mut items: Vec<ListItem> = if is_panes {
-        Vec::with_capacity(real_count)
-    } else {
-        (0..pad).map(|_| ListItem::new("")).collect()
-    };
-    items.extend(real_items);
+    let total_conceptual = pad + real_count;
 
     // The stored selection is in data coordinates (0 = newest).
     // Map it to the rendered list coordinates where the newest item
@@ -3180,7 +3286,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // **Panes mode**: data index IS the rendered index (0 = first
     // row at the top). No flip.
     let rendered_idx = if is_panes {
-        app.list_state.selected().map(|data_idx| data_idx)
+        app.list_state.selected()
     } else {
         app.list_state
             .selected()
@@ -3197,7 +3303,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // workspace header is the first visible row and the user can
     // scroll DOWN to see more panes. The bottom-anchor logic for
     // the reverse-sorted history list doesn't apply here.
-    let offset = if is_panes {
+    let anchor_offset = if is_panes {
         0
     } else if real_count >= visible_height {
         // Anchor at the bottom: offset = real_count - visible_height.
@@ -3208,10 +3314,56 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         0
     };
 
-    // Replace the state so we can set the offset explicitly. Preserve
-    // the rendered selection for this frame.
-    let mut render_state = ListState::default().with_offset(offset);
-    render_state.select(rendered_idx);
+    // The actual window of conceptual indices ratatui's `List`
+    // would paint, given the anchor offset above and wherever the
+    // selection currently is (which may be scrolled well outside
+    // the anchor, e.g. the user pressed `Up` repeatedly through a
+    // long list). Building `ListItem`s for just this slice —
+    // instead of all `total_conceptual` entries — is the whole
+    // point of `list_visible_window`.
+    let (first_visible, last_visible) =
+        list_visible_window(rendered_idx, anchor_offset, visible_height, total_conceptual);
+
+    // `age_width` only needs to line up within what's actually on
+    // screen, so derive it from the visible window instead of
+    // scanning every row.
+    let age_width = (first_visible..last_visible)
+        .filter(|&i| i >= pad)
+        .filter_map(|i| {
+            let data_idx = if is_panes {
+                i - pad
+            } else {
+                real_count.saturating_sub(1) - (i - pad)
+            };
+            merged.get(data_idx)
+        })
+        .map(|r| format_diff(r.timestamp).chars().count())
+        .max()
+        .unwrap_or(3)
+        .max(3);
+
+    let items: Vec<ListItem> = (first_visible..last_visible)
+        .map(|i| {
+            if i < pad {
+                ListItem::new("")
+            } else {
+                let data_idx = if is_panes {
+                    i - pad
+                } else {
+                    real_count.saturating_sub(1) - (i - pad)
+                };
+                let r = &merged[data_idx];
+                let is_selected = app.list_state.selected() == Some(data_idx);
+                ListItem::new(render_row(r, app, is_selected, age_width))
+            }
+        })
+        .collect();
+
+    // `items` is already exactly the visible slice, so the state we
+    // hand to the widget starts at offset 0 with the selection
+    // shifted to be relative to `first_visible`.
+    let mut render_state = ListState::default().with_offset(0);
+    render_state.select(rendered_idx.map(|ri| ri.saturating_sub(first_visible)));
 
     // The list title is mode-dependent. The
     // historical "History" label is kept for the
@@ -3316,10 +3468,14 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    // ratatui may have scrolled the state; read its final offset and
-    // selection back into app.list_state in data coordinates.
-    let final_selected = render_state.selected();
-    let data_idx = final_selected.and_then(|ri| {
+    // Map the (pre-render, full conceptual-coordinate) selection
+    // back into app.list_state in data coordinates. `rendered_idx`
+    // rather than `render_state.selected()` (which is relative to
+    // `first_visible`, not the full conceptual list) since ratatui
+    // doesn't itself mutate `.selected()` during render — only
+    // `.offset()`, which this function no longer even reads back
+    // (see `list_visible_window`'s doc comment).
+    let data_idx = rendered_idx.and_then(|ri| {
         if ri < pad {
             None
         } else {
@@ -5341,16 +5497,19 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Ag-mode, tags-mode, codegraph-mode, JIRA-mode, notes-mode,
-    // todo-mode, files-mode, and panes-mode rows carry more than
-    // 4 lines of context. Ag/tags/codegraph carry up to
-    // [`SOURCE_CONTEXT_LINES`] (50) lines of source context plus a
-    // callers/callees overlay. JIRA rows carry a 3-line header
-    // (Status/Priority, Due/Assignee, Description label) followed by
-    // the full issue description body. Notes / todo / files rows
-    // carry the first 50 lines of the referenced file (piped
-    // through `bat` for syntax highlighting). Pane rows carry
-    // the last 50 visible lines of the underlying herdr pane
-    // (from `herdr pane read <pane_id> --lines 50`).
+    // todo-mode, files-mode, panes-mode, and elements-mode rows
+    // carry more than 4 lines of context. Ag/tags/codegraph/
+    // elements carry up to [`SOURCE_CONTEXT_LINES`] (50) lines of
+    // source context CENTERED on the matched line (elements mode
+    // via `read_source_context_with_cache`, same as tags/ag) plus,
+    // for tags/codegraph, a callers/callees overlay. JIRA rows
+    // carry a 3-line header (Status/Priority, Due/Assignee,
+    // Description label) followed by the full issue description
+    // body. Notes / todo / files rows carry the first 50 lines of
+    // the referenced file (piped through `bat` for syntax
+    // highlighting). Pane rows carry the last 50 visible lines of
+    // the underlying herdr pane (from `herdr pane read <pane_id>
+    // --lines 50`).
     // The inline pane's height caps the actually-visible count
     // (ratatui renders only what fits), but we don't clamp the
     // slice here so a tall terminal / a scrolled `Ctrl-O` overlay
@@ -5364,6 +5523,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         || row.mode == "todo"
         || row.mode == "file"
         || row.mode == "pane"
+        || row.mode == "element"
     {
         crate::tui::SOURCE_CONTEXT_LINES
     } else {
@@ -5718,6 +5878,174 @@ mod tests {
     fn list_display_position_none_when_unselected_or_empty() {
         assert_eq!(list_display_position(None, 5, false), None);
         assert_eq!(list_display_position(Some(0), 0, false), None);
+    }
+
+    use super::list_visible_window;
+
+    #[test]
+    fn list_visible_window_empty_list_or_zero_viewport() {
+        assert_eq!(list_visible_window(None, 0, 10, 0), (0, 0));
+        assert_eq!(list_visible_window(Some(0), 0, 0, 10), (0, 0));
+    }
+
+    /// No selection: the window is just `[offset, offset+viewport)`,
+    /// clamped to `total` — the anchor position from `draw_list`,
+    /// unmodified.
+    #[test]
+    fn list_visible_window_no_selection_uses_offset_as_is() {
+        assert_eq!(list_visible_window(None, 0, 10, 100), (0, 10));
+        assert_eq!(list_visible_window(None, 50, 10, 100), (50, 60));
+        // Anchor near the end: window clamps to `total`.
+        assert_eq!(list_visible_window(None, 95, 10, 100), (95, 100));
+    }
+
+    /// Selection already inside `[offset, offset+viewport)`: window
+    /// is unchanged from the anchor.
+    #[test]
+    fn list_visible_window_selection_inside_anchor_is_a_noop() {
+        assert_eq!(list_visible_window(Some(55), 50, 10, 100), (50, 60));
+    }
+
+    /// Selection scrolled ABOVE the anchor window (e.g. the user
+    /// pressed `Up` repeatedly past a bottom-anchored viewport, the
+    /// scenario a long elements-mode result list hits by default):
+    /// the window slides up so the selected row is the first line.
+    #[test]
+    fn list_visible_window_selection_above_anchor_scrolls_up() {
+        assert_eq!(list_visible_window(Some(5), 50, 10, 100), (5, 15));
+        // Selection at the very top of the data.
+        assert_eq!(list_visible_window(Some(0), 50, 10, 100), (0, 10));
+    }
+
+    /// Selection scrolled BELOW the anchor window: the window
+    /// slides down so the selected row is the last line.
+    #[test]
+    fn list_visible_window_selection_below_anchor_scrolls_down() {
+        assert_eq!(list_visible_window(Some(80), 0, 10, 100), (71, 81));
+        // Selection at the very end of the data.
+        assert_eq!(list_visible_window(Some(99), 0, 10, 100), (90, 100));
+    }
+
+    /// A viewport at least as tall as the data, anchored at offset
+    /// 0 (the only anchor `draw_list` ever passes for a short list
+    /// — its "pad the top" branch): the window covers everything.
+    #[test]
+    fn list_visible_window_viewport_covers_entire_short_list() {
+        assert_eq!(list_visible_window(Some(2), 0, 10, 5), (0, 5));
+        assert_eq!(list_visible_window(None, 0, 10, 5), (0, 5));
+        // A nonzero offset is honored literally even when the
+        // viewport could fit everything — `draw_list` never passes
+        // this combination (its anchor is always 0 whenever total <
+        // viewport), but the function doesn't second-guess an
+        // offset it's given, matching ratatui's own behavior.
+        assert_eq!(list_visible_window(None, 3, 10, 5), (3, 5));
+    }
+
+    /// `draw_list` builds a `ListItem` per index in `[first, last)`
+    /// — this asserts that range never exceeds the requested
+    /// viewport size, for a broad sweep of inputs. A window wider
+    /// than the viewport would mean `draw_list` is building more
+    /// `ListItem`s than can ever be painted, defeating the whole
+    /// point of windowing.
+    #[test]
+    fn list_visible_window_never_exceeds_viewport_size() {
+        for total in [0usize, 1, 5, 10, 50, 137, 20_000] {
+            for viewport in [0usize, 1, 3, 10, 40] {
+                for offset in [0usize, 1, 7, total / 2, total.saturating_sub(1)] {
+                    for selected in [None, Some(0), Some(total / 3), Some(total.saturating_sub(1))]
+                    {
+                        let (first, last) = list_visible_window(selected, offset, viewport, total);
+                        assert!(first <= last, "first {first} > last {last}");
+                        assert!(
+                            last - first <= viewport,
+                            "window ({first}, {last}) wider than viewport {viewport} \
+                             (total={total}, offset={offset}, selected={selected:?})"
+                        );
+                        assert!(last <= total, "window extends past total {total}: {last}");
+                        // A zero-height viewport can't show anything
+                        // — including the selection — by construction.
+                        if let Some(sel) = selected
+                            && sel < total
+                            && viewport > 0
+                        {
+                            assert!(
+                                sel >= first && sel < last,
+                                "selected {sel} not inside window ({first}, {last}) \
+                                 (total={total}, offset={offset}, viewport={viewport})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validates `list_visible_window` against the REAL ratatui
+    /// `List` widget (not just a hand-derived formula): renders a
+    /// `List` of uniform-height (single-`Line`) items to a
+    /// `TestBackend` with the same `(selected, offset, viewport,
+    /// total)` inputs, and checks the resulting `state.offset`
+    /// (which ratatui's own `List::render` sets to whatever it
+    /// actually painted from — see `list::rendering::get_items_bounds`
+    /// upstream) matches `list_visible_window`'s `first`. This is
+    /// the actual claim `draw_list` now depends on: that skipping
+    /// `ListItem` construction for anything outside this window
+    /// produces the identical on-screen result ratatui would have
+    /// picked out of the full, unwindowed item set itself.
+    #[test]
+    fn list_visible_window_matches_real_ratatui_scroll() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::text::Line;
+        use ratatui::widgets::{List, ListItem, ListState};
+
+        for total in [1usize, 2, 5, 10, 47, 200] {
+            let items: Vec<ListItem> = (0..total)
+                .map(|i| ListItem::new(Line::from(format!("row {i}"))))
+                .collect();
+            for viewport in [1usize, 3, 10, 25] {
+                for offset in [0usize, 1, total / 2, total.saturating_sub(1)] {
+                    for selected in
+                        [None, Some(0), Some(total / 3), Some(total.saturating_sub(1))]
+                    {
+                        // No block/borders on this `List` — the full
+                        // backend area IS the list's content area, so
+                        // `viewport` maps directly to `list_height`
+                        // without needing to account for border rows
+                        // (unlike `draw_list`'s real `List`, which has
+                        // a bordered `Block` and sizes its backend
+                        // area at `viewport + 2` accordingly).
+                        let backend = TestBackend::new(20, viewport as u16);
+                        let mut terminal = Terminal::new(backend).expect("terminal");
+                        // `.with_selected()`, NOT `.select()`: `ListState::select`
+                        // has a side effect of resetting `offset` to 0 whenever
+                        // the new selection is `None` (see its doc/impl) — which
+                        // would corrupt this test's `offset` input before the
+                        // widget ever renders. The fluent `with_selected` setter
+                        // has no such side effect.
+                        let mut state = ListState::default()
+                            .with_offset(offset)
+                            .with_selected(selected);
+                        let list = List::new(items.clone());
+                        terminal
+                            .draw(|f| {
+                                f.render_stateful_widget(list.clone(), f.area(), &mut state);
+                            })
+                            .expect("draw");
+                        let (expected_first, _) =
+                            list_visible_window(selected, offset, viewport, total);
+                        assert_eq!(
+                            state.offset(),
+                            expected_first,
+                            "total={total} viewport={viewport} offset={offset} \
+                             selected={selected:?}: ratatui picked first-visible \
+                             index {}, list_visible_window said {expected_first}",
+                            state.offset()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The `DIR:HERDR` chip

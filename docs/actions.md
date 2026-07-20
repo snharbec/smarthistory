@@ -8,10 +8,10 @@ The canonical source is [`src/tui/bindings.rs`](../src/tui/bindings.rs) — the 
 
 | Concept | What it is |
 | --- | --- |
-| **Action** | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 48 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`. |
+| **Action** | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 54 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`. |
 | **Key binding** | The mapping from a `KeySpec` (e.g. `C-c`, `F1`, `Up`) to an action. Multiple keys can map to the same action (`delete-word-backward` ships with both `C-w` and `M-Backspace`). The same key can't map to two actions — the first one in `ALL_ACTIONS` order wins (see [`KeyBindings::defaults`](../src/tui/bindings.rs)). |
 | **Mode** | The active prefix mode (history, output, `~`, `$`, `&`, etc. — see [`docs/modes/`](modes/README.md)). Most actions work in every mode; a few are mode-specific (`MarkTodoDone` is a no-op outside `!` mode, `JiraFieldComplete` only completes inside `-`, `CodegraphRelations` is meaningful only in `&` / `$`). |
-| **Overlay** | When an overlay is open (command palette, prefix picker, theme picker, completion menu, help, output view, describe view, add-entry dialog, delete-confirmation), it captures key routing until it closes; the global actions don't fire underneath it. |
+| **Overlay** | When an overlay is open (command palette, prefix picker, theme picker, completion menu, help, output view, describe view, add-entry dialog, note/todo compose dialog, delete-confirmation), it captures key routing until it closes; the global actions don't fire underneath it. |
 
 ## Config key syntax
 
@@ -41,9 +41,9 @@ Actions are grouped in the command palette by their `category()`:
 | [`search`](#search) | CycleMode, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix |
 | [`todo`](#todo) | MarkTodoDone |
 | [`theme`](#theme) | CycleThemeNext, CycleThemePrev |
-| [`tools`](#tools) | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, JiraFieldComplete, SmartOpen |
+| [`tools`](#tools) | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry |
 | [`llm`](#llm) | Describe, Correct |
-| [`delete`](#delete) | DeleteSelected, DeleteMatching |
+| [`delete`](#delete) | DeleteSelected, DeleteMatching, ToggleMark, ClearMarks, BulkDeleteMarked |
 | [`config`](#config) | AddSession, AddHost |
 | [`panes`](#panes) | FilterPanesWindows, FilterPanesHosts, FilterPanesSessions |
 | [`layout`](#layout) | TogglePaneVisibility |
@@ -449,7 +449,7 @@ Open the theme picker. Lists every available theme (manual + built-in). Navigati
 | Default key | `C-y` |
 | Category | tools |
 
-Copy the current selection to the system clipboard. The "selection" picks the most useful thing to copy at the moment: if the captured-output view is open, the output text is copied; otherwise the selected history row's `command` is copied. The default `C-y` is the canonical readline / vim "yank" shortcut.
+Copy the current selection to the system clipboard. The "selection" picks the most useful thing to copy at the moment: if the captured-output view is open, the output text is copied; in `:` (Elements) mode, the containing note's **filename** is copied instead of the matched element's own text (a bare `[[link]]` reference line's own text can be as short as the link name itself, which isn't useful on the clipboard); otherwise the selected history row's `command` is copied. The default `C-y` is the canonical readline / vim "yank" shortcut.
 
 ### `EditFileReference`
 
@@ -495,7 +495,7 @@ Download **every** JIRA issue matching the current query, not just the selected 
 
 Tab-completion for JQL field names inside the `-` mode. When the user has typed a token that matches the prefix of one or more JIRA field names (e.g. `lab<TAB>`), the token is expanded to the full field name (e.g. `labels=`). Multiple matches open the completion menu; the user picks from the candidates. Also handles `@`-prefixed alias / fragment completion (`@m<TAB>` → `@me`).
 
-Cross-mode: in `@` (Notes) and `!` (Todo) modes, the same key dispatches to tag / link completion. See [`docs/modes/jira.md`](modes/jira.md) for the full table.
+Cross-mode: in `@` (Notes), `!` (Todo), and `:` (Elements) modes, the same key dispatches to tag / link completion. See [`docs/modes/jira.md`](modes/jira.md) for the full table.
 
 ### `SmartOpen`
 
@@ -630,6 +630,23 @@ Add the selected row's directory as a new `session.<id>` entry in the config fil
 | Category | config |
 
 Add the selected row's directory as a new `host.<id>` entry in the config file. Opens a multi-field dialog (Name, Host, Hostname, User, Port, Identity, Exec) that writes the entry and reloads the in-memory host list. The new host appears in the `*` panes view under a `# hosts` header.
+
+### `ComposeNoteEntry`
+
+| Field | Value |
+| --- | --- |
+| Config key | `compose-note-entry` |
+| Display name | Compose a new note/todo entry |
+| Default key | `F2` |
+| Category | tools |
+
+Open a multi-line compose overlay for a new note (`@` mode) or todo (`!` mode) entry — the answer to "the query line is too short for what I want to write." Available only in Notes or Todo mode; a no-op with a status message elsewhere. A second press while the dialog is already open keeps the existing buffer (doesn't reset it).
+
+Inside the dialog, `Enter` inserts a literal newline (the one place in the TUI where `Enter` doesn't commit) rather than submitting; `Ctrl-S` saves and exits (stages `note_search create-note <text> --type daily --timestamp [--todo] --database <db>` — the same command the single-line `@new <text>` / `!@new <text>` quick-create stages, just fed the dialog's buffer instead of query text); `Esc` cancels without staging anything; `Ctrl-U` clears the buffer; `Ctrl-W` deletes one word backward (`'\n'` counts as whitespace, so it can cross a line boundary). A no-op (dialog stays open, status message) when the buffer is empty/whitespace-only or `notes.database` isn't configured.
+
+Embedded newlines are re-indented (`"\n"` → `"\n  "`) before staging so the committed entry stays a single valid markdown list item with indented continuation lines — `note_search`'s `create-note` only knows how to format its `text` argument onto ONE line of the list item (`- [prefix]<text>` for a note, `- [ ] [prefix]<text> due: <date>` for a todo), so a raw unindented newline would otherwise break the entry apart.
+
+This is purely additive: the existing single-line `@new <text>` / `!@new <text>` quick-create (typed directly on the query line, still stages and exits immediately with no dialog) is completely unchanged and unaffected by this action.
 
 ---
 

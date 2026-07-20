@@ -95,12 +95,12 @@ The expansion includes the `@` in the replacement range — the user typed `@m` 
 
 ### Cross-mode behaviour
 
-The same `Tab` binding (`Action::JiraFieldComplete`) is also the tag / link completion key in [`@` (Notes) mode](notes.md) and [`!` (Todo) mode](todo.md). The dispatch site checks the active mode and routes to the right completion function:
+The same `Tab` binding (`Action::JiraFieldComplete`) is also the tag / link completion key in [`@` (Notes) mode](notes.md), [`!` (Todo) mode](todo.md), and [`:` (Elements) mode](elements.md) — all three share the same `notes.database` tag/link namespace. The dispatch site checks the active mode and routes to the right completion function:
 
 | Active mode | Tab dispatches to | Completes |
 | --- | --- | --- |
 | `-` (JIRA) | `jira_field_complete_at_cursor` | JQL field names (and `@`-prefixed aliases / fragments) |
-| `@` (Notes) and `!` (Todo) | `notes_tab_complete_at_cursor` | Note tags (after `#`) and link names (after `@`) |
+| `@` (Notes), `!` (Todo), and `:` (Elements) | `notes_tab_complete_at_cursor` | Note tags (after `#`) and link names (after `@`) |
 | every other mode | no-op | — |
 
 `Tab` in the add-entry dialog (`Ctrl-S` / `Ctrl-F6` to open a new session / host) is reserved for *field-next* INSIDE the dialog, so the two paths never collide.

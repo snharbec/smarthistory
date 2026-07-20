@@ -1627,6 +1627,49 @@ fn pick_text_to_yank_uses_selected_row() {
     assert_eq!(text, "echo hello");
 }
 
+/// In elements (`:`) mode, `pick_text_to_yank` copies the
+/// containing note's FILENAME (`row.comment`) instead of the
+/// matched element's own text (`row.command`) — a bare
+/// `[[kramfors]]` reference line's own text can be as short as
+/// the link name itself, which is rarely what the user wants on
+/// the clipboard.
+#[test]
+fn pick_text_to_yank_uses_filename_in_elements_mode() {
+    let mut app = global_test_app(&[]);
+    app.query = ":kramfors".to_string();
+    app.refresh();
+    app.merged_rows.push(crate::tui::state::HistoryRow {
+        id: -5,
+        command: "a reference to kramfors".to_string(),
+        directory: "/home/user/notes/project.md".to_string(),
+        session_id: "5".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "project.md".to_string(),
+        output: String::new(),
+        mode: "element".to_string(),
+        source: String::new(),
+        ..Default::default()
+    });
+    app.list_state.select(Some(0));
+    let text = pick_text_to_yank(&app).expect("a row is selected");
+    assert_eq!(
+        text, "project.md",
+        "elements mode should yank the filename, not the element text"
+    );
+}
+
+/// Outside elements mode, `pick_text_to_yank` still yanks the
+/// row's `command` as before — the elements-mode special case
+/// must not leak into other modes.
+#[test]
+fn pick_text_to_yank_uses_command_outside_elements_mode() {
+    let app = stats_test_app(&[("echo hello", 30)]);
+    assert!(!app.query.starts_with(':'));
+    let text = pick_text_to_yank(&app).expect("a row is selected");
+    assert_eq!(text, "echo hello");
+}
+
 /// `pick_text_to_yank` prefers the output view text over
 /// the selected row's command. This is the "or the
 /// output of this command" branch the user asked for.
@@ -6215,6 +6258,307 @@ fn confirm_delete_marked_key_y_deletes_and_closes_dialog() {
     assert_eq!(count, 1, "the one marked row should have been deleted");
 }
 
+// --- Note/todo compose overlay (`Action::ComposeNoteEntry`) ---
+
+/// `Action::ComposeNoteEntry` ships bound to `F2` by default —
+/// the historical `MarkTodoDone` default of `C-x` was long ago
+/// reassigned, `F1` is `PickPrefix`, so `F2` is the next free
+/// F-key in this app's "open a dialog" convention (`F5`
+/// AddSession, `F6` AddHost, ...).
+#[test]
+fn compose_note_entry_default_key_is_f2() {
+    let bindings = KeyBindings::defaults();
+    assert_eq!(
+        format_key_specs(bindings.specs(Action::ComposeNoteEntry)),
+        "F2".to_string()
+    );
+}
+
+/// Opening the dialog in Notes mode (`@`) sets `todo: false`.
+#[test]
+fn open_note_compose_dialog_in_notes_mode_creates_note() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    let dialog = app.note_compose.as_ref().expect("dialog should open");
+    assert!(!dialog.todo);
+    assert_eq!(dialog.text, "");
+    assert_eq!(dialog.cursor, 0);
+}
+
+/// Opening the dialog in Todo mode (`!`) sets `todo: true`.
+#[test]
+fn open_note_compose_dialog_in_todo_mode_creates_todo() {
+    let mut app = global_test_app(&[]);
+    app.query = "!".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    let dialog = app.note_compose.as_ref().expect("dialog should open");
+    assert!(dialog.todo);
+}
+
+/// Outside Notes/Todo mode, opening the dialog is a no-op with
+/// a status message.
+#[test]
+fn open_note_compose_dialog_outside_notes_or_todo_is_noop() {
+    let mut app = global_test_app(&[]);
+    app.query = "*".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    assert!(app.note_compose.is_none());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("Notes (@) or Todo (!) mode"),
+        "got: {:?}",
+        status
+    );
+}
+
+/// A second `open_note_compose_dialog` call while the dialog is
+/// already open keeps the existing buffer rather than resetting
+/// it — same re-entry policy as `open_add_entry_dialog`.
+#[test]
+fn open_note_compose_dialog_second_call_keeps_existing_buffer() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    app.note_compose_push_char('x');
+    app.open_note_compose_dialog();
+    assert_eq!(app.note_compose.as_ref().unwrap().text, "x");
+}
+
+/// `Enter` inserts a literal newline in the compose buffer —
+/// this is the one place in the TUI where `Enter` does NOT
+/// commit/submit.
+#[test]
+fn note_compose_push_char_supports_newlines() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    for c in "line one".chars() {
+        app.note_compose_push_char(c);
+    }
+    app.note_compose_push_char('\n');
+    for c in "line two".chars() {
+        app.note_compose_push_char(c);
+    }
+    assert_eq!(app.note_compose.as_ref().unwrap().text, "line one\nline two");
+}
+
+/// Backspace across a newline joins the two lines — the buffer
+/// is a flat `String`, so deleting the `'\n'` character is
+/// exactly "join current line with previous".
+#[test]
+fn note_compose_backspace_joins_lines_across_newline() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    for c in "ab\ncd".chars() {
+        app.note_compose_push_char(c);
+    }
+    // Cursor is at the end (after 'd'); walk it back to just
+    // after the newline (5 chars in: 'a','b','\n','c' -> stop
+    // before 'd'? simplest: move left len("cd") times then one
+    // more to sit right after the '\n').
+    for _ in 0.."cd".len() {
+        app.note_compose_move_left();
+    }
+    app.note_compose_backspace();
+    assert_eq!(app.note_compose.as_ref().unwrap().text, "abcd");
+}
+
+/// Cursor movement clamps at both ends of the buffer.
+#[test]
+fn note_compose_move_left_right_clamped() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    app.note_compose_move_left();
+    assert_eq!(app.note_compose.as_ref().unwrap().cursor, 0);
+    app.note_compose_push_char('a');
+    app.note_compose_push_char('b');
+    app.note_compose_move_right();
+    app.note_compose_move_right();
+    app.note_compose_move_right();
+    assert_eq!(app.note_compose.as_ref().unwrap().cursor, 2);
+}
+
+/// `Ctrl-W` (word-backward delete) treats `'\n'` as whitespace,
+/// so it can eat back across a line boundary into the previous
+/// line's trailing word — same `unix-word-rubout` semantics as
+/// the query buffer's `Ctrl-W`.
+#[test]
+fn note_compose_delete_word_backward_crosses_newline() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    for c in "foo\n".chars() {
+        app.note_compose_push_char(c);
+    }
+    app.note_compose_delete_word_backward();
+    assert_eq!(app.note_compose.as_ref().unwrap().text, "");
+}
+
+/// The core correctness case: submitting a multi-line body
+/// stages `note_search create-note` with the embedded newline
+/// re-indented (`"\n"` -> `"\n  "`) so the committed entry stays
+/// a single valid markdown list item instead of breaking into
+/// an unindented continuation line. `--todo` is added when the
+/// dialog was opened in Todo mode.
+#[test]
+fn note_compose_submit_stages_multiline_command_with_indented_continuation() {
+    let mut app = global_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp/notes.sqlite"));
+    app.query = "!".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    for c in "first line\nsecond line".chars() {
+        app.note_compose_push_char(c);
+    }
+    let quit = app.note_compose_submit();
+
+    assert!(quit, "submit must exit the TUI so the parent shell runs the staged command");
+    assert!(app.note_compose.is_none(), "dialog must close on submit");
+    let staged = app.selection.as_deref().expect("staged command");
+    assert!(
+        staged.contains("first line\n  second line"),
+        "the embedded newline should be re-indented with 2 spaces; got: {:?}",
+        staged
+    );
+    assert!(
+        staged.starts_with("note_search create-note "),
+        "got: {:?}",
+        staged
+    );
+    assert!(
+        staged.contains(" --todo"),
+        "todo-mode compose should stage --todo; got: {:?}",
+        staged
+    );
+    assert!(
+        staged.contains("--database"),
+        "got: {:?}",
+        staged
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// A plain (non-todo) note compose does NOT stage `--todo`.
+#[test]
+fn note_compose_submit_in_notes_mode_omits_todo_flag() {
+    let mut app = global_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp/notes.sqlite"));
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    app.note_compose_push_char('x');
+    app.note_compose_submit();
+    let staged = app.selection.as_deref().expect("staged command");
+    assert!(
+        !staged.contains("--todo"),
+        "note-mode compose must not stage --todo; got: {:?}",
+        staged
+    );
+}
+
+/// Submitting an empty (or whitespace-only) buffer is a no-op:
+/// the dialog stays open and a status message explains why.
+#[test]
+fn note_compose_submit_with_empty_buffer_is_noop() {
+    let mut app = global_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp/notes.sqlite"));
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    app.note_compose_push_char(' ');
+
+    let quit = app.note_compose_submit();
+
+    assert!(!quit);
+    assert!(app.note_compose.is_some(), "dialog must stay open");
+    assert!(app.selection.is_none());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(status.contains("empty"), "got: {:?}", status);
+}
+
+/// Submitting without `notes.database` configured is a no-op
+/// with a status message — same validation as the existing
+/// single-line `@new <text>` quick-create.
+#[test]
+fn note_compose_submit_without_notes_database_is_noop() {
+    let mut app = global_test_app(&[]);
+    app.notes_database = None;
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    app.note_compose_push_char('x');
+
+    let quit = app.note_compose_submit();
+
+    assert!(!quit);
+    assert!(app.note_compose.is_some());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(status.contains("notes.database"), "got: {:?}", status);
+}
+
+/// While the compose dialog is open, `handle_key` must route
+/// EVERY key to it (including `Enter`, which inserts a newline
+/// here rather than being dispatched as an action) — mirrors
+/// `handle_key_confirm_delete_intercepts_before_fallback_char_insert`.
+#[test]
+fn handle_key_note_compose_intercepts_enter_as_newline_not_dispatch() {
+    let mut app = global_test_app(&[]);
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    let quit = handle_key(&mut app, enter);
+
+    assert!(!quit);
+    assert_eq!(app.note_compose.as_ref().unwrap().text, "\n");
+    assert!(
+        app.note_compose.is_some(),
+        "Enter must NOT commit/close the compose dialog"
+    );
+}
+
+/// `Esc` cancels the dialog without staging anything.
+#[test]
+fn note_compose_esc_cancels_without_staging() {
+    let mut app = global_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp/notes.sqlite"));
+    app.query = "@".to_string();
+    app.refresh();
+    app.open_note_compose_dialog();
+    app.note_compose_push_char('x');
+
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    let quit = handle_key(&mut app, esc);
+
+    assert!(!quit);
+    assert!(app.note_compose.is_none());
+    assert!(app.selection.is_none());
+}
+
 /// Basic case: cursor at end of `git status`,
 /// press `Ctrl-W`, get `git `. The trailing
 /// word `status` is eaten; the space between
@@ -8729,6 +9073,673 @@ fn mark_todo_done_with_single_mark_preserves_precise_message() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
+}
+
+// --- Elements mode (`:` prefix) --------------------------------
+
+/// Elements-mode search runs on a background thread (debounced,
+/// mirroring `,` ag mode) rather than synchronously inside
+/// `refresh()`. Tests need a deterministic way to drive that cycle:
+/// backdate the debounce so `elements_maybe_autocall` fires
+/// immediately, block on the worker thread's result, then feed it
+/// through `process_elements_result` exactly as the real run loop
+/// does. Call this after setting `app.query` to a `:` query instead
+/// of relying on `app.refresh()` alone to populate results.
+fn drive_elements_search(app: &mut App) {
+    assert!(
+        app.is_elements_query(),
+        "drive_elements_search called outside elements-mode query"
+    );
+    app.elements_state.debounce_started = Some(
+        std::time::Instant::now()
+            - crate::tui::mode::elements::ELEMENTS_DEBOUNCE
+            - std::time::Duration::from_millis(10),
+    );
+    app.elements_maybe_autocall();
+    if let Some(request) = app.elements_state.request.take() {
+        let result = request
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("elements search should complete");
+        app.process_elements_result(request, result);
+    }
+}
+
+/// `:` is the default elements-mode prefix.
+#[test]
+fn elements_default_prefix_is_colon() {
+    assert_eq!(crate::QueryPrefixes::default().elements, ':');
+}
+
+/// `is_elements_query` recognises the `:` prefix, matching the
+/// `is_todo_query` / `is_notes_query` contract.
+#[test]
+fn is_elements_query_recognises_prefix() {
+    let mut app = global_test_app(&[("a", 1)]);
+    assert!(!app.is_elements_query());
+    app.query = ":older".to_string();
+    assert!(app.is_elements_query());
+    app.query = ":".to_string();
+    assert!(app.is_elements_query());
+    app.query = "older".to_string();
+    assert!(!app.is_elements_query());
+    app.query = "!todo".to_string();
+    assert!(!app.is_elements_query());
+}
+
+/// `elements_pattern` returns the body after the prefix; matches
+/// the `notes_pattern` / `todo_pattern` contract.
+#[test]
+fn elements_pattern_strips_prefix() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = ":older todo".to_string();
+    assert_eq!(app.elements_pattern(), "older todo");
+    app.query = "older todo".to_string();
+    assert_eq!(app.elements_pattern(), "");
+}
+
+/// A bare `:` (empty pattern) lists every element indexed across
+/// every file — headings and list items. `setup_todo_db`'s
+/// fixture indexes to:
+///   older.md: "# Older" (heading), "older todo 1" (list item —
+///             the immediately-following "some prose in between"
+///             line has no blank-line separator, so `note_search`
+///             folds it into the SAME list item rather than
+///             treating it as its own paragraph), "older done 1"
+///             (list item), "older todo 2" (list item)
+///   newer.md: "# Newer" (heading), "newer todo 1", "newer todo 2"
+/// 7 elements total.
+#[test]
+fn fetch_elements_lists_all_elements() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert_eq!(
+        app.merged_rows().len(),
+        7,
+        "expected 7 elements (2 headings + 5 list-item elements) across both files, got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `build_merged_rows` must take the same cheap early-return path
+/// as panes mode for elements rows (`self.rows.clone()`, no
+/// labeled-row interleave, no re-sort) rather than falling through
+/// to the command-history "labeled rows" merge. That merge scans
+/// every labeled row and re-sorts the whole result set on every
+/// `refresh()` call — which runs on every keystroke — so for a
+/// large notes vault it dwarfed the actual (already debounced,
+/// backgrounded) search cost and was the real source of the
+/// reported per-keystroke lag. This test locks in the fix by
+/// planting a labeled row that would match the query text (so the
+/// old code path would have pulled it in) and asserting it's
+/// absent from the elements-mode result.
+#[test]
+fn merged_rows_in_elements_mode_does_not_interleave_labeled_rows() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.labeled_rows.push(crate::tui::state::HistoryRow {
+        id: 999,
+        command: "older unrelated labeled command".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "a bookmark, not an element".to_string(),
+        output: String::new(),
+        mode: "history".to_string(),
+        source: String::new(),
+        ..Default::default()
+    });
+    app.query = ":older".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert!(
+        app.merged_rows().iter().all(|r| r.mode == "element"),
+        "labeled command-history rows must not be interleaved into elements-mode results, got: {:?}",
+        app.merged_rows().iter().map(|r| (&r.mode, &r.command)).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// A bare word in the typed pattern filters elements by
+/// substring (via `QueryExpr::Text`, the fallback case of the
+/// `#tag` / `[[link]]` query DSL `parse_query` produces).
+#[test]
+fn fetch_elements_applies_text_filter() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":prose".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let commands: Vec<String> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(
+        commands.len(),
+        1,
+        "expected exactly the 'some prose in between' paragraph, got: {:?}",
+        commands
+    );
+    assert!(commands[0].contains("prose"), "got: {:?}", commands);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// Helper: index a single custom markdown file (with frontmatter
+/// link + a heading-level inline tag + nested list items) into a
+/// fresh `note_search` DB, for testing the `#tag` / `[[link]]`
+/// query DSL cascade semantics on elements specifically. Mirrors
+/// the exact example from `note_search`'s own README "Cascading
+/// Tags and Links" section.
+fn setup_elements_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-elements-cascade-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project.md"),
+        "---\n\
+                         ref: [[NeoVimNote]]\n\
+                         ---\n\
+                         # Project X #urgent\n\
+                         \n\
+                         - [[SomeLink]] project reference\n\
+                         \x20\x20\x20\x20* Sub-note with more detail\n\
+                         - [[Auto]] a different reference\n",
+    )
+    .expect("write project.md");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-elements-cascade-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    let data = note_search::markdown_parser::process_markdown_file(&dir.join("project.md"), &dir)
+        .expect("process file");
+    note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+        .map_err(|e| format!("write: {e}"))
+        .expect("write db");
+    drop(conn);
+    (dir, db_path)
+}
+
+/// `:[[link]]` filters elements by the `#tag`/`[[link]]` query
+/// DSL (`QueryExpr::Link`), not just plain substring text — this
+/// is the capability upstream `note_search` added in a follow-up
+/// commit ("Support query for elements") after the initial
+/// element-search feature shipped text-only. A link in the
+/// document's frontmatter cascades to EVERY element in the file
+/// (same semantics as a heading-level tag/link — see the
+/// `elements` module doc comment).
+#[test]
+fn fetch_elements_filters_by_frontmatter_link_cascade() {
+    let (dir, db_path) = setup_elements_cascade_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    // Baseline: every element in the file, unfiltered.
+    app.query = ":".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let total = app.merged_rows().len();
+    assert!(total > 0, "fixture should index at least one element");
+
+    // The frontmatter `ref: [[NeoVimNote]]` link cascades to
+    // every element in the file, so this should match the same
+    // total.
+    app.query = ":[[NeoVimNote]]".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert_eq!(
+        app.merged_rows().len(),
+        total,
+        "frontmatter link should cascade to every element in the file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `:[[link]]` on a link that only appears on ONE list item
+/// matches just that item (plus its nested child, folded into
+/// the same element) — not the whole file. Distinguishes the
+/// cascade case (frontmatter/heading) from the direct-reference
+/// case.
+#[test]
+fn fetch_elements_filters_by_direct_link_match() {
+    let (dir, db_path) = setup_elements_cascade_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":[[SomeLink]]".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let commands: Vec<String> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(
+        commands.len(),
+        1,
+        "expected exactly the '[[SomeLink]] project reference' list item, got: {:?}",
+        commands
+    );
+    assert!(
+        commands[0].contains("project reference"),
+        "got: {:?}",
+        commands
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `:#tag` on a tag that appears on a HEADING cascades to every
+/// element in that heading's section — the tag/link cascade
+/// applies symmetrically to `#tag` and `[[link]]` tokens.
+#[test]
+fn fetch_elements_filters_by_heading_tag_cascade() {
+    let (dir, db_path) = setup_elements_cascade_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let total = app.merged_rows().len();
+
+    // `# Project X #urgent` is the only heading in the file, so
+    // every element (the whole file is under that heading's
+    // section) should match.
+    app.query = ":#urgent".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert_eq!(
+        app.merged_rows().len(),
+        total,
+        "heading-level tag should cascade to every element under it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// An invalid query (e.g. unbalanced parens) surfaces a status
+/// message and returns an empty list, rather than silently
+/// falling back to a literal-text search.
+#[test]
+fn fetch_elements_invalid_query_surfaces_status_message() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":(unbalanced".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert!(app.merged_rows().is_empty());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("invalid query"),
+        "got: {:?}",
+        status
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// Heading elements get a `#`/`##`/... prefix in `command` so the
+/// list visually distinguishes them from paragraphs / list items.
+#[test]
+fn fetch_elements_marks_headings_with_prefix() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":Older".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let heading_row = app
+        .merged_rows()
+        .iter()
+        .find(|r| r.command.contains("Older"))
+        .expect("the '# Older' heading element should match");
+    assert!(
+        heading_row.command.starts_with('#'),
+        "heading element's command should start with a literal '#'; got: {:?}",
+        heading_row.command
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// Selecting ANY element row — heading, paragraph, or list item —
+/// loads context from the underlying file into the output
+/// preview, not just that element's own isolated text. A bare
+/// `[[link]]` reference line's own text can be as short as the
+/// link name itself, which isn't useful as a preview on its own.
+/// This fixture's file is short (well under the 50-line context
+/// window), so the loaded context covers the entire file
+/// regardless of which line matched — see
+/// `ensure_selected_context_centers_window_on_match_line_for_long_file`
+/// for the case where the file is longer than the window and the
+/// window has to center on the match instead.
+/// The preview must be RAW markdown piped through `bat` — the
+/// same "clean content in, syntax-highlighted content out"
+/// pipeline `notes` / `todo` mode use — not `tags`/`ag` mode's
+/// `read_source_context_with_cache` format, which prefixes every
+/// line with a right-aligned line number and marks the matched
+/// line with `>>`. That annotation isn't valid markdown, so it
+/// would fight `bat`'s heading/checkbox/link highlighting instead
+/// of complementing it.
+#[test]
+fn ensure_selected_context_produces_clean_markdown_without_line_number_prefix() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":Older".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let heading_idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| r.command.starts_with('#'))
+        .expect("heading row should be present");
+    app.list_state.select(Some(heading_idx));
+    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    let output = ansi_re
+        .replace_all(&app.merged_rows()[heading_idx].output, "")
+        .to_string();
+    assert!(
+        !output.contains(">>"),
+        "output should not contain the tags/ag-style match marker, got: {:?}",
+        output
+    );
+    assert!(
+        output.trim_start().starts_with("# Older"),
+        "output should start with the raw heading line, not a line-number-prefixed version; got: {:?}",
+        output
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn ensure_selected_context_loads_full_file_for_any_element_row() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":Older".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    // Strip ANSI escapes before asserting on substrings: `bat`
+    // syntax-highlights each token as its own colored span, so a
+    // multi-token phrase like "# Older" (hash + space + word,
+    // each separately styled) won't appear as one contiguous
+    // substring in the raw (styled) output even though the text
+    // is there.
+    let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+
+    // Heading row.
+    let heading_idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| r.command.starts_with('#'))
+        .expect("heading row should be present");
+    app.list_state.select(Some(heading_idx));
+    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    let heading_output = app.merged_rows()[heading_idx].output.clone();
+    let plain_heading_output = ansi_re.replace_all(&heading_output, "").to_string();
+    assert!(
+        plain_heading_output.contains("older todo 1"),
+        "expected the full file's content in output for the heading row, got: {:?}",
+        plain_heading_output
+    );
+
+    // Plain list-item row (NOT a heading) — same expectation.
+    let list_item_idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| !r.command.starts_with('#') && r.command.contains("older todo 1"))
+        .expect("list-item row should be present");
+    app.list_state.select(Some(list_item_idx));
+    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    let list_item_output = app.merged_rows()[list_item_idx].output.clone();
+    let plain_output = ansi_re.replace_all(&list_item_output, "").to_string();
+    assert!(
+        plain_output.contains("Older") && plain_output.contains("older todo 2"),
+        "expected the full file's content (including the heading and other list items, beyond just this list item's own text) in output for the list-item row, got: {:?}",
+        plain_output
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `ensure_selected_context` runs on every keystroke (via
+/// `App::refresh`), and `merged_rows` is rebuilt from scratch each
+/// time (with the raw, unhighlighted element text) — so without a
+/// cache, re-selecting the same row on every keystroke would
+/// re-spawn `bat` every time, which is exactly the per-keystroke
+/// blocking work the background search thread was introduced to
+/// eliminate. Once a row's context has been computed, it must be
+/// served from `ElementsState::context_cache` on subsequent calls
+/// for the same file/line, not recomputed.
+#[test]
+fn ensure_selected_context_caches_by_file_and_line() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":Older".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    let heading_idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| r.command.starts_with('#'))
+        .expect("heading row should be present");
+    let filepath = app.merged_rows()[heading_idx].directory.clone();
+    let line_number: usize = app.merged_rows()[heading_idx]
+        .session_id
+        .parse()
+        .expect("session_id should be a line number");
+    app.list_state.select(Some(heading_idx));
+
+    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    let highlighted_output = app.merged_rows()[heading_idx].output.clone();
+    assert_eq!(
+        app.elements_state.context_cache.get(&(filepath.clone(), line_number)),
+        Some(&highlighted_output),
+        "cache should hold the just-computed highlighted output under (file, line)"
+    );
+    let cache_len_after_first = app.elements_state.context_cache.len();
+
+    // Simulate the next keystroke: `refresh()` rebuilds
+    // `merged_rows` from the still-raw cached search rows (so
+    // `output` resets to the raw element text) and then, as part
+    // of its own per-mode context step, calls
+    // `ensure_selected_context` again for the same selected row —
+    // this must be served from the cache rather than re-spawning
+    // `bat`, which is the whole point of the cache.
+    app.refresh();
+    assert_eq!(
+        app.merged_rows()[heading_idx].output, highlighted_output,
+        "refresh's own context step should restore the cached highlighted output"
+    );
+    assert_eq!(
+        app.elements_state.context_cache.len(),
+        cache_len_after_first,
+        "re-selecting the same row must not grow the cache"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// When the file is LONGER than the 50-line context window, the
+/// preview must center on the matched element's own line — not
+/// just show the first 50 lines from the top of the file (which
+/// wouldn't even contain a match that occurs deep in the file).
+/// This is the concrete case the windowed-context fix addresses:
+/// `:[[kramfors]]` matching a paragraph far from the top of a
+/// long note must show THAT paragraph in the preview, not the
+/// unrelated paragraphs at the very start of the file.
+#[test]
+fn ensure_selected_context_centers_window_on_match_line_for_long_file() {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-elements-longfile-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create dir");
+    // 80 short paragraphs (2 lines each incl. blank separator)
+    // before the target reference, then 20 more after — puts the
+    // `[[kramfors]]` match around line 165, well beyond the
+    // 50-line window if it were (wrongly) anchored at the top of
+    // the file.
+    let mut body = String::from("---\ntitle: long\n---\n\n");
+    for i in 0..80 {
+        body.push_str(&format!("paragraph number {}\n\n", i));
+    }
+    body.push_str("a reference to [[kramfors]] appears here\n\n");
+    for i in 80..100 {
+        body.push_str(&format!("paragraph number {}\n\n", i));
+    }
+    fs::write(dir.join("long.md"), &body).expect("write long.md");
+    let db_path = dir.join("notes.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    let data = note_search::markdown_parser::process_markdown_file(&dir.join("long.md"), &dir)
+        .expect("process file");
+    note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+        .map_err(|e| format!("write: {e}"))
+        .expect("write db");
+    drop(conn);
+
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":[[kramfors]]".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert_eq!(
+        app.merged_rows().len(),
+        1,
+        "expected exactly the one paragraph referencing kramfors, got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    app.list_state.select(Some(0));
+    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    let output = ansi_re
+        .replace_all(&app.merged_rows()[0].output, "")
+        .to_string();
+    assert!(
+        output.contains("kramfors"),
+        "expected the matched line itself to be visible in the windowed preview, got: {:?}",
+        output
+    );
+    assert!(
+        !output.contains("paragraph number 0\n"),
+        "window should be centered on the match, not on the unrelated paragraphs at the top of the file; got: {:?}",
+        output
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
+}
+
+/// Without `notes.database` configured, `fetch` returns an empty
+/// list with a status message — same UX as todo/notes mode.
+#[test]
+fn fetch_elements_requires_notes_database() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_database = None;
+    app.query = ":anything".to_string();
+    app.refresh();
+    drive_elements_search(&mut app);
+    assert!(app.merged_rows().is_empty());
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("notes.database"),
+        "got: {:?}",
+        status
+    );
+}
+
+/// Selecting an element row stages `$EDITOR +<start_line>
+/// <absolute-path>` — the same "open the file at the matching
+/// line" convention Tags/Ag/Codegraph use, keyed off
+/// `row.directory` (absolute path) and `row.session_id` (line
+/// number), NOT `row.id` (which is only a synthetic,
+/// not-necessarily-unique-across-files marker).
+#[test]
+fn select_for_run_in_elements_mode_stages_editor_at_line() {
+    let mut app = global_test_app(&[]);
+    app.query = ":".to_string();
+    app.refresh();
+    app.merged_rows.push(crate::tui::state::HistoryRow {
+        id: -6,
+        command: "older todo 1".to_string(),
+        directory: "/home/user/notes/older.md".to_string(),
+        session_id: "6".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "older.md".to_string(),
+        output: String::new(),
+        mode: "element".to_string(),
+        source: String::new(),
+        ..Default::default()
+    });
+    app.list_state.select(Some(0));
+
+    app.select_for_run();
+
+    let staged = app.selection.as_deref().expect("staged command");
+    assert!(
+        staged.contains("+6"),
+        "expected the line-number flag in the staged command; got: {:?}",
+        staged
+    );
+    assert!(
+        staged.contains("/home/user/notes/older.md"),
+        "got: {:?}",
+        staged
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
 }
 
 // --- Directories mode (`#` prefix) ----
@@ -14528,38 +15539,31 @@ fn notes_tab_complete_test_app(tags: &[&str], links: &[&str]) -> (App, std::path
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create dir");
     let db_path = dir.join("notes.sqlite");
+
+    // Write a real markdown file with `#tag` / `[[link]]`
+    // tokens in the body and index it through the same
+    // `process_markdown_file` + `write_markdown_data_to_sqlite_with_conn`
+    // pipeline the real indexer uses (same pattern as
+    // `setup_todo_db`). Tag/link completion
+    // (`note_search::commands::metadata::get_unique_values`)
+    // reads from the `note_tags` / `note_links` junction
+    // tables, which are only populated by that write path —
+    // a raw `INSERT INTO markdown_data (...) VALUES (...)`
+    // bypass (the previous version of this fixture) leaves
+    // those tables empty, so completion silently finds
+    // nothing no matter what's in `markdown_data.tags`/`.links`.
+    let tag_tokens: String = tags.iter().map(|t| format!("#{} ", t)).collect();
+    let link_tokens: String = links.iter().map(|l| format!("[[{}]] ", l)).collect();
+    let body = format!("---\ntitle: test\n---\n\n{}{}\n", tag_tokens, link_tokens);
+    std::fs::write(dir.join("test.md"), &body).expect("write test.md");
+
     let conn = Connection::open(&db_path).expect("open db");
     note_search::init_database_schema(&conn).expect("schema");
-    let tags_json = serde_json::Value::Array(
-        tags.iter()
-            .map(|t| serde_json::Value::String(t.to_string()))
-            .collect(),
-    );
-    let links_json = serde_json::Value::Array(
-        links
-            .iter()
-            .map(|l| serde_json::Value::String(l.to_string()))
-            .collect(),
-    );
-    conn.execute(
-        "INSERT INTO markdown_data \
-             (filename, title, tags, links) \
-             VALUES ('test.md', 'test', ?1, ?2)",
-        rusqlite::params![
-            serde_json::to_string(&tags_json).unwrap(),
-            serde_json::to_string(&links_json).unwrap(),
-        ],
-    )
-    .expect("insert markdown_data");
-    conn.execute(
-        "INSERT INTO todo_entries (filename, text, tags, links) \
-             VALUES ('test.md', 'test', ?1, ?2)",
-        rusqlite::params![
-            serde_json::to_string(&tags_json).unwrap(),
-            serde_json::to_string(&links_json).unwrap(),
-        ],
-    )
-    .expect("insert todo");
+    let data = note_search::markdown_parser::process_markdown_file(&dir.join("test.md"), &dir)
+        .expect("process file");
+    note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+        .map_err(|e| format!("write: {e}"))
+        .expect("write db");
     drop(conn);
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_database = Some(db_path.clone());
@@ -14762,6 +15766,54 @@ fn notes_tab_completion_works_in_todo_mode() {
     assert_eq!(
         app.query, "!#feature ",
         "tag completion should work in todo mode, got: {:?}",
+        app.query
+    );
+}
+
+/// Tab completion works identically in elements mode (`:`) —
+/// same tag/link namespace as notes/todo mode, just a different
+/// leading prefix char to recognise.
+#[test]
+fn notes_tab_completion_works_in_elements_mode() {
+    let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+    app.query = String::from(":#feat");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, ":#feature ",
+        "tag completion should work in elements mode, got: {:?}",
+        app.query
+    );
+}
+
+/// Link completion (`@name` → `[[linkname]] `) also works in
+/// elements mode, same as tag completion.
+#[test]
+fn notes_tab_completion_link_works_in_elements_mode() {
+    let (mut app, _db) = notes_tab_complete_test_app(&[], &["NeovimNote"]);
+    app.query = String::from(":@Neo");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, ":[[neovimnote]] ",
+        "link completion should work in elements mode, got: {:?}",
+        app.query
+    );
+}
+
+/// `Action::JiraFieldComplete` dispatches to
+/// `notes_tab_complete_at_cursor` in elements mode, not just
+/// notes/todo — this is the actual dispatch-site wiring, not
+/// just the lower-level `notes_tab_complete_at_cursor` gate.
+#[test]
+fn jira_field_complete_action_dispatches_in_elements_mode() {
+    let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+    app.query = String::from(":#feat");
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    assert_eq!(
+        app.query, ":#feature ",
+        "got: {:?}",
         app.query
     );
 }
@@ -17609,6 +18661,43 @@ fn apply_prefix_jira_then_output_cycles_ok() {
     assert_eq!(app.query, "todo");
 }
 
+/// `query_mode_char` must recognise EVERY configured prefix
+/// char — it feeds both `maybe_prefix_selection_with_space`
+/// (the space-prefix privacy convention) and the per-mode
+/// query-history "did the mode change" checks. A prefix char
+/// missing from its lookup array would silently fall back to
+/// `MODE_NONE`, wrongly treating that mode's queries as plain
+/// history. Covers `:` (elements) explicitly since it's new;
+/// the other 11 configured prefixes are exercised via
+/// `maybe_prefix_selection_with_space_skips_in_history_mode`.
+#[test]
+fn query_mode_char_recognises_elements_prefix() {
+    let prefixes = crate::QueryPrefixes::default();
+    assert_eq!(query_mode_char(":symbol", &prefixes), ':');
+    assert_eq!(query_mode_char("plain text", &prefixes), MODE_NONE);
+}
+
+/// `apply_prefix`'s `has_prefix` check must recognise EVERY
+/// configured prefix char, not just a subset — a mode missing
+/// from that check would have its leading char treated as part
+/// of the body instead of stripped, leaving a stray character
+/// behind when cycling prefixes. Covers `:` (elements, the mode
+/// added in this change) and `&` (codegraph, which turned out to
+/// be missing from this same check already — an unrelated
+/// pre-existing gap fixed alongside elements since it's the
+/// exact same bug shape).
+#[test]
+fn apply_prefix_strips_elements_and_codegraph_prefixes() {
+    let mut app = global_test_app(&[("sym", 1)]);
+    app.query = ":sym".to_string();
+    app.apply_prefix(None);
+    assert_eq!(app.query, "sym", "expected ':' prefix stripped");
+
+    app.query = "&sym".to_string();
+    app.apply_prefix(None);
+    assert_eq!(app.query, "sym", "expected '&' prefix stripped");
+}
+
 #[test]
 fn prefix_picker_new_preselects_none_for_plain_query() {
     let app = global_test_app(&[("hello", 1)]);
@@ -17638,9 +18727,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_thirteen_entries() {
+fn prefix_picker_has_fourteen_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 13);
+    assert_eq!(picker.options.len(), 14);
 }
 
 #[test]
@@ -17735,7 +18824,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 12);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 13);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
@@ -18735,6 +19824,7 @@ fn maybe_prefix_selection_with_space_skips_in_history_mode() {
         ("tags", prefixes.tags),
         ("codegraph", prefixes.codegraph),
         ("ag", prefixes.ag),
+        ("elements", prefixes.elements),
     ] {
         assert_eq!(
             maybe_prefix_selection_with_space("cmd".to_string(), mode_char),
@@ -18751,4 +19841,139 @@ fn maybe_prefix_selection_with_space_skips_in_history_mode() {
         "",
         "empty selection in history mode must stay empty (no space added)"
     );
+}
+
+/// `draw_list`'s windowing (added alongside the elements-mode perf
+/// fix — see `draw_list_stays_fast_with_a_large_elements_result_set`
+/// below) now builds `ListItem`s only for the slice
+/// `list_visible_window` picks out, instead of every row in
+/// `merged_rows`. This is a plain history-mode (not elements)
+/// integration check that the visible CONTENT is still correct
+/// after that rewrite — not just fast: with more rows than fit on
+/// screen, the newest rows must appear at the bottom by default
+/// (bottom-anchored, oldest-at-top), and selecting a row far
+/// outside that anchor (deep scroll-back) must bring it on screen.
+/// `list_visible_window`'s own unit tests (in `render.rs`) cover
+/// the windowing math in isolation and against the real ratatui
+/// widget; this test instead inspects the actual rendered buffer
+/// text, covering the surrounding `data_idx` <-> conceptual-index
+/// mapping in `draw_list` itself.
+#[test]
+fn draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list() {
+    let rows: Vec<(&str, i64)> = (0..50)
+        .map(|i| {
+            let cmd: &'static str = Box::leak(format!("cmd{i}").into_boxed_str());
+            (cmd, i as i64)
+        })
+        .collect();
+    let mut app = global_test_app(&rows);
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 50);
+
+    let backend = ratatui::backend::TestBackend::new(40, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+    // Default selection is `cmd0` (data index 0, the newest —
+    // smallest offset). With only ~10 content rows visible, the
+    // bottom-anchored view should show the newest commands at the
+    // bottom and NOT show the oldest (`cmd49`) at all.
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>();
+    assert!(text.contains("cmd0"), "newest row should be visible by default");
+    assert!(
+        !text.contains("cmd49"),
+        "oldest row should be scrolled off by default, got: {text:?}"
+    );
+
+    // Scroll all the way back to the oldest row (data index 49) —
+    // far outside the bottom anchor. The window must shift to bring
+    // it into view.
+    app.list_state.select(Some(49));
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>();
+    assert!(
+        text.contains("cmd49"),
+        "selecting the oldest row should scroll it into view, got: {text:?}"
+    );
+}
+
+/// Regression test for the elements-mode typing-lag report: on a
+/// large notes vault, `draw_list` used to build a `ListItem` for
+/// EVERY row in `merged_rows` on every redraw (ratatui's `List`
+/// widget only *paints* the visible slice, but by then the
+/// (styled-span, string-formatting) construction cost for every
+/// off-screen row had already been paid) — measured at ~400ms of
+/// list-building work per keystroke against 20,000 rows, which was
+/// the actual dominant cost behind reports of `:` mode lagging
+/// typing, independent of the (already backgrounded/debounced)
+/// search itself. `draw_list` now only builds `ListItem`s for the
+/// slice `list_visible_window` says will actually be painted. This
+/// test drives real `refresh()` + `render::ui` calls (via
+/// `TestBackend`) against a synthetic 20,000-row elements result
+/// set and asserts each keystroke's render stays well under what
+/// a full unbounded rebuild cost (hundreds of ms, per the manual
+/// measurement above) — a generous bound so the test isn't flaky
+/// on a loaded CI box, but tight enough to catch a regression back
+/// to the O(total rows) behavior.
+#[test]
+fn draw_list_stays_fast_with_a_large_elements_result_set() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-perf-probe-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let file_path = dir.join("shared.md");
+    std::fs::write(&file_path, "just one line\n").expect("write file");
+
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(dir.join("nonexistent-notes-db.sqlite"));
+    let mut rows = Vec::new();
+    for i in 0..20_000 {
+        rows.push(crate::tui::state::HistoryRow {
+            id: -(i as i64),
+            command: format!("element number {} with some words in it", i),
+            directory: file_path.to_string_lossy().to_string(),
+            session_id: "1".to_string(),
+            exit_code: 0,
+            timestamp: i as i64,
+            comment: "shared.md".to_string(),
+            output: format!("raw text {}", i),
+            mode: "element".to_string(),
+            source: String::new(),
+            ..Default::default()
+        });
+    }
+    app.elements_state.rows = rows;
+    app.elements_state.last_pattern = Some(String::new());
+    app.query = ":".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+    for (i, c) in "kramfors reference".chars().enumerate() {
+        app.query.push(c);
+        app.trigger_text_change_search();
+        let render_start = std::time::Instant::now();
+        terminal
+            .draw(|f| crate::tui::render::ui(f, &mut app))
+            .expect("draw");
+        let render_elapsed = render_start.elapsed();
+        assert!(
+            render_elapsed < std::time::Duration::from_millis(100),
+            "keystroke {} ({:?}) took {:?} to render 20,000 elements rows — \
+             draw_list should only build ListItems for the visible window, \
+             not the full result set",
+            i,
+            c,
+            render_elapsed
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

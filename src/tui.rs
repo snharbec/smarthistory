@@ -632,11 +632,21 @@ fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
 /// Priority:
 /// 1. The captured-output overlay, if open. This is "the output
 ///    of this command" — the user is looking at the output and
-///    yanking it is the natural action.
-/// 2. The command of the currently-selected history row. This
-///    is "the current document" — the command line itself,
-///    in the same sense as a text editor's "current buffer".
-/// 3. `None` — nothing to yank.
+///    yanking it is the natural action. Mode-agnostic: even in
+///    elements mode, if the user has the full preview open they
+///    want what they're looking at, not the filename.
+/// 2. In elements (`:`) mode, the containing note's filename
+///    (`row.comment`) rather than the matched element's own text
+///    (`row.command` — a paragraph/list-item/heading snippet,
+///    e.g. just `"kramfors"` for a bare `[[kramfors]]` reference
+///    line). The filename is the more useful thing to have on
+///    the clipboard — e.g. to paste into another command — than
+///    an isolated snippet of note content.
+/// 3. Every other mode: the command of the currently-selected
+///    history row. This is "the current document" — the command
+///    line itself, in the same sense as a text editor's "current
+///    buffer".
+/// 4. `None` — nothing to yank.
 ///
 /// Kept as a free function (not a method) so the decision logic
 /// is testable without standing up a full `App` and a SQLite
@@ -648,7 +658,13 @@ fn pick_text_to_yank(app: &App) -> Option<String> {
     {
         return Some(view.text.clone());
     }
-    app.selected_row().map(|r| r.command.clone())
+    app.selected_row().map(|r| {
+        if app.is_elements_query() {
+            r.comment.clone()
+        } else {
+            r.command.clone()
+        }
+    })
 }
 
 /// Truncate a string for use in a status-bar message, with a
@@ -1393,6 +1409,13 @@ pub(crate) struct App {
     /// (Enter) or cancels
     /// (Esc).
     add_entry_dialog: Option<AddEntryDialog>,
+    /// The in-TUI multi-line note/todo compose overlay state
+    /// (`Action::ComposeNoteEntry`, `F2` by default). `None`
+    /// when closed. See the `NoteComposeDialog` doc comment in
+    /// `src/tui/state.rs` for how this relates to the existing
+    /// single-line `@new <text>` quick-create (a separate,
+    /// unchanged mechanism).
+    note_compose: Option<crate::tui::state::NoteComposeDialog>,
     /// Filter for the `*`-mode panes view.
     /// When set to a non-`All` value,
     /// `fetch_panes` hides rows whose
@@ -1768,6 +1791,13 @@ pub(crate) struct App {
     /// and cached rows.
     ag_state: crate::ag::AgState,
 
+    /// Aggregated elements-mode state: debounce timer, in-flight
+    /// search request, last searched pattern, and cached rows.
+    /// Same shape as `ag_state` — see `ElementsState`'s doc
+    /// comment for why the query needed to move to a background
+    /// thread.
+    elements_state: crate::tui::mode::elements::ElementsState,
+
     /// User-configured additional
     /// directory basenames to
     /// skip during the walk
@@ -1959,7 +1989,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
     let Some(c) = query.chars().next() else {
         return MODE_NONE;
     };
-    let known: [char; 12] = [
+    let known: [char; 13] = [
         prefixes.output,
         prefixes.llm,
         prefixes.question,
@@ -1972,6 +2002,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
         prefixes.tags,
         prefixes.codegraph,
         prefixes.ag,
+        prefixes.elements,
     ];
     if known.contains(&c) {
         c
@@ -2199,6 +2230,22 @@ impl App {
     /// and file-pattern globs (tokens containing `*`).
     fn is_ag_query(&self) -> bool {
         crate::tui::mode::ag::matches(self)
+    }
+
+    /// Whether the query is an element-search request: the
+    /// query starts with the elements prefix (`:` by default).
+    /// Finer-grained than `is_notes_query` — searches individual
+    /// paragraphs/list-items/headings rather than whole files.
+    fn is_elements_query(&self) -> bool {
+        crate::tui::mode::elements::matches(self)
+    }
+
+    /// The element-search body, i.e. everything after the
+    /// leading elements prefix. Empty string when not in
+    /// elements mode.
+    #[allow(dead_code)]
+    fn elements_pattern(&self) -> &str {
+        crate::tui::mode::elements::pattern(self)
     }
 
     /// The ag-search body, i.e. everything after the
@@ -2911,6 +2958,8 @@ impl App {
                 || c == prefixes.files
                 || c == prefixes.tags
                 || c == prefixes.ag
+                || c == prefixes.codegraph
+                || c == prefixes.elements
         });
         let body = if has_prefix {
             self.query.chars().skip(1).collect::<String>()
@@ -3001,6 +3050,10 @@ impl App {
         // search debounce. `ag_touch` is a
         // no-op outside `,` mode.
         self.ag_touch();
+        // Same co-location for the elements-mode
+        // search debounce. `elements_touch` is a
+        // no-op outside `:` mode.
+        self.elements_touch();
     }
 
     /// Fire the per-mode search immediately on a
@@ -4316,6 +4369,11 @@ impl PrefixPicker {
                 label: "ag search",
                 description: "search file contents with `ag` (The Silver Searcher)",
             },
+            PrefixOption {
+                prefix: Some(prefixes.elements),
+                label: "Elements",
+                description: "search note paragraphs/list-items/headings individually",
+            },
         ];
         // Pre-select the row
         // matching the current
@@ -4631,6 +4689,7 @@ impl App {
             hosts: Vec::new(),
             host_defs: Vec::new(),
             add_entry_dialog: None,
+            note_compose: None,
             panes_filter: PanesFilter::default(),
             pane_cmdlines_request: None,
             panes_snapshot_id: 0,
@@ -4689,6 +4748,7 @@ impl App {
             llm_in_flight: false,
             llm_request: None,
             ag_state: crate::ag::AgState::new(),
+            elements_state: crate::tui::mode::elements::ElementsState::new(),
             files_state: crate::files::FilesState::new(),
             files_ignores,
             jira_rows: Vec::new(),
@@ -4776,6 +4836,11 @@ impl App {
         if app.is_ag_query() {
             app.ag_state.debounce_started = Some(std::time::Instant::now());
             app.ag_maybe_autocall();
+        }
+        // Same priming for a restored elements query.
+        if app.is_elements_query() {
+            app.elements_state.debounce_started = Some(std::time::Instant::now());
+            app.elements_maybe_autocall();
         }
         // Rows are ordered newest first; index 0 is the newest entry.
         // Keep the selection on the newest match so it appears at the
@@ -5021,6 +5086,24 @@ impl App {
         // (workspace-grouped, last-pane-bubbled)
         // order.
         if self.is_panes_query() {
+            return self.rows.clone();
+        }
+        // Elements mode (`:`) rows come from `note_search`'s
+        // `elements` table, not command history — "labeled"
+        // (starred/commented) rows are a command-history concept
+        // that has no meaning here, and results are already
+        // ordered server-side (`run_elements_search` requests
+        // `SortOrder::Modified`). Falling through to the
+        // labeled-row merge + `sort_partition` below would scan
+        // every labeled row AND re-sort the full element result
+        // set on every keystroke (`build_merged_rows` runs
+        // unconditionally in `refresh()`), which is exactly the
+        // kind of per-keystroke main-thread work the background
+        // search thread was introduced to get off the typing
+        // path — for a large notes vault this dwarfed the actual
+        // debounced search cost. Return the already-sorted rows
+        // as-is, same shape as the panes-mode early return above.
+        if self.is_elements_query() {
             return self.rows.clone();
         }
         // Directories / JIRA / files
@@ -5281,6 +5364,7 @@ impl App {
             crate::tui::mode::ModeKind::Tags => return crate::tui::mode::tags::fetch(self),
             crate::tui::mode::ModeKind::Codegraph => return crate::tui::mode::codegraph::fetch(self),
             crate::tui::mode::ModeKind::Ag => return crate::tui::mode::ag::fetch(self),
+            crate::tui::mode::ModeKind::Elements => return crate::tui::mode::elements::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -5811,6 +5895,10 @@ impl App {
             self.select_for_run_impl();
             return;
         }
+        if self.is_elements_query() {
+            self.select_for_run_impl();
+            return;
+        }
         // Default: history mode.
         if let Some(row) = self.selected_row() {
             if row.mode == "llm" && !row.output.is_empty() {
@@ -6247,6 +6335,102 @@ impl App {
         if current == request.pattern {
             self.ag_state.rows = rows;
             self.refresh();
+        }
+    }
+
+    /// Arm the elements-mode debounce. Mirrors `ag_touch`.
+    fn elements_touch(&mut self) {
+        if self.is_elements_query() {
+            self.elements_state.debounce_started = Some(std::time::Instant::now());
+            if let Some(request) = self.elements_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            self.elements_state.in_flight = false;
+        } else {
+            self.elements_state.debounce_started = None;
+            self.elements_state.in_flight = false;
+            self.elements_state.request = None;
+            self.elements_state.last_pattern = None;
+        }
+    }
+
+    /// Check whether the elements-mode debounce has elapsed and
+    /// spawn a background search if so. Mirrors `ag_maybe_autocall`.
+    fn elements_maybe_autocall(&mut self) {
+        if !self.is_elements_query() {
+            return;
+        }
+        if self.elements_state.in_flight {
+            return;
+        }
+        let Some(started) = self.elements_state.debounce_started else {
+            return;
+        };
+        if started.elapsed() < crate::tui::mode::elements::ELEMENTS_DEBOUNCE {
+            return;
+        }
+        let Some(ref db_path) = self.notes_database else {
+            self.set_status_message("Elements mode: notes.database is not configured".to_string());
+            self.elements_state.debounce_started = None;
+            return;
+        };
+        let pattern = crate::tui::mode::elements::ElementsState::current_pattern(
+            &self.query,
+            self.query_prefixes.elements,
+        );
+        if self.elements_state.has_results_for(&pattern) {
+            return;
+        }
+        self.elements_state.last_pattern = Some(pattern.clone());
+        let db_path = db_path.clone();
+        let notes_dir = self.notes_dir.clone();
+        self.spawn_elements_search(db_path, notes_dir, pattern);
+    }
+
+    /// Spawn a background thread that runs the elements query.
+    /// Mirrors `spawn_ag_search`.
+    fn spawn_elements_search(
+        &mut self,
+        db_path: std::path::PathBuf,
+        notes_dir: Option<std::path::PathBuf>,
+        pattern: String,
+    ) {
+        let request = crate::tui::mode::elements::spawn_elements_search(db_path, notes_dir, pattern);
+        self.elements_state.in_flight = true;
+        self.elements_state.request = Some(request);
+    }
+
+    /// Process an elements-mode search result from the
+    /// background thread. Unlike `process_ag_result`, the
+    /// channel carries a `Result` — an invalid query (unbalanced
+    /// parens, etc.) or a search failure surfaces as a status
+    /// message, same UX the old synchronous `fetch()` had.
+    fn process_elements_result(
+        &mut self,
+        request: crate::tui::mode::elements::ElementsRequest,
+        result: Result<Vec<HistoryRow>, String>,
+    ) {
+        self.elements_state.in_flight = false;
+        self.elements_state.request = None;
+        let current = crate::tui::mode::elements::ElementsState::current_pattern(
+            &self.query,
+            self.query_prefixes.elements,
+        );
+        if current != request.pattern {
+            // Stale result — the user has typed something else
+            // since this search was fired. Discard silently; a
+            // fresh search for the current pattern is already
+            // debounced/in flight.
+            return;
+        }
+        match result {
+            Ok(rows) => {
+                self.elements_state.rows = rows;
+                self.refresh();
+            }
+            Err(e) => {
+                self.set_status_message(format!("Elements mode: {}", e));
+            }
         }
     }
 
@@ -7347,11 +7531,11 @@ impl App {
     ///   `Tab` key doesn't interfere with any other
     ///   mode.
     fn notes_tab_complete_at_cursor(&mut self) {
-        // Only active in notes (`@`) or
-        // todos (`!`) mode. The notes
-        // and todos prefixes are both
-        // single chars (the `query_prefixes.notes`
-        // and `query_prefixes.todo` fields).
+        // Active in notes (`@`), todos (`!`), and elements (`:`)
+        // mode — all three share the same `notes.database` tag/
+        // link namespace, so the completion source is identical.
+        // The three prefixes are each a single char (the
+        // `query_prefixes.notes` / `.todo` / `.elements` fields).
         let prefix_len: usize = 1;
         if self.query_cursor < prefix_len {
             return;
@@ -7369,7 +7553,10 @@ impl App {
             .chars()
             .next()
             .expect("query_cursor >= 1 implies non-empty");
-        if first != self.query_prefixes.notes && first != self.query_prefixes.todo {
+        if first != self.query_prefixes.notes
+            && first != self.query_prefixes.todo
+            && first != self.query_prefixes.elements
+        {
             return;
         }
         // Walk left from the cursor
@@ -10015,6 +10202,165 @@ impl App {
         self.theme_picker = Some(ThemePicker::new(self.theme));
     }
 
+    fn is_note_compose_open(&self) -> bool {
+        self.note_compose.is_some()
+    }
+
+    /// Open the multi-line note/todo compose overlay
+    /// (`Action::ComposeNoteEntry`, `F2` by default). Available
+    /// in `@` (Notes) mode (creates a note) and `!` (Todo) mode
+    /// (creates a todo); a no-op with a status message
+    /// elsewhere. A second invocation while the dialog is
+    /// already open is also a no-op — keeps the existing buffer
+    /// rather than resetting the user's typing, same policy as
+    /// `open_add_entry_dialog`.
+    fn open_note_compose_dialog(&mut self) {
+        if self.note_compose.is_some() {
+            return;
+        }
+        let todo = self.is_todo_query();
+        if !todo && !self.is_notes_query() {
+            self.set_status_message(
+                "Compose is only available in Notes (@) or Todo (!) mode".to_string(),
+            );
+            return;
+        }
+        self.note_compose = Some(crate::tui::state::NoteComposeDialog {
+            todo,
+            text: String::new(),
+            cursor: 0,
+        });
+    }
+
+    /// Insert `c` at the cursor in the compose buffer. Unlike
+    /// every single-line input in the TUI (where `Enter`
+    /// commits), the compose dialog's key handler routes
+    /// `Enter` here as a literal `'\n'` — this is the one place
+    /// in the app where the user can type a real newline.
+    fn note_compose_push_char(&mut self, c: char) {
+        let Some(ref mut dialog) = self.note_compose else {
+            return;
+        };
+        let byte_idx = char_to_byte_index(&dialog.text, dialog.cursor);
+        dialog.text.insert(byte_idx, c);
+        dialog.cursor += 1;
+    }
+
+    /// Delete the character to the left of the cursor —
+    /// including a `'\n'`, which naturally joins the current
+    /// line with the previous one (the buffer is a flat
+    /// `String`; there's no separate per-line representation to
+    /// keep in sync).
+    fn note_compose_backspace(&mut self) {
+        let Some(ref mut dialog) = self.note_compose else {
+            return;
+        };
+        if dialog.cursor == 0 {
+            return;
+        }
+        let byte_idx = char_to_byte_index(&dialog.text, dialog.cursor - 1);
+        dialog.text.remove(byte_idx);
+        dialog.cursor -= 1;
+    }
+
+    fn note_compose_move_left(&mut self) {
+        if let Some(ref mut dialog) = self.note_compose {
+            dialog.cursor = dialog.cursor.saturating_sub(1);
+        }
+    }
+
+    fn note_compose_move_right(&mut self) {
+        if let Some(ref mut dialog) = self.note_compose {
+            let len = dialog.text.chars().count();
+            dialog.cursor = (dialog.cursor + 1).min(len);
+        }
+    }
+
+    fn note_compose_clear(&mut self) {
+        if let Some(ref mut dialog) = self.note_compose {
+            dialog.text.clear();
+            dialog.cursor = 0;
+        }
+    }
+
+    /// Delete one "word" backward from the cursor —
+    /// `unix-word-rubout` semantics, same algorithm
+    /// `delete_word_backward` uses for the query buffer.
+    /// `'\n'` counts as whitespace (`char::is_whitespace`), so
+    /// a word-delete at the start of a line eats back into the
+    /// previous line's trailing word, matching most editors'
+    /// behaviour.
+    fn note_compose_delete_word_backward(&mut self) {
+        let Some(ref dialog) = self.note_compose else {
+            return;
+        };
+        let new_cursor = delete_word_backward_at_cursor(&dialog.text, dialog.cursor);
+        let Some(ref mut dialog) = self.note_compose else {
+            return;
+        };
+        let start = char_to_byte_index(&dialog.text, new_cursor);
+        let end = char_to_byte_index(&dialog.text, dialog.cursor);
+        dialog.text.replace_range(start..end, "");
+        dialog.cursor = new_cursor;
+    }
+
+    fn note_compose_cancel(&mut self) {
+        self.note_compose = None;
+    }
+
+    /// Commit the compose buffer: stage `note_search
+    /// create-note <text> --type daily --timestamp [--todo]
+    /// --database <db>` and exit the TUI so the parent shell
+    /// runs it — the SAME staging mechanism the existing
+    /// single-line `@new <text>` quick-create uses
+    /// (`stage_note_selection` / `stage_todo_selection` in
+    /// `src/tui/actions.rs`), just fed a (possibly multi-line)
+    /// buffer instead of the query-line text.
+    ///
+    /// Embedded newlines are re-indented (`"\n"` → `"\n  "`)
+    /// before shell-quoting so the committed body stays a
+    /// single valid markdown list item with indented
+    /// continuation lines — see the `NoteComposeDialog` doc
+    /// comment in `src/tui/state.rs` for why this is necessary
+    /// (`note_search`'s `append_to_yournal` only knows how to
+    /// format `text` onto ONE line of the list item).
+    ///
+    /// A no-op (dialog stays open, status message) when the
+    /// buffer is empty/whitespace-only or `notes.database`
+    /// isn't configured — same validation as the one-liner path.
+    fn note_compose_submit(&mut self) -> bool {
+        let Some(ref dialog) = self.note_compose else {
+            return false;
+        };
+        let trimmed = dialog.text.trim();
+        if trimmed.is_empty() {
+            self.set_status_message("Nothing to save — the entry is empty".to_string());
+            return false;
+        }
+        let Some(ref db_path) = self.notes_database else {
+            self.set_status_message(
+                "notes.database not configured; set it to use the compose dialog".to_string(),
+            );
+            return false;
+        };
+        let indented = trimmed.replace('\n', "\n  ");
+        let mut staged = format!(
+            "note_search create-note {} --type daily --timestamp",
+            crate::util::shell_quote(&indented)
+        );
+        if dialog.todo {
+            staged.push_str(" --todo");
+        }
+        staged.push_str(&format!(
+            " --database {}",
+            crate::util::shell_quote(&db_path.display().to_string())
+        ));
+        self.selection = Some(staged);
+        self.pick_mode = Some(PickMode::Run);
+        self.note_compose = None;
+        true
+    }
+
     /// Open the "add session /
     /// host" dialog. The
     /// dialog is pre-filled
@@ -10866,6 +11212,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.directories => Some(ModeKind::Directories),
             _ if c == query_prefixes.panes => Some(ModeKind::Panes),
             _ if c == query_prefixes.jira => Some(ModeKind::Jira),
+            _ if c == query_prefixes.elements => Some(ModeKind::Elements),
             _ => None,
         }
     });
@@ -11464,6 +11811,15 @@ fn run_loop(
                 app.process_ag_result(request, result);
             }
 
+        // Check for elements-mode search result
+        // from background thread. Mirrors the
+        // ag-mode poll above.
+        if let Some(request) = app.elements_state.request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+            && let Some(request) = app.elements_state.request.take() {
+                app.process_elements_result(request, result);
+            }
+
         // Check for JIRA comments-fetch result
         // from background thread (mirrors the
         // search poll above). When the
@@ -11588,6 +11944,11 @@ fn run_loop(
                 // ag search after `AG_DEBOUNCE` of
                 // quiet typing in `,` mode.
                 app.ag_maybe_autocall();
+                // Same debounce drive for elements-mode
+                // searches: spawns the background
+                // search after `ELEMENTS_DEBOUNCE` of
+                // quiet typing in `:` mode.
+                app.elements_maybe_autocall();
                 continue;
             }
             Ok(true) => {}
@@ -11696,6 +12057,20 @@ fn run_loop(
             }
             app.ag_state.in_flight = false;
             app.set_status_message("ag search cancelled".to_string());
+            continue;
+        }
+
+        // Same cancel handling for an in-flight
+        // elements search.
+        if app.elements_state.request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+            && matches!(action, Action::Cancel)
+        {
+            if let Some(request) = app.elements_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            app.elements_state.in_flight = false;
+            app.set_status_message("elements search cancelled".to_string());
             continue;
         }
 
@@ -11850,6 +12225,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // fields, Esc cancels.
     if app.is_add_entry_dialog_open() {
         return handle_add_entry_dialog_key(app, key);
+    }
+
+    // The note/todo compose overlay is a sibling of the
+    // add-entry dialog: it also takes precedence over action
+    // dispatch so printable characters (AND `Enter`, which
+    // inserts a newline here rather than committing) go to the
+    // compose buffer.
+    if app.is_note_compose_open() {
+        return handle_note_compose_key(app, key);
     }
 
     // Action-based dispatch: look up the user-configured binding
@@ -12196,6 +12580,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Host);
             false
         }
+        Action::ComposeNoteEntry => {
+            app.open_note_compose_dialog();
+            false
+        }
         Action::FilterPanesWindows => {
             app.toggle_panes_filter(PanesFilter::Windows);
             false
@@ -12243,18 +12631,18 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // names inside the JIRA
             // search mode AND tag / link
             // names inside the notes
-            // (`@`) and todos (`!`)
-            // modes. The add-entry
-            // dialog handles its own
-            // Tab as field-next INSIDE
-            // the dialog, so the two
-            // paths never collide.
+            // (`@`), todos (`!`), and
+            // elements (`:`) modes. The
+            // add-entry dialog handles
+            // its own Tab as field-next
+            // INSIDE the dialog, so the
+            // two paths never collide.
             if app.is_jira_query() {
                 app.jira_field_complete_at_cursor();
-            } else if app.is_notes_query() || app.is_todo_query() {
+            } else if app.is_notes_query() || app.is_todo_query() || app.is_elements_query() {
                 app.notes_tab_complete_at_cursor();
             }
-            // Outside all three
+            // Outside all four
             // modes, Tab is a
             // no-op.
             false
@@ -13806,6 +14194,68 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char(c) => {
             app.push_char(c);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Input handling for the multi-line note/todo compose overlay
+/// (`Action::ComposeNoteEntry`). Unlike every other text-input
+/// overlay in the TUI, `Enter` inserts a newline here rather
+/// than committing — `Ctrl-S` is the dedicated submit key
+/// instead. `Ctrl-Enter`/`Alt-Enter` were considered for
+/// "submit" but rejected: like the `S-Return` case documented
+/// on `Action::SmartOpen`'s default key, many terminals can't
+/// reliably distinguish a modified Enter from plain Enter
+/// without the kitty keyboard protocol, and `Ctrl-S` is a
+/// single-byte ASCII control char every terminal emits
+/// reliably.
+fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.cancelled = true;
+                return true;
+            }
+            KeyCode::Char('s') => {
+                return app.note_compose_submit();
+            }
+            KeyCode::Char('u') => {
+                app.note_compose_clear();
+                return false;
+            }
+            KeyCode::Char('w') => {
+                app.note_compose_delete_word_backward();
+                return false;
+            }
+            _ => return false,
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.note_compose_cancel();
+            false
+        }
+        KeyCode::Enter => {
+            app.note_compose_push_char('\n');
+            false
+        }
+        KeyCode::Backspace => {
+            app.note_compose_backspace();
+            false
+        }
+        KeyCode::Left => {
+            app.note_compose_move_left();
+            false
+        }
+        KeyCode::Right => {
+            app.note_compose_move_right();
+            false
+        }
+        KeyCode::Char(c) => {
+            app.note_compose_push_char(c);
             false
         }
         _ => false,

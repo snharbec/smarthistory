@@ -991,6 +991,46 @@ impl AddEntryDialog {
     }
 }
 
+/// State for the in-TUI multi-line note/todo compose overlay
+/// (`Action::ComposeNoteEntry`, `F2` by default). Opens in `@`
+/// (Notes) or `!` (Todo) mode and lets the user type a body
+/// spanning multiple lines before committing.
+///
+/// This is deliberately a SEPARATE mechanism from the existing
+/// `@new <text>` / `!@new <text>` single-line quick-create
+/// (`stage_note_selection` / `stage_todo_selection` in
+/// `src/tui/actions.rs`), which still stages `note_search
+/// create-note <text> ...` and exits immediately, unchanged.
+/// The one-liner stays the fast path for a short entry; this
+/// dialog is for when the user wants to write more than fits
+/// on the query line.
+///
+/// `note_search create-note`'s `text: String` argument becomes
+/// ONE line in the daily note (`- [prefix]<text>` or, for a
+/// todo, `- [ ] [prefix]<text> due: <date>` — see
+/// `note_search_core::commands::create_note::append_to_yournal`).
+/// A raw embedded newline in `text` would therefore break out
+/// of that markdown list item as an unindented continuation
+/// line. `App::note_compose_submit` re-indents embedded
+/// newlines (`"\n"` → `"\n  "`) before staging the command so
+/// the committed body stays a single valid list item with
+/// indented continuation lines.
+#[derive(Debug, Clone, Default)]
+pub struct NoteComposeDialog {
+    /// True for a `!` todo entry (stages `--todo`, which adds
+    /// checkbox + due-date formatting downstream); false for a
+    /// plain `@` note entry.
+    pub todo: bool,
+    /// Multi-line body text. Embedded `\n` from `Enter`
+    /// keypresses are preserved literally in the buffer — the
+    /// re-indenting for markdown-safety happens only at commit
+    /// time (`App::note_compose_submit`), not while editing.
+    pub text: String,
+    /// Cursor position as a CHARACTER index into `text` (same
+    /// convention as `App::query_cursor`), not a byte index.
+    pub cursor: usize,
+}
+
 /// Exit codes returned by the TUI binary, also used by the line-editor
 /// widget to dispatch on. The shell snippet in `init zsh` reads these
 /// to decide what to do with the chosen command.

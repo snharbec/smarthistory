@@ -378,6 +378,19 @@ pub enum Action {
     /// no-op semantics as
     /// `AddSession`.
     AddHost,
+    /// Open the multi-line note/todo compose overlay. Available
+    /// in `@` (Notes) mode (creates a note) and `!` (Todo) mode
+    /// (creates a todo); a no-op with a status message
+    /// elsewhere. `Enter` inserts a newline in the buffer;
+    /// `Ctrl-S` submits (stages `note_search create-note ...`
+    /// and exits, same mechanism as the existing single-line
+    /// `@new <text>` quick-create — see the `NoteComposeDialog`
+    /// doc comment in `src/tui/state.rs`); `Esc` cancels.
+    ///
+    /// This is a SEPARATE, additive mechanism — `@new <text>`
+    /// typed on the query line still works exactly as before
+    /// and is unaffected by this action.
+    ComposeNoteEntry,
     /// Filter the `*`-mode panes view to show
     /// only live multiplexer panes (hide
     /// `# sessions` and `# hosts`). Pressing
@@ -613,6 +626,7 @@ impl Action {
             Action::CycleDirectorySource => "cycle-directory-source",
             Action::AddSession => "add-session",
             Action::AddHost => "add-host",
+            Action::ComposeNoteEntry => "compose-note-entry",
             Action::FilterPanesWindows => "filter-panes-windows",
             Action::FilterPanesHosts => "filter-panes-hosts",
             Action::FilterPanesSessions => "filter-panes-sessions",
@@ -672,6 +686,7 @@ impl Action {
             Action::CycleDirectorySource => "Cycle directory source",
             Action::AddSession => "Add selected directory as a session",
             Action::AddHost => "Add selected directory as a host",
+            Action::ComposeNoteEntry => "Compose a new note/todo entry",
             Action::FilterPanesWindows => "Filter panes: windows only",
             Action::FilterPanesHosts => "Filter panes: hosts only",
             Action::FilterPanesSessions => "Filter panes: sessions only",
@@ -765,6 +780,7 @@ impl Action {
             // machine lives in `tui.rs`; these
             // actions just open it.
             Action::AddSession | Action::AddHost => "config",
+            Action::ComposeNoteEntry => "tools",
             Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
                 "panes"
             }
@@ -891,6 +907,7 @@ impl Action {
             Action::MarkTodoDone => "none",
             Action::AddSession => "F5",
             Action::AddHost => "F6",
+            Action::ComposeNoteEntry => "F2",
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
@@ -1302,6 +1319,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::MarkTodoDone,
     Action::AddSession,
     Action::AddHost,
+    Action::ComposeNoteEntry,
     Action::FilterPanesWindows,
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,

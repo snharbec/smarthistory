@@ -16,6 +16,7 @@ Notes mode searches the `note_search` SQLite database (a separate project: <http
 
 - `Enter` on a note row stages `note_search edit-note <note-id>` (the note opens in `$EDITOR`).
 - `Enter` on the special `@new <text>` quick-create row appends a timestamped line to today's daily note. The TUI exits and the parent shell runs the `note_search create-note` command.
+- `F2` (`Action::ComposeNoteEntry`) opens a multi-line compose overlay instead of the one-line `@new <text>` quick-create, for a note body longer than fits on the query line. `Enter` inserts a newline (not commit); `Ctrl-S` saves and exits (same underlying `note_search create-note` command, staged with the buffer instead of query text); `Esc` cancels. This is purely additive — `@new <text>` on the query line still works exactly as before. See [`docs/actions.md`](../actions.md#composenoteentry).
 - `Ctrl-E` opens the comment editor for the note (a smarthistory-side annotation, separate from `note_search`'s own metadata).
 
 ## Required configuration
@@ -61,7 +62,7 @@ The date filter is the only token that's *removed* from the body rather than rew
 
 ## Tab completion
 
-Press `Tab` while typing in `@` mode to open a completion menu for the token under the cursor. The kind of completion depends on which prefix the cursor is on:
+Press `Tab` while typing in `@` mode (also works identically in [`!` (Todo)](todo.md) and [`:` (Elements)](elements.md) mode — all three share the same `notes.database` tag/link namespace) to open a completion menu for the token under the cursor. The kind of completion depends on which prefix the cursor is on:
 
 | Cursor shape | Completion kind | Source |
 | --- | --- | --- |
@@ -83,6 +84,7 @@ Link-name completion case-folds the prefix for matching but inserts the **canoni
 ## Cross-references
 
 - [Todo mode — the sibling mode for open todo entries; the same shorthand expansion and Tab completion apply because the underlying `note_search::parse_query` is shared](todo.md)
+- [Elements mode — finer-grained search over paragraphs/list-items/headings; same query DSL and Tab completion](elements.md)
 - [JIRA — the `jira-issue` action downloads a JIRA issue as a local note, which then becomes searchable in `@` mode](jira.md)
 - [TECHNICAL — note_search integration details](../../TECHNICAL.md#notes-mode-integration)
 - [`parse_notes_query` in `src/tui.rs`](../../src/tui.rs) — the implementation of the shorthand expansion

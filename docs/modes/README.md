@@ -19,12 +19,13 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | Tags | `$` | [`tags.md`](tags.md) | List every symbol from the local ctags `tags` file. |
 | CodeGraph | `&` | [`codegraph.md`](codegraph.md) | Search symbols in the local `.codegraph/codegraph.db` index; the selected row's preview shows source context plus callers / callees. |
 | ag | `,` | [`ag.md`](ag.md) | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher) (The Silver Searcher). |
+| Elements | `:` | [`elements.md`](elements.md) | Search individual paragraphs, list items, and headings via `note_search`'s `elements` table — finer-grained than `@` (Notes), which searches whole files. |
 
 ## Cross-cutting topics
 
 Some flows span multiple modes. These are documented as standalone pages:
 
-- **[`actions.md`](actions.md)** — every TUI action (all 48 in `ALL_ACTIONS`), grouped by category, with config keys, default keys, and mode-specific behavior. The canonical reference for `key.<action>=<spec>` config-file bindings. Read this when you want to rebind a key, find a key you've forgotten, or understand which actions are mode-specific (e.g. `MarkTodoDone` is a no-op outside `!` mode).
+- **[`actions.md`](actions.md)** — every TUI action (all 54 in `ALL_ACTIONS`), grouped by category, with config keys, default keys, and mode-specific behavior. The canonical reference for `key.<action>=<spec>` config-file bindings. Read this when you want to rebind a key, find a key you've forgotten, or understand which actions are mode-specific (e.g. `MarkTodoDone` is a no-op outside `!` mode).
 - **[`multiplexer.md`](multiplexer.md)** — tmux + herdr support: backend selection, building with the herdr feature, setup guides, troubleshooting. Required reading for anyone who uses `#` or `*` mode (the backend is what produces the `T` marker and what handles the focus / create staging).
 
 ## How the prefix is selected
@@ -46,6 +47,7 @@ The first character of the query decides the mode. Examples:
 | `$@rust setUp` | Tags (rust symbols matching `setUp`). |
 | `&@java getSymbol` | CodeGraph. |
 | `,TODO *.rs` | ag. |
+| `:project reference` | Elements (paragraphs / list items / headings containing "project reference"). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 
@@ -88,7 +90,7 @@ The substring / fuzzy / regex algorithms apply to most modes. Toggle with `Ctrl-
 
 The TUI honors zsh's `HIST_NO_STORE` convention: **any command whose first character is whitespace is treated as "do not record".** This applies in two places:
 
-1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `~` / `@` / `!` / `-` / `,` / `=` / `%` / `#` / `*`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
+1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `~` / `@` / `!` / `-` / `,` / `:` / `=` / `%` / `#` / `*`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
 2. **User-typed space-prefixed commands** get the same treatment. Type `git push` (with a leading space) and the precmd hook skips the DB write; `git push` (no space) is recorded normally.
 
 The convention is also honored by the `Ctrl-S` (next-probable-command) widget: a space-prefixed command is deliberately NOT remembered as `_smarthistory_last_cmd`, so the widget will not suggest a sensitive command as the "next probable" one. The cycle index is still reset so the next `Ctrl-S` press starts with the most probable candidate from the (non-sensitive) recent past.
