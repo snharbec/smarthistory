@@ -72,6 +72,8 @@
 //! selected under a herdr config.
 
 use std::path::Path;
+#[cfg(feature = "herdr")]
+use crate::tui::herdr_snapshot_debug_log;
 
 /// Which multiplexer the TUI should
 /// target for directory switching.
@@ -1174,7 +1176,13 @@ fn herdr_run_json(args: &[&str]) -> Option<serde_json::Value> {
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return None,
+        Err(e) => {
+            herdr_snapshot_debug_log(&format!(
+                "herdr_run_json spawn FAILED: herdr {:?} (kind: {:?})",
+                args, e
+            ));
+            return None;
+        }
     };
     let mut stdout = child.stdout.take()?;
     let mut buf = Vec::new();
@@ -1192,15 +1200,44 @@ fn herdr_run_json(args: &[&str]) -> Option<serde_json::Value> {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            herdr_snapshot_debug_log(&format!(
+                "herdr_run_json TIMEOUT after {}ms: herdr {:?} (HERDR_PANE_ID={:?}); \
+                 see https://github.com/<your-herdr-fork>/issues if the \
+                 TUI is a herdr popup",
+                timeout_ms,
+                args,
+                std::env::var("HERDR_PANE_ID").ok()
+            ));
             return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let _ = child.wait();
     if buf.is_empty() {
+        herdr_snapshot_debug_log(&format!(
+            "herdr_run_json EMPTY STDOUT: herdr {:?} (HERDR_PANE_ID={:?})",
+            args,
+            std::env::var("HERDR_PANE_ID").ok()
+        ));
         return None;
     }
-    serde_json::from_slice(&buf).ok()
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(&buf).ok();
+    if let Some(ref v) = parsed {
+        herdr_snapshot_debug_log(&format!(
+            "herdr_run_json OK: herdr {:?} -> {} bytes, {} top-level keys",
+            args,
+            buf.len(),
+            v.as_object().map(|m: &serde_json::Map<String, serde_json::Value>| m.len()).unwrap_or(0)
+        ));
+    } else {
+        herdr_snapshot_debug_log(&format!(
+            "herdr_run_json JSON PARSE FAILED: herdr {:?} -> {} bytes; first 200 chars: {:?}",
+            args,
+            buf.len(),
+            String::from_utf8_lossy(&buf[..buf.len().min(200)])
+        ));
+    }
+    parsed
 }
 
 /// One row of
@@ -1296,6 +1333,132 @@ pub fn herdr_pane_cmdline(pane_id: &str) -> Option<String> {
     }
     first
         .get("argv0")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Fallback resolver for the
+/// "which pane is the TUI
+/// itself?" question. The
+/// primary path is the
+/// `HERDR_PANE_ID` env var
+/// (set by herdr in every
+/// pane process). When the
+/// TUI is launched as a
+/// herdr popup, herdr may
+/// NOT pass `HERDR_PANE_ID`
+/// to the popup process
+/// (this is the user's
+/// reported case — the
+/// debug log shows
+/// `HERDR_PANE_ID=None`
+/// when the TUI runs as a
+/// popup). In that case
+/// we ask herdr directly:
+/// `herdr pane current`
+/// returns the pane the
+/// CALLING process is in,
+/// which is the popup pane
+/// itself when the TUI
+/// runs as a popup, and the
+/// user's shell pane when
+/// the TUI runs from a
+/// regular shell. Either
+/// way, the returned id is
+/// the one we want to
+/// filter out of the
+/// panes-mode snapshot so
+/// the user never sees a
+/// "switch to myself" row.
+///
+/// Returns `None` if:
+/// - herdr is not on PATH
+///   (the spawn fails), or
+/// - `herdr pane current`
+///   returns a non-pane-list
+///   response (some
+///   unrecognised shape), or
+/// - the response is missing
+///   the `result.pane.pane_id`
+///   field.
+///
+/// This function does NOT
+/// fall back to
+/// `herdr pane list` +
+/// `focused: true` heuristic
+/// because the simpler
+/// `pane current` query
+/// works in BOTH the
+/// shell and popup cases
+/// without parsing the
+/// full pane list. The
+/// `focused: true` heuristic
+/// is reserved as a
+/// second-level fallback
+/// (not currently
+/// implemented — would be
+/// needed if herdr ever
+/// stops returning the
+/// calling process's pane
+/// in `pane current`).
+#[cfg(feature = "herdr")]
+pub fn herdr_current_pane_id() -> Option<String> {
+    parse_herdr_current_pane(&herdr_run_json(&["pane", "current"])?)
+}
+
+/// Parse the
+/// `herdr pane current`
+/// response into the pane
+/// id. Extracted from
+/// `herdr_current_pane_id`
+/// so the parser logic
+/// is unit-testable
+/// without spawning a
+/// `herdr` subprocess
+/// (which the test
+/// suite can't do in
+/// CI). The expected
+/// response shape is:
+///
+/// ```json
+/// {
+///   "id": "cli:pane:current",
+///   "result": {
+///     "type": "pane_current",
+///     "pane": {
+///       "pane_id": "wN:pM",
+///       ...
+///     }
+///   }
+/// }
+/// ```
+///
+/// Returns `None` for
+/// any deviation: missing
+/// `result`, missing
+/// `pane`, missing
+/// `pane_id`, non-string
+/// `pane_id`, or empty
+/// string. Empty-string
+/// filtering matters
+/// because herdr has been
+/// observed to return
+/// `{"pane_id": ""}` for
+/// panes in transitional
+/// states (e.g. during a
+/// split), and we
+/// definitely don't want
+/// to fall back to the
+/// empty-string "current
+/// pane" — that would
+/// filter out every row
+/// from the snapshot.
+#[cfg(feature = "herdr")]
+fn parse_herdr_current_pane(json: &serde_json::Value) -> Option<String> {
+    json.get("result")
+        .and_then(|r| r.get("pane"))
+        .and_then(|p| p.get("pane_id"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
@@ -1430,9 +1593,50 @@ fn parse_herdr_pane_list(json: &serde_json::Value) -> Vec<HerdrPaneRecord> {
         .and_then(|p| p.as_array())
     {
         Some(p) => p,
-        None => return out,
+        None => {
+            // The JSON we got
+            // back isn't the
+            // shape we
+            // expected.
+            // Surface this in
+            // the debug log
+            // because it's a
+            // very common
+            // source of
+            // empty-list
+            // symptoms (the
+            // user upgrades
+            // herdr and the
+            // response shape
+            // changes; the
+            // TUI silently
+            // shows an empty
+            // list and the
+            // user has no
+            // idea why).
+            let top_keys: Vec<&str> = json
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            let result_keys: Vec<&str> = json
+                .get("result")
+                .and_then(|r| r.as_object())
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            herdr_snapshot_debug_log(&format!(
+                "parse_herdr_pane_list: NO result.panes array; \
+                 top-level keys = {:?}, result keys = {:?}",
+                top_keys, result_keys
+            ));
+            return out;
+        }
     };
-    for p in panes {
+    herdr_snapshot_debug_log(&format!(
+        "parse_herdr_pane_list: {} panes in raw response (HERDR_PANE_ID={:?})",
+        panes.len(),
+        std::env::var("HERDR_PANE_ID").ok()
+    ));
+    for p in panes.iter() {
         let pane_id = p
             .get("pane_id")
             .and_then(|v| v.as_str())
@@ -1489,7 +1693,31 @@ fn parse_herdr_pane_list(json: &serde_json::Value) -> Vec<HerdrPaneRecord> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        if pane_id.is_empty() || effective_cwd.is_empty() {
+        if pane_id.is_empty() {
+            herdr_snapshot_debug_log(&format!(
+                "parse_herdr_pane_list: dropping raw entry (no pane_id); \
+                 workspace_id={:?} cwd={:?}",
+                workspace_id, cwd
+            ));
+            continue;
+        }
+        if effective_cwd.is_empty() {
+            // The popup pane itself
+            // is the most common
+            // offender (no shell,
+            // no cwd). Log it so
+            // the user can see
+            // which pane is being
+            // dropped and why —
+            // this is the exact
+            // "TUI as herdr popup
+            // shows empty list"
+            // symptom.
+            herdr_snapshot_debug_log(&format!(
+                "parse_herdr_pane_list: dropping pane_id={:?} workspace_id={:?} \
+                 (no cwd/foreground_cwd; likely the TUI popup itself)",
+                pane_id, workspace_id
+            ));
             continue;
         }
         out.push(HerdrPaneRecord {
@@ -1781,7 +2009,67 @@ impl MultiplexerBackend for HerdrBackend {
                 Some(ws_json) => parse_workspace_labels(&ws_json),
                 None => std::collections::HashMap::new(),
             };
-        parse_herdr_pane_list(&json)
+        let parsed = parse_herdr_pane_list(&json);
+        herdr_snapshot_debug_log(&format!(
+            "snapshot_current_panes: parsed {} panes, current_pane_env={:?}; \
+             filtering out current_pane_env now",
+            parsed.len(),
+            current_pane_env
+        ));
+        // The workspace id of the
+        // TUI's own pane (the
+        // popup, if launched as
+        // one). The user's
+        // "current workspace" is
+        // the one containing this
+        // pane — we mark the
+        // first pane in that
+        // workspace as
+        // `is_last: true` so the
+        // `refresh_session_panes_impl`
+        // sort logic can pin the
+        // current workspace to
+        // the second position
+        // (see the user's
+        // complaint: "this always
+        // has the newest
+        // timestamp but for me
+        // it does not make sense
+        // to switch to it").
+        //
+        // Without this, the
+        // herdr backend leaves
+        // `is_last: false` on
+        // every pane (herdr's
+        // `pane list` JSON
+        // doesn't expose a
+        // "currently focused"
+        // field, unlike tmux's
+        // `#{pane_last}`), so
+        // the current-workspace
+        // pin never fires for
+        // herdr users and the
+        // current workspace
+        // always sits at the top
+        // of the list.
+        //
+        // `HERDR_PANE_ID` has the
+        // form `wN:pM` (e.g.
+        // `w31:p1`). The
+        // workspace id is
+        // everything before the
+        // first `:`. We use this
+        // prefix to identify
+        // panes that share the
+        // same workspace as the
+        // TUI.
+        let current_workspace_id: Option<String> = current_pane_env
+            .split(':')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let workspace_label_count = workspace_labels.len();
+        let filtered: Vec<CurrentPaneInfo> = parsed
             .into_iter()
             .filter(|r| r.pane_id != current_pane_env)
             .map(|r| {
@@ -1790,6 +2078,131 @@ impl MultiplexerBackend for HerdrBackend {
                     .cloned()
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| r.workspace_id.clone());
+                // Mark the first pane
+                // in the current
+                // workspace (the
+                // workspace
+                // containing the
+                // TUI's own
+                // pane) as
+                // `is_last: true` so
+                // the sort
+                // logic can pin
+                // it to the
+                // second
+                // position.
+                //
+                // Only the FIRST
+                // pane in the
+                // current
+                // workspace gets
+                // `is_last: true`
+                // because:
+                //   1. The
+                //      `refresh_session_panes_impl`
+                //      sort logic
+                //      uses the
+                //      FIRST
+                //      `is_last`
+                //      pane it
+                //      encounters
+                //      to identify
+                //      the current
+                //      workspace
+                //      (any
+                //      subsequent
+                //      hits would
+                //      overwrite
+                //      with the
+                //      same
+                //      workspace
+                //      label), so
+                //      one is
+                //      enough.
+                //   2. The
+                //      cold-start
+                //      stamp in
+                //      pass 1 of
+                //      the impl
+                //      only fires
+                //      for panes
+                //      WITHOUT
+                //      an existing
+                //      `last_touched`
+                //      entry;
+                //      marking
+                //      multiple
+                //      panes means
+                //      the first
+                //      one
+                //      bubbles to
+                //      the top
+                //      (correct)
+                //      and the
+                //      others
+                //      sort by
+                //      their
+                //      existing
+                //      timestamps
+                //      (also
+                //      correct).
+                //      Either way
+                //      the
+                //      user-visible
+                //      behavior is
+                //      the same.
+                //
+                // `is_last` is a
+                // workspace-level
+                // flag (we want
+                // to pin the
+                // workspace to
+                // position 1,
+                // not a specific
+                // pane), so we
+                // use the
+                // `is_last` of
+                // the first pane
+                // in the current
+                // workspace as
+                // the signal
+                // and leave the
+                // rest at false.
+                // But for the
+                // cold-start
+                // stamp to fire
+                // on the
+                // first-seen pane
+                // in the current
+                // workspace, we
+                // also need that
+                // pane to have
+                // `is_last: true`
+                // — so we just
+                // mark all panes
+                // in the current
+                // workspace as
+                // `is_last: true`.
+                // The first-seen
+                // one wins
+                // (subsequent
+                // cold-start
+                // stamps would
+                // be no-ops on
+                // the
+                // already-stamped
+                // first pane).
+                let is_last = current_workspace_id
+                    .as_deref()
+                    .map(|w| r.workspace_id == w)
+                    .unwrap_or(false);
+                if is_last {
+                    herdr_snapshot_debug_log(&format!(
+                        "snapshot_current_panes: marking pane_id={:?} as is_last \
+                         (in current workspace {:?})",
+                        r.pane_id, current_workspace_id
+                    ));
+                }
                 // The pane's `current_command`
                 // is initialized to the agent
                 // name (e.g. `pi`) so the row
@@ -1833,10 +2246,19 @@ impl MultiplexerBackend for HerdrBackend {
                     session_label: label,
                     path: r.cwd,
                     current_command: r.agent,
-                    is_last: false,
+                    is_last,
                 }
             })
-            .collect()
+            .collect();
+        herdr_snapshot_debug_log(&format!(
+            "snapshot_current_panes: {} workspace labels, {} panes after current_pane filter \
+             (HERDR_PANE_ID={:?}, current_workspace_id={:?})",
+            workspace_label_count,
+            filtered.len(),
+            current_pane_env,
+            current_workspace_id
+        ));
+        filtered
     }
 
     fn focus_command(&self, pane_id: &str) -> Option<String> {
@@ -2474,6 +2896,135 @@ mod tests {
         // Empty `label` → fall
         // back as well.
         assert_eq!(labels.get("wB").map(String::as_str), Some("wB"));
+    }
+
+    /// The popup-case fallback
+    /// parser for
+    /// `herdr_current_pane_id`.
+    /// When the TUI is launched
+    /// as a herdr popup, herdr
+    /// may NOT pass
+    /// `HERDR_PANE_ID` to the
+    /// popup's process — the
+    /// user's debug log shows
+    /// `HERDR_PANE_ID=None` in
+    /// that case. We fall
+    /// back to
+    /// `herdr pane current`,
+    /// which returns the
+    /// calling process's pane
+    /// id. This test verifies
+    /// the parser handles the
+    /// canonical response
+    /// shape.
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn parse_herdr_current_pane_resolves_canonical_response() {
+        let json = serde_json::json!({
+            "id": "cli:pane:current",
+            "result": {
+                "type": "pane_current",
+                "pane": {
+                    "pane_id": "w20:p27",
+                    "workspace_id": "w20",
+                    "tab_id": "w20:t3",
+                    "focused": true,
+                    "cwd": "/Users/har/smarthistory/smarthistory",
+                    "foreground_cwd": "/Users/har/smarthistory/smarthistory",
+                    "agent": "smarthistory-tui"
+                }
+            }
+        });
+        assert_eq!(
+            parse_herdr_current_pane(&json),
+            Some("w20:p27".to_string()),
+            "the popup-case fallback must extract the pane id from result.pane.pane_id"
+        );
+    }
+
+    /// Edge case: herdr has
+    /// been observed to return
+    /// an empty `pane_id`
+    /// string for panes in
+    /// transitional states
+    /// (e.g. during a split).
+    /// We MUST filter that
+    /// out — falling back to
+    /// the empty-string
+    /// "current pane" would
+    /// filter out EVERY row
+    /// from the snapshot and
+    /// reproduce the original
+    /// "empty pane list" bug.
+    /// The fallback resolver
+    /// (`refresh_session_panes`)
+    /// would then bail out
+    /// when the empty string
+    /// propagated, but it's
+    /// cleaner for the parser
+    /// to never produce it in
+    /// the first place.
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn parse_herdr_current_pane_filters_empty_pane_id() {
+        let json = serde_json::json!({
+            "result": {
+                "pane": {
+                    "pane_id": "",
+                    "workspace_id": "w20"
+                }
+            }
+        });
+        assert_eq!(
+            parse_herdr_current_pane(&json),
+            None,
+            "empty pane_id must NOT be returned as the fallback current pane; \
+             a None result causes the wrapper to bail out cleanly rather than \
+             filtering every snapshot row"
+        );
+    }
+
+    /// Malformed response
+    /// shapes (missing
+    /// `result`, missing
+    /// `pane`, missing
+    /// `pane_id`, non-string
+    /// `pane_id`) all
+    /// produce `None`. The
+    /// wrapper treats `None`
+    /// as "couldn't determine
+    /// the current pane —
+    /// bail out, the user
+    /// isn't inside a
+    /// multiplexer pane" and
+    /// skips the snapshot
+    /// fetch.
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn parse_herdr_current_pane_handles_malformed_responses() {
+        // Missing `result` envelope.
+        let json = serde_json::json!({
+            "pane": { "pane_id": "wA:p1" }
+        });
+        assert_eq!(parse_herdr_current_pane(&json), None);
+        // Missing `pane` field.
+        let json = serde_json::json!({
+            "result": { "type": "pane_current" }
+        });
+        assert_eq!(parse_herdr_current_pane(&json), None);
+        // Missing `pane_id` field.
+        let json = serde_json::json!({
+            "result": { "pane": { "workspace_id": "wA" } }
+        });
+        assert_eq!(parse_herdr_current_pane(&json), None);
+        // Non-string `pane_id`.
+        let json = serde_json::json!({
+            "result": { "pane": { "pane_id": 42 } }
+        });
+        assert_eq!(parse_herdr_current_pane(&json), None);
+        // Empty object.
+        let json = serde_json::json!({});
+        assert_eq!(parse_herdr_current_pane(&json), None);
     }
 
     #[cfg(feature = "herdr")]

@@ -849,6 +849,46 @@ impl App {
                 if let Some(cmd) = self.multiplexer.focus_session(&label) {
                     self.selection = Some(cmd);
                     self.pick_mode = Some(PickMode::Run);
+                    // Record `last_touched`
+                    // for every pane in
+                    // this workspace so
+                    // the workspace header
+                    // bubbles to the top
+                    // of the panes list on
+                    // the next refresh
+                    // (the within-group
+                    // max-touched sort
+                    // in
+                    // `refresh_session_panes_impl`
+                    // is what floats
+                    // it). We don't know
+                    // which specific pane
+                    // the multiplexer
+                    // landed the user on
+                    // (herdr's
+                    // `workspace focus`
+                    // is workspace-scoped,
+                    // not pane-scoped), so
+                    // bumping all panes
+                    // in the workspace
+                    // is the cleanest
+                    // approximation —
+                    // the user navigated
+                    // to this workspace,
+                    // so the whole
+                    // workspace is
+                    // "new".
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    for pane in self
+                        .session_panes
+                        .iter()
+                        .filter(|r| r.mode == "pane" && r.workspace_label == label)
+                    {
+                        self.pane_last_touched.insert(pane.session_id.clone(), now);
+                    }
                 } else {
                     self.set_status_message(format!(
                         "{} workspace {} is no longer available",
@@ -874,6 +914,33 @@ impl App {
                 if let Some(cmd) = self.multiplexer.focus_pane(&pane_id, &tab_id) {
                     self.selection = Some(cmd);
                     self.pick_mode = Some(PickMode::Run);
+                    // Record this pane's
+                    // `last_touched` so it
+                    // bubbles to the top
+                    // of its workspace
+                    // group on the next
+                    // refresh. The
+                    // within-group sort
+                    // in
+                    // `refresh_session_panes_impl`
+                    // picks the
+                    // `last_touched`
+                    // column, so the
+                    // just-focused pane
+                    // becomes the
+                    // topmost row of
+                    // its workspace
+                    // (and the
+                    // workspace's max
+                    // also gets bumped,
+                    // so it bubbles to
+                    // the top of the
+                    // outer list too).
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    self.pane_last_touched.insert(pane_id, now);
                 } else {
                     self.set_status_message(format!(
                         "{} pane {} is no longer available",

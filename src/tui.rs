@@ -113,6 +113,36 @@ pub(crate) struct TuiSession {
     /// means "no preference" and falls back
     /// to `ColorScheme::default()` (`Dark`).
     scheme: Option<String>,
+
+    /// Per-pane `last_touched` timestamps
+    /// (Unix epoch seconds), keyed by
+    /// `pane_id` (e.g. `"wB:p1"` for herdr,
+    /// `"%5"` for tmux). Populated on every
+    /// `stage_pane_selection` and consumed
+    /// by `refresh_session_panes_impl` to
+    /// sort the panes-mode tree:
+    ///
+    /// 1. Within each workspace group, panes
+    ///    are sorted by `last_touched DESC`
+    ///    so the most-recently-focused pane
+    ///    is on top.
+    /// 2. Workspace groups are sorted by the
+    ///    MAX `last_touched` of their panes
+    ///    DESC, so the most-recently-used
+    ///    workspace floats to the top.
+    ///
+    /// Panes that have never been touched
+    /// (or are no longer present in the
+    /// current snapshot) sort last, in
+    /// first-seen order — i.e. the
+    /// legacy `is_last` bubble is
+    /// replaced by a persistent
+    /// cross-launch ordering. The map is
+    /// pruned to only contain the panes
+    /// in the current snapshot on save, so
+    /// deleted panes don't accumulate
+    /// forever in the session file.
+    pane_last_touched: std::collections::HashMap<String, i64>,
 }
 
 /// Flags the user passed to `smarthistory tui <flags>...` on
@@ -346,6 +376,39 @@ impl TuiSession {
                 {
                     s.scheme = Some(value.to_string());
                 }
+                // Per-pane `last_touched` map.
+                // Lines look like
+                //   `pane-last-touched.wB:p1=1736200000`
+                // (herdr) or
+                //   `pane-last-touched.%5=1736200050`
+                // (tmux). The pane id is
+                // everything after the literal
+                // `pane-last-touched.` prefix
+                // and is preserved verbatim
+                // (including any `:` / `%`
+                // characters) so the map
+                // key set is identical on
+                // save and load. The
+                // timestamp is parsed as a
+                // `i64`; values that don't
+                // parse are silently dropped
+                // (a hand-edited session file
+                // with a typo just gets a
+                // missing entry, not a
+                // startup crash). Empty
+                // pane ids (a stray
+                // `pane-last-touched.=...`
+                // line) are also dropped.
+                k if k.starts_with("pane-last-touched.") => {
+                    let pane_id = &k["pane-last-touched.".len()..];
+                    if pane_id.is_empty() {
+                        continue;
+                    }
+                    if let Ok(ts) = value.parse::<i64>() {
+                        s.pane_last_touched
+                            .insert(pane_id.to_string(), ts);
+                    }
+                }
                 _ => {}
             }
         }
@@ -405,6 +468,28 @@ impl TuiSession {
         }
         if let Some(ref sc) = self.scheme {
             out.push_str(&format!("colorscheme={}\n", sc));
+        }
+        // Per-pane `last_touched` map. Emitted
+        // as one line per pane:
+        //   pane-last-touched.wB:p1=1736200000
+        //   pane-last-touched.%5=1736200050
+        // The `pane-last-touched.` prefix is
+        // namespaced so a hand-edited session
+        // file can never collide with a
+        // future top-level key. Parsing uses
+        // the prefix-stripping pattern below.
+        // We sort the keys for deterministic
+        // output (handy for diffs in the
+        // session file).
+        let mut keys: Vec<&String> = self.pane_last_touched.keys().collect();
+        keys.sort();
+        for pane_id in keys {
+            if let Some(ts) = self.pane_last_touched.get(pane_id) {
+                out.push_str(&format!(
+                    "pane-last-touched.{}={}\n",
+                    pane_id, ts
+                ));
+            }
         }
         std::fs::write(path, out)
     }
@@ -1718,6 +1803,40 @@ pub(crate) struct App {
     /// a second `Enter` on the buffer
     /// from queuing a duplicate POST.
     jira_add_comment_in_flight: bool,
+
+    /// Per-pane `last_touched` map (Unix
+    /// epoch seconds, keyed by `pane_id`).
+    /// Populated from the session file at
+    /// `App::new` time and updated on every
+    /// `stage_pane_selection` call (the
+    /// user pressed Enter on a workspace
+    /// header or a pane row in `*` mode).
+    /// Consumed by
+    /// `refresh_session_panes_impl` to
+    /// sort the panes-mode tree:
+    ///
+    /// 1. Within each workspace group,
+    ///    panes are sorted by
+    ///    `last_touched DESC` so the
+    ///    most-recently-focused pane is
+    ///    on top.
+    /// 2. Workspace groups are sorted by
+    ///    the MAX `last_touched` of their
+    ///    panes DESC, so the
+    ///    most-recently-used workspace
+    ///    floats to the top.
+    ///
+    /// Panes that have never been
+    /// touched (or are no longer present
+    /// in the current snapshot) sort
+    /// last, in first-seen order. The
+    /// map is pruned to the current
+    /// snapshot in `TuiSession::save_to`
+    /// so deleted panes don't
+    /// accumulate forever in the
+    /// session file.
+    pane_last_touched:
+        std::collections::HashMap<String, i64>,
 
     /// Source-file contents cache for tags
     /// (`$`) mode. The TAGS file can be
@@ -4833,6 +4952,21 @@ impl App {
             jira_add_comment_in_flight: false,
             smart_open_file_commands,
             tags_source_cache: std::collections::HashMap::new(),
+            // Per-pane `last_touched` map.
+            // Populated by the
+            // `App::new` caller's
+            // post-construction block
+            // (which loads it from
+            // the session file). For
+            // the App-struct
+            // initializer we start
+            // empty — the run loop
+            // constructs a fresh map
+            // on each launch and the
+            // session-merge happens
+            // immediately after
+            // `App::new` returns.
+            pane_last_touched: std::collections::HashMap::new(),
             codegraph_client: None,
             mode_query_history: std::collections::HashMap::new(),
             mode_query_drafts: std::collections::HashMap::new(),
@@ -4982,12 +5116,14 @@ impl App {
             // Still need to rebuild the merged rows (the
             // duplicate filter may have been toggled).
             self.merged_rows = self.build_merged_rows();
-            // Re-select row 0 if the list is non-empty.
-            let n = self.merged_rows.len();
-            if n == 0 {
-                self.list_state.select(None);
-            } else if self.list_state.selected().is_none() {
-                self.list_state.select(Some(0));
+            // Re-select if the current selection was lost
+            // (e.g. the previous fetch returned 0 rows but
+            // this one has rows). Use the same
+            // mode-aware logic as the fresh-fetch path so
+            // a panes-mode query that previously returned 0
+            // rows now selects the matching pane.
+            if self.list_state.selected().is_none() {
+                self.select_initial_row();
             }
             // Still need to load the lazy context.
             crate::tui::mode::ensure_selected_context(self);
@@ -5076,17 +5212,109 @@ impl App {
         // for long lists and also gives us a stable borrow for
         // `selected_row()`.
         self.merged_rows = self.build_merged_rows();
-        let n = self.merged_rows.len();
-        if n == 0 {
-            self.list_state.select(None);
-        } else {
-            self.list_state.select(Some(0));
-        }
+        self.select_initial_row();
         // Load the lazy preview context (source lines for
         // tags/codegraph, note/todo/file previews, herdr pane
         // output) for whichever mode is active, now that the
         // selection is known.
         crate::tui::mode::ensure_selected_context(self);
+    }
+
+    /// Set the initial list
+    /// selection after a
+    /// `refresh()`. The
+    /// historical behavior
+    /// is to select row 0
+    /// (the newest entry in
+    /// the history list). For
+    /// panes mode (`*`),
+    /// row 0 is a workspace
+    /// header — the user
+    /// just searched for an
+    /// agent name (`*claude`)
+    /// and landed on the
+    /// workspace header
+    /// instead of the actual
+    /// `claude` pane they
+    /// wanted. The fix:
+    /// scan `merged_rows` for
+    /// the first `pane` row
+    /// whose `command` (the
+    /// agent name / cmdline)
+    /// matches the active
+    /// query, and select
+    /// that. Falls back to
+    /// row 0 when no pane
+    /// matches (the query
+    /// matched only the
+    /// workspace label, or
+    /// the user typed `*`
+    /// alone to see the
+    /// full tree).
+    ///
+    /// Why "first matching
+    /// pane" rather than
+    /// "last-touched pane":
+    /// the user is searching
+    /// for a specific agent
+    /// or process name, and
+    /// they want THAT pane.
+    /// The within-group sort
+    /// already puts the
+    /// last-touched pane on
+    /// top of its group; if
+    /// the user searches for
+    /// a different agent, we
+    /// honor the search.
+    fn select_initial_row(&mut self) {
+        let n = self.merged_rows.len();
+        if n == 0 {
+            self.list_state.select(None);
+            return;
+        }
+        if self.is_panes_query()
+            && !self.panes_pattern().trim().is_empty()
+        {
+            // Pane mode + non-empty
+            // query: find the first
+            // pane row whose agent /
+            // command line matches
+            // the query. The user
+            // explicitly asked for
+            // this ("when I search
+            // for `claude` I want
+            // the `claude` pane
+            // selected, not the
+            // workspace header").
+            // Pane rows have
+            // `mode = "pane"` and
+            // the agent / cmdline
+            // in `command`. We use
+            // `query_matches_text`
+            // for the same
+            // Substring / Fuzzy /
+            // Regex match the
+            // `panes::fetch`
+            // group-aware filter
+            // uses, so the
+            // selection matches the
+            // visible row set.
+            if let Some(idx) = self
+                .merged_rows
+                .iter()
+                .position(|r| r.mode == "pane" && self.query_matches_text(&r.command))
+            {
+                self.list_state.select(Some(idx));
+                return;
+            }
+        }
+        // Fallback: row 0
+        // (workspace header in
+        // panes mode when no
+        // pane matched, the
+        // newest history row in
+        // history mode, etc.).
+        self.list_state.select(Some(0));
     }
 
     /// Compute the merged view: primary list + labeled rows
@@ -11709,6 +11937,20 @@ pub fn run_tui_to_stdout(
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
         app.duplicate_filter = session.duplicate_filter.unwrap_or(true);
     }
+    // Load the persisted per-pane
+    // `last_touched` map from the session
+    // file. Consumed by
+    // `refresh_session_panes_impl` to sort
+    // the panes-mode tree on this launch.
+    // The map is keyed by `pane_id` and
+    // contains Unix epoch seconds. Old
+    // entries (panes no longer in the
+    // current snapshot) are pruned on
+    // save, so the map never grows
+    // unboundedly across launches.
+    if !session.pane_last_touched.is_empty() {
+        app.pane_last_touched = session.pane_last_touched.clone();
+    }
     // Load named sessions from the config file
     // (`session.<id>=...`, `session.<id>.dir=...`).
     app.sessions = app_cfg.sessions();
@@ -11973,6 +12215,18 @@ pub fn run_tui_to_stdout(
         } else {
             Some(app.detected_scheme.label().to_string())
         },
+        // Per-pane `last_touched` map. Persist when
+        // non-empty: an empty map is the
+        // "user hasn't focused any pane yet"
+        // state, and serialising it as a no-op
+        // line would just bloat the session
+        // file. `save_to` handles the actual
+        // per-pane line emission; here we just
+        // hand the map over. The map is pruned
+        // to the current snapshot in `save_to`
+        // so deleted panes don't accumulate
+        // forever.
+        pane_last_touched: app.pane_last_touched.clone(),
     };
     session.save();
 
@@ -14232,6 +14486,63 @@ fn tmux_filter_debug_log(message: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
+/// Mirror of
+/// `tmux_filter_debug_log`
+/// for the herdr
+/// multiplexer. Activated
+/// by `SMARTHISTORY_DEBUG_HERDR=1` in
+/// the environment. Writes
+/// to
+/// `~/.local/cache/smarthistory/herdr-snapshot-debug.log`
+/// so the user can `tail -f`
+/// it from a separate
+/// terminal to see what
+/// `herdr pane list` /
+/// `herdr workspace list`
+/// actually return when
+/// the TUI is running — in
+/// particular when the TUI
+/// is itself a herdr
+/// popup. The popup case
+/// is a known sharp edge
+/// (herdr may or may not
+/// return data for the
+/// popup pane itself
+/// depending on the
+/// version, and the
+/// parsing layers in
+/// `src/multiplexer.rs`
+/// silently drop panes
+/// without a `cwd`),
+/// so a dedicated log
+/// file is the right
+/// debugging tool.
+pub(crate) fn herdr_snapshot_debug_log(message: &str) {
+    if std::env::var("SMARTHISTORY_DEBUG_HERDR").is_err() {
+        return;
+    }
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let path = std::path::Path::new(&home)
+        .join(".local")
+        .join("cache")
+        .join("smarthistory")
+        .join("herdr-snapshot-debug.log");
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{}] [smarthistory] {}\n", now, message);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
 /// Walk every
 /// `sessiondirs=...` config
 /// entry recursively and
@@ -14823,6 +15134,12 @@ mod tui_session_tests {
             pane_visibility: Some("output".to_string()),
             pane_height: Some("20".to_string()),
             scheme: Some("light".to_string()),
+            pane_last_touched: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("wB:p1".to_string(), 1_736_200_000);
+                m.insert("%5".to_string(), 1_736_200_050);
+                m
+            },
         };
         let _ = original.save_to(&tmp);
         let loaded = TuiSession::load_from(&tmp);
@@ -14837,6 +15154,15 @@ mod tui_session_tests {
         assert_eq!(loaded.pane_visibility.as_deref(), Some("output"));
         assert_eq!(loaded.pane_height.as_deref(), Some("20"));
         assert_eq!(loaded.scheme.as_deref(), Some("light"));
+        assert_eq!(
+            loaded.pane_last_touched.get("wB:p1").copied(),
+            Some(1_736_200_000)
+        );
+        assert_eq!(
+            loaded.pane_last_touched.get("%5").copied(),
+            Some(1_736_200_050)
+        );
+        assert_eq!(loaded.pane_last_touched.len(), 2);
     }
 
     /// The save function should not write a `query=`
@@ -15164,6 +15490,7 @@ mod tui_session_tests {
                 Some(app_pane_height.as_str())
             },
             scheme: None,
+            pane_last_touched: std::collections::HashMap::new(),
         }
     }
 }

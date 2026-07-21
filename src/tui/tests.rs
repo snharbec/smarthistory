@@ -5201,6 +5201,7 @@ fn session_round_trips_sort_order() {
         pane_visibility: None,
         pane_height: None,
         scheme: None,
+        pane_last_touched: std::collections::HashMap::new(),
     };
     let rendered = format!("{:?}", s);
     // The `Debug` output includes the
@@ -20396,4 +20397,1380 @@ fn draw_list_stays_fast_with_a_large_elements_result_set() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Per-pane `last_touched` persistence + sort tests
+// ---------------------------------------------------------------------------
+//
+// The `*` (panes) mode used to bubble the
+// multiplexer-reported "is_last" pane to the
+// top, which is the pane the user is
+// CURRENTLY in (per tmux/herdr). The new
+// `pane_last_touched` map replaces that with
+// a persistent, cross-launch ordering: every
+// time the user presses Enter on a pane
+// (workspace header or pane row) in `*` mode,
+// the pane's `last_touched` is set to
+// "now", and `refresh_session_panes_impl`
+// sorts the panes-mode tree by that map:
+// newest first within each group, and
+// the group whose MAX `last_touched` is
+// the most recent at the top of the
+// outer list.
+//
+// These tests exercise the new logic
+// directly via the fake-backend
+// pattern used throughout this test file.
+
+// Build a minimal `App` with a herdr
+// backend whose `snapshot_current_panes`
+// returns the panes described by
+// `rows`. Each row is
+// `(pane_id, window_id, session_label, path, current_command, is_last)`.
+// The backend is wired to return
+// those rows on every snapshot call,
+// and the test calls
+// `refresh_session_panes_impl` to
+// drive the impl directly with a
+// `current_pane` string that doesn't
+// match any of them (so nothing gets
+// filtered out).
+fn panes_sort_test_app(
+    rows: Vec<(
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        bool,
+    )>,
+) -> crate::tui::App {
+    use crate::multiplexer::{ActiveContext, CurrentPaneInfo, MultiplexerBackend};
+    use std::sync::Arc;
+    // We need the backend to return
+    // a per-call snapshot, and we
+    // also need the snapshot to be
+    // shareable across the test
+    // (the impl calls
+    // `app.multiplexer.snapshot_current_panes(...)`).
+    // We use a `Mutex<Vec<...>>` so
+    // the test can mutate the
+    // snapshot between calls if
+    // needed (and so the snapshot
+    // itself lives as long as the
+    // `App` does).
+    let snapshot: Arc<std::sync::Mutex<Vec<CurrentPaneInfo>>> = Arc::new(std::sync::Mutex::new(
+        rows.iter()
+            .map(
+                |(pane_id, window_id, session_label, path, current_command, is_last)| {
+                    CurrentPaneInfo {
+                        pane_id: pane_id.to_string(),
+                        window_id: window_id.to_string(),
+                        tab_id: String::new(),
+                        session_label: session_label.to_string(),
+                        path: path.to_string(),
+                        current_command: current_command.to_string(),
+                        is_last: *is_last,
+                    }
+                },
+            )
+            .collect(),
+    ));
+    struct TestBackend(Arc<std::sync::Mutex<Vec<CurrentPaneInfo>>>);
+    impl MultiplexerBackend for TestBackend {
+        fn snapshot(&self) -> Vec<ActiveContext> {
+            Vec::new()
+        }
+        fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<CurrentPaneInfo> {
+            self.0.lock().unwrap().clone()
+        }
+        fn focus_command(&self, _pane_id: &str) -> Option<String> {
+            None
+        }
+        fn focus_session(&self, _label: &str) -> Option<String> {
+            None
+        }
+        fn focus_pane(&self, _pane_id: &str, _tab_id: &str) -> Option<String> {
+            None
+        }
+        fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
+            None
+        }
+        fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
+            None
+        }
+        fn read_pane(&self, _pane_id: &str, _lines: usize) -> Option<String> {
+            None
+        }
+        fn name(&self) -> &'static str {
+            "herdr"
+        }
+    }
+    let mut app = directories_test_app(&[]);
+    app.multiplexer = Box::new(TestBackend(snapshot));
+    app
+}
+
+#[test]
+fn panes_sort_workspace_by_max_last_touched_desc() {
+    // Three workspaces, each with
+    // two panes. The
+    // `pane_last_touched` map
+    // bumps pane `wC:p1` to a
+    // recent timestamp — the
+    // workspace containing
+    // that pane (wC) should
+    // float to the top, even
+    // though it was
+    // third-seen in the
+    // snapshot.
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", false),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+        ("wB:p1", "wB", "wB", "/tmp", "zsh", false),
+        ("wB:p2", "wB", "wB", "/tmp", "vim", false),
+        ("wC:p1", "wC", "wC", "/tmp", "zsh", false),
+        ("wC:p2", "wC", "wC", "/tmp", "vim", false),
+    ]);
+    app.pane_last_touched
+        .insert("wC:p1".to_string(), 1_000_000_000);
+    app.pane_last_touched
+        .insert("wA:p1".to_string(), 500_000_000);
+    // Run the impl directly
+    // (the helper takes
+    // `&str` for the
+    // current pane, not
+    // the env var; we
+    // pass a string that
+    // doesn't match any
+    // pane so nothing
+    // gets filtered).
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    // Filter to workspace
+    // header rows so we
+    // can read the order
+    // without the pane
+    // children.
+    let workspace_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        workspace_order,
+        vec!["wC", "wA", "wB"],
+        "workspaces must be sorted by max last_touched DESC; \
+         wC contains the most-recently-focused pane (wC:p1), \
+         wA is second (wA:p1), wB has no entries and sorts last"
+    );
+}
+
+#[test]
+fn panes_sort_panes_within_group_by_last_touched_desc() {
+    // Single workspace, three
+    // panes. The middle one
+    // (`wA:p2`) has the
+    // newest `last_touched` —
+    // it should be on top of
+    // its group.
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", false),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+        ("wA:p3", "wA", "wA", "/tmp", "ssh", false),
+    ]);
+    app.pane_last_touched.insert("wA:p1".to_string(), 100);
+    app.pane_last_touched.insert("wA:p2".to_string(), 300);
+    app.pane_last_touched.insert("wA:p3".to_string(), 200);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let pane_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "pane")
+        .map(|r| r.session_id.as_str())
+        .collect();
+    assert_eq!(
+        pane_order,
+        vec!["wA:p2", "wA:p3", "wA:p1"],
+        "panes within a group must be sorted by last_touched DESC"
+    );
+}
+
+#[test]
+fn panes_sort_unseen_panes_fall_through_in_first_seen_order() {
+    // No `pane_last_touched`
+    // entries at all. All
+    // workspaces and panes
+    // should fall back to
+    // the first-seen
+    // order (the legacy
+    // `is_last` behaviour
+    // but more general:
+    // the user has
+    // literally never
+    // touched any pane
+    // in any prior
+    // session, so the
+    // snapshot's natural
+    // order is the
+    // only signal we
+    // have).
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", false),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+        ("wB:p1", "wB", "wB", "/tmp", "ssh", false),
+    ]);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let workspace_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(workspace_order, vec!["wA", "wB"]);
+    let pane_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "pane")
+        .map(|r| r.session_id.as_str())
+        .collect();
+    assert_eq!(
+        pane_order,
+        vec!["wA:p1", "wA:p2", "wB:p1"],
+        "no last_touched entries → first-seen order is the tiebreaker"
+    );
+}
+
+#[test]
+fn panes_sort_is_last_gets_cold_start_stamp() {
+    // The cold-start case:
+    // `pane_last_touched`
+    // is empty, but
+    // `is_last: true`
+    // is set on one of
+    // the panes by the
+    // multiplexer. The
+    // impl should
+    // stamp that pane
+    // with `now` so it
+    // bubbles to the
+    // top of its group
+    // (preserving the
+    // pre-existing UX
+    // where the
+    // currently-focused
+    // pane is at the
+    // top).
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", false),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", true),
+        ("wA:p3", "wA", "wA", "/tmp", "ssh", false),
+    ]);
+    assert!(app.pane_last_touched.is_empty());
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    // After the impl runs,
+    // the cold-start stamp
+    // should be in the map.
+    assert!(
+        app.pane_last_touched.contains_key("wA:p2"),
+        "is_last pane must get a cold-start stamp"
+    );
+    // And the cold-stamped
+    // pane should be on top
+    // of its group.
+    let pane_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "pane")
+        .map(|r| r.session_id.as_str())
+        .collect();
+    assert_eq!(
+        pane_order,
+        vec!["wA:p2", "wA:p1", "wA:p3"],
+        "is_last pane (cold-stamped) must be at the top of its group"
+    );
+}
+
+#[test]
+fn panes_sort_existing_timestamp_not_overwritten_by_cold_start() {
+    // Belt-and-suspenders:
+    // if the user already
+    // has a `last_touched`
+    // entry for the
+    // `is_last` pane
+    // (because they
+    // pressed Enter on it
+    // earlier in this
+    // TUI session), the
+    // cold-start path
+    // must NOT overwrite
+    // that entry. The
+    // user's explicit
+    // "I just used this"
+    // signal is stronger
+    // than the
+    // multiplexer's
+    // "is_last" hint, but
+    // they're
+    // usually the same
+    // value — preserving
+    // the user's
+    // timestamp keeps
+    // it stable in case
+    // `is_last` flips to
+    // a different pane
+    // later in the same
+    // session.
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", false),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", true),
+    ]);
+    // Pre-set a
+    // user-touched
+    // timestamp on
+    // the `is_last`
+    // pane. The
+    // value is
+    // older than
+    // "now" (so a
+    // hypothetical
+    // cold-start
+    // stamp would
+    // be NEWER
+    // and bump it
+    // down) but
+    // newer than
+    // any other
+    // entry.
+    app.pane_last_touched
+        .insert("wA:p2".to_string(), 999_999_999);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    assert_eq!(
+        app.pane_last_touched.get("wA:p2").copied(),
+        Some(999_999_999),
+        "existing timestamp must NOT be overwritten by the cold-start path"
+    );
+}
+
+#[test]
+fn panes_sort_current_workspace_pinned_to_second_position() {
+    // Three workspaces. `wA` is
+    // the current one (one of
+    // its panes has
+    // `is_last: true` per the
+    // multiplexer's
+    // "currently focused"
+    // report). The user has
+    // touched panes in `wA`
+    // and `wC` — the
+    // max-touched sort would
+    // put `wC` first and `wA`
+    // second already, so the
+    // pin step is a no-op. This
+    // test verifies the
+    // no-op-when-already-second
+    // case (no workspace
+    // shuffling).
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", true),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+        ("wB:p1", "wB", "wB", "/tmp", "zsh", false),
+        ("wC:p1", "wC", "wC", "/tmp", "zsh", false),
+    ]);
+    app.pane_last_touched
+        .insert("wC:p1".to_string(), 1_000_000_000);
+    app.pane_last_touched
+        .insert("wA:p2".to_string(), 500_000_000);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let workspace_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        workspace_order,
+        vec!["wC", "wA", "wB"],
+        "wC is on top (newest max), wA (current) is second, wB is last"
+    );
+}
+
+#[test]
+fn panes_sort_current_workspace_moved_from_first_to_second() {
+    // The load-bearing test for
+    // the user's reported
+    // complaint. `wA` is the
+    // current workspace AND
+    // has the highest
+    // max-touched. The user
+    // says: "this always has
+    // the newest timestamp
+    // but for me it does not
+    // make sense to switch to
+    // it" — the current
+    // workspace is the one
+    // the user is already in,
+    // so the OTHER
+    // workspaces are the
+    // ones they want to see
+    // on top. Verify: the
+    // current workspace is
+    // moved to position 1
+    // (index 0 is the top
+    // — the workspace they'd
+    // most likely want to
+    // switch to).
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", true),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+        ("wB:p1", "wB", "wB", "/tmp", "zsh", false),
+        ("wC:p1", "wC", "wC", "/tmp", "zsh", false),
+    ]);
+    // wA has the most-recent
+    // timestamp (cold-start
+    // stamp on wA:p1 = "now"
+    // is even higher than
+    // anything else, but the
+    // user-touched entries
+    // also contribute).
+    app.pane_last_touched
+        .insert("wA:p2".to_string(), 1_000_000_000);
+    app.pane_last_touched
+        .insert("wC:p1".to_string(), 500_000_000);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let workspace_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        workspace_order,
+        vec!["wC", "wA", "wB"],
+        "current workspace wA must be moved from position 0 to position 1; \
+         wC (the next-newest max-touched) takes position 0; \
+         wB (no entries) is last"
+    );
+}
+
+#[test]
+fn panes_sort_current_workspace_moved_from_middle_to_second() {
+    // The current workspace
+    // is `wB` (a pane in
+    // it has `is_last:
+    // true`). wA has a
+    // high
+    // `last_touched`,
+    // wB has a medium
+    // one, wC has
+    // none. The pure
+    // max-touched sort
+    // would put wA at
+    // 0, wB at 1, wC
+    // at 2 — the
+    // current
+    // workspace is
+    // already at
+    // position 1,
+    // so the pin is
+    // a no-op. Verify
+    // the order is
+    // preserved.
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", false),
+        ("wB:p1", "wB", "wB", "/tmp", "zsh", true),
+        ("wB:p2", "wB", "wB", "/tmp", "vim", false),
+        ("wC:p1", "wC", "wC", "/tmp", "zsh", false),
+    ]);
+    app.pane_last_touched
+        .insert("wA:p1".to_string(), 1_000_000_000);
+    app.pane_last_touched
+        .insert("wB:p2".to_string(), 500_000_000);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let workspace_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        workspace_order,
+        vec!["wA", "wB", "wC"],
+        "current wB is already at position 1; pin is a no-op; \
+         order is the same as the pure max-touched sort"
+    );
+}
+
+#[test]
+fn panes_sort_only_one_workspace_pin_does_not_panic() {
+    // Edge case: there's only
+    // one workspace, and it's
+    // the current one. The
+    // pin step should NOT
+    // panic on `Vec::insert(1,
+    // _)` (a 1-element Vec
+    // has no index 1). The
+    // workspace is the only
+    // one, so it has to be
+    // at position 0 — which
+    // is also where the user
+    // wants it (they can't
+    // switch to a different
+    // workspace if there
+    // isn't one).
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", true),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+    ]);
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let workspace_order: Vec<&str> = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(workspace_order, vec!["wA"]);
+}
+
+#[test]
+fn pane_last_touched_session_round_trip() {
+    // Round-trip the
+    // `pane_last_touched`
+    // map through a
+    // real session
+    // file. The map
+    // is serialised as
+    // one
+    // `pane-last-touched.<id>=<epoch>`
+    // line per pane;
+    // the loader
+    // must reassemble
+    // it into a
+    // `HashMap` with
+    // the same
+    // contents.
+    use std::collections::HashMap;
+    let tmp = std::env::temp_dir().join(format!(
+        "smarthistory_pane_last_touched_test_{}.ini",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut session = crate::tui::TuiSession::load_or_default();
+    let mut map: HashMap<String, i64> = HashMap::new();
+    map.insert("wA:p1".to_string(), 1_736_200_000);
+    map.insert("wB:p2".to_string(), 1_736_200_500);
+    // Edge case: a pane id
+    // with a `%` (tmux
+    // form). The
+    // serialiser must
+    // preserve the
+    // literal string.
+    map.insert("%5".to_string(), 1_736_201_000);
+    session.pane_last_touched = map.clone();
+    session.save_to(&tmp).expect("save");
+    let loaded = crate::tui::TuiSession::load_from(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(loaded.pane_last_touched, map);
+}
+
+#[test]
+fn pane_last_touched_garbage_values_silently_dropped() {
+    // Hand-edited
+    // session files
+    // can have
+    // malformed
+    // `pane-last-touched.*=...`
+    // lines (typo
+    // in the epoch,
+    // empty pane id,
+    // etc.). The
+    // loader must
+    // silently drop
+    // those entries
+    // rather than
+    // crashing on
+    // startup. Good
+    // values
+    // alongside the
+    // bad ones must
+    // still be
+    // loaded.
+    let tmp = std::env::temp_dir().join(format!(
+        "smarthistory_pane_last_touched_garbage_test_{}.ini",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(
+        &tmp,
+        "pane-last-touched.wA:p1=1736200000\n\
+         pane-last-touched.=1736200050\n\
+         pane-last-touched.wB:p2=not-a-number\n\
+         pane-last-touched.wC:p3=1736200100\n",
+    )
+    .expect("write");
+    let loaded = crate::tui::TuiSession::load_from(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(loaded.pane_last_touched.len(), 2);
+    assert_eq!(
+        loaded.pane_last_touched.get("wA:p1").copied(),
+        Some(1_736_200_000)
+    );
+    assert_eq!(
+        loaded.pane_last_touched.get("wC:p3").copied(),
+        Some(1_736_200_100)
+    );
+    assert!(!loaded.pane_last_touched.contains_key(""));
+    assert!(!loaded.pane_last_touched.contains_key("wB:p2"));
+}
+
+#[test]
+fn pane_last_touched_does_not_collide_with_top_level_keys() {
+    // The
+    // `pane-last-touched.<id>`
+    // prefix
+    // namespaces
+    // per-pane
+    // entries so a
+    // hand-edited
+    // session file
+    // can never
+    // collide with
+    // a future
+    // top-level key
+    // (e.g. a user
+    // typing
+    // `pane-last-touched=true`
+    // would
+    // otherwise
+    // look like a
+    // boolean flag).
+    // Verify the
+    // parser treats
+    // the prefix
+    // as
+    // opaque, NOT
+    // a boolean
+    // or
+    // anything
+    // else.
+    let tmp = std::env::temp_dir().join(format!(
+        "smarthistory_pane_last_touched_prefix_test_{}.ini",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(
+        &tmp,
+        "pane-last-touched=true\n\
+         pane-last-touched.something=42\n",
+    )
+    .expect("write");
+    let loaded = crate::tui::TuiSession::load_from(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    // The line
+    // `pane-last-touched=true`
+    // is parsed
+    // as
+    // `pane_id = ""`,
+    // value =
+    // "true".
+    // The empty
+    // pane id
+    // path is
+    // dropped, so
+    // we expect
+    // only the
+    // explicit
+    // `something`
+    // entry.
+    // (The map
+    // keys here
+    // are the
+    // literal
+    // string
+    // after the
+    // prefix.)
+    assert_eq!(loaded.pane_last_touched.get("something").copied(), Some(42));
+    assert!(!loaded.pane_last_touched.contains_key(""));
+    assert!(!loaded.pane_last_touched.contains_key("true"));
+}
+
+// ---------------------------------------------------------------------------
+// Regression test for the
+// "session_panes grows past
+// the snapshot count" bug
+// in `*` (panes) mode.
+// ---------------------------------------------------------------------------
+//
+// The user reported the
+// pane list as "empty" when
+// the TUI was launched as a
+// herdr popup. Investigation
+// with the new
+// `SMARTHISTORY_DEBUG_HERDR=1`
+// log showed that
+// `app.session_panes` was
+// growing 9 → 17 → 40 rows
+// across three calls to
+// `refresh_session_panes_impl`,
+// even though each call
+// should have been a
+// no-op after the first
+// (the wrapper has an
+// `is_empty()` guard).
+//
+// Root cause:
+// `run_tui_to_stdout` calls
+// `app.session_panes.clear()`
+// after each config-load
+// step (after loading
+// `app.sessions`, after
+// loading `app.hosts`).
+// Each `clear()` makes the
+// guard's `is_empty()` check
+// true, so the impl re-runs.
+// The impl assigned the
+// snapshot with
+// `app.session_panes = panes;`
+// (9 rows) and then
+// APPENDED the configured
+// sessions and hosts.
+// After three impl runs
+// (initial empty + two
+// post-clear empties) the
+// vec had the snapshot 3×,
+// sessions 3×, and hosts 3×
+// — `9 + 8 + 4 + 8 + 4 + 8 +
+// 4 = 45` rows instead of
+// the expected
+// `9 + 8 + 4 = 21`.
+//
+// The visible symptom
+// (empty list) was the
+// downstream renderer: the
+// rows were technically
+// there, but they were
+// shoved so far down by
+// the cumulative padding
+// (the post-config clears
+// re-emitted workspace
+// headers) that the visible
+// window showed only
+// duplicates of
+// `workspace_header
+// workspace_header
+// workspace_header` and
+// no actual pane content.
+//
+// Fix: extract the
+// sessions+hosts row
+// construction into a
+// helper
+// (`configured_sections_into`)
+// and call it from
+// `panes::fetch` on every
+// refresh, instead of
+// appending inside
+// `refresh_session_panes_impl`.
+// The snapshot in
+// `app.session_panes` is now
+// ONLY the multiplexer
+// snapshot; the configured
+// rows are composed
+// deterministically each
+// fetch, regardless of how
+// many times the snapshot
+// was rebuilt.
+//
+// This test verifies
+// the fix by simulating
+// the post-config-clear
+// path: clear
+// `session_panes`, re-run
+// the impl, and verify the
+// snapshot count is
+// unchanged (the impl
+// alone should not grow
+// the vec anymore).
+#[test]
+fn refresh_session_panes_impl_does_not_grow_session_panes_on_repeat_calls() {
+    use crate::tui::mode::panes::refresh_session_panes_impl;
+    use crate::tui::state::HistoryRow;
+    // Build an app with a
+    // known snapshot
+    // (5 panes across 4
+    // workspaces, with
+    // `is_last` set on
+    // the first pane in
+    // the current
+    // workspace so the
+    // sort logic doesn't
+    // panic).
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", true),
+        ("wA:p2", "wA", "wA", "/tmp", "vim", false),
+        ("wB:p1", "wB", "wB", "/tmp", "zsh", false),
+        ("wC:p1", "wC", "wC", "/tmp", "vim", false),
+        ("wD:p1", "wD", "wD", "/tmp", "pi", false),
+    ]);
+    // First call: empty
+    // `session_panes` →
+    // the impl runs and
+    // populates with
+    // `snapshot + sessions
+    // + hosts`. With no
+    // configured
+    // sessions/hosts,
+    // only the snapshot
+    // is written.
+    let initial = app.session_panes.len();
+    assert_eq!(initial, 0, "fresh app should have empty session_panes");
+    refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let after_first = app.session_panes.len();
+    assert!(
+        after_first > 0,
+        "first impl call should populate session_panes; got {}",
+        after_first
+    );
+    // The post-fix invariant:
+    // `app.session_panes`
+    // contains ONLY the
+    // snapshot — the
+    // configured sessions
+    // and hosts are
+    // composed in
+    // `panes::fetch`, NOT
+    // in the impl. So
+    // the count is the
+    // snapshot's count
+    // (4 workspace headers
+    // + 5 panes = 9
+    // rows in this
+    // fixture).
+    // Pre-fix this would
+    // be `9 + 8 + 4 = 21`
+    // for users with
+    // configured
+    // sessions/hosts,
+    // because the impl
+    // appended them.
+    let workspace_count = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "workspace")
+        .count();
+    let pane_count = app
+        .session_panes
+        .iter()
+        .filter(|r| r.mode == "pane")
+        .count();
+    assert_eq!(
+        workspace_count, 4,
+        "snapshot should have 4 workspace headers (one per workspace in the fixture)"
+    );
+    assert_eq!(
+        pane_count, 5,
+        "snapshot should have 5 pane rows (one per pane in the fixture)"
+    );
+    assert_eq!(
+        app.session_panes.len(),
+        workspace_count + pane_count,
+        "post-fix: session_panes is the snapshot only — no configured sessions/hosts \
+         should be appended here (those are composed in panes::fetch)"
+    );
+    // Now simulate the
+    // bug's trigger:
+    // clear the vec
+    // (what
+    // `run_tui_to_stdout`
+    // does after
+    // loading
+    // sessions/hosts)
+    // and re-run the
+    // impl. With the
+    // fix, the impl
+    // re-populates with
+    // the SAME snapshot
+    // count (no extra
+    // appends).
+    app.session_panes.clear();
+    refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    assert_eq!(
+        app.session_panes.len(),
+        after_first,
+        "post-fix: re-running the impl after a clear produces the same snapshot count; \
+         the previous bug would have appended configured sessions/hosts on every re-run"
+    );
+    // And a third
+    // clear+impl cycle
+    // (the user's
+    // observed third
+    // clear that pushed
+    // the count to
+    // 40).
+    app.session_panes.clear();
+    refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    assert_eq!(
+        app.session_panes.len(),
+        after_first,
+        "post-fix: even after multiple clear+impl cycles, the count stays stable"
+    );
+}
+
+#[test]
+fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
+    use crate::tui::state::HistoryRow;
+    // The complementary
+    // test to
+    // `refresh_session_panes_impl_does_not_grow_session_panes_on_repeat_calls`:
+    // verify that
+    // `panes::fetch` DOES
+    // append the
+    // configured
+    // sessions and
+    // hosts to the
+    // snapshot,
+    // regardless of how
+    // many times the
+    // snapshot was
+    // cleared and
+    // re-built. The
+    // composed count is
+    // deterministic:
+    // `snapshot +
+    // (1 + N_sessions) +
+    // (1 + N_hosts)`.
+    let mut app = panes_sort_test_app(vec![
+        ("wA:p1", "wA", "wA", "/tmp", "zsh", true),
+        ("wB:p1", "wB", "wB", "/tmp", "zsh", false),
+    ]);
+    // 2 sessions + 1 host.
+    app.sessions = vec![
+        HistoryRow {
+            id: -1,
+            command: "session-A".to_string(),
+            directory: "/tmp/session-a".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: "session-B".to_string(),
+            directory: "/tmp/session-b".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.hosts = vec![HistoryRow {
+        id: -100,
+        command: "host-A".to_string(),
+        directory: "user@host-a".to_string(),
+        ..Default::default()
+    }];
+    // Single fetch →
+    // snapshot (2
+    // workspaces + 2
+    // panes = 4) +
+    // sessions header +
+    // 2 sessions + hosts
+    // header + 1 host = 8.
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let workspaces = rows.iter().filter(|r| r.mode == "workspace").count();
+    let panes = rows.iter().filter(|r| r.mode == "pane").count();
+    let sessions = rows.iter().filter(|r| r.mode == "session").count();
+    let hosts = rows.iter().filter(|r| r.mode == "host").count();
+    assert_eq!(
+        workspaces, 4,
+        "2 snapshot workspaces + 1 sessions header + 1 hosts header"
+    );
+    assert_eq!(
+        panes, 2,
+        "2 snapshot panes (no panes in the configured sections)"
+    );
+    assert_eq!(sessions, 2, "2 configured sessions");
+    assert_eq!(hosts, 1, "1 configured host");
+    assert_eq!(
+        rows.len(),
+        9,
+        "composed count must be 4 workspace rows (2 snapshot + sessions header + hosts header) \
+         + 2 panes + 2 sessions + 1 host = 9"
+    );
+    // Now simulate
+    // the
+    // post-config-clear
+    // path: clear
+    // `session_panes`,
+    // re-run the
+    // impl, then
+    // re-fetch.
+    // Post-fix the
+    // composed count
+    // must STILL be
+    // 9 (the snapshot
+    // is rebuilt but
+    // the sessions+hosts
+    // are composed
+    // fresh from
+    // `app.sessions` /
+    // `app.hosts`).
+    app.session_panes.clear();
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let rows2 = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert_eq!(
+        rows2.len(),
+        9,
+        "post-fix: clear+impl+fetch produces the same composed count; \
+         the previous bug would have grown this (snapshot was duplicated on every re-run)"
+    );
+    // And a third cycle.
+    app.session_panes.clear();
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
+    let rows3 = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert_eq!(
+        rows3.len(),
+        9,
+        "post-fix: a third clear+impl+fetch cycle still produces 9 rows; \
+         the previous bug would have grown this further"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Smart selection in panes mode
+// ---------------------------------------------------------------------------
+//
+// When the user searches for
+// an agent name in `*` mode
+// (e.g. `*claude`, `*vim`,
+// `*ssh`), the legacy
+// selection logic put the
+// cursor on the WORKSPACE
+// header row (row 0 of the
+// tree). The user had to
+// press Down to reach the
+// actual pane they wanted.
+//
+// The fix: after a fresh
+// fetch in panes mode, scan
+// `merged_rows` for the first
+// `pane` row whose `command`
+// (the agent name / cmdline)
+// matches the active query.
+// Select that row instead of
+// row 0. Fall back to row 0
+// when no pane matches (the
+// query matched only the
+// workspace label, or the
+// user typed `*` alone).
+//
+// These tests cover the four
+// branches: pane-matches-query,
+// no-pane-matches (fallback
+// to workspace header),
+// `*` alone (fallback to row
+// 0 = current workspace
+// header), and the
+// cache-hit path in `refresh`
+// (where the selection is
+// preserved when the query
+// hasn't changed).
+
+/// Build a panes-mode `App`
+/// with a pre-populated
+/// `session_panes` vec (so
+/// the test doesn't have to
+/// run a real `herdr pane
+/// list` round-trip), and
+/// a known query. Returns
+/// the App with the cache
+/// key reset (so the next
+/// `refresh()` call re-runs
+/// the full fetch path,
+/// not the cache-hit
+/// short-circuit) and the
+/// fetch already executed
+/// (so `self.rows` and
+/// `self.merged_rows` are
+/// populated and the
+/// selection is the
+/// post-`select_initial_row`
+/// value).
+fn panes_select_test_app(
+    panes: Vec<(&'static str, &'static str, &'static str, &'static str)>,
+    query: &'static str,
+) -> crate::tui::App {
+    use crate::tui::state::HistoryRow;
+    let mut app = directories_test_app(&[]);
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let home_list = app.home_list.clone();
+    // Build a tree-shaped
+    // vec: one workspace
+    // header followed by
+    // the panes in that
+    // workspace. The
+    // fixture's first
+    // tuple element is the
+    // workspace label; the
+    // remaining elements
+    // are the panes. We
+    // group by workspace
+    // label so the test
+    // can specify multiple
+    // workspaces in one
+    // call.
+    let mut rows = Vec::new();
+    let mut id = -1i64;
+    for (label, pane_id, cwd, current_command) in panes {
+        // One workspace header
+        // + one pane per
+        // tuple. The
+        // tests use this
+        // minimal tree
+        // shape to verify
+        // selection logic
+        // without depending
+        // on the full
+        // refresh path.
+        let full = crate::util::canonicalize_directory(cwd);
+        let short = crate::util::shorten_home_path(&full, &home_list).into_owned();
+        rows.push(HistoryRow {
+            id,
+            command: label.to_string(),
+            directory: full.clone(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: now_epoch,
+            comment: "workspace".to_string(),
+            output: String::new(),
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: label.to_string(),
+            ..Default::default()
+        });
+        id -= 1;
+        // Add the pane.
+        rows.push(HistoryRow {
+            id,
+            command: current_command.to_string(),
+            directory: full,
+            session_id: pane_id.to_string(),
+            exit_code: 0,
+            timestamp: now_epoch,
+            comment: short,
+            output: String::new(),
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: label.to_string(),
+            pane_agent: current_command.to_string(),
+            ..Default::default()
+        });
+        id -= 1;
+    }
+    app.session_panes = rows;
+    app.query = query.to_string();
+    // Reset the cache
+    // key so a manual
+    // fetch() runs
+    // the full path
+    // (not the
+    // cache-hit
+    // short-circuit).
+    app.last_fetch_key = None;
+    app
+}
+
+#[test]
+fn panes_select_initial_row_finds_pane_matching_query() {
+    // The user's
+    // reported case:
+    // workspace
+    // "NoteSearch" with
+    // two panes — one
+    // running `claude`,
+    // one running
+    // `zsh`. The user
+    // searches for
+    // `claude` and
+    // expects the
+    // `claude` pane to
+    // be selected, not
+    // the workspace
+    // header.
+    let mut app = panes_select_test_app(
+        vec![
+            ("NoteSearch", "w34:p1", "/tmp/notes", "claude"),
+            ("NoteSearch", "w34:p2", "/tmp/notes", "zsh"),
+        ],
+        "*claude",
+    );
+    // Run a manual
+    // fetch. The
+    // query-matching
+    // `panes::fetch`
+    // group-aware
+    // filter keeps the
+    // whole NoteSearch
+    // group because
+    // one pane matches
+    // `claude`.
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    // Pre-fix
+    // behavior: this
+    // would select
+    // row 0 (the
+    // workspace
+    // header).
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let selected_row = &app.merged_rows[selected];
+    assert_eq!(
+        selected_row.mode, "pane",
+        "selecting on `*claude` must land on the pane row, not the workspace header"
+    );
+    assert!(
+        selected_row.command.contains("claude"),
+        "the selected pane must be the `claude` pane (got command={:?})",
+        selected_row.command
+    );
+    assert_eq!(selected_row.session_id, "w34:p1");
+}
+
+#[test]
+fn panes_select_initial_row_falls_back_to_workspace_header_when_no_pane_matches() {
+    // The user searches
+    // for the workspace
+    // label itself (no
+    // pane has it as
+    // their command).
+    // The group-aware
+    // filter keeps the
+    // group because the
+    // header matches;
+    // no pane matches
+    // the query, so
+    // `select_initial_row`
+    // falls back to
+    // row 0 (the
+    // workspace
+    // header).
+    let mut app = panes_select_test_app(
+        vec![
+            ("NoteSearch", "w34:p1", "/tmp/notes", "claude"),
+            ("NoteSearch", "w34:p2", "/tmp/notes", "zsh"),
+        ],
+        "*NoteSearch",
+    );
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let selected_row = &app.merged_rows[selected];
+    assert_eq!(
+        selected_row.mode, "workspace",
+        "when only the workspace label matches, selection must fall back to the workspace header"
+    );
+    assert_eq!(selected_row.command, "NoteSearch");
+}
+
+#[test]
+fn panes_select_initial_row_with_empty_query_selects_row_zero() {
+    // The user typed
+    // `*` alone
+    // (no query) to
+    // browse the
+    // tree. There's
+    // no search
+    // target; select
+    // row 0 (the
+    // first row of
+    // the tree, which
+    // is the
+    // current
+    // workspace
+    // header per the
+    // pin-to-second
+    // logic).
+    let mut app = panes_select_test_app(
+        vec![
+            ("NoteSearch", "w34:p1", "/tmp/notes", "claude"),
+            ("NoteSearch", "w34:p2", "/tmp/notes", "zsh"),
+        ],
+        "*",
+    );
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    assert_eq!(selected, 0, "empty query must select row 0");
+}
+
+#[test]
+fn panes_select_initial_row_finds_first_matching_pane_when_multiple_match() {
+    // Two workspaces,
+    // each with a
+    // `zsh` pane. The
+    // first match wins.
+    // The within-group
+    // sort orders
+    // panes by
+    // `last_touched`
+    // DESC, but the
+    // test fixture
+    // has no
+    // `last_touched`
+    // entries, so the
+    // first-seen pane
+    // (in the
+    // snapshot) is
+    // the one selected.
+    let mut app = panes_select_test_app(
+        vec![
+            ("wA", "wA:p1", "/tmp/a", "zsh"),
+            ("wA", "wA:p2", "/tmp/a", "vim"),
+            ("wB", "wB:p1", "/tmp/b", "zsh"),
+        ],
+        "*zsh",
+    );
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let selected_row = &app.merged_rows[selected];
+    assert_eq!(selected_row.mode, "pane");
+    assert!(
+        selected_row.command.contains("zsh"),
+        "selected pane must match `zsh` (got {:?})",
+        selected_row.command
+    );
+    // Verify both
+    // matching panes
+    // are present in
+    // the result (the
+    // group-aware
+    // filter keeps
+    // both groups).
+    let zsh_count = app
+        .merged_rows
+        .iter()
+        .filter(|r| r.mode == "pane" && r.command.contains("zsh"))
+        .count();
+    assert_eq!(zsh_count, 2, "both `zsh` panes should be in the result");
+}
+
+#[test]
+fn panes_select_initial_row_handles_empty_list() {
+    // No panes in the
+    // session, no
+    // query. The
+    // selection is
+    // `None`.
+    let mut app = panes_select_test_app(vec![], "*");
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.select_initial_row();
+    assert!(
+        app.list_state.selected().is_none(),
+        "empty list must select None"
+    );
 }

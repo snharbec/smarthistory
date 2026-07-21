@@ -69,10 +69,67 @@ pub(crate) fn check(app: &App) -> CheckReport {
     };
     let panes = app.multiplexer.snapshot_current_panes(current_pane);
     if panes.is_empty() {
-        CheckReport::warn(
-            mode,
-            format!("`{backend}` backend returned 0 panes (you may be the only pane in this session)"),
-        )
+        // Specialised
+        // message for
+        // the herdr
+        // popup case,
+        // which is the
+        // most common
+        // source of
+        // "empty list"
+        // user reports.
+        // The popup
+        // itself has no
+        // `cwd` (it's a
+        // UI overlay,
+        // not a shell),
+        // so
+        // `parse_herdr_pane_list`
+        // filters it
+        // out, and the
+        // remaining
+        // panes may
+        // still be
+        // present in
+        // the snapshot
+        // — but if herdr
+        // itself
+        // reports the
+        // popup as the
+        // ONLY pane
+        // (e.g. a fresh
+        // session with
+        // no other
+        // panes yet),
+        // the list is
+        // empty by
+        // design. The
+        // debug log
+        // path gives
+        // the user a
+        // way to see
+        // what herdr
+        // actually
+        // returned.
+        if backend == "herdr" {
+            CheckReport::warn(
+                mode,
+                format!(
+                    "`herdr` backend returned 0 panes (HERDR_PANE_ID={current_pane:?}). \
+                     If the TUI is running as a herdr popup, the popup pane itself \
+                     is filtered out (it has no shell/cwd) — so the list will be empty \
+                     until you have at least one other pane open in the same or another \
+                     workspace. Run with `SMARTHISTORY_DEBUG_HERDR=1` and check \
+                     `~/.local/cache/smarthistory/herdr-snapshot-debug.log` for the \
+                     raw `herdr pane list` response."
+                ),
+            )
+        } else {
+            CheckReport::warn(
+                mode,
+                format!("`{backend}` backend returned 0 panes (you may be the only pane in this session)"),
+            )
+        }
     } else {
         CheckReport::ok(
             mode,
@@ -112,8 +169,21 @@ pub(crate) fn pattern(app: &App) -> &str {
 ///    kept if any child pane matches, so searching
 ///    for a pane command still surfaces the parent
 ///    workspace header (and vice versa).
+use crate::tui::herdr_snapshot_debug_log;
+
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     crate::tui::mode::panes::refresh_session_panes(app);
+    herdr_snapshot_debug_log(&format!(
+        "panes::fetch START: app.session_panes has {} rows \
+         (HERDR_PANE_ID={:?}, query={:?}, filter={:?}, \
+         sessions={}, hosts={})",
+        app.session_panes.len(),
+        std::env::var("HERDR_PANE_ID").ok(),
+        app.query,
+        app.panes_filter,
+        app.sessions.len(),
+        app.hosts.len()
+    ));
     // Apply the panes-filter
     // (toggled by F7 / F8 /
     // F9) BEFORE the token
@@ -133,10 +203,52 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     //   - `Sessions` keeps
     //     `sessions`.
     //   - `All` keeps everything.
+    //
+    // The snapshot stored in
+    // `app.session_panes` is
+    // ONLY the multiplexer
+    // snapshot (workspaces +
+    // panes) — the
+    // configured sessions
+    // and hosts are appended
+    // here, on every fetch
+    // call, via
+    // `configured_sections`.
+    // This composition is the
+    // fix for the
+    // "session_panes grows
+    // past the snapshot count"
+    // bug where the
+    // previous design appended
+    // the configured rows at
+    // the end of
+    // `refresh_session_panes_impl`,
+    // and the
+    // `session_panes.clear()`
+    // calls in
+    // `run_tui_to_stdout` (after
+    // loading sessions, then
+    // after loading hosts) made
+    // the impl re-run and
+    // re-append the same
+    // configured rows each
+    // time, ending up with
+    // `9 + 8 + 4 + 8 + 4 + 8 + 4
+    // = 45` rows instead of
+    // the expected
+    // `9 + 8 + 4 = 21`. By
+    // building the configured
+    // rows fresh here (the
+    // helper is a pure
+    // function over `app.sessions`
+    // and `app.hosts`) the
+    // count is deterministic.
+    let mut composed: Vec<HistoryRow> = app.session_panes.clone();
+    configured_sections_into(&mut composed, app);
     let section_rows: Vec<HistoryRow> = if app.panes_filter.is_default() {
-        app.session_panes.clone()
+        composed
     } else {
-        app.session_panes
+        composed
             .iter()
             .filter(|r| match app.panes_filter {
                 PanesFilter::All => true,
@@ -249,6 +361,135 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     Ok(out)
 }
 
+/// Build the configured-sessions
+/// and configured-hosts rows that
+/// are appended to the panes-mode
+/// list, and push them onto the
+/// caller-provided `Vec<HistoryRow>`.
+/// Lives in its own helper so
+/// `panes::fetch` and the snapshot
+/// path don't drift apart on the row
+/// shape (the staging layer
+/// `stage_directory_selection`
+/// depends on every field
+/// being set the same way:
+///
+/// - `mode = "workspace"` for the
+///   header row (so the renderer
+///   uses the `# ` accent prefix).
+/// - `mode = "session"` /
+///   `mode = "host"` for the
+///   children.
+/// - `source = "sessions"` /
+///   `source = "hosts"` so the
+///   panes-filter (F7/F8/F9) can
+///   scope the list to one section.
+/// - `session_id` set on the
+///   children so the matcher in
+///   `stage_directory_selection`
+///   can identify "this is the
+///   configured X".
+///
+/// Extracted from
+/// `refresh_session_panes_impl`
+/// so the snapshot and the
+/// configured rows can be
+/// built independently and
+/// composed in `panes::fetch`.
+/// The original code appended
+/// the configured rows at the
+/// end of `refresh_session_panes_impl`,
+/// which had a subtle
+/// interaction with the
+/// `session_panes.clear()` calls
+/// in `run_tui_to_stdout`: each
+/// clear triggered a re-run of
+/// the impl (the
+/// `is_empty()` guard became
+/// true), which re-appended
+/// the configured rows on top
+/// of the new snapshot. After
+/// three clears (initial,
+/// after-load-sessions,
+/// after-load-hosts) the list
+/// had grown to `9 + 8 + 4 +
+/// 8 + 4 + 8 + 4` rows
+/// instead of the expected
+/// `9 + 8 + 4`. Composing
+/// the rows fresh in `fetch`
+/// (which runs on every refresh)
+/// keeps the list at exactly
+/// `snapshot + sessions + hosts`
+/// regardless of how many times
+/// the snapshot itself was
+/// rebuilt.
+fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
+    if !app.sessions.is_empty() {
+        out.push(HistoryRow {
+            id: -20_000,
+            command: "sessions".to_string(),
+            directory: String::new(),
+            session_id: "sessions".to_string(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: "configured sessions".to_string(),
+            output: String::new(),
+            mode: "workspace".to_string(),
+            source: "sessions".to_string(),
+            ..Default::default()
+        });
+        let mut next_session_id: i64 = -20_000;
+        for s in &app.sessions {
+            next_session_id -= 1;
+            out.push(HistoryRow {
+                id: next_session_id,
+                command: s.command.clone(),
+                directory: s.directory.clone(),
+                session_id: s.command.clone(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: s.comment.clone(),
+                output: String::new(),
+                mode: "session".to_string(),
+                source: "sessions".to_string(),
+                ..Default::default()
+            });
+        }
+    }
+    if !app.hosts.is_empty() {
+        out.push(HistoryRow {
+            id: -25_000,
+            command: "hosts".to_string(),
+            directory: String::new(),
+            session_id: "hosts".to_string(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: "configured hosts".to_string(),
+            output: String::new(),
+            mode: "workspace".to_string(),
+            source: "hosts".to_string(),
+            ..Default::default()
+        });
+        let mut next_host_id: i64 = -25_000;
+        for h in &app.hosts {
+            next_host_id -= 1;
+            out.push(HistoryRow {
+                id: next_host_id,
+                command: h.command.clone(),
+                directory: h.directory.clone(),
+                session_id: String::new(),
+                exit_code: 0,
+                timestamp: 0,
+                comment: h.comment.clone(),
+                output: String::new(),
+                mode: "host".to_string(),
+                source: "hosts".to_string(),
+                ..Default::default()
+            });
+        }
+    }
+}
+
 
     /// Populate `app.session_panes` from
     /// `tmux list-panes -s` (the *current*
@@ -302,14 +543,18 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // (jumping to ourselves
         // would be a no-op). We
         // bail early only when
-        // NEITHER is set — that
-        // means the user isn't
-        // running inside a
-        // multiplexer pane at
-        // all (so there are no
-        // sibling panes to jump
-        // to and the snapshot
-        // would be wasted work).
+        // NEITHER is set AND the
+        // herdr fallback
+        // (`herdr pane current`)
+        // can't determine it
+        // either — that means
+        // the user isn't running
+        // inside a multiplexer
+        // pane at all (so there
+        // are no sibling panes to
+        // jump to and the
+        // snapshot would be
+        // wasted work).
         //
         // The previous code
         // checked `$TMUX_PANE`
@@ -323,6 +568,29 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // "there are no panes
         // visible when I switch
         // to the panes prefix".
+        //
+        // The herdr-popup case
+        // is the most subtle
+        // shape of the same
+        // bug: when the TUI is
+        // launched as a herdr
+        // popup, herdr may NOT
+        // pass `HERDR_PANE_ID`
+        // to the popup's process
+        // (the user's debug log
+        // shows
+        // `HERDR_PANE_ID=None`
+        // in that case). We
+        // fall back to
+        // `herdr pane current`,
+        // which returns the
+        // calling process's own
+        // pane id (the popup
+        // itself when running
+        // as a popup; the
+        // user's shell pane
+        // when running from a
+        // regular shell).
         let current_pane = std::env::var("TMUX_PANE")
             .ok()
             .filter(|s| !s.is_empty())
@@ -330,10 +598,58 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                 std::env::var("HERDR_PANE_ID")
                     .ok()
                     .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                // Popup fallback. When
+                // `HERDR_PANE_ID` is
+                // unset (e.g. the TUI
+                // runs as a herdr
+                // popup and herdr
+                // didn't pass the var
+                // through), ask herdr
+                // for the calling
+                // process's own pane.
+                // `herdr pane current`
+                // returns the
+                // calling process's
+                // pane id in BOTH the
+                // shell case and the
+                // popup case, so this
+                // is a safe fallback
+                // regardless of how
+                // the TUI was
+                // launched. We only
+                // try this when herdr
+                // is on PATH (the
+                // `Command::new("herdr")`
+                // would fail
+                // otherwise; the
+                // `herdr_current_pane_id`
+                // function logs the
+                // failure to the
+                // debug log). Gated
+                // on the `herdr`
+                // feature so the
+                // tmux-only build
+                // doesn't try to
+                // link the herdr
+                // fallback.
+                #[cfg(feature = "herdr")]
+                {
+                    if std::env::var("HERDR_PANE_ID").is_err() {
+                        crate::tui::herdr_snapshot_debug_log(
+                            "HERDR_PANE_ID unset; falling back to `herdr pane current`",
+                        );
+                        return crate::multiplexer::herdr_current_pane_id();
+                    }
+                }
+                None
             });
         let current_pane = match current_pane {
             Some(p) => p,
-            // Neither env var set —
+            // Neither env var set
+            // AND herdr couldn't
+            // tell us either —
             // the user isn't inside
             // a multiplexer pane.
             // Bail rather than
@@ -407,17 +723,64 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // through so we can bubble the
         // containing workspace to the
         // top of the list afterwards.
+        //
+        // Each `pane_record` carries the
+        // pane's `last_touched` epoch
+        // (i64::MIN when absent, so it
+        // sorts last) so the second pass
+        // can sort within each group
+        // without a second map lookup.
         use std::collections::BTreeMap;
         let mut order: Vec<String> = Vec::new();
         let mut grouped: BTreeMap<
             String,
-            Vec<(crate::multiplexer::CurrentPaneInfo, String, String, i64)>,
+            Vec<(crate::multiplexer::CurrentPaneInfo, String, String, i64, i64)>,
         > = BTreeMap::new();
         // Decreasing synthetic ids so
         // the rows sort consistently
         // under any timestamp-DESC sort.
         let mut next_id: i64 = -1;
-        let mut last_workspace: Option<String> = None;
+        // Stamp the `is_last` pane on
+        // first sight if it doesn't
+        // already have a `last_touched`
+        // entry. This handles the
+        // cold-start case where the user
+        // has never pressed Enter on a
+        // pane in this TUI session
+        // (the persisted `pane_last_touched`
+        // map only has explicit user
+        // actions, not multiplexer-reported
+        // "currently focused" state). The
+        // bump is conditional on the
+        // entry being absent so we don't
+        // overwrite an explicit user
+        // action that happened earlier
+        // in the same launch.
+        let now_epoch_for_cold_start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // The workspace containing the
+        // currently-focused pane (per
+        // the multiplexer's `is_last`).
+        // Captured during pass 1 and
+        // used in pass 2 to pin that
+        // workspace to the second
+        // position in the outer list
+        // (so the user sees the OTHER
+        // workspaces they're most
+        // likely to switch to on top,
+        // rather than the one they're
+        // already in). The first pane
+        // in pass 1 with `is_last: true`
+        // wins; if no pane has the
+        // flag (rare — the multiplexer
+        // only reports it after the
+        // user has been active) the
+        // field stays `None` and the
+        // sort falls through to the
+        // pure max-touched order.
+        let mut current_workspace_label: Option<String> = None;
         for pr in backend_rows {
             if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
                 eprintln!(
@@ -483,44 +846,267 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             if !grouped.contains_key(&label) {
                 order.push(label.clone());
             }
-            // The last pane gets a
-            // slightly newer timestamp
-            // so it sorts first within
-            // its group AND signals
-            // "bring this workspace to
-            // the top of the list".
-            if pr.is_last {
-                last_workspace = Some(label.clone());
+            // Track the workspace
+            // containing the
+            // currently-focused pane
+            // (the multiplexer's
+            // `is_last`). Used in
+            // pass 2 to pin that
+            // workspace to the
+            // second position in the
+            // outer list (so the
+            // user sees the OTHER
+            // workspaces they're
+            // most likely to switch
+            // to on top, rather
+            // than the one they're
+            // already in). Only the
+            // first hit wins; the
+            // multiplexer's snapshot
+            // usually has exactly
+            // one `is_last` pane,
+            // but if there are
+            // several, the
+            // first-seen one is
+            // canonical.
+            if pr.is_last && current_workspace_label.is_none() {
+                current_workspace_label = Some(label.clone());
             }
-            grouped
-                .entry(label)
-                .or_default()
-                .push((pr.clone(), short_dir, full_path, id));
+            // The last pane gets a
+            // cold-start stamp (if no
+            // existing `last_touched`
+            // entry) so it bubbles to
+            // the top of its group on
+            // the first refresh, and
+            // its workspace header
+            // bubbles to the top of
+            // the outer list. The
+            // pre-existing UX where
+            // the currently-focused
+            // pane is at the top of
+            // its workspace is
+            // preserved. (See the
+            // cold-start block below
+            // for the actual stamp.)
+            //
+            // Resolve this pane's
+            // `last_touched` from the
+            // persisted map. Absent
+            // entries sort last
+            // (i64::MIN). For the
+            // cold-start case (no
+            // entry yet), the
+            // currently-focused pane
+            // (the multiplexer's
+            // `is_last`) gets stamped
+            // to "now" so it bubbles
+            // to the top of its
+            // group on the very
+            // first refresh. This
+            // preserves the
+            // pre-existing UX where
+            // the currently-active
+            // pane is always at the
+            // top of its workspace.
+            let touched = if let Some(ts) =
+                app.pane_last_touched.get(&pr.pane_id)
+            {
+                *ts
+            } else if pr.is_last {
+                app.pane_last_touched
+                    .insert(pr.pane_id.clone(), now_epoch_for_cold_start);
+                now_epoch_for_cold_start
+            } else {
+                i64::MIN
+            };
+            grouped.entry(label).or_default().push((
+                pr.clone(),
+                short_dir,
+                full_path,
+                id,
+                touched,
+            ));
         }
 
         // Second pass: emit
         // (workspace_header, then
         // its pane children) for
-        // each group, in
-        // first-seen order. The
-        // workspace containing the
-        // "last" pane is emitted
-        // first so pressing Enter
-        // on the default selection
-        // flips back to where the
-        // user just was.
-        if let Some(ref last_ws) = last_workspace
-            && let Some(pos) = order.iter().position(|l| l == last_ws)
-            && pos > 0
-        {
-            let l = order.remove(pos);
-            order.insert(0, l);
+        // each group.
+        //
+        // Sort order:
+        //
+        // 1. Within each group, panes
+        //    are sorted by
+        //    `last_touched DESC`,
+        //    stable (newest first;
+        //    never-touched panes fall
+        //    to the bottom in
+        //    first-seen order).
+        // 2. The outer `order` is
+        //    sorted by the MAX
+        //    `last_touched` of each
+        //    group's panes, DESC,
+        //    stable. So the workspace
+        //    containing the
+        //    most-recently-focused
+        //    pane floats to the top.
+        //
+        // The legacy `is_last` bubble
+        // is replaced by the
+        // `pane_last_touched` map.
+        // When the map is empty (cold
+        // start, never focused a
+        // pane), the cold-start
+        // stamp in pass 1 above
+        // ensures the
+        // currently-focused pane (per
+        // the multiplexer's
+        // `is_last`) gets a fresh
+        // `now` stamp and therefore
+        // floats to the top of its
+        // group, which in turn floats
+        // its workspace to the top
+        // of the list — i.e. the
+        // same UX as before, just
+        // now backed by a
+        // persistent map.
+        //
+        // Stable sort by max-touched
+        // is used so the original
+        // first-seen order is
+        // preserved as a
+        // deterministic tiebreaker.
+        let max_touched = |label: &String| -> i64 {
+            grouped
+                .get(label)
+                .and_then(|v| v.iter().map(|(_, _, _, _, t)| *t).max())
+                .unwrap_or(i64::MIN)
+        };
+        // Snapshot the original
+        // first-seen positions so the
+        // stable sort falls back to
+        // them on tie.
+        let first_seen_index: std::collections::HashMap<String, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.clone(), i))
+            .collect();
+        order.sort_by(|a, b| {
+            let ta = max_touched(a);
+            let tb = max_touched(b);
+            tb.cmp(&ta).then_with(|| {
+                first_seen_index
+                    .get(a)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .cmp(&first_seen_index.get(b).copied().unwrap_or(usize::MAX))
+            })
+        });
+        // Pin the currently-focused
+        // workspace to the second
+        // position (index 1) in the
+        // outer list. The user is
+        // already in this workspace;
+        // putting it on top would
+        // make the OTHER workspaces
+        // (the ones they'd actually
+        // want to switch to) harder
+        // to reach. Index 0 is the
+        // "top" of the list in the
+        // renderer, so removing the
+        // current workspace from its
+        // current sorted position
+        // and inserting it at index
+        // 1 (after position 0) is
+        // the right move.
+        //
+        // The current workspace is
+        // almost always the one with
+        // the highest max-touched
+        // (the cold-start stamp +
+        // any in-session user
+        // action), so before this
+        // step it was at position 0.
+        // After this step, the
+        // second-highest is at
+        // position 0, and the
+        // current is at position
+        // 1. When there's only one
+        // workspace total, the
+        // remove-and-insert is a
+        // no-op.
+        //
+        // The pin is unconditional:
+        // even when the current
+        // workspace is already at
+        // position 0, we move it
+        // to position 1, because
+        // the user explicitly asked
+        // "always put the current
+        // group on the second
+        // place" — the
+        // current-workspace
+        // position should be
+        // deterministic regardless
+        // of how recently the user
+        // has touched it.
+        if let Some(ref cur) = current_workspace_label
+            && let Some(pos) = order.iter().position(|l| l == cur) {
+                let l = order.remove(pos);
+                // Clamp the insert
+                // position to 1 so
+                // a list with only
+                // one workspace
+                // doesn't panic on
+                // `insert(1, _)` (a
+                // one-element Vec
+                // has indices 0
+                // only). When the
+                // list has zero
+                // or one entry,
+                // the current
+                // workspace is
+                // the only one
+                // and there's
+                // nowhere to put
+                // it but at
+                // position 0 —
+                // which is also
+                // position 1 in
+                // a 1-element
+                // list (the same
+                // index). We
+                // special-case
+                // this rather
+                // than skipping
+                // the insert
+                // entirely,
+                // because the
+                // `remove`
+                // above would
+                // leave the
+                // list empty.
+                let insert_at = if order.is_empty() {
+                    0
+                } else {
+                    1.min(order.len())
+                };
+                order.insert(insert_at, l);
+            }
+        // Within each group: stable
+        // sort by `last_touched` DESC
+        // (the 5th tuple element).
+        // Stable so the
+        // first-seen order is the
+        // tiebreaker.
+        for (_, entries) in grouped.iter_mut() {
+            entries.sort_by(|a, b| b.4.cmp(&a.4));
         }
 
         let mut panes: Vec<HistoryRow> = Vec::new();
         if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
             eprintln!(
-                "[debug] pass 2: order={:?}, grouped.keys={:?}",
+                "[debug] pass 2: order={:?} (sorted by max last_touched DESC), grouped.keys={:?}",
                 order,
                 grouped.keys().collect::<Vec<_>>()
             );
@@ -533,20 +1119,15 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             if entries.is_empty() {
                 continue;
             }
-            // Bubble any
-            // `is_last` pane to
-            // the front of this
-            // workspace's pane
-            // list so the user
-            // can flip back to it
-            // immediately.
-            let mut entries = entries;
-            if let Some(pos) = entries.iter().position(|(pr, _, _, _)| pr.is_last)
-                && pos > 0
-            {
-                let item = entries.remove(pos);
-                entries.insert(0, item);
-            }
+            // `entries` is already
+            // sorted by `last_touched`
+            // DESC (stable) by the
+            // within-group sort above.
+            // The legacy `is_last`
+            // bubble is gone — the
+            // cold-start stamp in
+            // pass 1 handles that
+            // case.
 
             // The workspace header
             // row. `command` is the
@@ -563,7 +1144,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             // a secondary hint.
             let agent_count = entries
                 .iter()
-                .filter(|(pr, _, _, _)| !pr.current_command.is_empty())
+                .filter(|(pr, _, _, _, _)| !pr.current_command.is_empty())
                 .count();
             let summary = format!(
                 "{} pane{}{}, ",
@@ -584,7 +1165,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                 command: label.clone(),
                 directory: entries
                     .first()
-                    .map(|(_, _, full, _)| full.clone())
+                    .map(|(_, _, full, _, _)| full.clone())
                     .unwrap_or_default(),
                 // The workspace ID (`wB`, `wE`,
                 // etc.) — used as the focus
@@ -604,7 +1185,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                 // recognizes.
                 session_id: entries
                     .first()
-                    .map(|(pr, _, _, _)| pr.window_id.clone())
+                    .map(|(pr, _, _, _, _)| pr.window_id.clone())
                     .unwrap_or_default(),
                 exit_code: 0,
                 timestamp: now_epoch,
@@ -627,7 +1208,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             // `select_for_run`'s
             // pane-row branch can pass
             // it to `focus_pane`.
-            for (pr, short_dir, full_path, id) in entries {
+            for (pr, short_dir, full_path, id, _touched) in entries {
                 let agent = pr.current_command.clone();
                 panes.push(HistoryRow {
                     id,
@@ -695,124 +1276,50 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             }
         }
         app.session_panes = panes;
-        // Append named sessions as additional
-        // workspace + pane rows, grouped under
-        // a `# sessions` header.
-        if !app.sessions.is_empty() {
-            app.session_panes.push(HistoryRow {
-                id: -20_000,
-                command: "sessions".to_string(),
-                directory: String::new(),
-                session_id: "sessions".to_string(),
-                exit_code: 0,
-                timestamp: 0,
-                comment: "configured sessions".to_string(),
-                output: String::new(),
-                mode: "workspace".to_string(),
-                source: "sessions".to_string(),
-
-                ..Default::default()
-            });
-            let mut next_session_id: i64 = -20_000;
-            for s in &app.sessions {
-                next_session_id -= 1;
-                app.session_panes.push(HistoryRow {
-                    id: next_session_id,
-                    command: s.command.clone(),
-                    directory: s.directory.clone(),
-                    session_id: s.command.clone(),
-                    exit_code: 0,
-                    timestamp: 0,
-                    comment: s.comment.clone(),
-                    output: String::new(),
-                    mode: "session".to_string(),
-                    source: "sessions".to_string(),
-
-                    ..Default::default()
-                });
-            }
-        }
-        // Append hosts as additional
-        // rows, grouped under a
-        // `# hosts` header. Each
-        // host row carries the
-        // display name in `command`
-        // and a `user@host:port`
-        // connection string in
-        // `directory` (the staging
-        // layer reads both for the
-        // matcher and the
-        // connection-argv
-        // construction).
-        if !app.hosts.is_empty() {
-            app.session_panes.push(HistoryRow {
-                id: -25_000,
-                command: "hosts".to_string(),
-                directory: String::new(),
-                session_id: "hosts".to_string(),
-                exit_code: 0,
-                timestamp: 0,
-                comment: "configured hosts".to_string(),
-                output: String::new(),
-                mode: "workspace".to_string(),
-                source: "hosts".to_string(),
-
-                ..Default::default()
-            });
-            let mut next_host_id: i64 = -25_000;
-            for h in &app.hosts {
-                next_host_id -= 1;
-                // The synthetic
-                // `id` is
-                // negative
-                // (consistent
-                // with
-                // `# sessions`)
-                // and stable
-                // across
-                // refreshes, so
-                // the staging
-                // layer can
-                // index
-                // `app.hosts`
-                // by
-                // `-(row.id) -
-                // 25_000 - 1`
-                // (the
-                // accessor in
-                // `Config::hosts`
-                // uses the
-                // same
-                // `id - 30_000`
-                // scheme,
-                // shifted by
-                // 5_000 to keep
-                // the two
-                // ranges
-                // disjoint).
-                app.session_panes.push(HistoryRow {
-                    id: next_host_id,
-                    command: h.command.clone(),
-                    directory: h.directory.clone(),
-                    session_id: String::new(),
-                    exit_code: 0,
-                    timestamp: 0,
-                    comment: h.comment.clone(),
-                    output: String::new(),
-                    mode: "host".to_string(),
-                    source: "hosts".to_string(),
-
-                    ..Default::default()
-                });
-            }
-        }
-        if std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok() {
-            eprintln!(
-                "[debug] sessions count: {}, session_panes total: {}",
-                app.sessions.len(),
-                app.session_panes.len()
-            );
-        }
+        // The configured sessions
+        // and hosts are NOT
+        // appended here. They
+        // are appended in
+        // `panes::fetch` via
+        // `configured_sections_into`,
+        // which runs on every
+        // fetch. The previous
+        // design appended them
+        // here, which interacted
+        // badly with the
+        // `session_panes.clear()`
+        // calls in
+        // `run_tui_to_stdout` (one
+        // after loading sessions,
+        // one after loading
+        // hosts): each clear
+        // triggered a re-run of
+        // the impl (the
+        // `is_empty()` guard
+        // became true), which
+        // re-appended the same
+        // configured rows on top
+        // of the new snapshot.
+        // After three clears the
+        // list had grown to
+        // roughly 2.1× the
+        // expected count
+        // (each clear added
+        // another full set of
+        // sessions + hosts).
+        // Composing the rows
+        // fresh in `fetch` keeps
+        // the list at exactly
+        // `snapshot + sessions + hosts`
+        // regardless of how many
+        // times the snapshot was
+        // rebuilt.
+        herdr_snapshot_debug_log(&format!(
+            "refresh_session_panes_impl END: session_panes total = {} rows \
+             (snapshot only; sessions+hosts appended by panes::fetch; HERDR_PANE_ID={:?})",
+            app.session_panes.len(),
+            std::env::var("HERDR_PANE_ID").ok()
+        ));
         // Bump the snapshot id and spawn an
         // asynchronous cmdline lookup for every
         // pane row in the new snapshot. The
