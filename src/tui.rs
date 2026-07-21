@@ -1767,6 +1767,33 @@ pub(crate) struct App {
     /// the newest history entry"; `Some(N-1)` means
     /// "at the oldest". Session-local — not persisted.
     mode_query_history_index: std::collections::HashMap<char, Option<usize>>,
+
+    /// Flat, chronological (newest-first) list of every query
+    /// submitted or abandoned across ALL prefix modes — the
+    /// cross-mode counterpart to `mode_query_history`. Recorded
+    /// at the same two call sites (`select_for_run`,
+    /// `on_query_mode_change`), just without the per-mode
+    /// partition, so `Action::PreviousGlobalHistory` /
+    /// `NextGlobalHistory` (default `C-S-p` / `C-S-n`) can
+    /// rotate through past queries regardless of which mode
+    /// they were typed in. Persisted across TUI sessions to
+    /// `<db_dir>/global_query_history.json` (a separate file
+    /// from `mode_query_history`'s, to keep the two independent
+    /// on-disk formats simple).
+    global_query_history: Vec<String>,
+    /// The in-progress query saved when global recall starts
+    /// (mirrors `mode_query_drafts`, but a single session-local
+    /// slot rather than one per mode, since global recall
+    /// rotates through one shared list regardless of the active
+    /// mode).
+    global_query_draft: Option<String>,
+    /// Recall position in `global_query_history` (mirrors
+    /// `mode_query_history_index`'s `None` = live /
+    /// `Some(0)` = newest / `Some(N-1)` = oldest semantics, but
+    /// as a single scalar instead of a per-mode map). Session-
+    /// local — not persisted.
+    global_query_history_index: Option<usize>,
+
     /// Cache key for the SQL `fetch()` short-circuit: the
     /// `(query, mode, exit_filter, match_algorithm,
     /// directory_source)` tuple from the last successful fetch.
@@ -2528,34 +2555,7 @@ impl App {
         // the renderer shows as the row's
         // primary text.
         for (pane_id, cmdline) in &updates {
-            if let Some(row) = self
-                .session_panes
-                .iter_mut()
-                .find(|r| r.mode == "pane" && &r.session_id == pane_id)
-            {
-                // Combine the agent name
-                // (if any) with the
-                // cmdline (if any). When
-                // the agent and the
-                // cmdline's first token
-                // match (e.g.
-                // agent="pi" and
-                // argv0="pi"), show
-                // only the cmdline
-                // (avoids `pi pi`).
-                let agent = row.command.clone();
-                let combined = if agent.is_empty() {
-                    cmdline.clone()
-                } else {
-                    let cmd_first = cmdline.split_whitespace().next().unwrap_or("");
-                    if cmd_first.eq_ignore_ascii_case(&agent) {
-                        cmdline.clone()
-                    } else {
-                        format!("{} {}", agent, cmdline)
-                    }
-                };
-                row.command = combined;
-            }
+            self.patch_pane_cmdline(pane_id, cmdline);
         }
         // Re-fetch the panes so the patched
         // `session_panes` values flow into
@@ -2612,6 +2612,71 @@ impl App {
                 }
             }
             self.merged_rows = self.build_merged_rows();
+        }
+    }
+
+    /// Patch a single `(pane_id, cmdline)`
+    /// update from the herdr background
+    /// thread into the matching pane row in
+    /// `self.session_panes`. Extracted from
+    /// `process_pane_cmdlines` so the dedup
+    /// logic is unit-testable in isolation
+    /// (the background-thread + channel +
+    /// snapshot-id machinery is hard to set
+    /// up in a test, but the dedup itself is
+    /// a 4-line pure function over two
+    /// strings and a row).
+    ///
+    /// The agent is read from
+    /// `row.pane_agent` (set once by
+    /// `refresh_session_panes_impl` at
+    /// row-emission time) — NOT from
+    /// `row.command`, which already holds
+    /// the previous combined value after
+    /// the first patch. Reading
+    /// `row.command` was the original bug:
+    /// each tick re-concatenated the
+    /// previous combined value with the new
+    /// cmdline, so a `ssh user@host` pane
+    /// ended up showing `ssh user@host ssh
+    /// user@host ssh user@host ...` after a
+    /// few seconds. The `pane_agent` field
+    /// is the load-bearing fix: the patch
+    /// is now idempotent across ticks and
+    /// only re-runs when the cmdline itself
+    /// changes.
+    ///
+    /// When the agent and the cmdline's
+    /// first token match (e.g. agent="pi"
+    /// and argv0="pi"), show only the
+    /// cmdline (avoids `pi pi`).
+    ///
+    /// No-op when the pane id doesn't
+    /// match any row in `session_panes`
+    /// (the row may have been re-fetched
+    /// out from under the in-flight
+    /// request; the snapshot-id check in
+    /// `process_pane_cmdlines` should
+    /// already have discarded it, but
+    /// belt-and-suspenders here).
+    fn patch_pane_cmdline(&mut self, pane_id: &str, cmdline: &str) {
+        if let Some(row) = self
+            .session_panes
+            .iter_mut()
+            .find(|r| r.mode == "pane" && r.session_id == pane_id)
+        {
+            let agent = row.pane_agent.clone();
+            let combined = if agent.is_empty() {
+                cmdline.to_string()
+            } else {
+                let cmd_first = cmdline.split_whitespace().next().unwrap_or("");
+                if cmd_first.eq_ignore_ascii_case(&agent) {
+                    cmdline.to_string()
+                } else {
+                    format!("{} {}", agent, cmdline)
+                }
+            };
+            row.command = combined;
         }
     }
 
@@ -4772,6 +4837,9 @@ impl App {
             mode_query_history: std::collections::HashMap::new(),
             mode_query_drafts: std::collections::HashMap::new(),
             mode_query_history_index: std::collections::HashMap::new(),
+            global_query_history: Vec::new(),
+            global_query_draft: None,
+            global_query_history_index: None,
             last_fetch_key: None,
         };
         app.recompile_regex();
@@ -5844,6 +5912,7 @@ impl App {
         // mutable borrow of the same `self`.)
         let (mode_char, query_snapshot) = (self.current_mode_char(), self.query.clone());
         self.record_to_mode_history(mode_char, &query_snapshot);
+        self.record_to_global_history(&query_snapshot);
         self.select_for_run_dispatch()
     }
 
@@ -6922,6 +6991,7 @@ impl App {
             // position 0, overwriting the leading `=`).
             let old_query = self.query.clone();
             self.history_exit_recall();
+            self.global_history_exit_recall();
             self.query_touched = true;
             // Insert the new character at the current cursor
             // position rather than unconditionally appending.
@@ -7103,6 +7173,7 @@ impl App {
                 // user's edits become the "live" query).
                 let old_query = self.query.clone();
                 self.history_exit_recall();
+                self.global_history_exit_recall();
                 self.query_touched = true;
                 // Delete the character to the LEFT of the
                 // cursor. The cursor is always >= 1 here (the
@@ -7864,6 +7935,7 @@ impl App {
         // session. Same pattern as `backspace`.
         let old_query = self.query.clone();
         self.history_exit_recall();
+        self.global_history_exit_recall();
         self.query_touched = true;
         // Walk left in *characters*, counting how
         // many we delete. The cursor is in
@@ -7924,6 +7996,7 @@ impl App {
             // recording just before clearing would
             // capture the about-to-be-discarded text.
             self.history_exit_recall();
+            self.global_history_exit_recall();
             self.query.clear();
             self.query_touched = true;
             self.query_regex = None;
@@ -9883,6 +9956,7 @@ impl App {
     fn on_query_mode_change(&mut self, old_query: &str) {
         let old_mode = query_mode_char(old_query, &self.query_prefixes);
         self.record_to_mode_history(old_mode, old_query);
+        self.record_to_global_history(old_query);
         // Reset the NEW mode's recall state. The user just
         // switched modes; their prior recall session (in the
         // old mode) is implicitly dropped. The new mode
@@ -10055,6 +10129,167 @@ impl App {
             .copied()
             .flatten()
             .is_some()
+    }
+
+    /// Record `query` into the GLOBAL (cross-mode) history.
+    /// Cross-mode counterpart to `record_to_mode_history`: same
+    /// empty/whitespace skip and consecutive-dedup rules, same
+    /// two call sites (`select_for_run`, `on_query_mode_change`),
+    /// but one flat newest-first list instead of one per mode.
+    fn record_to_global_history(&mut self, query: &str) {
+        if query.trim().is_empty() {
+            return;
+        }
+        if self.global_query_history.first().map(String::as_str) == Some(query) {
+            return;
+        }
+        self.global_query_history.insert(0, query.to_string());
+        // Cap higher than the per-mode 100 (`record_to_mode_history`)
+        // since this list aggregates every mode at once.
+        const MAX: usize = 200;
+        if self.global_query_history.len() > MAX {
+            self.global_query_history.truncate(MAX);
+        }
+    }
+
+    /// Exit global recall mode (if active) and discard the saved
+    /// draft. Cross-mode counterpart to `history_exit_recall`;
+    /// called at the same 4 call sites (`push_char`, `backspace`,
+    /// `delete_word_backward`, `clear_query`) — any keystroke
+    /// that mutates the query commits recall.
+    fn global_history_exit_recall(&mut self) {
+        if self.global_query_history_index.is_some() {
+            self.global_query_history_index = None;
+            self.global_query_draft = None;
+        }
+    }
+
+    /// Move to the previous (older) entry in the GLOBAL
+    /// (cross-mode) query history. Same readline semantics as
+    /// `history_previous`, over `global_query_history` instead
+    /// of a per-mode slice. Recalling an entry restores its
+    /// ORIGINAL leading prefix char (it's part of the stored
+    /// string, same as `mode_query_history`'s entries), so
+    /// `refresh()` naturally switches the app back into whatever
+    /// mode that query was typed in.
+    fn global_history_previous(&mut self) {
+        let n = self.global_query_history.len();
+        if n == 0 {
+            return;
+        }
+        match self.global_query_history_index {
+            None => {
+                if self.global_query_draft.is_none() {
+                    self.global_query_draft = Some(self.query.clone());
+                }
+                if let Some(q) = self.global_query_history.first().cloned() {
+                    self.query = q;
+                    self.query_cursor = self.query.chars().count();
+                    self.query_touched = true;
+                    self.recompile_regex();
+                    self.global_query_history_index = Some(0);
+                    self.refresh();
+                }
+            }
+            Some(i) => {
+                if i + 1 < n {
+                    let next_i = i + 1;
+                    if let Some(q) = self.global_query_history.get(next_i).cloned() {
+                        self.query = q;
+                        self.query_cursor = self.query.chars().count();
+                        self.query_touched = true;
+                        self.recompile_regex();
+                        self.global_query_history_index = Some(next_i);
+                        self.refresh();
+                    }
+                }
+                // else: at oldest, stay
+            }
+        }
+    }
+
+    /// Move to the next (newer) entry in the GLOBAL query
+    /// history. Same semantics as `history_next`, over
+    /// `global_query_history`.
+    fn global_history_next(&mut self) {
+        let Some(i) = self.global_query_history_index else {
+            return; // already at the live query
+        };
+        if i == 0 {
+            let draft = self.global_query_draft.take();
+            self.query = draft.unwrap_or_default();
+            self.query_cursor = self.query.chars().count();
+            self.query_touched = true;
+            self.recompile_regex();
+            self.global_query_history_index = None;
+            self.refresh();
+        } else {
+            let next_i = i - 1;
+            if let Some(q) = self.global_query_history.get(next_i).cloned() {
+                self.query = q;
+                self.query_cursor = self.query.chars().count();
+                self.query_touched = true;
+                self.recompile_regex();
+                self.global_query_history_index = Some(next_i);
+                self.refresh();
+            }
+        }
+    }
+
+    /// Load the GLOBAL (cross-mode) query history from
+    /// `<db_dir>/global_query_history.json` if it exists. Called
+    /// once at TUI start alongside `load_mode_history_from_disk`.
+    /// Missing / malformed / unreadable files are silently
+    /// treated as "no history" — a corrupt sidecar must never
+    /// block the TUI from launching.
+    fn load_global_history_from_disk(&mut self) {
+        let Some(path) = self.global_history_path() else {
+            return;
+        };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        match serde_json::from_str::<Vec<String>>(&contents) {
+            Ok(list) => {
+                self.global_query_history = list;
+            }
+            Err(_) => {
+                self.global_query_history.clear();
+            }
+        }
+    }
+
+    /// Persist the GLOBAL query history to
+    /// `<db_dir>/global_query_history.json`. Called at TUI exit
+    /// alongside `persist_mode_history_to_disk`. The draft/index
+    /// are NOT persisted (session-local only), matching the
+    /// per-mode history's contract.
+    fn persist_global_history_to_disk(&self) {
+        let Some(path) = self.global_history_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(s) = serde_json::to_string_pretty(&self.global_query_history) {
+            let _ = std::fs::write(&path, s);
+        }
+    }
+
+    /// Resolve `<db_dir>/global_query_history.json`. A separate
+    /// file from `mode_history_path()`'s (`query_history.json`)
+    /// so the two independent on-disk formats (`HashMap<char,
+    /// Vec<String>>` vs a flat `Vec<String>`) don't need to share
+    /// a schema. Returns `None` if `HOME` is unset.
+    fn global_history_path(&self) -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("cache")
+                .join("smarthistory")
+                .join("global_query_history.json"),
+        )
     }
 
     /// Load the per-mode query history from
@@ -11540,6 +11775,7 @@ pub fn run_tui_to_stdout(
     // so a partial write from a previous crash never
     // blocks the TUI from launching.
     app.load_mode_history_from_disk();
+    app.load_global_history_from_disk();
 
     let mut render = std::io::stderr();
     crossterm::terminal::enable_raw_mode()?;
@@ -11747,6 +11983,7 @@ pub fn run_tui_to_stdout(
     // persisted — drafts and recall positions are
     // session-local and reset on the next launch.
     app.persist_mode_history_to_disk();
+    app.persist_global_history_to_disk();
 
     Ok(selection)
 }
@@ -12795,6 +13032,18 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // restores the saved draft when navigating past
             // the newest entry (i.e. back to "live" mode).
             app.history_next();
+            false
+        }
+        Action::PreviousGlobalHistory => {
+            // Cross-mode counterpart to PreviousHistory: rotates
+            // through every query submitted across ALL modes
+            // instead of just the active one.
+            app.global_history_previous();
+            false
+        }
+        Action::NextGlobalHistory => {
+            // Mirror of PreviousGlobalHistory.
+            app.global_history_next();
             false
         }
     }

@@ -7,7 +7,7 @@ Every value `smarthistory` reads at startup, with the config-file key, default, 
 | Location | What |
 | --- | --- |
 | `~/.config/smarthistory/config` | The user config file (INI-style `key=value` lines; `#` starts a comment; `~` is expanded in path values). Read once at startup by `Config::load`. Missing file → built-in defaults. |
-| `~/.local/cache/smarthistory/` | Runtime cache: `query_history.json` (per-mode recall), `widget-debug.log` (TUI debug trace), `last_session.json` (the most recent session, for `smarthistory tui` resume). Not hand-edited. |
+| `~/.local/cache/smarthistory/` | Runtime cache: `query_history.json` (per-mode recall), `global_query_history.json` (cross-mode recall, `Ctrl+Shift+P`/`Ctrl+Shift+N`), `widget-debug.log` (TUI debug trace), `last_session.json` (the most recent session, for `smarthistory tui` resume). Not hand-edited. |
 | `~/.cache/tmux-history/` | Per-pane tmux output logs (set via `tmuxpaneoutputdir`). |
 | `~/.config/smarthistory/themes/` | Optional user theme directory (TOML files matching the built-in theme shape). |
 

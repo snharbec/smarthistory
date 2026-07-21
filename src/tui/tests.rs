@@ -6349,7 +6349,10 @@ fn note_compose_push_char_supports_newlines() {
     for c in "line two".chars() {
         app.note_compose_push_char(c);
     }
-    assert_eq!(app.note_compose.as_ref().unwrap().text, "line one\nline two");
+    assert_eq!(
+        app.note_compose.as_ref().unwrap().text,
+        "line one\nline two"
+    );
 }
 
 /// Backspace across a newline joins the two lines — the buffer
@@ -6427,7 +6430,10 @@ fn note_compose_submit_stages_multiline_command_with_indented_continuation() {
     }
     let quit = app.note_compose_submit();
 
-    assert!(quit, "submit must exit the TUI so the parent shell runs the staged command");
+    assert!(
+        quit,
+        "submit must exit the TUI so the parent shell runs the staged command"
+    );
     assert!(app.note_compose.is_none(), "dialog must close on submit");
     let staged = app.selection.as_deref().expect("staged command");
     assert!(
@@ -6445,11 +6451,7 @@ fn note_compose_submit_stages_multiline_command_with_indented_continuation() {
         "todo-mode compose should stage --todo; got: {:?}",
         staged
     );
-    assert!(
-        staged.contains("--database"),
-        "got: {:?}",
-        staged
-    );
+    assert!(staged.contains("--database"), "got: {:?}", staged);
     assert_eq!(app.pick_mode, Some(PickMode::Run));
 }
 
@@ -9029,11 +9031,7 @@ fn mark_todo_done_toggles_all_marked_todos() {
         .as_ref()
         .map(|(m, _)| m.as_str())
         .unwrap_or("");
-    assert!(
-        msg.contains("Marked 2 of 2 todos done"),
-        "got: {:?}",
-        msg
-    );
+    assert!(msg.contains("Marked 2 of 2 todos done"), "got: {:?}", msg);
     assert_eq!(
         app.merged_rows().len(),
         2,
@@ -9162,7 +9160,10 @@ fn fetch_elements_lists_all_elements() {
         app.merged_rows().len(),
         7,
         "expected 7 elements (2 headings + 5 list-item elements) across both files, got: {:?}",
-        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+        app.merged_rows()
+            .iter()
+            .map(|r| &r.command)
+            .collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
@@ -9223,7 +9224,11 @@ fn fetch_elements_applies_text_filter() {
     app.query = ":prose".to_string();
     app.refresh();
     drive_elements_search(&mut app);
-    let commands: Vec<String> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    let commands: Vec<String> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.clone())
+        .collect();
     assert_eq!(
         commands.len(),
         1,
@@ -9335,7 +9340,11 @@ fn fetch_elements_filters_by_direct_link_match() {
     app.query = ":[[SomeLink]]".to_string();
     app.refresh();
     drive_elements_search(&mut app);
-    let commands: Vec<String> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    let commands: Vec<String> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.clone())
+        .collect();
     assert_eq!(
         commands.len(),
         1,
@@ -9398,11 +9407,7 @@ fn fetch_elements_invalid_query_surfaces_status_message() {
         .as_ref()
         .map(|(s, _)| s.as_str())
         .unwrap_or("");
-    assert!(
-        status.contains("invalid query"),
-        "got: {:?}",
-        status
-    );
+    assert!(status.contains("invalid query"), "got: {:?}", status);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }
@@ -9571,7 +9576,9 @@ fn ensure_selected_context_caches_by_file_and_line() {
     crate::tui::mode::elements::ensure_selected_context(&mut app);
     let highlighted_output = app.merged_rows()[heading_idx].output.clone();
     assert_eq!(
-        app.elements_state.context_cache.get(&(filepath.clone(), line_number)),
+        app.elements_state
+            .context_cache
+            .get(&(filepath.clone(), line_number)),
         Some(&highlighted_output),
         "cache should hold the just-computed highlighted output under (file, line)"
     );
@@ -9586,7 +9593,8 @@ fn ensure_selected_context_caches_by_file_and_line() {
     // `bat`, which is the whole point of the cache.
     app.refresh();
     assert_eq!(
-        app.merged_rows()[heading_idx].output, highlighted_output,
+        app.merged_rows()[heading_idx].output,
+        highlighted_output,
         "refresh's own context step should restore the cached highlighted output"
     );
     assert_eq!(
@@ -9656,7 +9664,10 @@ fn ensure_selected_context_centers_window_on_match_line_for_long_file() {
         app.merged_rows().len(),
         1,
         "expected exactly the one paragraph referencing kramfors, got: {:?}",
-        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+        app.merged_rows()
+            .iter()
+            .map(|r| &r.command)
+            .collect::<Vec<_>>()
     );
     app.list_state.select(Some(0));
     crate::tui::mode::elements::ensure_selected_context(&mut app);
@@ -9693,11 +9704,7 @@ fn fetch_elements_requires_notes_database() {
         .as_ref()
         .map(|(s, _)| s.as_str())
         .unwrap_or("");
-    assert!(
-        status.contains("notes.database"),
-        "got: {:?}",
-        status
-    );
+    assert!(status.contains("notes.database"), "got: {:?}", status);
 }
 
 /// Selecting an element row stages `$EDITOR +<start_line>
@@ -12146,6 +12153,22 @@ fn panes_test_app(panes: &[(&str, &str, &str, &str)]) -> App {
             let short = crate::util::shorten_home_path(&full, &home_list).into_owned();
             let id = next_id;
             next_id -= 1;
+            // The fourth tuple slot
+            // doubles as the
+            // `current_command` /
+            // `pane_agent` — the
+            // production helper
+            // `refresh_session_panes_impl`
+            // sets both to the same
+            // value (the agent name
+            // from
+            // `CurrentPaneInfo`),
+            // and the test helper
+            // mirrors that
+            // invariant so the
+            // dedup test below
+            // sees the same
+            // initial state.
             HistoryRow {
                 id,
                 command: cmd.to_string(),
@@ -12160,12 +12183,185 @@ fn panes_test_app(panes: &[(&str, &str, &str, &str)]) -> App {
                 output: window_id.to_string(),
                 mode: "pane".to_string(),
                 source: "pane".to_string(),
+                pane_agent: cmd.to_string(),
 
                 ..Default::default()
             }
         })
         .collect();
     app
+}
+
+/// The background cmdline patch in
+/// `App::process_pane_cmdlines` used to
+/// concatenate `agent` + `cmdline` on every
+/// tick, re-reading the just-patched
+/// `row.command` as the new "agent" each
+/// time. So a herdr pane running `ssh
+/// user@host` ended up showing `ssh
+/// user@host ssh user@host ssh user@host
+/// ...` after a few seconds. The fix was
+/// to add a separate `pane_agent` field
+/// on `HistoryRow` and have the patch
+/// read the original agent from there.
+///
+/// These tests exercise the dedup logic
+/// directly via the extracted
+/// `App::patch_pane_cmdline` helper. The
+/// background-thread + channel + snapshot
+/// machinery is hard to set up in a
+/// test, but the dedup itself is a
+/// 4-line pure function over two strings
+/// and a row, so the unit tests cover
+/// the regression at the right level of
+/// abstraction.
+#[test]
+fn patch_pane_cmdline_appends_agent_only_once() {
+    // Single pane running `ssh`. The
+    // herdr thread will report a fresh
+    // `ssh user@host` cmdline on every
+    // poll; the patch should write
+    // `ssh user@host` once and not
+    // concatenate on subsequent ticks.
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "ssh")]);
+    // Tick 1: herdr reports
+    // `ssh user@host`.
+    app.patch_pane_cmdline("%1", "ssh user@host");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "ssh user@host");
+    assert_eq!(row.pane_agent, "ssh");
+    // Tick 2: same cmdline again.
+    // The original bug would have
+    // produced `ssh user@host ssh
+    // user@host` here.
+    app.patch_pane_cmdline("%1", "ssh user@host");
+    let row = &app.session_panes[0];
+    assert_eq!(
+        row.command, "ssh user@host",
+        "second patch must not concatenate; the agent is read from pane_agent, not from the just-patched command"
+    );
+    // Tick 3: cmdline still the
+    // same. Repeat the assertion to
+    // be sure the patch is fully
+    // idempotent.
+    app.patch_pane_cmdline("%1", "ssh user@host");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "ssh user@host");
+    assert_eq!(row.pane_agent, "ssh");
+}
+
+#[test]
+fn patch_pane_cmdline_dedups_when_agent_matches_argv0() {
+    // The dedup shortcut: when the
+    // agent name matches the cmdline's
+    // first token, the patch must show
+    // only the cmdline (no `pi pi
+    // ...`). This is the case the
+    // user hits most often — `pi`,
+    // `claude`, `vim`, etc. all spawn
+    // a child process with the same
+    // argv0, so the herdr
+    // `process-info` command comes
+    // back with the same first token.
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "pi")]);
+    app.patch_pane_cmdline("%1", "pi --model foo --prompt bar");
+    let row = &app.session_panes[0];
+    assert_eq!(
+        row.command, "pi --model foo --prompt bar",
+        "agent == cmd_first must not double the agent"
+    );
+    // Same again on a second tick.
+    app.patch_pane_cmdline("%1", "pi --model foo --prompt bar");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "pi --model foo --prompt bar");
+    // Now the cmdline changes
+    // (e.g. the user re-runs with a
+    // different flag) — the patch
+    // must pick up the new cmdline
+    // cleanly, no leftover from the
+    // previous tick.
+    app.patch_pane_cmdline("%1", "pi --model baz");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "pi --model baz");
+}
+
+#[test]
+fn patch_pane_cmdline_joins_when_agent_differs_from_argv0() {
+    // The non-dedup case: agent
+    // (`pi`) is a parent process,
+    // but the cmdline's first token
+    // (`ssh`) is a child that
+    // doesn't match. The display
+    // should be `pi ssh ...` so the
+    // user sees both the agent and
+    // the foreground command.
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "pi")]);
+    app.patch_pane_cmdline("%1", "ssh user@host -p 2222");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "pi ssh user@host -p 2222");
+    // And critically: a second
+    // tick with the same cmdline
+    // must NOT become `pi ssh ... pi
+    // ssh ...` — that's the bug
+    // being regression-tested.
+    app.patch_pane_cmdline("%1", "ssh user@host -p 2222");
+    let row = &app.session_panes[0];
+    assert_eq!(
+        row.command, "pi ssh user@host -p 2222",
+        "non-dedup path must also be idempotent across ticks"
+    );
+    // Cmdline changes (user ran a
+    // different child).
+    app.patch_pane_cmdline("%1", "vim /etc/hosts");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "pi vim /etc/hosts");
+}
+
+#[test]
+fn patch_pane_cmdline_handles_empty_agent() {
+    // A pane row with no agent
+    // (`pane_agent == ""`) is
+    // unusual but legal (e.g. the
+    // initial fetch ran before
+    // `current_command` was
+    // populated, or the user
+    // constructed a synthetic
+    // pane row in a test). The
+    // patch must just show the
+    // cmdline alone, no leading
+    // space, no ` agent` prefix.
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "")]);
+    app.patch_pane_cmdline("%1", "vim /etc/hosts");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "vim /etc/hosts");
+    // And the empty-agent case
+    // must also be idempotent.
+    app.patch_pane_cmdline("%1", "vim /etc/hosts");
+    let row = &app.session_panes[0];
+    assert_eq!(row.command, "vim /etc/hosts");
+}
+
+#[test]
+fn patch_pane_cmdline_no_op_for_unknown_pane() {
+    // The patch must silently do
+    // nothing if the `pane_id` from
+    // the herdr thread doesn't
+    // match any row in
+    // `session_panes`. This
+    // happens when the snapshot
+    // has been superseded between
+    // the thread spawn and the
+    // patch (the snapshot-id
+    // check in
+    // `process_pane_cmdlines`
+    // should already have caught
+    // it, but belt-and-suspenders
+    // here).
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "ssh")]);
+    let before = app.session_panes[0].command.clone();
+    app.patch_pane_cmdline("%99", "vim /etc/hosts");
+    assert_eq!(app.session_panes[0].command, before);
+    assert_eq!(app.session_panes.len(), 1);
 }
 
 /// `*` prefix switches the query into panes mode,
@@ -12248,6 +12444,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             workspace_label: "SmartHistory".to_string(),
             codegraph_node_id: String::new(),
             preview: String::new(),
+            pane_agent: String::new(),
         },
         HistoryRow {
             id: -2,
@@ -12263,6 +12460,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             workspace_label: "SmartHistory".to_string(),
             codegraph_node_id: String::new(),
             preview: String::new(),
+            pane_agent: "zsh".to_string(),
         },
         HistoryRow {
             id: -3,
@@ -12278,6 +12476,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             workspace_label: "SmartHistory".to_string(),
             codegraph_node_id: String::new(),
             preview: String::new(),
+            pane_agent: "vim".to_string(),
         },
     ];
     app.query = String::from("*SmartHistory");
@@ -12332,6 +12531,7 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
             workspace_label: "SmartHistory".to_string(),
             codegraph_node_id: String::new(),
             preview: String::new(),
+            pane_agent: String::new(),
         },
         HistoryRow {
             id: -2,
@@ -12347,6 +12547,7 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
             workspace_label: "SmartHistory".to_string(),
             codegraph_node_id: String::new(),
             preview: String::new(),
+            pane_agent: "vim".to_string(),
         },
     ];
     // `*vim` matches the pane's command; the
@@ -12995,11 +13196,8 @@ ssh_config_parse\t\t10,0\n";
 /// moment the parent shell `eval`s the staged string.
 #[test]
 fn stage_editor_open_at_line_rejects_non_numeric_line() {
-    let staged = crate::tui::actions::stage_editor_open_at_line(
-        "vi",
-        "/tmp/file.rs",
-        "123; touch pwned",
-    );
+    let staged =
+        crate::tui::actions::stage_editor_open_at_line("vi", "/tmp/file.rs", "123; touch pwned");
     assert!(
         !staged.contains("touch pwned"),
         "malicious line field must not survive into the staged command, got: {staged:?}"
@@ -15811,11 +16009,7 @@ fn jira_field_complete_action_dispatches_in_elements_mode() {
     app.query = String::from(":#feat");
     app.query_cursor = app.query.chars().count();
     dispatch_action(&mut app, Action::JiraFieldComplete);
-    assert_eq!(
-        app.query, ":#feature ",
-        "got: {:?}",
-        app.query
-    );
+    assert_eq!(app.query, ":#feature ", "got: {:?}", app.query);
 }
 
 /// Outside notes and todos
@@ -19368,6 +19562,220 @@ fn select_for_run_records_current_query_into_active_mode() {
     assert_eq!(entries, &vec!["&getSymbol".to_string()]);
 }
 
+// ---- Global (cross-mode) query history (C-S-p / C-S-n) ----
+
+/// `record_to_global_history` mirrors `record_to_mode_history`'s
+/// contract (skip empty/whitespace, dedup consecutive duplicates)
+/// but as one flat list instead of one per mode.
+#[test]
+fn record_to_global_history_skips_empty_and_dedups() {
+    let mut app = global_test_app(&[]);
+
+    app.record_to_global_history("");
+    app.record_to_global_history("   ");
+    assert!(
+        app.global_query_history.is_empty(),
+        "empty / whitespace queries must not be recorded"
+    );
+
+    app.record_to_global_history("&foo");
+    app.record_to_global_history("$bar");
+    assert_eq!(
+        app.global_query_history,
+        vec!["$bar".to_string(), "&foo".to_string()],
+        "newer entries must come first, regardless of which mode they came from"
+    );
+
+    // Consecutive duplicate skipped.
+    app.record_to_global_history("$bar");
+    assert_eq!(app.global_query_history.len(), 2);
+}
+
+/// `select_for_run` records into BOTH the per-mode history AND
+/// the global history — the global list is meant to be a
+/// superset, not a replacement.
+#[test]
+fn select_for_run_records_into_global_history_too() {
+    let mut app = global_test_app(&[("ls -la", 1)]);
+    app.query = "&getSymbol".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(app.global_query_history, vec!["&getSymbol".to_string()]);
+}
+
+/// Queries from DIFFERENT modes interleave in the global history
+/// in the order they were actually run, unlike the per-mode
+/// history where each mode has its own independent list.
+#[test]
+fn global_history_interleaves_queries_across_modes() {
+    let mut app = global_test_app(&[("ls -la", 1)]);
+    app.list_state.select(Some(0));
+
+    app.query = "&getSymbol".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.select_for_run();
+
+    app.query = "$aSymbol".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.select_for_run();
+
+    app.query = ":kramfors".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.select_for_run();
+
+    assert_eq!(
+        app.global_query_history,
+        vec![
+            ":kramfors".to_string(),
+            "$aSymbol".to_string(),
+            "&getSymbol".to_string(),
+        ],
+        "global history must be newest-first across all three modes, unlike the siloed per-mode lists"
+    );
+}
+
+/// `global_history_previous`/`global_history_next` follow the
+/// same readline semantics as `history_previous`/`history_next`,
+/// but rotating through `global_query_history` regardless of the
+/// currently active mode — and recalling an entry switches the
+/// app INTO whatever mode that entry's prefix indicates, since
+/// the full prefixed string is what gets restored into
+/// `self.query`.
+#[test]
+fn global_history_previous_next_navigates_across_modes() {
+    let mut app = global_test_app(&[]);
+    app.global_query_history = vec![
+        ":newest".to_string(),
+        "$older".to_string(),
+        "&oldest".to_string(),
+    ];
+
+    app.query = "live".to_string();
+    app.query_cursor = app.query.chars().count();
+
+    // C-S-p from live: save draft, load newest (from `:` mode).
+    app.global_history_previous();
+    assert_eq!(app.query, ":newest");
+    assert_eq!(app.global_query_draft.as_deref(), Some("live"));
+    assert!(
+        app.is_elements_query(),
+        "recalling a `:` entry must switch the app into elements mode"
+    );
+
+    // C-S-p again: one step older (now `$` mode).
+    app.global_history_previous();
+    assert_eq!(app.query, "$older");
+
+    // C-S-p again: oldest (`&` mode).
+    app.global_history_previous();
+    assert_eq!(app.query, "&oldest");
+
+    // C-S-p at oldest: stay.
+    app.global_history_previous();
+    assert_eq!(app.query, "&oldest", "C-S-p at oldest must stay");
+
+    // C-S-n twice back to newest.
+    app.global_history_next();
+    assert_eq!(app.query, "$older");
+    app.global_history_next();
+    assert_eq!(app.query, ":newest");
+
+    // C-S-n past newest: restore the draft.
+    app.global_history_next();
+    assert_eq!(
+        app.query, "live",
+        "C-S-n past newest must restore the draft"
+    );
+    assert_eq!(app.global_query_history_index, None);
+
+    // C-S-n at live: no-op.
+    app.global_history_next();
+    assert_eq!(app.query, "live");
+}
+
+/// Switching prefix mode mid-typing (which resets the PER-MODE
+/// recall state — see `on_query_mode_change`) must NOT reset an
+/// in-progress GLOBAL recall session. Global recall is
+/// deliberately mode-agnostic: rotating through it is exactly
+/// how the user ends up switching modes in the first place.
+#[test]
+fn global_history_recall_state_survives_mode_switch() {
+    let mut app = global_test_app(&[]);
+    app.global_query_history = vec!["&foo".to_string(), "$bar".to_string()];
+    app.query = "live".to_string();
+    app.query_cursor = app.query.chars().count();
+
+    app.global_history_previous();
+    assert_eq!(app.query, "&foo");
+    assert_eq!(app.global_query_history_index, Some(0));
+
+    app.global_history_previous();
+    assert_eq!(app.query, "$bar");
+    assert_eq!(
+        app.global_query_history_index,
+        Some(1),
+        "global recall index must keep advancing even though the active mode changed underneath it"
+    );
+}
+
+/// Any keystroke that mutates the query must commit an
+/// in-progress GLOBAL recall session too (mirrors
+/// `keystroke_while_recalling_exits_recall_and_drops_draft` for
+/// the per-mode case).
+#[test]
+fn keystroke_while_global_recalling_exits_recall_and_drops_draft() {
+    let mut app = global_test_app(&[]);
+    app.global_query_history = vec!["&recalled".to_string()];
+    app.query = "live".to_string();
+    app.query_cursor = app.query.chars().count();
+
+    app.global_history_previous();
+    assert_eq!(app.query, "&recalled");
+    assert!(app.global_query_draft.is_some());
+
+    app.push_char('x');
+    assert_eq!(
+        app.global_query_history_index, None,
+        "push_char while global-recalling must exit global recall mode"
+    );
+    assert!(
+        app.global_query_draft.is_none(),
+        "push_char while global-recalling must drop the global draft"
+    );
+}
+
+/// `C-S-p` / `C-S-n` default to distinct specs (uppercase P/N
+/// with CONTROL|SHIFT) from the per-mode `C-p` / `C-n`, and both
+/// new actions are wired into `ALL_ACTIONS`.
+#[test]
+fn global_history_actions_have_distinct_defaults() {
+    assert_eq!(Action::PreviousGlobalHistory.default_key(), "C-S-P");
+    assert_eq!(Action::NextGlobalHistory.default_key(), "C-S-N");
+    assert!(ALL_ACTIONS.contains(&Action::PreviousGlobalHistory));
+    assert!(ALL_ACTIONS.contains(&Action::NextGlobalHistory));
+}
+
+/// `dispatch_action` routes the two new actions to the global
+/// recall methods (not the per-mode ones), and — per the user's
+/// explicit choice — does NOT stage a selection or exit the TUI;
+/// it only fills the query box, same as `PreviousHistory`.
+#[test]
+fn dispatch_previous_global_history_fills_query_without_exiting() {
+    let mut app = global_test_app(&[]);
+    app.global_query_history = vec!["&recalled".to_string()];
+    app.query = "live".to_string();
+    app.query_cursor = app.query.chars().count();
+
+    let quit = dispatch_action(&mut app, Action::PreviousGlobalHistory);
+    assert!(!quit, "PreviousGlobalHistory must not exit the TUI");
+    assert!(
+        app.selection.is_none(),
+        "PreviousGlobalHistory must not stage a selection"
+    );
+    assert_eq!(app.query, "&recalled");
+}
+
 /// `SmartOpen` in `!` (Todo) mode takes the
 /// mark-todo-done branch, NOT the `Run` fallback.
 /// The `Run` fallback would stage
@@ -19880,8 +20288,17 @@ fn draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list() {
     terminal
         .draw(|f| crate::tui::render::ui(f, &mut app))
         .expect("draw");
-    let text = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>();
-    assert!(text.contains("cmd0"), "newest row should be visible by default");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("cmd0"),
+        "newest row should be visible by default"
+    );
     assert!(
         !text.contains("cmd49"),
         "oldest row should be scrolled off by default, got: {text:?}"
@@ -19894,7 +20311,13 @@ fn draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list() {
     terminal
         .draw(|f| crate::tui::render::ui(f, &mut app))
         .expect("draw");
-    let text = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
     assert!(
         text.contains("cmd49"),
         "selecting the oldest row should scroll it into view, got: {text:?}"
@@ -19921,10 +20344,7 @@ fn draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list() {
 /// to the O(total rows) behavior.
 #[test]
 fn draw_list_stays_fast_with_a_large_elements_result_set() {
-    let dir = std::env::temp_dir().join(format!(
-        "smarthistory-perf-probe-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("smarthistory-perf-probe-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create dir");
     let file_path = dir.join("shared.md");

@@ -112,7 +112,8 @@ own config.
 | `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `~`, else runs the selected row. In `-`/`!`/`~` mode, acts on every **marked** row when at least one is marked, not just the selected one. |
 | `F2` | Open the multi-line note/todo compose overlay in `@`/`!` mode (`Enter` = newline, `Ctrl-S` = save). Complements the one-line `@new <text>` / `!@new <text>` quick-create. |
 | `Ctrl+R` | Open the callers / callees picker for the selected `&` / `$` symbol. |
-| `Ctrl+P` / `Ctrl+N` | Per-mode query history recall (readline `previous-history` / `next-history`). |
+| `Ctrl+P` / `Ctrl+N` | Per-mode query history recall (readline `previous-history` / `next-history`). Scoped to the active prefix mode only. |
+| `Ctrl+Shift+P` / `Ctrl+Shift+N` | Global (cross-mode) query history recall — rotates through every query submitted across ALL modes, in chronological order, switching modes as needed. Terminal support for `Ctrl+Shift+<letter>` varies; rebind via `key.previous-global-history=<spec>` if your terminal can't produce a distinct event. |
 | `Ctrl+A` | Open the help overlay. |
 | `Ctrl+Q` | Open the command palette. |
 | `T` | Open the theme picker. |

@@ -628,9 +628,10 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             // pane-row branch can pass
             // it to `focus_pane`.
             for (pr, short_dir, full_path, id) in entries {
+                let agent = pr.current_command.clone();
                 panes.push(HistoryRow {
                     id,
-                    command: pr.current_command.clone(),
+                    command: agent.clone(),
                     directory: full_path,
                     session_id: pr.pane_id.clone(),
                     exit_code: 0,
@@ -639,6 +640,18 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                     output: pr.tab_id.clone(),
                     mode: "pane".to_string(),
                     source: "pane".to_string(),
+                    // Stash the agent name
+                    // separately so the
+                    // `process_pane_cmdlines`
+                    // background patch can
+                    // dedup against the
+                    // ORIGINAL value (not
+                    // the just-patched
+                    // `command`). See the
+                    // `pane_agent` field
+                    // doc for the full
+                    // reasoning.
+                    pane_agent: agent,
 
                     ..Default::default()
                 });

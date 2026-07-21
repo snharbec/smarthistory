@@ -571,6 +571,23 @@ pub enum Action {
     /// bash `next-history`). Mirror of
     /// [`Action::PreviousHistory`].
     NextHistory,
+    /// Navigate to the previous (older) entry in the GLOBAL
+    /// (cross-mode) query history — every query submitted or
+    /// abandoned across ALL prefix modes, in true chronological
+    /// order, not just the currently active mode. Default
+    /// `C-S-p`. Same readline recall semantics as
+    /// [`Action::PreviousHistory`] (draft-saving, oldest-clamp,
+    /// commit-on-edit) applied to the flat cross-mode list
+    /// instead of a per-mode slice. Recalling an entry restores
+    /// its ORIGINAL leading prefix char, so the app switches
+    /// back into whatever mode that query was typed in — this
+    /// still only fills the query box for review/editing, it
+    /// does not stage or run anything by itself.
+    PreviousGlobalHistory,
+    /// Navigate to the next (newer) entry in the GLOBAL
+    /// (cross-mode) query history. Default `C-S-n`. Mirror of
+    /// [`Action::PreviousGlobalHistory`].
+    NextGlobalHistory,
     /// Context-aware "dive" key: a single binding (default
     /// `C-]`, ASCII GS 0x1D — chosen over `S-Return` because
     /// many terminals emit Shift-Return as a non-standard
@@ -659,6 +676,8 @@ impl Action {
             Action::CodegraphRelations => "codegraph-relations",
             Action::PreviousHistory => "previous-history",
             Action::NextHistory => "next-history",
+            Action::PreviousGlobalHistory => "previous-global-history",
+            Action::NextGlobalHistory => "next-global-history",
             Action::SmartOpen => "smart-open",
         }
     }
@@ -719,6 +738,8 @@ impl Action {
             Action::CodegraphRelations => "Browse callers / callees",
             Action::PreviousHistory => "Previous history entry",
             Action::NextHistory => "Next history entry",
+            Action::PreviousGlobalHistory => "Previous global history entry (all modes)",
+            Action::NextGlobalHistory => "Next global history entry (all modes)",
             Action::SmartOpen => "Smart open (context dive)",
         }
     }
@@ -771,6 +792,8 @@ impl Action {
             Action::CodegraphRelations => "codegraph",
             Action::PreviousHistory => "navigation",
             Action::NextHistory => "navigation",
+            Action::PreviousGlobalHistory => "navigation",
+            Action::NextGlobalHistory => "navigation",
             Action::SmartOpen => "tools",
             Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
@@ -919,6 +942,17 @@ impl Action {
             Action::CodegraphRelations => "C-r",
             Action::PreviousHistory => "C-p",
             Action::NextHistory => "C-n",
+            // Uppercase P/N: crossterm reports the shifted
+            // (uppercase) char alongside the SHIFT modifier bit
+            // for Ctrl+Shift+<letter> on terminals that can
+            // distinguish it at all — many legacy/non-kitty-
+            // protocol terminals can't tell Ctrl+Shift+P from
+            // Ctrl+P (same limitation noted on `C-]` above for
+            // `S-Return`). Users on such a terminal can rebind
+            // via `key.previous-global-history=<spec>` /
+            // `key.next-global-history=<spec>`.
+            Action::PreviousGlobalHistory => "C-S-P",
+            Action::NextGlobalHistory => "C-S-N",
             // `C-]` (ASCII GS, 0x1D) instead of the more semantic
             // `S-Return`: many terminals either emit Shift-Return
             // as a non-standard `ESC[27;5;13~` sequence that
@@ -1331,6 +1365,8 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CodegraphRelations,
     Action::PreviousHistory,
     Action::NextHistory,
+    Action::PreviousGlobalHistory,
+    Action::NextGlobalHistory,
     Action::SmartOpen,
 ];
 

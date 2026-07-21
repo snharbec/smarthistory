@@ -120,6 +120,36 @@ pub struct HistoryRow {
     /// modes dump their preview text) so the two uses
     /// don't fight over the same field.
     pub preview: String,
+
+    /// Original agent / process name for
+    /// herdr pane rows (`mode == "pane"`),
+    /// captured at the time the row was
+    /// emitted by
+    /// `panes::refresh_session_panes_impl`
+    /// (the value of
+    /// `CurrentPaneInfo::current_command`,
+    /// e.g. `"pi"`, `"claude"`, `"vim"`,
+    /// `"ssh"`). Kept separate from
+    /// `command` because the
+    /// `process_pane_cmdlines` background
+    /// patch in `src/tui.rs` REPLACES
+    /// `row.command` with the herdr
+    /// `pane process-info` cmdline, and
+    /// needs the original agent to do
+    /// the dedup (`agent == cmd_first`
+    /// skips the `agent cmdline` join
+    /// to avoid `pi pi` etc.). Reading
+    /// the agent back out of
+    /// `row.command` after the first
+    /// patch would re-read the just-set
+    /// combined value as the agent and
+    /// concatenate again on the next
+    /// tick (`"ssh ..."` + `"ssh ..."`
+    /// $\rightarrow$ `"ssh ... ssh ..."`),
+    /// which is the bug this field
+    /// was introduced to fix. Empty for
+    /// every non-pane row.
+    pub pane_agent: String,
 }
 
 impl HistoryRow {

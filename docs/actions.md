@@ -37,7 +37,7 @@ Actions are grouped in the command palette by their `category()`:
 
 | Category | Actions |
 | --- | --- |
-| [`navigation`](#navigation) | Cancel, Run, EditStart, EditEnd, Up, Down, MoveCursorLeft, MoveCursorRight, PageUp, PageDown, Home, End, Backspace, DeleteWordBackward, PreviousHistory, NextHistory |
+| [`navigation`](#navigation) | Cancel, Run, EditStart, EditEnd, Up, Down, MoveCursorLeft, MoveCursorRight, PageUp, PageDown, Home, End, Backspace, DeleteWordBackward, PreviousHistory, NextHistory, PreviousGlobalHistory, NextGlobalHistory |
 | [`search`](#search) | CycleMode, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix |
 | [`todo`](#todo) | MarkTodoDone |
 | [`theme`](#theme) | CycleThemeNext, CycleThemePrev |
@@ -249,6 +249,32 @@ Was forced off the historical `CycleThemePrev` (`C-p`) default to free the key f
 | Category | navigation |
 
 Navigate to the next (newer) entry in the current mode's input history. Mirror of `PreviousHistory`. Was forced off the historical `CycleThemeNext` (`C-n`) default.
+
+### `PreviousGlobalHistory`
+
+| Field | Value |
+| --- | --- |
+| Config key | `previous-global-history` |
+| Display name | Previous global history entry (all modes) |
+| Default key | `C-S-P` |
+| Category | navigation |
+
+Navigate to the previous (older) entry in the GLOBAL (cross-mode) query history — every query submitted or abandoned across ALL prefix modes, in true chronological order, not just the currently active one. Same readline recall semantics as `PreviousHistory` (draft-saving, oldest-clamp, commit-on-edit), just over one flat cross-mode list instead of a per-mode slice. Recalling an entry restores its original leading prefix char, so the app switches back into whatever mode that query was originally typed in — like `PreviousHistory`, this only fills the query box for review/editing; it does not stage or run anything itself.
+
+Persisted separately from the per-mode history, to `<db_dir>/global_query_history.json`.
+
+Terminal support for `Ctrl+Shift+<letter>` as a distinct event from plain `Ctrl+<letter>` varies — many legacy/non-kitty-protocol terminals can't tell them apart (same limitation noted for `SmartOpen`'s `S-Return` alternative). If your terminal can't produce a distinct `C-S-p` event, rebind via `key.previous-global-history=<spec>`.
+
+### `NextGlobalHistory`
+
+| Field | Value |
+| --- | --- |
+| Config key | `next-global-history` |
+| Display name | Next global history entry (all modes) |
+| Default key | `C-S-N` |
+| Category | navigation |
+
+Navigate to the next (newer) entry in the GLOBAL query history. Mirror of `PreviousGlobalHistory`.
 
 ---
 
