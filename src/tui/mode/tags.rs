@@ -544,5 +544,19 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
             // `--file-name`.
             crate::highlight::highlight_with_bat_auto(&context, &filepath).unwrap_or(context)
         };
+        // Set the scroll hint so the
+        // matched line is visible in
+        // the preview pane. The
+        // `read_source_context_with_cache`
+        // window above centers the
+        // match at line
+        // `SOURCE_CONTEXT_LINES / 2`
+        // (= 25). The renderer
+        // clamps the scroll to
+        // `max(total - visible)`, so
+        // values that overshoot a
+        // short file are safe.
+        let half = crate::tui::SOURCE_CONTEXT_LINES / 2;
+        row.preview_scroll = half.saturating_sub(2) as u16;
     }
 }

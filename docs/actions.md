@@ -674,6 +674,36 @@ Embedded newlines are re-indented (`"\n"` → `"\n  "`) before staging so the co
 
 This is purely additive: the existing single-line `@new <text>` / `!@new <text>` quick-create (typed directly on the query line, still stages and exits immediately with no dialog) is completely unchanged and unaffected by this action.
 
+### `CreateNote`
+
+| Field | Value |
+| --- | --- |
+| Config key | `create-note` |
+| Display name | Create a new note (Title + Content) |
+| Default key | none (open it via the command palette, `Ctrl-Q`, or bind `key.create-note=<spec>`) |
+| Category | tools |
+
+Open the two-field `create-note` dialog: a single-line **Title** and a multi-line **Content**, `Tab` toggling between them. `Ctrl-S` saves and exits — stages `note_search create-note <text> --type daily` (title + links/tags extracted into a `### Heading` line, content as the body) the same way `ComposeNoteEntry` above stages its own command. `Esc` cancels; `Ctrl-U` clears the active field; `Ctrl-W` deletes one word backward.
+
+Also launchable standalone via `smarthistory tui --create-note`, which implies `--exec` (runs the staged command itself instead of just printing it) so it works from a bare shell invocation, a herdr keybinding, or a shell alias without needing `eval "$(...)"`.
+
+**Inline link/tag completion** — in either field, `Tab` on a word starting with one of these prefixes opens a completion menu of matching notes (candidates are note file BASENAMEs, not frontmatter titles):
+
+| Prefix | Matches |
+| --- | --- |
+| `@p:` | notes with frontmatter `type: project` |
+| `@e:` | notes with frontmatter `type: people` |
+| `@d:` | notes created today (frontmatter `created:` date) |
+| `@7:` / `@w:` | notes created in the last 7 days (today and the 6 days before it — a rolling window, not the previous calendar week) |
+| `@n:` | all notes |
+| `#...` | all notes, tag-style (`#basename`) |
+
+Typed text after the prefix narrows the candidates by a case-insensitive substring match against the basename, live — while the menu is open, printable characters and `Backspace` keep filtering the list instead of being swallowed. A single match is inserted directly (no menu to confirm); `[[basename]]` for the `@*:` prefixes, `#basename` for `#`. Navigate a multi-match menu with `Up`/`Down`, `Tab`/`Shift-Tab` (`BackTab`), `Home`/`End`; `Enter` commits the selected candidate, `Esc` dismisses the menu (keeping whatever was typed) without closing the dialog.
+
+`Ctrl-D` / `Ctrl-N` / `Ctrl-7` are one-keystroke shortcuts for `@d:` / `@n:` / `@7:` — same as typing the prefix and pressing `Tab`. (`Ctrl-W` was the natural mnemonic for "last 7 days" but was already taken by delete-word-backward, so `Ctrl-7` is used instead.)
+
+A no-op (dialog stays open, status message) when both fields are empty/whitespace-only, or when `notes.database` / `notes.dir` aren't configured.
+
 ---
 
 ## panes

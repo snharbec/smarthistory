@@ -486,5 +486,55 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         && row.output != highlighted
     {
         row.output = highlighted;
+        // The output preview
+        // renderer scrolls
+        // `Paragraph` by this
+        // offset so the
+        // segment line is
+        // visible. The
+        // windowed source
+        // context above is
+        // 50 lines centered
+        // on `target` (the
+        // segment line is
+        // the
+        // `SOURCE_CONTEXT_LINES / 2`-th
+        // line of the
+        // window). For a
+        // typical preview
+        // pane (~10–20
+        // lines tall),
+        // scrolling to
+        // `half - visible_height / 2`
+        // would put the
+        // segment line
+        // near the top of
+        // the visible
+        // area. The
+        // renderer's
+        // `min(max_scroll)`
+        // clamp handles
+        // the case where
+        // the file has
+        // fewer than 50
+        // lines or the
+        // segment is
+        // near the end
+        // of the file
+        // (so the window
+        // is shorter than
+        // 50 and the
+        // `half` offset
+        // would overshoot).
+        let half = crate::tui::SOURCE_CONTEXT_LINES / 2;
+        // The renderer's
+        // visible height is
+        // `area.height - 2`
+        // (top + bottom
+        // border). The
+        // `2` is the same
+        // value the
+        // renderer uses.
+        row.preview_scroll = half.saturating_sub(2) as u16;
     }
 }

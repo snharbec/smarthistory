@@ -12446,6 +12446,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             codegraph_node_id: String::new(),
             preview: String::new(),
             pane_agent: String::new(),
+            preview_scroll: 0,
         },
         HistoryRow {
             id: -2,
@@ -12462,6 +12463,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             codegraph_node_id: String::new(),
             preview: String::new(),
             pane_agent: "zsh".to_string(),
+            preview_scroll: 0,
         },
         HistoryRow {
             id: -3,
@@ -12478,6 +12480,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             codegraph_node_id: String::new(),
             preview: String::new(),
             pane_agent: "vim".to_string(),
+            preview_scroll: 0,
         },
     ];
     app.query = String::from("*SmartHistory");
@@ -12533,6 +12536,7 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
             codegraph_node_id: String::new(),
             preview: String::new(),
             pane_agent: String::new(),
+            preview_scroll: 0,
         },
         HistoryRow {
             id: -2,
@@ -12549,6 +12553,7 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
             codegraph_node_id: String::new(),
             preview: String::new(),
             pane_agent: "vim".to_string(),
+            preview_scroll: 0,
         },
     ];
     // `*vim` matches the pane's command; the
@@ -21195,7 +21200,6 @@ fn pane_last_touched_does_not_collide_with_top_level_keys() {
 #[test]
 fn refresh_session_panes_impl_does_not_grow_session_panes_on_repeat_calls() {
     use crate::tui::mode::panes::refresh_session_panes_impl;
-    use crate::tui::state::HistoryRow;
     // Build an app with a
     // known snapshot
     // (5 panes across 4
@@ -21773,4 +21777,1736 @@ fn panes_select_initial_row_handles_empty_list() {
         app.list_state.selected().is_none(),
         "empty list must select None"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Output preview scroll hint
+// ---------------------------------------------------------------------------
+//
+// Windowed source-context modes
+// (`:`, `$`, `&`, `,`) load
+// `SOURCE_CONTEXT_LINES` (50)
+// lines of context centered on
+// the matched line. The matched
+// line sits at position
+// `SOURCE_CONTEXT_LINES / 2` (=
+// 25) in the loaded buffer. The
+// output preview pane is
+// typically only 10–20 lines
+// tall, so without a scroll
+// hint the matched line is below
+// the fold and the user has to
+// scroll the preview pane
+// manually to find the line they
+// searched for.
+//
+// The fix: each mode's
+// `ensure_selected_context` sets
+// `row.preview_scroll = half -
+// 2` (= 23) when the context is
+// loaded. The renderer reads
+// this and applies it via
+// `Paragraph::scroll((y, 0))`,
+// so the matched line lands at
+// row 2 of the visible area (top
+// of the pane with a couple of
+// leading context lines for
+// orientation).
+//
+// The renderer's `min(max_scroll,
+// scroll)` clamp handles short
+// files / near-end matches
+// where the loaded buffer is
+// shorter than the scroll offset.
+
+#[test]
+fn elements_preview_scroll_hint_centers_segment_line() {
+    // The post-load
+    // state: a
+    // `mode = "element"`
+    // row with a 50-line
+    // context window.
+    // `preview_scroll`
+    // should be set to
+    // `SOURCE_CONTEXT_LINES / 2 - 2`
+    // = 23 by
+    // `elements::ensure_selected_context`.
+    use crate::tui::SOURCE_CONTEXT_LINES;
+    let half = SOURCE_CONTEXT_LINES / 2;
+    let expected_scroll = half.saturating_sub(2) as u16;
+    // The
+    // `ensure_selected_context`
+    // path requires a
+    // real file on
+    // disk to load
+    // the source
+    // context. We use
+    // a temp file
+    // with enough
+    // lines to
+    // populate the
+    // full 50-line
+    // window.
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_elements_scroll_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let file_path = dir.join("note.md");
+    // Build a 100-line
+    // file where the
+    // 50-line window
+    // centered on the
+    // matched line
+    // (line 50) is the
+    // full 50 lines.
+    let mut content = String::new();
+    for i in 1..=100 {
+        content.push_str(&format!("line {}\n", i));
+    }
+    std::fs::write(&file_path, &content).expect("write file");
+    // Find the line
+    // that the
+    // `note_search`
+    // element index
+    // will land on.
+    // We use a query
+    // that matches a
+    // segment on
+    // line 50.
+    let mut app = directories_test_app(&[]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(dir.join("nonexistent-elements.sql"));
+    // Inject a
+    // synthetic
+    // element row
+    // pointing at
+    // line 50.
+    app.elements_state.rows = vec![crate::tui::state::HistoryRow {
+        id: -1,
+        command: "test-segment".to_string(),
+        directory: file_path.to_string_lossy().to_string(),
+        session_id: "50".to_string(), // 1-based line number
+        exit_code: 0,
+        timestamp: 0,
+        comment: "note.md".to_string(),
+        output: String::new(),
+        mode: "element".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.elements_state.last_pattern = Some(String::new());
+    app.query = ":".to_string();
+    app.refresh();
+    // After
+    // `refresh()`,
+    // `ensure_selected_context`
+    // has run for
+    // the selected
+    // element row.
+    // The row's
+    // `output` should
+    // contain the
+    // source
+    // context, and
+    // `preview_scroll`
+    // should be set
+    // to the
+    // load-bearing
+    // `half - 2`
+    // value that
+    // tells the
+    // renderer to
+    // scroll so the
+    // segment line
+    // is at row 2 of
+    // the preview
+    // pane.
+    let row = &app.merged_rows[app.list_state.selected().unwrap()];
+    assert_eq!(
+        row.preview_scroll, expected_scroll,
+        "preview_scroll must equal SOURCE_CONTEXT_LINES / 2 - 2 = {} \
+         so the segment line is visible at row 2 of the preview pane",
+        expected_scroll
+    );
+    // Sanity: the
+    // loaded
+    // context
+    // contains
+    // the
+    // matched
+    // line.
+    assert!(
+        row.output.contains("line 50"),
+        "the loaded context must contain the matched line; got output=\n{}",
+        row.output
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn preview_scroll_zero_for_history_rows() {
+    // History rows
+    // don't have a
+    // windowed context,
+    // so `preview_scroll`
+    // defaults to 0
+    // (the renderer's
+    // "no scroll hint"
+    // sentinel). This
+    // test verifies the
+    // default in a
+    // freshly-constructed
+    // row.
+    use crate::tui::state::HistoryRow;
+    let row = HistoryRow::default();
+    assert_eq!(row.preview_scroll, 0);
+    assert_eq!(row.preview, "");
+}
+
+#[test]
+fn preview_scroll_clamps_at_max_scroll_for_short_buffers() {
+    // When the loaded
+    // preview is shorter
+    // than the requested
+    // scroll offset, the
+    // renderer's
+    // `min(max_scroll,
+    // scroll)` clamp
+    // brings it back to
+    // 0 (or the largest
+    // valid offset). This
+    // test verifies the
+    // arithmetic the
+    // renderer uses.
+    fn clamped_scroll(requested: u16, total_lines: usize, visible_height: usize) -> u16 {
+        let max_scroll = total_lines.saturating_sub(visible_height);
+        (requested as usize).min(max_scroll) as u16
+    }
+    // Full 50-line
+    // window, smaller
+    // preview height:
+    // the requested
+    // `23` is honoured
+    // because the
+    // window is tall
+    // enough that the
+    // clamped max is
+    // >= 23.
+    assert_eq!(clamped_scroll(23, 50, 15), 23);
+    // Larger preview
+    // height (30): the
+    // clamped max is
+    // 50 - 30 = 20, so
+    // the scroll is
+    // capped at 20
+    // (the segment
+    // line is still
+    // visible at
+    // position 25 - 20
+    // = 5, near the
+    // top of the
+    // visible area).
+    assert_eq!(clamped_scroll(23, 50, 30), 20);
+    // Tiny preview
+    // height: still
+    // honoured (the
+    // window is
+    // tall enough).
+    assert_eq!(clamped_scroll(23, 50, 5), 23);
+    // Short buffer
+    // (10 lines) with a
+    // normal preview
+    // height: the
+    // scroll is
+    // clamped to 0
+    // because the
+    // window fits
+    // entirely in
+    // view.
+    assert_eq!(clamped_scroll(23, 10, 15), 0);
+    // Short buffer,
+    // larger preview:
+    // same clamp.
+    assert_eq!(clamped_scroll(23, 8, 30), 0);
+    // Edge: total
+    // == visible
+    // (no scroll
+    // possible).
+    assert_eq!(clamped_scroll(23, 15, 15), 0);
+}
+
+// ---------------------------------------------------------------------------
+// `create-note` dialog (Title + Content composer)
+// ---------------------------------------------------------------------------
+
+/// `extract_links_and_tags` is
+/// the load-bearing helper for
+/// the `create-note` submit
+/// path: it pulls structured
+/// metadata out of the
+/// free-form Title + Content
+/// so the heading line gets
+/// the right `[[links]]` and
+/// `#tags` without the user
+/// having to retype them in
+/// the heading itself.
+#[test]
+fn extract_links_and_tags_pulls_bracketed_links_and_hash_tags() {
+    use crate::tui::state::extract_links_and_tags;
+    let (links, tags) = extract_links_and_tags(
+        "see [[Note A]] and [[Note B]] and [[Note A]] again; \
+         tagged #feature and #bug and #feature again",
+    );
+    // First-seen
+    // order, deduped.
+    assert_eq!(
+        links,
+        vec!["[[Note A]]".to_string(), "[[Note B]]".to_string()],
+        "links are deduped but preserve first-seen order; the [[...]] wrapper is preserved verbatim"
+    );
+    // Tags
+    // are
+    // stripped
+    // of
+    // the
+    // leading
+    // `#`
+    // (the
+    // heading
+    // builder
+    // re-adds
+    // it).
+    assert_eq!(
+        tags,
+        vec!["feature".to_string(), "bug".to_string()],
+        "tags are deduped, stripped of the leading `#`, and in first-seen order"
+    );
+}
+
+#[test]
+fn extract_links_and_tags_ignores_hash_inside_words() {
+    // The `c#` substring
+    // (e.g. in "use c#lang")
+    // is NOT a tag — only
+    // `#` at a word boundary
+    // (start of text, or
+    // preceded by whitespace /
+    // punctuation) counts.
+    use crate::tui::state::extract_links_and_tags;
+    let (links, tags) =
+        extract_links_and_tags("use c#lang for the #feature; don't tag this # but yes #feature");
+    assert!(links.is_empty(), "no `[[...]]` spans in the input");
+    // `#` immediately
+    // followed by
+    // whitespace
+    // (the
+    // `# but`
+    // token) is
+    // also
+    // dropped:
+    // the tag
+    // body is
+    // empty.
+    assert_eq!(
+        tags,
+        vec!["feature".to_string()],
+        "embedded `#` inside words is not a tag; empty tags are dropped"
+    );
+}
+
+#[test]
+fn extract_links_and_tags_handles_unicode_tags_and_links() {
+    use crate::tui::state::extract_links_and_tags;
+    let (links, tags) =
+        extract_links_and_tags("see [[Über uns]] and [[Café au lait]]; tag #naïve and #α-β");
+    assert_eq!(
+        links,
+        vec!["[[Über uns]]".to_string(), "[[Café au lait]]".to_string()],
+        "multi-byte UTF-8 link contents are preserved"
+    );
+    // The
+    // tag-body
+    // alphabet
+    // is
+    // `alphanumeric`
+    // +
+    // `_`
+    // +
+    // `-`.
+    // Greek
+    // letters
+    // count
+    // as
+    // alphanumeric;
+    // the
+    // dash
+    // is
+    // part
+    // of
+    // the
+    // tag.
+    assert_eq!(
+        tags,
+        vec!["naïve".to_string(), "α-β".to_string()],
+        "tag-body alphabet accepts alphanumeric + `_` + `-` (including non-ASCII letters)"
+    );
+}
+
+#[test]
+fn note_create_dialog_opens_and_field_toggles() {
+    // The dialog opens,
+    // defaults to the Title
+    // field, and `Tab`
+    // toggles between Title
+    // and Content.
+    let mut app = directories_test_app(&[]);
+    assert!(!app.is_note_create_open());
+    app.open_note_create_dialog();
+    assert!(app.is_note_create_open());
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Title);
+        assert!(d.title.is_empty());
+        assert!(d.content.is_empty());
+    }
+    app.note_create_toggle_field();
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Content);
+    }
+    app.note_create_toggle_field();
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Title);
+    }
+    app.note_create_cancel();
+    assert!(!app.is_note_create_open());
+}
+
+#[test]
+fn note_create_push_char_rejects_newline_in_title() {
+    // The Title field is
+    // single-line per the
+    // spec. `Enter` in the
+    // Title field is
+    // silently dropped
+    // (the user has to
+    // `Tab` to Content for
+    // newlines).
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_push_char('h');
+    app.note_create_push_char('i');
+    app.note_create_push_char('\n');
+    app.note_create_push_char('x');
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(
+            d.title, "hix",
+            "newlines in the Title field are silently dropped"
+        );
+        assert_eq!(d.title_cursor, 3);
+    }
+}
+
+#[test]
+fn note_create_push_char_inserts_newline_in_content() {
+    // The Content field is
+    // multi-line. `Enter`
+    // inserts a real `\n`.
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_toggle_field();
+    app.note_create_push_char('h');
+    app.note_create_push_char('i');
+    app.note_create_push_char('\n');
+    app.note_create_push_char('x');
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content, "hi\nx");
+        assert_eq!(d.content_cursor, 4);
+    }
+}
+
+#[test]
+fn note_create_backspace_removes_char_or_joins_line() {
+    // Backspace
+    // removes a
+    // char in
+    // the
+    // active
+    // field
+    // and
+    // naturally
+    // joins
+    // two
+    // Content
+    // lines
+    // when
+    // the
+    // cursor
+    // is at
+    // the
+    // start
+    // of a
+    // line.
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_toggle_field();
+    app.note_create_push_char('a');
+    app.note_create_push_char('\n');
+    app.note_create_push_char('b');
+    // Now content is "a\nb" with
+    // cursor at end.
+    app.note_create_backspace();
+    // Should remove the 'b'.
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content, "a\n");
+        assert_eq!(d.content_cursor, 2);
+    }
+    app.note_create_backspace();
+    // Now backspace at
+    // position 2 (start
+    // of "b" / after \n)
+    // removes the \n and
+    // joins the lines.
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content, "a");
+        assert_eq!(d.content_cursor, 1);
+    }
+    app.note_create_backspace();
+    // Now backspace at
+    // position 1 (after 'a')
+    // removes the 'a'.
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content, "");
+        assert_eq!(d.content_cursor, 0);
+    }
+    // And again is a no-op
+    // (cursor at start).
+    app.note_create_backspace();
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content, "");
+        assert_eq!(d.content_cursor, 0);
+    }
+}
+
+#[test]
+fn note_create_submit_empty_both_fields_surfaces_message() {
+    // Empty Title + empty
+    // Content: no commit,
+    // status message set.
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    let committed = app.note_create_submit();
+    assert!(!committed, "empty dialog must not commit");
+    assert!(app.note_create.is_some(), "empty dialog stays open");
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("empty"),
+        "status message should mention empty; got: {msg}"
+    );
+}
+
+#[test]
+fn note_create_submit_missing_notes_database_surfaces_message() {
+    // The default test
+    // app has no
+    // `notes.database`
+    // configured, so submit
+    // should fail with a
+    // clear "not configured"
+    // message rather than
+    // panicking on `unwrap`.
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_push_char('h');
+    app.note_create_push_char('i');
+    let committed = app.note_create_submit();
+    assert!(!committed);
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("notes.database") || msg.contains("not configured"),
+        "status message should mention the missing config; got: {msg}"
+    );
+}
+
+#[test]
+fn note_create_submit_formats_markdown_block() {
+    // Set up a dialog with
+    // a Title, a Content,
+    // and `notes.database`
+    // configured so the
+    // submit path actually
+    // builds a command. We
+    // don't need a real DB
+    // — the submit path
+    // stages the
+    // `note_search
+    // create-note ...`
+    // command, which the
+    // parent shell runs;
+    // the TUI itself only
+    // assembles the argv.
+    let mut app = directories_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp/fake-notes.sql"));
+    app.notes_dir = Some(std::path::PathBuf::from("/tmp/fake-notes"));
+    app.open_note_create_dialog();
+    // Title with a link +
+    // tag, content with a
+    // different link + tag.
+    app.note_create_push_char('M');
+    app.note_create_push_char('y');
+    app.note_create_push_char(' ');
+    app.note_create_push_char('N');
+    app.note_create_push_char('o');
+    app.note_create_push_char('t');
+    app.note_create_push_char('e');
+    app.note_create_push_char(' ');
+    app.note_create_push_char('[');
+    app.note_create_push_char('[');
+    app.note_create_push_char('O');
+    app.note_create_push_char('t');
+    app.note_create_push_char('h');
+    app.note_create_push_char('e');
+    app.note_create_push_char('r');
+    app.note_create_push_char(']');
+    app.note_create_push_char(']');
+    app.note_create_toggle_field();
+    app.note_create_push_char('b');
+    app.note_create_push_char('o');
+    app.note_create_push_char('d');
+    app.note_create_push_char('y');
+    app.note_create_push_char(' ');
+    app.note_create_push_char('o');
+    app.note_create_push_char('f');
+    app.note_create_push_char(' ');
+    app.note_create_push_char('#');
+    app.note_create_push_char('i');
+    app.note_create_push_char('d');
+    app.note_create_push_char('e');
+    app.note_create_push_char('a');
+    app.note_create_push_char(' ');
+    app.note_create_push_char('[');
+    app.note_create_push_char('[');
+    app.note_create_push_char('L');
+    app.note_create_push_char('i');
+    app.note_create_push_char('n');
+    app.note_create_push_char('k');
+    app.note_create_push_char(']');
+    app.note_create_push_char(']');
+    let committed = app.note_create_submit();
+    assert!(
+        committed,
+        "submit must succeed when notes.database is configured"
+    );
+    let staged = app.selection.as_deref().unwrap();
+    // The staged command is
+    // a `note_search
+    // create-note` shell
+    // line with the body
+    // payload inside. We
+    // don't have a real
+    // shell to run it; we
+    // just verify the TUI
+    // assembled a
+    // `note_search`-shaped
+    // argv (the parent
+    // shell picks it up
+    // from `selection` and
+    // `eval`s it).
+    assert!(
+        staged.starts_with("note_search create-note "),
+        "staged command should be a `note_search create-note ...` line; got: {staged}"
+    );
+    // The payload is shell-quoted, so a
+    // single-string `shell_quote`
+    // round-trip recovers
+    // the raw body. The
+    // body must contain the
+    // heading (`### My Note
+    // [[Link]]` etc.), the
+    // timestamp line, and
+    // the content.
+    let body = shell_quote_decode(&extract_single_quoted_arg(staged));
+    assert!(
+        body.starts_with("### My Note "),
+        "body should start with `### My Note ...`; got: {body}"
+    );
+    assert!(
+        body.contains("[[Other]]"),
+        "body should contain the [[Other]] link from the Title; got: {body}"
+    );
+    assert!(
+        body.contains("#idea"),
+        "body should contain the #idea tag from the Content; got: {body}"
+    );
+    assert!(
+        body.contains("[[Link]]"),
+        "body should contain the [[Link]] link from the Content; got: {body}"
+    );
+    assert!(
+        body.contains("body of #idea"),
+        "body should contain the Content text; got: {body}"
+    );
+    // The
+    // `[time:: HH:MM]`
+    // line
+    // is
+    // present
+    // somewhere
+    // in
+    // the
+    // body.
+    // The
+    // exact
+    // time
+    // varies
+    // (we
+    // test
+    // it
+    // with
+    // a
+    // regex
+    // for
+    // stability).
+    let time_re = regex::Regex::new(r"\[time:: \d{2}:\d{2}\]").unwrap();
+    assert!(
+        time_re.is_match(&body),
+        "body should contain a `[time:: HH:MM]` line; got: {body}"
+    );
+    // The dialog closes on
+    // commit.
+    assert!(!app.is_note_create_open());
+}
+
+/// The completion menu's
+/// `Enter` handler
+/// replaces the prefix
+/// word (the text from the
+/// most recent whitespace
+/// to the cursor in the
+/// active field) with the
+/// selected candidate and
+/// closes the menu. This
+/// test simulates the full
+/// `Tab → Enter` flow by
+/// setting `dialog.completion`
+/// directly (bypassing
+/// `try_note_create_completion`
+/// which would need a real
+/// `note_search` SQLite
+/// database).
+#[test]
+fn note_create_completion_enter_replaces_prefix_word() {
+    use crate::tui::state::NoteCreateCompletion;
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    // Type the prefix
+    // `@p:Cla` in the Title
+    // field.
+    for c in "@p:Cla".chars() {
+        app.note_create_push_char(c);
+    }
+    // Inject a fake
+    // completion menu (the
+    // real one is built by
+    // `try_note_create_completion`
+    // from a note_search
+    // query; we simulate the
+    // result here).
+    {
+        let d = app.note_create.as_mut().unwrap();
+        d.completion = Some(NoteCreateCompletion {
+            candidates: vec![
+                "[[Claude Setup]]".to_string(),
+                "[[Classics]]".to_string(),
+                "[[Other]]".to_string(),
+            ],
+            selected: 0,
+        });
+    }
+    // Simulate the user
+    // pressing Enter on the
+    // highlighted (first)
+    // candidate. The full
+    // `Enter` arm is in
+    // `handle_note_create_completion_key`
+    // (we exercise it
+    // inline here so the
+    // test is independent
+    // of the keymap's
+    // dispatch order).
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    crate::tui::handle_note_create_completion_key(&mut app, key);
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(
+        d.title, "[[Claude Setup]] ",
+        "Enter replaces the prefix word `@p:Cla` with the selected candidate `[[Claude Setup]]` (plus a trailing space)"
+    );
+    assert_eq!(
+        d.title_cursor,
+        "[[Claude Setup]] ".chars().count(),
+        "cursor moves to the end of the inserted text (including the trailing space)"
+    );
+    assert!(
+        d.completion.is_none(),
+        "the menu closes on commit (the user is back in plain typing mode)"
+    );
+    // The commit also
+    // appends a trailing
+    // space (so the user
+    // can type another word
+    // after the `]]`).
+    assert!(
+        d.title.ends_with(' '),
+        "trailing space is appended after the inserted candidate; got: {:?}",
+        d.title
+    );
+    // Sanity: the prefix
+    // word is fully
+    // replaced (no
+    // leftover `@p:Cla`).
+    assert!(
+        !d.title.contains("@p:"),
+        "the prefix word `@p:Cla` is fully replaced; got: {:?}",
+        d.title
+    );
+}
+
+#[test]
+fn note_create_completion_arrow_keys_move_selection() {
+    use crate::tui::state::NoteCreateCompletion;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    // Inject a 3-item
+    // completion menu with
+    // the second item
+    // selected (so we can
+    // verify both up and
+    // down move correctly).
+    {
+        let d = app.note_create.as_mut().unwrap();
+        d.completion = Some(NoteCreateCompletion {
+            candidates: vec![
+                "[[A]]".to_string(),
+                "[[B]]".to_string(),
+                "[[C]]".to_string(),
+            ],
+            selected: 1,
+        });
+    }
+    // Up: 1 -> 0.
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(m.selected, 0, "Up moves the selection up by one");
+    }
+    // Up
+    // is
+    // clamped
+    // at
+    // 0
+    // (no
+    // wrap).
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            m.selected, 0,
+            "Up is clamped at 0 (no wrap-around; the user must use Down)"
+        );
+    }
+    // Down: 0 -> 1 -> 2.
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            m.selected, 2,
+            "Down moves the selection down by one each press"
+        );
+    }
+    // Down
+    // is
+    // clamped
+    // at
+    // n-1.
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(m.selected, 2, "Down is clamped at n-1 (no wrap-around)");
+    }
+}
+
+#[test]
+fn note_create_completion_tab_shift_tab_move_selection() {
+    use crate::tui::state::NoteCreateCompletion;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    {
+        let d = app.note_create.as_mut().unwrap();
+        d.completion = Some(NoteCreateCompletion {
+            candidates: vec![
+                "[[A]]".to_string(),
+                "[[B]]".to_string(),
+                "[[C]]".to_string(),
+            ],
+            selected: 0,
+        });
+    }
+    // Tab moves down, same as Down/`j`/Ctrl-N — it's the key that
+    // opened the menu, so it stays the natural "next" key.
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(m.selected, 2, "Tab moves the selection down by one each press");
+    }
+    // Tab is clamped at n-1 (no wrap-around).
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(m.selected, 2, "Tab is clamped at n-1 (no wrap-around)");
+    }
+    // Shift-Tab (crossterm reports it as `BackTab`, not
+    // `Tab` + a shift modifier) moves back up.
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+    );
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(m.selected, 0, "Shift-Tab (BackTab) moves the selection up");
+    }
+    // Shift-Tab is clamped at 0 (no wrap-around).
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+    );
+    {
+        let m = app
+            .note_create
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(m.selected, 0, "Shift-Tab is clamped at 0 (no wrap-around)");
+    }
+}
+
+#[test]
+fn note_create_completion_esc_dismisses_menu_keeps_typed_text() {
+    use crate::tui::state::NoteCreateCompletion;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    // Type the prefix
+    // text the user
+    // already had in
+    // the field.
+    for c in "@p:Cla".chars() {
+        app.note_create_push_char(c);
+    }
+    {
+        let d = app.note_create.as_mut().unwrap();
+        d.completion = Some(NoteCreateCompletion {
+            candidates: vec!["[[Claude Setup]]".to_string()],
+            selected: 0,
+        });
+    }
+    // The user changes
+    // their mind and
+    // dismisses the menu
+    // with Esc. The
+    // `Esc` key is the
+    // canonical dismiss
+    // binding (the user
+    // can rebind it via
+    // `key.cancel=...`,
+    // but the default
+    // `key.cancel=Esc` is
+    // what `action_for_key`
+    // returns for the Esc
+    // keypress). We test
+    // it directly via the
+    // handler.
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    );
+    let d = app.note_create.as_ref().unwrap();
+    assert!(
+        d.completion.is_none(),
+        "Esc dismisses the menu (sets `dialog.completion = None`)"
+    );
+    // The
+    // typed
+    // text
+    // is
+    // preserved
+    // (the
+    // user
+    // can
+    // keep
+    // editing
+    // the
+    // prefix
+    // or
+    // abandon
+    // it).
+    assert_eq!(
+        d.title, "@p:Cla",
+        "the typed prefix is preserved when the user dismisses the menu"
+    );
+    // The dialog itself
+    // is still open (Esc on
+    // the completion menu
+    // only dismisses the
+    // menu, NOT the
+    // dialog).
+    assert!(
+        app.is_note_create_open(),
+        "dismissing the completion menu must NOT close the dialog itself"
+    );
+}
+
+#[test]
+fn note_create_completion_commit_in_content_field() {
+    use crate::tui::state::NoteCreateCompletion;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    // Switch to the
+    // Content field and
+    // type a tag-completion
+    // prefix.
+    app.note_create_toggle_field();
+    for c in "#fea".chars() {
+        app.note_create_push_char(c);
+    }
+    {
+        let d = app.note_create.as_mut().unwrap();
+        d.completion = Some(NoteCreateCompletion {
+            candidates: vec!["#feature".to_string(), "#feature-flag".to_string()],
+            selected: 0,
+        });
+    }
+    crate::tui::handle_note_create_completion_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.content, "#feature ", "the prefix word `#fea` is replaced with `#feature ` (with trailing space) in the Content field");
+    assert!(d.completion.is_none());
+}
+
+// Tiny shell-quote helper:
+// the staged command is
+// a single shell-quoted
+// arg, e.g.
+// `note_search create-note '### My Note ...' --type daily`.
+// We extract the single-quoted
+// arg (between the
+// outermost pair of `'`s)
+// and return the inner
+// text. This is a
+// test-only helper — the
+// production shell
+// expansion is done by
+// the parent shell, not
+// the TUI.
+fn extract_single_quoted_arg(staged: &str) -> String {
+    let first = staged
+        .find('\'')
+        .expect("staged command should have a quoted arg");
+    let rest = &staged[first + 1..];
+    let end = rest
+        .find('\'')
+        .expect("staged command should have a closing quote");
+    rest[..end].to_string()
+}
+
+// Inverse of
+// `crate::util::shell_quote`.
+// We round-trip the
+// staged body through
+// the same shell-quote
+// rule so the assertion
+// sees the literal
+// payload (the production
+// argv-encoding is lossy:
+// e.g. embedded `\n` in
+// a single-quoted arg is
+// preserved as a literal
+// backslash-n, NOT a real
+// newline). We want the
+// test to mirror the
+// production behaviour
+// exactly so the
+// assertions don't false-
+// positive on round-trip
+// artefacts.
+fn shell_quote_decode(quoted: &str) -> String {
+    // The
+    // production
+    // shell_quote
+    // uses
+    // single-quote
+    // wrapping
+    // and
+    // escapes
+    // embedded
+    // `'`s
+    // as
+    // `'\''`
+    // (close,
+    // escape,
+    // open).
+    // We
+    // don't
+    // need
+    // the
+    // full
+    // inverse
+    // here
+    // — the
+    // tests
+    // only
+    // check
+    // that
+    // the
+    // literal
+    // text
+    // (newlines
+    // and
+    // all)
+    // is
+    // present
+    // in
+    // the
+    // single-quoted
+    // arg,
+    // so
+    // we
+    // just
+    // return
+    // it
+    // verbatim.
+    quoted.to_string()
+}
+
+/// `try_note_create_completion`
+/// is the entry point for
+/// the inline `@`- / `#`-
+/// completion in the
+/// `create-note` dialog.
+/// When the user presses
+/// `Tab` on a word that
+/// starts with one of the
+/// supported prefixes
+/// (`@p:`, `@e:`, `@d:`,
+/// `@7:`, `@w:`, `@n:`,
+/// `#`), the dialog's
+/// `completion` field is
+/// populated with the
+/// matching `note_search`
+/// candidates (formatted as
+/// `[[Title]]` for `@`-prefixes
+/// or `#tag` for the `#`
+/// prefix). On commit the
+/// prefix word is replaced
+/// with the selected
+/// candidate.
+///
+/// This test indexes a
+/// couple of notes (one
+/// tagged `project`, one
+/// tagged `people`) and
+/// verifies that Tab
+/// actually opens the
+/// completion menu. The
+/// previous bug was that
+/// the menu was wired to
+/// the wrong field (the
+/// global `CompletionMenu`
+/// on `self.query` rather
+/// than a dialog-local
+/// menu on
+/// `dialog.completion`),
+/// and the keymap never
+/// routed Tab through
+/// `try_note_create_completion`
+/// in the first place.
+/// The test below drives
+/// the same code path the
+/// TUI's Tab handler does,
+/// so a regression here
+/// (e.g. if the prefix
+/// detection starts
+/// matching the wrong
+/// strings, or if the
+/// candidate list is
+/// empty) is caught at
+/// `cargo test` time
+/// instead of in a user
+/// report.
+#[test]
+fn try_note_create_completion_opens_menu_with_matching_notes() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    // Build a tiny notes vault: two `type: project` notes (so `@p:`
+    // has a real multi-match menu to test) and one `type: people`
+    // note (so `@e:` exercises the single-match auto-apply path).
+    // `@p:` / `@e:` match via note_search's attribute key=value
+    // condition (`[type:project]` / `[type:people]`) — the vault
+    // convention is a `type:` frontmatter field whose VALUE is
+    // `project` / `people`, not a top-level `project:` / `people:`
+    // key. The note's title comes from a frontmatter `title:` field
+    // (or else the filename), but candidates are built from the
+    // file BASENAME, not the title — see `try_note_create_completion`.
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-try-completion-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project_alpha.md"),
+        "---\ntitle: Project Alpha\ntype: project\n---\n# Project Alpha\n",
+    )
+    .expect("write project_alpha.md");
+    fs::write(
+        dir.join("project_bravo.md"),
+        "---\ntitle: Project Bravo\ntype: project\n---\n# Project Bravo\n",
+    )
+    .expect("write project_bravo.md");
+    fs::write(
+        dir.join("people_charlie.md"),
+        "---\ntitle: People Charlie\ntype: people\n---\n# People Charlie\n",
+    )
+    .expect("write people_charlie.md");
+    // Build the sqlite DB the same way the existing notes-mode
+    // tests do (init schema, then index each file).
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-try-completion-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn).expect("init schema");
+    for entry in fs::read_dir(&dir).expect("read dir") {
+        let entry = entry.expect("entry");
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let data =
+            note_search::markdown_parser::process_markdown_file(&path, &dir).expect("process");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn).expect("write");
+    }
+    drop(conn);
+    // Set up the TUI with the real notes database + dir configured.
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    // Open the dialog (the user pressed `CreateNote`).
+    app.open_note_create_dialog();
+    let esc = || {
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        )
+    };
+    // Type the prefix `@p:` (no search term yet) in the Title
+    // field. Two notes have `type: project`, so this is a
+    // multi-match case: Tab must open a menu, not auto-apply.
+    for c in "@p:".chars() {
+        app.note_create_push_char(c);
+    }
+    // Simulate the Tab keypress (the real TUI routes Tab to
+    // `try_note_create_completion` first, then to the field toggle
+    // as a fallback; we call the helper directly here to keep the
+    // test independent of the keymap's dispatch order).
+    let opened = app.try_note_create_completion();
+    assert!(
+        opened,
+        "Tab on the prefix `@p:` must open the completion menu (the user reported that \
+         Tab just toggles fields, so the prefix detection is the most likely culprit)"
+    );
+    let d = app.note_create.as_ref().unwrap();
+    let menu = d
+        .completion
+        .as_ref()
+        .expect("menu is open after Tab on `@p:` (2 project notes match)");
+    assert!(
+        menu.candidates.iter().any(|c| c == "[[project_alpha]]"),
+        "the project_alpha note must be a candidate; got: {:?}",
+        menu.candidates
+    );
+    assert!(
+        menu.candidates.iter().any(|c| c == "[[project_bravo]]"),
+        "the project_bravo note must be a candidate; got: {:?}",
+        menu.candidates
+    );
+    // The people-typed note must NOT appear (filtered by `type: project`).
+    assert!(
+        !menu.candidates.iter().any(|c| c == "[[people_charlie]]"),
+        "the people-typed note must NOT be a candidate for `@p:`; got: {:?}",
+        menu.candidates
+    );
+    // The selected index starts at 0 (so the first arrow key moves
+    // to 1, not skips past the top of the list).
+    assert_eq!(menu.selected, 0);
+    // Narrow `@p:` by typed search text down to a SINGLE match
+    // ("alph" only matches project_alpha, not project_bravo) — a
+    // unique match must be inserted directly, no menu. Dismiss the
+    // open menu first (mirrors real key routing: a real user can't
+    // type further field text while the menu is open).
+    crate::tui::handle_note_create_completion_key(&mut app, esc());
+    for c in "alph".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "narrowed `@p:alph` must be handled by Tab");
+    let d = app.note_create.as_ref().unwrap();
+    assert!(
+        d.completion.is_none(),
+        "a single narrowed match must be inserted directly, not opened as a menu"
+    );
+    assert_eq!(
+        d.title, "[[project_alpha]] ",
+        "the sole match must replace the prefix word in place, with a trailing space"
+    );
+    // Now type the `@e:` prefix — only one note has `type: people`,
+    // so this must ALSO auto-apply directly with no typed search
+    // term needed.
+    app.note_create_clear();
+    for c in "@e:".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "Tab on the prefix `@e:` must be handled");
+    let d = app.note_create.as_ref().unwrap();
+    assert!(
+        d.completion.is_none(),
+        "the sole `@e:` match must be inserted directly, not opened as a menu"
+    );
+    assert_eq!(d.title, "[[people_charlie]] ");
+    // Now type `#` (the tag-completion prefix) with no search term
+    // — all three notes match, so this is a multi-match menu case.
+    app.note_create_clear();
+    app.note_create_push_char('#');
+    let opened = app.try_note_create_completion();
+    assert!(
+        opened,
+        "Tab on the `#` prefix must open the completion menu"
+    );
+    let d = app.note_create.as_ref().unwrap();
+    let menu = d
+        .completion
+        .as_ref()
+        .expect("menu is open after Tab on `#` (3 notes match, no filter)");
+    // `#` completion candidates are each note's file BASENAME
+    // prefixed with `#` (see `try_note_create_completion`'s doc
+    // comment) — not the frontmatter title or an attribute/tag
+    // name — so with no filter it must offer all three basenames.
+    assert!(
+        menu.candidates.iter().any(|c| c == "#project_alpha"),
+        "tag completion must include project_alpha's basename; got: {:?}",
+        menu.candidates
+    );
+    assert!(
+        menu.candidates.iter().any(|c| c == "#project_bravo"),
+        "tag completion must include project_bravo's basename; got: {:?}",
+        menu.candidates
+    );
+    assert!(
+        menu.candidates.iter().any(|c| c == "#people_charlie"),
+        "tag completion must include people_charlie's basename; got: {:?}",
+        menu.candidates
+    );
+    // Narrow `#` by typed search text down to a single match
+    // ("charlie" only matches people_charlie). This is the
+    // regression check for "tag completion ignores the text typed
+    // so far": if the search term were dropped, all 3 candidates
+    // would still be there and this would stay a menu instead of
+    // auto-applying the one narrowed match.
+    crate::tui::handle_note_create_completion_key(&mut app, esc());
+    for c in "charlie".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "narrowed `#charlie` must be handled by Tab");
+    let d = app.note_create.as_ref().unwrap();
+    assert!(
+        d.completion.is_none(),
+        "a single narrowed tag match must be inserted directly, not opened as a menu \
+         (if this fails, the typed search text after `#` is being ignored)"
+    );
+    assert_eq!(
+        d.title, "#people_charlie ",
+        "narrowing `#charlie` must resolve to the one matching note's basename; got: {:?}",
+        d.title
+    );
+    // And a bare word (no `@`/`#` prefix) should NOT open a menu —
+    // Tab on a plain word toggles fields instead.
+    app.note_create_clear();
+    app.note_create_push_char('h');
+    app.note_create_push_char('i');
+    let opened = app.try_note_create_completion();
+    assert!(
+        !opened,
+        "Tab on a plain word (no `@`/`#` prefix) must NOT open the menu; \
+         it should fall through to the field-toggle behavior"
+    );
+    assert!(
+        app.note_create.as_ref().unwrap().completion.is_none(),
+        "the menu must remain closed when the prefix doesn't match"
+    );
+    // Cleanup.
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
+}
+
+#[test]
+fn note_create_completion_menu_live_narrows_by_typing() {
+    // Unlike `try_note_create_completion_opens_menu_with_matching_notes`
+    // (which calls `App::try_note_create_completion` directly), this
+    // drives the real key-dispatch path — `handle_note_create_completion_key`
+    // — to prove typing WHILE the menu is already open narrows the
+    // candidate list live, rather than being swallowed or requiring
+    // the user to Esc and retype.
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-live-narrow-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project_alpha.md"),
+        "---\ntitle: Project Alpha\ntype: project\n---\n# Project Alpha\n",
+    )
+    .expect("write project_alpha.md");
+    fs::write(
+        dir.join("project_bravo.md"),
+        "---\ntitle: Project Bravo\ntype: project\n---\n# Project Bravo\n",
+    )
+    .expect("write project_bravo.md");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-live-narrow-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn).expect("init schema");
+    for entry in fs::read_dir(&dir).expect("read dir") {
+        let entry = entry.expect("entry");
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let data =
+            note_search::markdown_parser::process_markdown_file(&path, &dir).expect("process");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn).expect("write");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.open_note_create_dialog();
+    for c in "@p:".chars() {
+        app.note_create_push_char(c);
+    }
+    assert!(
+        app.try_note_create_completion(),
+        "Tab on `@p:` must open the menu (2 project notes match)"
+    );
+    assert_eq!(
+        app.note_create.as_ref().unwrap().completion.as_ref().unwrap().candidates.len(),
+        2,
+        "both project notes must be candidates before narrowing"
+    );
+    // Feed characters one at a time through the REAL key handler
+    // while the menu is open, mirroring the real dispatch guard
+    // (`handle_key` only routes to `handle_note_create_completion_key`
+    // while `dialog.completion.is_some()`): stop as soon as a
+    // keystroke narrows to a single, auto-applied match and closes
+    // the menu — any further characters in `s` would, in the real
+    // app, go through the plain field-editing path instead.
+    fn type_while_menu_open(app: &mut App, s: &str) {
+        for c in s.chars() {
+            let still_open = app
+                .note_create
+                .as_ref()
+                .map(|d| d.completion.is_some())
+                .unwrap_or(false);
+            if !still_open {
+                break;
+            }
+            crate::tui::handle_note_create_completion_key(
+                app,
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            );
+        }
+    }
+    // "alph" narrows to the sole match ("project_alpha") within the
+    // first couple of characters — before "bravo" would even
+    // contain the same substring — proving the list live-narrows
+    // per keystroke rather than only re-evaluating on a full retype.
+    type_while_menu_open(&mut app, "alph");
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(
+        d.title, "[[project_alpha]] ",
+        "typing \"alph\" while the menu is open must narrow to the sole match \
+         and auto-apply it directly; got title: {:?}",
+        d.title
+    );
+    assert!(
+        d.completion.is_none(),
+        "the menu must close once typing narrows to a single, auto-applied match"
+    );
+    // Backspace through the applied link back to the bare prefix,
+    // then re-narrow with a different substring to confirm
+    // Backspace also live-re-filters (not just insertion).
+    for c in "[[project_alpha]] ".chars() {
+        let _ = c;
+        app.note_create_backspace();
+    }
+    for c in "@p:".chars() {
+        app.note_create_push_char(c);
+    }
+    assert!(
+        app.try_note_create_completion(),
+        "Tab on `@p:` must reopen the menu"
+    );
+    type_while_menu_open(&mut app, "bravo");
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(
+        d.title, "[[project_bravo]] ",
+        "typing \"bravo\" while the menu is open must narrow to project_bravo; got: {:?}",
+        d.title
+    );
+    // Narrow to zero matches: the menu must close instead of
+    // showing a stale candidate list.
+    for c in "[[project_bravo]] ".chars() {
+        let _ = c;
+        app.note_create_backspace();
+    }
+    for c in "@p:".chars() {
+        app.note_create_push_char(c);
+    }
+    assert!(app.try_note_create_completion());
+    type_while_menu_open(&mut app, "zzz");
+    assert!(
+        app.note_create.as_ref().unwrap().completion.is_none(),
+        "narrowing to zero matches must close the menu instead of leaving a stale list"
+    );
+    // Cleanup.
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
+}
+
+#[test]
+fn note_create_ctrl_d_n_7_shortcuts_act_like_typed_prefix() {
+    // `Ctrl-D` / `Ctrl-N` / `Ctrl-7` are one-keystroke equivalents
+    // of typing `@d:` / `@n:` / `@7:` then Tab. `@d:`/`@7:` filter
+    // on `json_extract(header_fields, '$.created')` — the
+    // FRONTMATTER `created:` field, NOT the file's mtime/birth-time
+    // fallback the DB's `created` column otherwise uses — so the
+    // fixture note needs an explicit `created:` dated today for the
+    // `Today` / `LastWeek` filters to match it. `@n:` has no filter
+    // either way. A single match in every case, so each shortcut
+    // should auto-apply directly rather than open a menu.
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-ctrl-shortcuts-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    fs::write(
+        dir.join("fresh_note.md"),
+        format!("---\ntitle: Fresh Note\ncreated: {today}\n---\n# Fresh Note\n"),
+    )
+    .expect("write fresh_note.md");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-ctrl-shortcuts-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn).expect("init schema");
+    for entry in fs::read_dir(&dir).expect("read dir") {
+        let entry = entry.expect("entry");
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let data =
+            note_search::markdown_parser::process_markdown_file(&path, &dir).expect("process");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn).expect("write");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.open_note_create_dialog();
+
+    for (key_char, label) in [('d', "Ctrl-D"), ('n', "Ctrl-N"), ('7', "Ctrl-7")] {
+        crate::tui::handle_note_create_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(key_char),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        );
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(
+            d.title, "[[fresh_note]] ",
+            "{label} must act like typing its `@*:` prefix then Tab and auto-apply \
+             the sole match; got title: {:?}",
+            d.title
+        );
+        assert!(
+            d.completion.is_none(),
+            "{label}: a single match must auto-apply, not open a menu"
+        );
+        app.note_create_clear();
+    }
+
+    // `Ctrl-W` must still be delete-word-backward, not hijacked by
+    // the new shortcuts (it was the original mnemonic for
+    // "last 7 days" but conflicts with the existing binding, so
+    // `Ctrl-7` was used instead — see the conversation that led to
+    // this test).
+    for c in "foo bar".chars() {
+        app.note_create_push_char(c);
+    }
+    crate::tui::handle_note_create_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert_eq!(
+        app.note_create.as_ref().unwrap().title,
+        "foo ",
+        "Ctrl-W must still delete the last word, not trigger a completion shortcut"
+    );
+
+    // Cleanup.
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
 }

@@ -1501,6 +1501,21 @@ pub(crate) struct App {
     /// single-line `@new <text>` quick-create (a separate,
     /// unchanged mechanism).
     note_compose: Option<crate::tui::state::NoteComposeDialog>,
+    /// Two-field note-create
+    /// dialog opened via
+    /// `Action::CreateNote`
+    /// (default key: `none`;
+    /// bind via the config
+    /// file). `None` when no
+    /// dialog is open. See
+    /// `NoteCreateDialog` for
+    /// the full shape (Title +
+    /// Content + inline
+    /// completion for
+    /// `@`-prefixed note
+    /// links and `#`-prefixed
+    /// tags).
+    note_create: Option<crate::tui::state::NoteCreateDialog>,
     /// Filter for the `*`-mode panes view.
     /// When set to a non-`All` value,
     /// `fetch_panes` hides rows whose
@@ -4612,7 +4627,8 @@ impl CodeGraphRelationsPicker {
 /// `Ctrl-P` / `j`/`k`), commits with
 /// `Enter`, and dismisses with `Esc` or
 /// the user's `Cancel` binding.
-struct CompletionMenu {
+#[derive(Debug, Clone)]
+pub(crate) struct CompletionMenu {
     /// The full list of candidates
     /// (the raw match names, e.g.
     /// `"NeovimNote"` for a link, or
@@ -4874,6 +4890,7 @@ impl App {
             host_defs: Vec::new(),
             add_entry_dialog: None,
             note_compose: None,
+            note_create: None,
             panes_filter: PanesFilter::default(),
             pane_cmdlines_request: None,
             panes_snapshot_id: 0,
@@ -10695,6 +10712,65 @@ impl App {
         });
     }
 
+    /// Open the two-field
+    /// `create-note` dialog
+    /// (Title + Content +
+    /// inline completion for
+    /// `@`-prefixed note
+    /// links and `#`-prefixed
+    /// tags). The dialog is
+    /// mode-agnostic — it can
+    /// be opened from any
+    /// prefix mode (history,
+    /// panes, notes, …) so the
+    /// user can capture a
+    /// thought without first
+    /// switching to notes
+    /// mode. The completion
+    /// candidates are loaded
+    /// lazily (on the first
+    /// `@` or `#` typed) from
+    /// the configured
+    /// `notes.database` via
+    /// `note_search`'s
+    /// `DatabaseService`.
+    ///
+    /// On `Ctrl-S` the dialog
+    /// formats the body as a
+    /// level-3 heading
+    /// (`### TITLE [[LINKS]] #TAGS`)
+    /// followed by a
+    /// `[time:: HH:MM]` line
+    /// and the user's content,
+    /// then appends it to the
+    /// same `# Yournal` section
+    /// of the daily note that
+    /// the legacy `@new` uses
+    /// (`note_search::commands::create_note`).
+    /// The tag/link heading is
+    /// extracted from BOTH the
+    /// Title and Content
+    /// fields.
+    fn open_note_create_dialog(&mut self) {
+        if self.note_create.is_some() {
+            return;
+        }
+        self.note_create = Some(crate::tui::state::NoteCreateDialog {
+            title: String::new(),
+            title_cursor: 0,
+            content: String::new(),
+            content_cursor: 0,
+            // Default the user to the
+            // Title field on first
+            // open — the Title is the
+            // "what is this note"
+            // field, the natural
+            // starting point.
+            active_field: crate::tui::state::NoteCreateField::Title,
+            completion: None,
+        });
+    }
+
     /// Insert `c` at the cursor in the compose buffer. Unlike
     /// every single-line input in the TUI (where `Enter`
     /// commits), the compose dialog's key handler routes
@@ -10822,6 +10898,676 @@ impl App {
         self.pick_mode = Some(PickMode::Run);
         self.note_compose = None;
         true
+    }
+
+    // -----------------------------------------------------------------------
+    // Note-create dialog (the rich, two-field Title + Content composer).
+    // -----------------------------------------------------------------------
+    //
+    // Distinct from `note_compose` above (which is the
+    // single-field, bullet-list composer used by `@new`).
+    // This is the multi-field
+    // composer the user
+    // described in
+    // `/tmp/notes.md`:
+    // Title + Content, with
+    // inline completion for
+    // `@`-prefixed note
+    // links and `#`-prefixed
+    // tags, and a heading-style
+    // submission to the
+    // Yournal section.
+
+    /// `true` when the
+    /// `create-note` dialog is
+    /// open.
+    fn is_note_create_open(&self) -> bool {
+        self.note_create.is_some()
+    }
+
+    /// Insert `c` into the
+    /// active field of the
+    /// create-note dialog at
+    /// the cursor.
+    fn note_create_push_char(&mut self, c: char) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        if c == '\n' && dialog.active_field == crate::tui::state::NoteCreateField::Title {
+            return;
+        }
+        match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                let byte_idx = char_to_byte_index(&dialog.title, dialog.title_cursor);
+                dialog.title.insert(byte_idx, c);
+                dialog.title_cursor += 1;
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                let byte_idx = char_to_byte_index(&dialog.content, dialog.content_cursor);
+                dialog.content.insert(byte_idx, c);
+                dialog.content_cursor += 1;
+            }
+        }
+    }
+
+    /// Insert `prefix` (e.g. `"@d:"`) at the cursor in the active
+    /// create-note field, then immediately trigger
+    /// `try_note_create_completion` — the shared implementation
+    /// behind the `Ctrl-D` / `Ctrl-N` / `Ctrl-7` shortcuts, each a
+    /// one-keystroke equivalent of typing the prefix text and
+    /// pressing Tab. Reusing `try_note_create_completion` (rather
+    /// than duplicating its search/filter logic) means the menu,
+    /// basename narrowing, and single-match auto-apply all behave
+    /// identically whether the prefix was typed or inserted by a
+    /// shortcut. If the cursor isn't at a word boundary (e.g. mid
+    /// existing text), this can produce a "word" the prefix match
+    /// doesn't recognize and silently no-op — same limitation as
+    /// typing the prefix by hand in that position.
+    fn note_create_insert_and_complete(&mut self, prefix: &str) {
+        for c in prefix.chars() {
+            self.note_create_push_char(c);
+        }
+        self.try_note_create_completion();
+    }
+
+    fn note_create_backspace(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                if dialog.title_cursor == 0 {
+                    return;
+                }
+                let byte_idx =
+                    char_to_byte_index(&dialog.title, dialog.title_cursor - 1);
+                dialog.title.remove(byte_idx);
+                dialog.title_cursor -= 1;
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                if dialog.content_cursor == 0 {
+                    return;
+                }
+                let byte_idx =
+                    char_to_byte_index(&dialog.content, dialog.content_cursor - 1);
+                dialog.content.remove(byte_idx);
+                dialog.content_cursor -= 1;
+            }
+        }
+    }
+
+    fn note_create_move_left(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                if dialog.title_cursor > 0 {
+                    dialog.title_cursor -= 1;
+                }
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                if dialog.content_cursor > 0 {
+                    dialog.content_cursor -= 1;
+                }
+            }
+        }
+    }
+
+    fn note_create_move_right(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        let active_len = match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => dialog.title.chars().count(),
+            crate::tui::state::NoteCreateField::Content => dialog.content.chars().count(),
+        };
+        let cursor = match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => &mut dialog.title_cursor,
+            crate::tui::state::NoteCreateField::Content => &mut dialog.content_cursor,
+        };
+        if *cursor < active_len {
+            *cursor += 1;
+        }
+    }
+
+    /// Toggle the active
+    /// field between Title
+    /// and Content.
+    fn note_create_toggle_field(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        dialog.active_field = match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                crate::tui::state::NoteCreateField::Content
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                crate::tui::state::NoteCreateField::Title
+            }
+        };
+    }
+
+    /// Clear the active field.
+    fn note_create_clear(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                dialog.title.clear();
+                dialog.title_cursor = 0;
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                dialog.content.clear();
+                dialog.content_cursor = 0;
+            }
+        }
+    }
+
+    /// Cancel the dialog.
+    fn note_create_cancel(&mut self) {
+        self.note_create = None;
+        self.set_status_message("create-note cancelled".to_string());
+    }
+
+    /// Submit the dialog.
+    fn note_create_submit(&mut self) -> bool {
+        let Some(ref dialog) = self.note_create else {
+            return false;
+        };
+        if dialog.title.trim().is_empty() && dialog.content.trim().is_empty() {
+            self.set_status_message("Nothing to save — both fields are empty".to_string());
+            return false;
+        }
+        let Some(ref _db_path) = self.notes_database else {
+            self.set_status_message(
+                "notes.database not configured; set it to use the create-note dialog".to_string(),
+            );
+            return false;
+        };
+        let Some(ref _notes_dir) = self.notes_dir else {
+            self.set_status_message(
+                "notes_dir not configured; set `notes.dir` to the parent of your daily/ folder"
+                    .to_string(),
+            );
+            return false;
+        };
+        let combined = format!(
+            "{}\n{}",
+            dialog.title.trim(),
+            dialog.content.trim()
+        );
+        let (links, tags) = crate::tui::state::extract_links_and_tags(&combined);
+        let mut heading = dialog.title.trim().to_string();
+        for link in &links {
+            if !heading.contains(link) {
+                if !heading.is_empty() {
+                    heading.push(' ');
+                }
+                heading.push_str(link);
+            }
+        }
+        for tag in &tags {
+            if !heading.contains(tag) {
+                if !heading.is_empty() {
+                    heading.push(' ');
+                }
+                heading.push_str(tag);
+            }
+        }
+        let now = chrono::Local::now();
+        let time_str = now.format("%H:%M").to_string();
+        let body = format!(
+            "### {}\n[time:: {}]\n{}",
+            heading,
+            time_str,
+            dialog.content.trim()
+        );
+        let staged = format!(
+            "note_search create-note {} --type daily",
+            crate::util::shell_quote(&body)
+        );
+        self.selection = Some(staged);
+        self.pick_mode = Some(PickMode::Run);
+        self.note_create = None;
+        true
+    }
+
+    /// Open the
+    /// inline
+    /// completion
+    /// menu for
+    /// the
+    /// create-note
+    /// dialog
+    /// when the
+    /// cursor
+    /// sits on a
+    /// word that
+    /// starts
+    /// with one
+    /// of the
+    /// supported
+    /// prefixes
+    /// (`@p:`,
+    /// `@e:`,
+    /// `@d:`,
+    /// `@7:` /
+    /// `@w:`,
+    /// `@n:`, or
+    /// `#`).
+    /// Returns
+    /// `true`
+    /// when a
+    /// menu was
+    /// opened,
+    /// `false`
+    /// when no
+    /// completion
+    /// was
+    /// triggered
+    /// (so the
+    /// caller
+    /// can
+    /// fall
+    /// through
+    /// to the
+    /// default
+    /// `Tab`
+    /// behavior
+    /// — field
+    /// toggle).
+    ///
+    /// Completion
+    /// candidates
+    /// are loaded
+    /// from
+    /// `note_search::DatabaseService::search_notes`
+    /// with the
+    /// prefix's
+    /// filter:
+    /// `@p:` →
+    /// `attribute: project`,
+    /// `@e:` →
+    /// `attribute: people`,
+    /// `@d:` →
+    /// `date_range: Today`,
+    /// `@7:` /
+    /// `@w:` →
+    /// rolling 7-day
+    /// `date_range: Custom`
+    /// (today and the
+    /// 6 days before
+    /// it — NOT
+    /// `DateRange::LastWeek`,
+    /// which is the
+    /// previous
+    /// calendar
+    /// week),
+    /// `@n:` →
+    /// no
+    /// filter
+    /// (all
+    /// notes),
+    /// `#` →
+    /// all
+    /// notes'
+    /// titles
+    /// (tag
+    /// completion).
+    /// Each
+    /// candidate
+    /// is
+    /// the
+    /// note's
+    /// file
+    /// BASENAME
+    /// (filename
+    /// minus
+    /// directory
+    /// and
+    /// extension)
+    /// — never
+    /// the
+    /// frontmatter
+    /// title —
+    /// formatted
+    /// as
+    /// `[[basename]]`,
+    /// and
+    /// narrowed
+    /// by
+    /// whatever
+    /// the
+    /// user
+    /// typed
+    /// after
+    /// the
+    /// prefix
+    /// (case-
+    /// insensitive
+    /// substring
+    /// match
+    /// against
+    /// the
+    /// basename).
+    ///
+    /// The
+    /// existing
+    /// `CompletionMenu`
+    /// (used
+    /// by
+    /// the
+    /// main
+    /// query
+    /// input)
+    /// is
+    /// re-used
+    /// here
+    /// so
+    /// the
+    /// user
+    /// navigates
+    /// with
+    /// the
+    /// same
+    /// arrow-key
+    /// /
+    /// Enter
+    /// pattern
+    /// they
+    /// already
+    /// know.
+    fn try_note_create_completion(&mut self) -> bool {
+        let opened = self.try_note_create_completion_inner();
+        if !opened {
+            // Every "no completion" exit of the inner function
+            // (unmatched prefix, no database configured, a search
+            // error, zero candidates after narrowing, ...) must
+            // leave no menu showing — required now that this is
+            // re-invoked on every keystroke while live-narrowing an
+            // already-open menu (see `handle_note_create_completion_key`'s
+            // `Char` / `Backspace` arms): without this, typing past
+            // the last match would leave the STALE candidate list on
+            // screen instead of closing it.
+            if let Some(d) = self.note_create.as_mut() {
+                d.completion = None;
+            }
+        }
+        opened
+    }
+
+    /// Does the actual prefix-detection / search / candidate-build
+    /// work for `try_note_create_completion`. Split out so the
+    /// public entry point above can uniformly clear a stale menu on
+    /// every "no completion" return path without having to thread
+    /// that through each individual early return here.
+    fn try_note_create_completion_inner(&mut self) -> bool {
+        let Some(ref mut dialog) = self.note_create else {
+            return false;
+        };
+        // The completion word
+        // is the text from the
+        // last word-boundary to
+        // the cursor in the
+        // active field. We walk
+        // back from the cursor
+        // (character by
+        // character) until we
+        // hit a non-word
+        // character (whitespace,
+        // punctuation) or the
+        // start of the buffer.
+        // A "word" here is the
+        // broadest notion —
+        // anything until
+        // whitespace — because
+        // the prefixes (`@p:`,
+        // `@e:`, `#`) are
+        // non-whitespace sequences
+        // we want to match.
+        let (active_text, active_cursor) = match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                (dialog.title.as_str(), dialog.title_cursor)
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                (dialog.content.as_str(), dialog.content_cursor)
+            }
+        };
+        let chars: Vec<char> = active_text.chars().collect();
+        if active_cursor == 0 || active_cursor > chars.len() {
+            return false;
+        }
+        // Walk back from the
+        // cursor to the start
+        // of the word (the
+        // most recent
+        // whitespace or
+        // buffer start).
+        let mut word_start_char = active_cursor;
+        while word_start_char > 0
+            && !chars[word_start_char - 1].is_whitespace()
+        {
+            word_start_char -= 1;
+        }
+        let word: String = chars[word_start_char..active_cursor]
+            .iter()
+            .collect();
+        // Identify the
+        // prefix and the
+        // filter to apply.
+        // The prefix is the
+        // leading sequence
+        // before the
+        // search term;
+        // the search term
+        // is what the user
+        // has typed
+        // (everything
+        // after the
+        // prefix).
+        let (prefix, search_term) = if let Some(rest) = word.strip_prefix("@p:") {
+            ("@p:", rest)
+        } else if let Some(rest) = word.strip_prefix("@e:") {
+            ("@e:", rest)
+        } else if let Some(rest) = word.strip_prefix("@d:") {
+            ("@d:", rest)
+        } else if let Some(rest) = word.strip_prefix("@7:") {
+            ("@7:", rest)
+        } else if let Some(rest) = word.strip_prefix("@w:") {
+            ("@w:", rest)
+        } else if let Some(rest) = word.strip_prefix("@n:") {
+            ("@n:", rest)
+        } else if word.starts_with('#') {
+            ("#", &word[1..])
+        } else {
+            return false;
+        };
+        // Build the
+        // search
+        // criteria
+        // for
+        // this
+        // prefix.
+        // We need
+        // the
+        // notes
+        // database
+        // path
+        // to
+        // instantiate
+        // the
+        // `DatabaseService`.
+        let Some(db_path) = self.notes_database.as_ref() else {
+            self.set_status_message(
+                "notes.database not configured; cannot complete note links".to_string(),
+            );
+            return false;
+        };
+        let service = note_search::database_service::DatabaseService::new(
+            &db_path.display().to_string(),
+        );
+        let mut criteria = note_search::SearchCriteria::default();
+        criteria.list_only = true;
+        match prefix {
+            // `AttributePair` (the `criteria.attributes` field) is an
+            // equality filter: the query builder emits `... WHERE
+            // LOWER(json_each.value) = LOWER(?)`, so an empty value
+            // string requires the note to have an attribute value that
+            // is LITERALLY an empty string — it does NOT mean "any
+            // value" / "attribute present". That mismatch is why `@p:`
+            // and `@e:` never returned candidates. The vault's actual
+            // convention is a `type:` frontmatter field whose VALUE is
+            // `project` / `people` (not a top-level `project:` /
+            // `people:` key), so we match on that instead via
+            // `QueryExpr::Attribute { key: "type", value: Some(...) }`.
+            "@p:" => {
+                criteria.query_expr = Some(note_search::QueryExpr::Attribute {
+                    key: "type".to_string(),
+                    value: Some("project".to_string()),
+                });
+            }
+            "@e:" => {
+                criteria.query_expr = Some(note_search::QueryExpr::Attribute {
+                    key: "type".to_string(),
+                    value: Some("people".to_string()),
+                });
+            }
+            "@d:" => {
+                criteria.date_range = Some(note_search::DateRange::Today);
+            }
+            "@7:" | "@w:" => {
+                // "Last 7 days" means a rolling window ending
+                // today (today and the 6 days before it) — NOT
+                // `DateRange::LastWeek`, which is the previous
+                // Mon-Sun CALENDAR week and therefore never
+                // includes today (or, depending on the day of
+                // the week, most of the actual last 7 days).
+                let today = chrono::Local::now().date_naive();
+                let start = today - chrono::Duration::days(6);
+                criteria.date_range = Some(note_search::DateRange::Custom {
+                    start: start.format("%Y%m%d").to_string(),
+                    end: today.format("%Y%m%d").to_string(),
+                });
+            }
+            // "@n:" and "#" use
+            // no filter (all
+            // notes).
+            _ => {}
+        }
+        let rows = match service.search_notes(&criteria) {
+            Ok(r) => r,
+            Err(e) => {
+                self.set_status_message(format!("completion query failed: {e}"));
+                return false;
+            }
+        };
+        // Notes are always referenced (and searched) by their
+        // file BASENAME, not the frontmatter title — two notes
+        // can share a title, but basenames are what `[[link]]`
+        // actually resolves against. For `@p:` / `@e:` / `@d:`
+        // / `@7:` / `@w:` / `@n:`, the candidate is the
+        // basename wrapped in `[[ ]]`. For `#`, the candidate
+        // is the basename prefixed with `#` (tag-style
+        // completion). Narrowed by whatever the user typed
+        // after the prefix (case-insensitive substring match
+        // against the basename).
+        let search_term_lower = search_term.to_lowercase();
+        let candidates: Vec<String> = rows
+            .iter()
+            .filter_map(|r| {
+                let basename = std::path::Path::new(&r.filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())?;
+                if basename.is_empty() {
+                    return None;
+                }
+                if !search_term_lower.is_empty()
+                    && !basename.to_lowercase().contains(&search_term_lower)
+                {
+                    return None;
+                }
+                Some(match prefix {
+                    "#" => format!("#{basename}"),
+                    _ => format!("[[{basename}]]"),
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            self.set_status_message(format!("no notes match {prefix}"));
+            return false;
+        }
+        // A single match is unambiguous — insert it directly instead
+        // of opening a menu the user would just have to confirm.
+        // `dialog` (borrowed at the top of this function) isn't used
+        // again on this path, so this fresh `&mut self` borrow is
+        // fine (same pattern as the early-return branches above).
+        if candidates.len() == 1 {
+            self.note_create_apply_completion(word_start_char, active_cursor, &candidates[0]);
+            return true;
+        }
+        // Multiple matches: open the completion menu (own shape,
+        // NOT the main query's `CompletionMenu` — that one is
+        // hard-wired to `self.query`). The keymap routes arrow
+        // keys + Enter to it whenever `dialog.completion.is_some()`.
+        dialog.completion = Some(crate::tui::state::NoteCreateCompletion {
+            candidates,
+            selected: 0,
+        });
+        true
+    }
+
+    /// Replace the word `[word_start_char, cursor_before)`
+    /// (character coordinates) in the create-note dialog's active
+    /// field with `candidate`, move the cursor to the end of the
+    /// inserted text, close the completion menu, and append a
+    /// trailing space if the next character isn't already
+    /// whitespace. Shared by the single-match auto-apply path in
+    /// `try_note_create_completion` and by `Enter` in
+    /// `handle_note_create_completion_key`.
+    fn note_create_apply_completion(
+        &mut self,
+        word_start_char: usize,
+        cursor_before: usize,
+        candidate: &str,
+    ) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => {
+                let word_byte_start = char_to_byte_index(&dialog.title, word_start_char);
+                let word_byte_end = char_to_byte_index(&dialog.title, cursor_before);
+                dialog
+                    .title
+                    .replace_range(word_byte_start..word_byte_end, candidate);
+                dialog.title_cursor = word_start_char + candidate.chars().count();
+            }
+            crate::tui::state::NoteCreateField::Content => {
+                let word_byte_start = char_to_byte_index(&dialog.content, word_start_char);
+                let word_byte_end = char_to_byte_index(&dialog.content, cursor_before);
+                dialog
+                    .content
+                    .replace_range(word_byte_start..word_byte_end, candidate);
+                dialog.content_cursor = word_start_char + candidate.chars().count();
+            }
+        }
+        dialog.completion = None;
+        let (active_buf, active_cursor) = match dialog.active_field {
+            crate::tui::state::NoteCreateField::Title => (dialog.title.as_str(), dialog.title_cursor),
+            crate::tui::state::NoteCreateField::Content => {
+                (dialog.content.as_str(), dialog.content_cursor)
+            }
+        };
+        let needs_space = active_buf
+            .chars()
+            .nth(active_cursor)
+            .map(|c| !c.is_whitespace())
+            .unwrap_or(true);
+        if needs_space {
+            self.note_create_push_char(' ');
+        }
     }
 
     /// Open the "add session /
@@ -11773,6 +12519,27 @@ pub fn run_tui_to_stdout(
     override_panes_filter: Option<&str>,
     override_pane_height: Option<&str>,
     cli_overrides: CliOverrides,
+    // `true` when the user
+    // passed `--create-note`
+    // on the CLI. The TUI
+    // opens the two-field
+    // `create-note` dialog
+    // immediately after
+    // construction (same
+    // shape as pressing the
+    // `Action::CreateNote`
+    // keybinding on the
+    // first frame). The
+    // dialog is the same
+    // one the interactive
+    // `Ctrl-S` path uses,
+    // so the staged command
+    // and submission
+    // behavior are
+    // identical to pressing
+    // the action from
+    // inside the TUI.
+    open_create_note_on_start: bool,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -11977,6 +12744,28 @@ pub fn run_tui_to_stdout(
         // appends the `# hosts` block.
         app.session_panes.clear();
         app.refresh();
+    }
+
+    // `--create-note` opens the
+    // two-field note-create
+    // dialog on the first
+    // frame. This is the
+    // CLI counterpart to
+    // `Action::CreateNote`:
+    // same dialog, same
+    // submission path, just
+    // pre-populated. We open
+    // it AFTER the
+    // `App::new` /
+    // `session_clear_and_refresh`
+    // dance above so the
+    // dialog is the topmost
+    // overlay on the very
+    // first paint (no
+    // one-frame flash of
+    // the bare list view).
+    if open_create_note_on_start {
+        app.open_note_create_dialog();
     }
 
     // Apply CLI overrides for pane
@@ -12727,6 +13516,58 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_note_compose_key(app, key);
     }
 
+    // The two-field
+    // `create-note` dialog
+    // is a sibling of the
+    // note/todo compose
+    // overlay: it also takes
+    // precedence over
+    // action dispatch so
+    // printable characters
+    // AND `Enter` (which
+    // inserts a newline in
+    // the Content field)
+    // go to the active
+    // field, not the query
+    // line. `Tab` toggles
+    // between Title and
+    // Content; `Ctrl-S`
+    // commits.
+    //
+    // The dialog's own
+    // completion menu (for
+    // `@`-prefixed note
+    // links and `#`-prefixed
+    // tags) sits ABOVE the
+    // dialog keymap: while
+    // the menu is open, ALL
+    // input is routed to the
+    // completion handler
+    // (arrow keys move the
+    // selection, `Enter`
+    // commits, `Esc` /
+    // `Cancel` dismisses).
+    // Without this override,
+    // the arrow keys would
+    // fall through to the
+    // dialog's `Left` / `Right`
+    // cursor handlers and
+    // the user couldn't
+    // navigate the
+    // candidates.
+    if app.is_note_create_open()
+        && app
+            .note_create
+            .as_ref()
+            .map(|d| d.completion.is_some())
+            .unwrap_or(false)
+    {
+        return handle_note_create_completion_key(app, key);
+    }
+    if app.is_note_create_open() {
+        return handle_note_create_key(app, key);
+    }
+
     // Action-based dispatch: look up the user-configured binding
     // for this key. Anything not explicitly bound falls through to
     // the default "type a character into the query" behavior.
@@ -13073,6 +13914,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::ComposeNoteEntry => {
             app.open_note_compose_dialog();
+            false
+        }
+        Action::CreateNote => {
+            app.open_note_create_dialog();
             false
         }
         Action::FilterPanesWindows => {
@@ -14816,6 +15661,425 @@ fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char(c) => {
             app.note_compose_push_char(c);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Key handler for the
+/// `create-note` dialog
+/// (the rich, two-field
+/// Title + Content
+/// composer). Routing
+/// rules:
+///
+/// - `Ctrl-S` submits
+///   (calls
+///   `note_create_submit`).
+/// - `Ctrl-C` /
+///   `Esc` cancels.
+/// - `Ctrl-U` clears
+///   the active field.
+/// - `Ctrl-W` deletes
+///   the previous word.
+/// - `Tab` toggles
+///   between Title and
+///   Content (the user
+///   described the
+///   field-switching
+///   behavior as
+///   "Tab to next field"
+///   in
+///   `/tmp/notes.md`,
+///   which is what
+///   `Tab` does in
+///   every other
+///   two-field dialog
+///   in the TUI).
+/// - `Backspace` /
+///   `Left` / `Right`
+///   edit the active
+///   field.
+/// - `Enter` inserts
+///   a newline in
+///   the Content
+///   field; in the
+///   Title field
+///   (single-line) it's
+///   silently dropped
+///   (handled by
+///   `note_create_push_char`,
+///   so we don't
+///   need a special
+///   case here).
+/// - Printable chars
+///   go into the
+///   active field.
+///
+/// Returns `true` when
+/// the keypress commits
+/// the dialog (`Ctrl-S`),
+/// or cancels it
+/// (`Esc` / `Ctrl-C`),
+/// in which case the
+/// run loop should
+/// exit the TUI. All
+/// other keys return
+/// `false` and the dialog
+/// stays open.
+fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.note_create_cancel();
+                app.cancelled = true;
+                return true;
+            }
+            KeyCode::Char('s') => {
+                return app.note_create_submit();
+            }
+            KeyCode::Char('u') => {
+                app.note_create_clear();
+                return false;
+            }
+            KeyCode::Char('w') => {
+                // Delete one word to the left of the cursor —
+                // reuses `delete_word_backward_at_cursor`, the
+                // SAME `unix-word-rubout`-style algorithm the main
+                // query line and the note-compose dialog use, so
+                // the behavior (eat trailing whitespace, then the
+                // preceding word) is consistent everywhere in the
+                // TUI. A previous hand-rolled version here computed
+                // the replace range from the START of the field
+                // instead of the start of the last word, deleting
+                // everything up to the cursor instead of just one
+                // word — caught by
+                // `note_create_ctrl_d_n_7_shortcuts_act_like_typed_prefix`'s
+                // Ctrl-W regression check.
+                let Some(ref mut dialog) = app.note_create else {
+                    return false;
+                };
+                match dialog.active_field {
+                    crate::tui::state::NoteCreateField::Title => {
+                        let new_cursor =
+                            delete_word_backward_at_cursor(&dialog.title, dialog.title_cursor);
+                        let start = char_to_byte_index(&dialog.title, new_cursor);
+                        let end = char_to_byte_index(&dialog.title, dialog.title_cursor);
+                        dialog.title.replace_range(start..end, "");
+                        dialog.title_cursor = new_cursor;
+                    }
+                    crate::tui::state::NoteCreateField::Content => {
+                        let new_cursor =
+                            delete_word_backward_at_cursor(&dialog.content, dialog.content_cursor);
+                        let start = char_to_byte_index(&dialog.content, new_cursor);
+                        let end = char_to_byte_index(&dialog.content, dialog.content_cursor);
+                        dialog.content.replace_range(start..end, "");
+                        dialog.content_cursor = new_cursor;
+                    }
+                }
+                return false;
+            }
+            KeyCode::Char('d') => {
+                // Shortcut for the `@d:` prefix (notes created
+                // today) — same as typing `@d:` then Tab: insert the
+                // prefix text at the cursor, then trigger the same
+                // completion path `try_note_create_completion` uses
+                // for manually-typed prefixes, so the menu, the
+                // basename narrowing, and the single-match
+                // auto-apply all behave identically either way.
+                app.note_create_insert_and_complete("@d:");
+                return false;
+            }
+            KeyCode::Char('n') => {
+                // Shortcut for the `@n:` prefix (all notes).
+                app.note_create_insert_and_complete("@n:");
+                return false;
+            }
+            KeyCode::Char('7') => {
+                // Shortcut for the `@7:` prefix (notes from the
+                // last 7 days). `Ctrl-W` was already taken by
+                // delete-word-backward, so this uses the digit
+                // instead — `@7:` and `@w:` are equivalent prefixes
+                // (see `try_note_create_completion_inner`), this
+                // just always spells out `@7:`.
+                app.note_create_insert_and_complete("@7:");
+                return false;
+            }
+            _ => return false,
+        }
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.note_create_cancel();
+            false
+        }
+        KeyCode::Tab => {
+            // Tab is overloaded: if
+            // the cursor sits on a
+            // word that starts with
+            // one of the supported
+            // completion prefixes
+            // (`@p:`, `@e:`, `@d:`,
+            // `@7:`, `@w:`, `@n:`,
+            // `#`), Tab opens the
+            // completion menu
+            // (per the spec: "Inside
+            // both fields there are
+            // tab expansions
+            // available"). Otherwise
+            // Tab toggles between
+            // the Title and Content
+            // fields.
+            if app.try_note_create_completion() {
+                false
+            } else {
+                app.note_create_toggle_field();
+                false
+            }
+        }
+        KeyCode::Enter => {
+            // In Content,
+            // insert a
+            // newline
+            // (handled by
+            // `push_char`).
+            // In Title,
+            // also insert
+            // a newline
+            // (the user
+            // asked for a
+            // single-line
+            // Title; the
+            // push_char
+            // helper
+            // silently
+            // drops
+            // newlines in
+            // Title).
+            app.note_create_push_char('\n');
+            false
+        }
+        KeyCode::Backspace => {
+            app.note_create_backspace();
+            false
+        }
+        KeyCode::Left => {
+            app.note_create_move_left();
+            false
+        }
+        KeyCode::Right => {
+            app.note_create_move_right();
+            false
+        }
+        KeyCode::Char(c) => {
+            app.note_create_push_char(c);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Key handler for the
+/// `create-note` dialog's
+/// INLINE completion
+/// menu. Routed by
+/// `handle_key` while
+/// `dialog.completion.is_some()`
+/// so the user can
+/// navigate the candidate
+/// list with the arrow
+/// keys / `Tab` / `Shift-Tab`,
+/// commit with `Enter`, or
+/// dismiss with `Esc` /
+/// `Cancel`.
+///
+/// Printable characters and
+/// `Backspace` are NOT
+/// swallowed — they're
+/// inserted into (or
+/// removed from) the active
+/// field same as normal
+/// typing, and the
+/// completion is re-run
+/// after each keystroke so
+/// the candidate list
+/// live-narrows as the user
+/// types. A narrow that
+/// drops to zero matches or
+/// walks past the prefix
+/// closes the menu (the
+/// field keeps whatever was
+/// typed); a narrow that
+/// drops to exactly one
+/// match auto-applies it,
+/// same as the initial Tab
+/// trigger.
+///
+/// Commit semantics:
+/// `Enter` replaces the
+/// prefix word (the text
+/// from the most recent
+/// whitespace / buffer
+/// start to the cursor in
+/// the active field) with
+/// the selected candidate.
+/// The cursor is then
+/// positioned at the end
+/// of the inserted text.
+/// This matches the
+/// single-match
+/// tab-completion UX of
+/// the main query input
+/// (the user types `@p:Cla`,
+/// presses Tab, picks
+/// `[[Claude Setup]]` from
+/// the menu, and the
+/// `@p:Cla` text is
+/// replaced with the link).
+pub(crate) fn handle_note_create_completion_key(
+    app: &mut App,
+    key: KeyEvent,
+) -> bool {
+    // Dismiss on the user's
+    // `Cancel` binding OR
+    // `Ctrl-C` — same as the
+    // main `CompletionMenu`.
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel)
+        || (key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        // Only dismiss the
+        // menu, NOT the
+        // dialog. The user
+        // is mid-completion;
+        // pressing `Esc`
+        // should drop the
+        // menu and let them
+        // keep typing the
+        // prefix (or the
+        // raw text if they
+        // want to bail out
+        // of the completion
+        // attempt entirely).
+        if let Some(ref mut dialog) = app.note_create {
+            dialog.completion = None;
+        }
+        return false;
+    }
+    // `Tab` / `Shift-Tab` (reported by crossterm as `BackTab`) move
+    // the selection down / up, same as the arrow keys — Tab is what
+    // opened the menu in the first place, so it stays the natural
+    // "next" key instead of doing nothing once the menu is up.
+    // There are no vim-style `j`/`k`/`n`/`p` shortcuts here (unlike
+    // the main `CompletionMenu`): those letters are valid narrowing
+    // text, and since printable characters live-narrow the list
+    // (see the `KeyCode::Char` arm below), treating them as
+    // navigation instead would make it impossible to search for a
+    // note whose name contains them.
+    let n_candidates = app
+        .note_create
+        .as_ref()
+        .and_then(|d| d.completion.as_ref())
+        .map(|c| c.candidates.len())
+        .unwrap_or(0);
+    match key.code {
+        KeyCode::Up | KeyCode::BackTab => {
+            if let Some(ref mut dialog) = app.note_create
+                && let Some(ref mut menu) = dialog.completion
+                && menu.selected > 0
+            {
+                menu.selected -= 1;
+            }
+            false
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if let Some(ref mut dialog) = app.note_create
+                && let Some(ref mut menu) = dialog.completion
+                && n_candidates > 0
+                && menu.selected + 1 < n_candidates
+            {
+                menu.selected += 1;
+            }
+            false
+        }
+        KeyCode::Home => {
+            if let Some(ref mut dialog) = app.note_create
+                && let Some(ref mut menu) = dialog.completion
+            {
+                menu.selected = 0;
+            }
+            false
+        }
+        KeyCode::End => {
+            if let Some(ref mut dialog) = app.note_create
+                && let Some(ref mut menu) = dialog.completion
+                && n_candidates > 0
+            {
+                menu.selected = n_candidates - 1;
+            }
+            false
+        }
+        KeyCode::Enter => {
+            // Commit: snapshot the selected candidate and the
+            // active field's text/cursor (can't borrow
+            // `app.note_create` mutably for the replace while
+            // also reading it for the word-boundary walk), then
+            // delegate the actual replace to the same helper the
+            // single-match auto-apply path uses.
+            let snapshot = {
+                let Some(ref dialog) = app.note_create else {
+                    return false;
+                };
+                let Some(ref menu) = dialog.completion else {
+                    return false;
+                };
+                let selected = menu
+                    .candidates
+                    .get(menu.selected)
+                    .cloned()
+                    .unwrap_or_default();
+                let active_text = match dialog.active_field {
+                    crate::tui::state::NoteCreateField::Title => dialog.title.clone(),
+                    crate::tui::state::NoteCreateField::Content => dialog.content.clone(),
+                };
+                let active_cursor = match dialog.active_field {
+                    crate::tui::state::NoteCreateField::Title => dialog.title_cursor,
+                    crate::tui::state::NoteCreateField::Content => dialog.content_cursor,
+                };
+                (selected, active_text, active_cursor)
+            };
+            let (selected, active_text, active_cursor) = snapshot;
+            // Walk back from the cursor to the start of the
+            // prefix word — whitespace boundary, same definition
+            // `try_note_create_completion` uses to detect the
+            // prefix.
+            let chars: Vec<char> = active_text.chars().collect();
+            let mut word_start = active_cursor.min(chars.len());
+            while word_start > 0 && !chars[word_start - 1].is_whitespace() {
+                word_start -= 1;
+            }
+            app.note_create_apply_completion(word_start, active_cursor, &selected);
+            false
+        }
+        KeyCode::Backspace => {
+            // Live-narrow: remove the last typed character and
+            // re-run the completion query. `try_note_create_completion`
+            // closes the menu itself if this drops to zero matches
+            // or walks back past the prefix, and auto-applies if it
+            // narrows to exactly one.
+            app.note_create_backspace();
+            app.try_note_create_completion();
+            false
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            // Live-narrow: insert the typed character and re-run
+            // the completion query, same as Backspace above.
+            app.note_create_push_char(c);
+            app.try_note_create_completion();
             false
         }
         _ => false,

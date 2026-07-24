@@ -362,5 +362,21 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
             // `--file-name`.
             crate::highlight::highlight_with_bat_auto(&context, &filepath).unwrap_or(context)
         };
+        // Scroll hint: the
+        // source-context
+        // window above is 50
+        // lines centered on
+        // the match (match at
+        // line 25). Scroll
+        // so it's near the
+        // top of the
+        // visible preview
+        // area. The renderer's
+        // `min(max_scroll)` clamp
+        // handles short
+        // files / near-end
+        // matches safely.
+        let half = crate::tui::SOURCE_CONTEXT_LINES / 2;
+        row.preview_scroll = half.saturating_sub(2) as u16;
     }
 }

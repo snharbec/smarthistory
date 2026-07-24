@@ -121,6 +121,41 @@ pub struct HistoryRow {
     /// don't fight over the same field.
     pub preview: String,
 
+    /// Hint for the output
+    /// preview renderer: the
+    /// desired vertical scroll
+    /// offset (in lines) when
+    /// rendering this row's
+    /// preview text. The
+    /// modes that load a
+    /// windowed source context
+    /// (`tags`, `ag`,
+    /// `codegraph`,
+    /// `elements`) use this
+    /// to scroll the
+    /// `Paragraph` so the
+    /// matched line is visible
+    /// in the typically-shorter
+    /// preview pane (the loaded
+    /// context is
+    /// `SOURCE_CONTEXT_LINES`
+    /// = 50 lines centered on
+    /// the match, but the
+    /// preview area is often
+    /// only 10–20 lines tall,
+    /// so the matched line is
+    /// below the fold without
+    /// the scroll hint).
+    /// `0` means "no scroll
+    /// hint — render the
+    /// preview from the top"
+    /// (the historical
+    /// default for history
+    /// rows and other modes
+    /// that don't need a
+    /// scroll hint).
+    pub preview_scroll: u16,
+
     /// Original agent / process name for
     /// herdr pane rows (`mode == "pane"`),
     /// captured at the time the row was
@@ -1059,6 +1094,389 @@ pub struct NoteComposeDialog {
     /// Cursor position as a CHARACTER index into `text` (same
     /// convention as `App::query_cursor`), not a byte index.
     pub cursor: usize,
+}
+
+/// Which field of the
+/// `NoteCreateDialog` the
+/// user is currently
+/// editing. The dialog has
+/// two fields (Title, Content);
+/// the user toggles between
+/// them with `Tab` (or any
+/// key that, while the cursor
+/// sits on a non-`@`/`#`-prefixed
+/// word, advances the focus —
+/// see `App::note_create_advance_field`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteCreateField {
+    Title,
+    Content,
+}
+
+/// A two-field
+/// "create a new note"
+/// dialog opened via
+/// `Action::CreateNote` (default
+/// key: `none`; the user binds
+/// it via the config file,
+/// e.g. `key.create-note=M-N`).
+/// Unlike `NoteComposeDialog`
+/// (a single multi-line body
+/// field that drops a bullet
+/// into the Yournal), this
+/// dialog is a richer
+/// composer: a single-line
+/// Title, a multi-line
+/// Content, and inline
+/// completion for `@`-prefixed
+/// note links (`@p:`, `@e:`,
+/// `@d:`, `@7:`, `@w:`, `@n:`)
+/// and `#`-prefixed tags.
+///
+/// On `Ctrl-S` the dialog
+/// formats the body as a
+/// level-3 heading
+/// (`### TITLE [[LINK1]] ... [[LINKN]] #TAG1 ... #TAGN`)
+/// followed by a
+/// `[time:: HH:MM]` line and
+/// the user's content, and
+/// appends it to the same
+/// `# Yournal` section of
+/// the daily note that the
+/// legacy `@new` uses
+/// (`note_search::commands::create_note`
+/// locates the journal
+/// section the same way).
+/// The tags and links in the
+/// heading are extracted
+/// from both the Title and
+/// Content fields, so the
+/// user can spread them
+/// across either field
+/// before submitting.
+///
+/// Completion: the dialog
+/// shares the `CompletionMenu`
+/// shape used by the main
+/// query input — same
+/// `candidates` / `selected`
+/// / byte-range replacement
+/// fields — so the user
+/// navigates with the same
+/// arrow-key / Enter pattern
+/// they already know. The
+/// candidate list is
+/// computed on demand via
+/// `note_search`'s
+/// `DatabaseService::search_notes`
+/// with the prefix's
+/// attribute / date filter
+/// (e.g. `@p:` → attributes
+/// filter `["project"]`,
+/// `@7:` → date_range =
+/// `LastWeek`).
+#[derive(Debug, Clone)]
+pub struct NoteCreateDialog {
+    /// Single-line title
+    /// text. No newlines
+    /// allowed (the
+    /// `push_char` path
+    /// rejects `'\n'`).
+    pub title: String,
+    /// Character-index
+    /// cursor into `title`.
+    pub title_cursor: usize,
+    /// Multi-line body
+    /// text. `\n` from
+    /// `Enter` is allowed
+    /// (same as
+    /// `NoteComposeDialog`).
+    pub content: String,
+    /// Character-index
+    /// cursor into
+    /// `content`.
+    pub content_cursor: usize,
+    /// Which field the
+    /// user is currently
+    /// editing. Toggled
+    /// by `Tab` (or by
+    /// pressing a
+    /// non-`@`/`#` word
+    /// while the other
+    /// is the active
+    /// field — see the
+    /// keymap). When
+    /// `None`, no field
+    /// is focused
+    /// (initial state
+    /// right after the
+    /// dialog opens;
+    /// the keymap
+    /// auto-focuses
+    /// the title on the
+    /// first printable
+    /// keypress).
+    pub active_field: NoteCreateField,
+    /// Inline completion
+    /// menu, opened when
+    /// the cursor sits on
+    /// a word that starts
+    /// with one of the
+    /// supported prefixes
+    /// (`@p:`, `@e:`, `@d:`,
+    /// `@7:`, `@w:`, `@n:`,
+    /// `#`). `None` when
+    /// the user is typing
+    /// freely without a
+    /// completion in
+    /// flight.
+    ///
+    /// This is a
+    /// `NoteCreateCompletion`
+    /// (a small completion
+    /// menu specific to the
+    /// dialog), NOT the
+    /// global `CompletionMenu`
+    /// used by the main
+    /// query input. The dialog
+    /// completion operates on
+    /// the active field's
+    /// buffer (Title or
+    /// Content), so the byte
+    /// range it tracks refers
+    /// to the active field,
+    /// not `app.query`. The
+    /// existing
+    /// `CompletionMenu`'s
+    /// `format_selected`
+    /// always wraps the
+    /// candidate in a kind
+    /// prefix/suffix
+    /// (`[[...]]`, `#`, `=`),
+    /// which is wrong for the
+    /// dialog's pre-formatted
+    /// candidates (we
+    /// already wrap `[[Title]]`
+    /// in the candidate list
+    /// — re-wrapping would
+    /// produce `[[[Title]]]`).
+    /// Keeping the dialog
+    /// completion local
+    /// avoids that
+    /// double-wrap and lets
+    /// us scan the active
+    /// field's buffer for the
+    /// replace range at
+    /// commit time (so the
+    /// user's exact typed
+    /// prefix — including
+    /// mid-word cursor
+    /// positions — is
+    /// replaced verbatim).
+    pub completion: Option<NoteCreateCompletion>,
+}
+
+/// The dialog-local
+/// completion menu. Stores
+/// the candidate list (each
+/// already in the final
+/// insertion form, e.g.
+/// `[[Title]]` for a note
+/// link or `#tag` for a
+/// tag) and the currently
+/// highlighted index. The
+/// replace range is
+/// recomputed at commit
+/// time (we scan backward
+/// from the active field's
+/// cursor to the most
+/// recent whitespace /
+/// buffer start), so we
+/// don't have to thread
+/// byte ranges through the
+/// menu struct — the
+/// candidate text is what
+/// gets inserted in place
+/// of the prefix word.
+#[derive(Debug, Clone)]
+pub struct NoteCreateCompletion {
+    /// The candidates, in
+    /// display order.
+    /// Each entry is the
+    /// FINAL text the user
+    /// wants inserted (e.g.
+    /// `[[Title]]` or
+    /// `#tag`); no further
+    /// wrapping happens at
+    /// commit time.
+    pub candidates: Vec<String>,
+    /// Index into
+    /// `candidates` of the
+    /// currently-highlighted
+    /// entry. Clamped to
+    /// `0..candidates.len()`
+    /// on every menu op.
+    pub selected: usize,
+}
+
+/// Extract the
+/// `[[link]]` and `#tag`
+/// mentions from a
+/// free-form text. Used by
+/// `App::note_create_submit`
+/// to pull structured
+/// metadata out of the
+/// combined Title + Content
+/// for the heading line.
+///
+/// Returns `(links, tags)`:
+/// - `links` is the list of
+///   `[[...]]`-wrapped
+///   mentions, in
+///   first-seen order,
+///   with no duplicates.
+///   Each entry INCLUDES
+///   the surrounding
+///   `[[ ]]` (the same
+///   shape the user typed
+///   in the completion
+///   menu), so the
+///   heading builder can
+///   drop them in verbatim
+///   without re-wrapping.
+/// - `tags` is the list of
+///   `#tag` mentions,
+///   stripped of the
+///   leading `#` (the
+///   heading builder
+///   re-adds the `#` to
+///   each one).
+///
+/// Both lists are
+/// deduped (a tag / link
+/// mentioned multiple
+/// times appears once) but
+/// NOT sorted — first-seen
+/// order is preserved so
+/// the heading reads
+/// top-to-bottom the way
+/// the user typed it.
+pub fn extract_links_and_tags(text: &str) -> (Vec<String>, Vec<String>) {
+    use std::collections::HashSet;
+    let mut links: Vec<String> = Vec::new();
+    let mut seen_links: HashSet<String> = HashSet::new();
+    let mut tags: Vec<String> = Vec::new();
+    let mut seen_tags: HashSet<String> = HashSet::new();
+    // Scan for `[[...]]`
+    // pairs. The
+    // regex-free
+    // manual scan is
+    // robust to nested
+    // brackets
+    // (`[[Note with
+    // [stuff] inside]]`),
+    // which a naive
+    // regex would not
+    // handle.
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'[' && bytes[i + 1] == b'['
+            && let Some(end) = find_closing_link(&text[i + 2..]) {
+                let inner = &text[i + 2..i + 2 + end];
+                let full = format!("[[{}]]", inner);
+                if seen_links.insert(full.clone()) {
+                    links.push(full);
+                }
+                i += 2 + end + 2;
+                continue;
+            }
+        i += 1;
+    }
+    // Scan for `#tag`. A
+    // `#` is a tag
+    // delimiter when it
+    // appears at the
+    // start of a token
+    // (preceded by
+    // whitespace, line
+    // start, or a
+    // punctuation
+    // boundary). This
+    // matches obsidian's
+    // tag rule.
+    for (idx, c) in text.char_indices() {
+        if c != '#' {
+            continue;
+        }
+        // Check
+        // boundary:
+        // either at
+        // start of
+        // text or
+        // preceded
+        // by a
+        // non-word
+        // character.
+        let is_boundary = idx == 0
+            || !text[..idx]
+                .chars()
+                .next_back()
+                .map(|p| p.is_alphanumeric() || p == '_')
+                .unwrap_or(false);
+        if !is_boundary {
+            continue;
+        }
+        // Collect the
+        // tag body:
+        // word chars
+        // (alphanumeric
+        // + `_` +
+        // `-`).
+        let rest = &text[idx + 1..];
+        let tag_end = rest
+            .char_indices()
+            .take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .last()
+            .map(|(i, _)| i + rest[i..].chars().next().unwrap().len_utf8())
+            .unwrap_or(0);
+        if tag_end == 0 {
+            continue;
+        }
+        let tag = rest[..tag_end].to_string();
+        if seen_tags.insert(tag.clone()) {
+            tags.push(tag);
+        }
+    }
+    (links, tags)
+}
+
+/// Find the byte index of the
+/// closing `]]` for a `[[link]]`
+/// span that starts at offset 0
+/// of `s`. Returns `None` if no
+/// closing `]]` is found.
+///
+/// Walks the string char-by-char
+/// so multi-byte UTF-8
+/// boundaries are respected.
+/// Nested `[[...]]` are not
+/// supported (we take the first
+/// `]]` after the opening
+/// `[[`) — obsidian doesn't
+/// support nested link syntax
+/// either, so this matches
+/// user expectations.
+fn find_closing_link(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b']' && bytes[i + 1] == b']' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Exit codes returned by the TUI binary, also used by the line-editor

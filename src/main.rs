@@ -227,7 +227,8 @@ enum Commands {
         /// from outside a shell context (e.g. a herdr
         /// keybinding, a GUI launcher, or a systemd
         /// service) where there's no parent shell to
-        /// `eval` the printed command.
+        /// `eval` the printed command. Implied automatically
+        /// by `--create-note` — see its help text.
         #[arg(long)]
         exec: bool,
         /// Which detail pane layout to use on startup.
@@ -263,6 +264,25 @@ enum Commands {
         /// Starting query text (overridden by `--prefix`).
         #[arg(index = 1)]
         query: Option<String>,
+        /// Open the two-field `create-note` dialog (Title + Content
+        /// with inline completion for `@`-prefixed note links and
+        /// `#`-prefixed tags) on startup. The dialog is the same one
+        /// the `Action::CreateNote` key binding opens from inside
+        /// the TUI; the flag is just a way to launch the TUI
+        /// pre-configured for note creation (e.g. from a herdr
+        /// keybinding or a shell alias).
+        ///
+        /// On `Ctrl-S` the TUI stages the same
+        /// `note_search create-note ...` command line that the
+        /// interactive path stages. `--create-note` implies `--exec`
+        /// (runs the staged command itself via `sh -c`) so a bare
+        /// `smarthistory tui --create-note` — typed directly, from a
+        /// herdr keybinding, or a shell alias — actually creates the
+        /// note. Without this default a caller would have to know to
+        /// wrap the invocation in `eval "$(...)"`, since otherwise
+        /// the staged command is only printed to stdout, never run.
+        #[arg(long)]
+        create_note: bool,
     },
     /// One-time import of history from an existing atuin database.
     ImportAtuin,
@@ -4170,7 +4190,20 @@ fn main() -> anyhow::Result<()> {
             pane,
             panes_filter,
             pane_height,
+            create_note,
         } => {
+            // `--create-note` defaults to `--exec`: without it, a
+            // bare `smarthistory tui --create-note` just prints the
+            // staged `note_search create-note ...` command and exits
+            // — nothing runs it unless the caller wraps the
+            // invocation in `eval "$(...)"`. That's an easy trap for
+            // a flag meant to be launched standalone (a herdr
+            // keybinding, a shell alias) rather than always through
+            // a shell wrapper, so `--create-note` runs the staged
+            // command itself via `sh -c`, same as passing `--exec`
+            // explicitly. `--exec` can still be passed on its own
+            // with any other flag; this only widens its default.
+            let exec = exec || create_note;
             // Honor an explicit --mode flag first. Otherwise consult
             // the user's environment for a preferred starting scope:
             //   $SMARTHISTORY_TUI_MODE      — explicit override
@@ -4335,6 +4368,7 @@ fn main() -> anyhow::Result<()> {
                 panes_filter.as_deref(),
                 pane_height.as_deref(),
                 cli_overrides,
+                create_note,
             )? {
                 Some((command, pick_mode)) => {
                     if exec {

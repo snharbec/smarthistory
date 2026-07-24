@@ -391,6 +391,43 @@ pub enum Action {
     /// typed on the query line still works exactly as before
     /// and is unaffected by this action.
     ComposeNoteEntry,
+    /// Open the two-field
+    /// `create-note` dialog
+    /// (Title + Content +
+    /// inline completion for
+    /// `@`-prefixed note
+    /// links and `#`-prefixed
+    /// tags). On submit
+    /// (`Ctrl-S`) the dialog
+    /// appends a
+    /// `### TITLE [[LINKS]] #TAGS`
+    /// + `[time:: HH:MM]` +
+    /// content block to the
+    /// daily note's
+    /// `# Yournal` section
+    /// (same target as
+    /// `Action::ComposeNoteEntry`,
+    /// but the heading-level
+    /// formatting is
+    /// different — this is
+    /// the rich variant, that
+    /// one is the bullet
+    /// variant).
+    ///
+    /// Default key: `none`.
+    /// Bind via the config
+    /// file, e.g.
+    /// `key.create-note=M-N`.
+    /// The action is
+    /// mode-agnostic: it's
+    /// available from any
+    /// prefix mode (history,
+    /// panes, notes, …) so
+    /// the user can capture a
+    /// thought without first
+    /// switching to
+    /// notes mode.
+    CreateNote,
     /// Filter the `*`-mode panes view to show
     /// only live multiplexer panes (hide
     /// `# sessions` and `# hosts`). Pressing
@@ -644,6 +681,7 @@ impl Action {
             Action::AddSession => "add-session",
             Action::AddHost => "add-host",
             Action::ComposeNoteEntry => "compose-note-entry",
+            Action::CreateNote => "create-note",
             Action::FilterPanesWindows => "filter-panes-windows",
             Action::FilterPanesHosts => "filter-panes-hosts",
             Action::FilterPanesSessions => "filter-panes-sessions",
@@ -706,6 +744,7 @@ impl Action {
             Action::AddSession => "Add selected directory as a session",
             Action::AddHost => "Add selected directory as a host",
             Action::ComposeNoteEntry => "Compose a new note/todo entry",
+            Action::CreateNote => "Create a new note (Title + Content)",
             Action::FilterPanesWindows => "Filter panes: windows only",
             Action::FilterPanesHosts => "Filter panes: hosts only",
             Action::FilterPanesSessions => "Filter panes: sessions only",
@@ -804,6 +843,7 @@ impl Action {
             // actions just open it.
             Action::AddSession | Action::AddHost => "config",
             Action::ComposeNoteEntry => "tools",
+            Action::CreateNote => "tools",
             Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
                 "panes"
             }
@@ -931,6 +971,14 @@ impl Action {
             Action::AddSession => "F5",
             Action::AddHost => "F6",
             Action::ComposeNoteEntry => "F2",
+            // Unbound by default — discoverable via the
+            // command palette (Ctrl-Q → "create note") or
+            // bound explicitly via `key.create-note=<spec>`
+            // in the config file (the user asked for
+            // `M-N` as a recommendation; terminals that
+            // don't reliably emit Alt-modified keys can
+            // pick any other free spec).
+            Action::CreateNote => "none",
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
@@ -1354,6 +1402,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::AddSession,
     Action::AddHost,
     Action::ComposeNoteEntry,
+    Action::CreateNote,
     Action::FilterPanesWindows,
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,

@@ -13,7 +13,9 @@ use ratatui::{
 };
 
 use super::bindings::{Action, format_key_specs};
-use super::state::{ExitFilter, HistoryRow, Mode, NoteComposeDialog, SortOrder};
+use super::state::{
+    ExitFilter, HistoryRow, Mode, NoteComposeDialog, NoteCreateDialog, NoteCreateField, SortOrder,
+};
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
@@ -163,6 +165,32 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // above.
     if let Some(dialog) = app.note_compose.as_ref() {
         draw_note_compose(f, app, dialog);
+    }
+
+    // The two-field
+    // `create-note` dialog
+    // is a sibling of the
+    // single-field
+    // `note_compose` overlay:
+    // also drawn last
+    // (topmost). The two
+    // are mutually
+    // exclusive in
+    // practice (the
+    // `handle_key`
+    // precedence chain
+    // routes input to
+    // whichever is open),
+    // so draw order
+    // between them
+    // doesn't matter for
+    // correctness — this
+    // is just "newest
+    // overlay wins" for
+    // consistency with
+    // the pattern above.
+    if let Some(dialog) = app.note_create.as_ref() {
+        draw_note_create(f, app, dialog);
     }
 
     // If a comment exists, draw the labeled entries pane as an overlay
@@ -358,6 +386,511 @@ fn draw_note_compose(f: &mut Frame, app: &App, dialog: &NoteComposeDialog) {
     let cursor_y = (inner_y + visible_cursor_line as u16)
         .min(area.y + area.height.saturating_sub(2));
     f.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// Draw the
+/// two-field
+/// `create-note`
+/// dialog. Renders
+/// the Title
+/// (single-line)
+/// and Content
+/// (multi-line)
+/// fields stacked
+/// vertically,
+/// with a footer
+/// hint bar at the
+/// bottom showing
+/// the save / cancel
+/// shortcuts. The
+/// active field is
+/// highlighted
+/// (different border
+/// style); the
+/// other field
+/// shows the same
+/// border style as
+/// the outer
+/// dialog for
+/// visual
+/// consistency.
+///
+/// Cursor rendering:
+/// the visible
+/// cursor is drawn
+/// on the active
+/// field only
+/// (the other field
+/// is read-only by
+/// visual
+/// convention; the
+/// user types into
+/// the active
+/// field as
+/// determined by
+/// the
+/// `note_create_toggle_field`
+/// path, which is
+/// bound to `Tab`).
+/// Word-wrap one logical line (no `\n`, given as its already-split
+/// `chars`) into rows of at most `width` characters, breaking at the
+/// last whitespace before the width boundary; a single word longer
+/// than `width` is hard-broken. Always returns at least one
+/// (possibly empty) row, so blank logical lines still occupy a
+/// display row. Each returned row carries the CHARACTER offset
+/// (within `chars`) where it starts, so callers can map a cursor
+/// offset in the logical line to a `(row_index, col_in_row)` pair —
+/// see `content_display_position` below.
+fn wrap_chars_to_rows(chars: &[char], width: usize) -> Vec<(String, usize)> {
+    if chars.is_empty() {
+        return vec![(String::new(), 0)];
+    }
+    // `width == 0` can't wrap at all (and would infinite-loop below,
+    // since `end` would never advance past `start`) — treat it as
+    // "no wrapping", returning the line whole. In practice the
+    // caller always passes `inner_width_content.max(1)`, so this is
+    // just a safety net, not a normal code path.
+    if width == 0 {
+        return vec![(chars.iter().collect(), 0)];
+    }
+    let mut rows = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + width).min(chars.len());
+        if end < chars.len() {
+            if let Some(ws) = (start..end).rev().find(|&i| chars[i].is_whitespace()) {
+                rows.push((chars[start..ws].iter().collect(), start));
+                start = ws + 1; // drop the whitespace itself — it's the break point
+                continue;
+            }
+        }
+        rows.push((chars[start..end].iter().collect(), start));
+        start = end;
+    }
+    rows
+}
+
+/// Given a logical line's wrapped rows (from `wrap_chars_to_rows`)
+/// and a character offset `col` within that logical line, find
+/// which row the cursor sits on and its column within that row.
+/// Picks the LAST row whose start offset is `<= col` — so a cursor
+/// sitting exactly at a wrap point lands at the START of the row
+/// that begins there (col 0) rather than one column past the end of
+/// the previous row.
+fn content_display_position(rows: &[(String, usize)], col: usize) -> (usize, usize) {
+    let row_idx = rows
+        .iter()
+        .rposition(|(_, start)| *start <= col)
+        .unwrap_or(0);
+    let row_len = rows[row_idx].0.chars().count();
+    (row_idx, (col - rows[row_idx].1).min(row_len))
+}
+
+fn draw_note_create(
+    f: &mut Frame,
+    app: &App,
+    dialog: &NoteCreateDialog,
+) {
+    // Slightly
+    // taller than
+    // the
+    // single-field
+    // compose
+    // dialog (80%
+    // of the
+    // viewport
+    // height) so
+    // the
+    // multi-line
+    // Content
+    // field
+    // has
+    // enough
+    // room
+    // for a
+    // paragraph
+    // or two.
+    let area = centered_rect(70, 75, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" New note (Title + Content) — Ctrl-S save ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent())
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    // Layout: a
+    // 3-line
+    // Title
+    // field at
+    // the top
+    // (border
+    // + content
+    // + spacing),
+    // a
+    // multi-line
+    // Content
+    // field in
+    // the
+    // middle
+    // (filling
+    // the
+    // remaining
+    // height),
+    // and a
+    // 1-line
+    // footer
+    // at the
+    // bottom.
+    // We split
+    // the inner
+    // area
+    // into
+    // three
+    // chunks:
+    // title (3
+    // lines),
+    // content
+    // (fill),
+    // footer
+    // (1
+    // line).
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Length(3), // Title field
+                Constraint::Length(1), // spacer
+                Constraint::Fill(1),   // Content field
+                Constraint::Length(1), // footer
+            ]
+            .as_ref(),
+        )
+        .split(inner);
+
+    // ----- Title field (single-line) -----
+    let title_active = dialog.active_field == NoteCreateField::Title;
+    let title_border_style = if title_active {
+        Theme::accent()
+    } else {
+        Theme::dim()
+    };
+    let title_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(if title_active { " Title (active, Tab → Content) " } else { " Title " })
+        .title_style(title_border_style)
+        .border_style(title_border_style);
+    let title_paragraph = Paragraph::new(Line::from(Span::raw(dialog.title.as_str())))
+        .block(title_block)
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
+    f.render_widget(title_paragraph, chunks[0]);
+
+    // ----- Content field (multi-line) -----
+    let content_active = dialog.active_field == NoteCreateField::Content;
+    let content_border_style = if content_active {
+        Theme::accent()
+    } else {
+        Theme::dim()
+    };
+    let cursor_byte = char_to_byte_index(&dialog.content, dialog.content_cursor);
+    let before_cursor = &dialog.content[..cursor_byte];
+    // Word-wrap each logical (`\n`-separated) line at the field's
+    // inner width so long lines wrap visually at the edge of the
+    // box instead of running off-screen or getting clipped. This is
+    // a soft wrap — it never touches `dialog.content` itself, only
+    // how it's displayed and where the cursor is drawn.
+    let inner_width_content = chunks[2].width.saturating_sub(2).max(1) as usize;
+    let content_line_chars: Vec<Vec<char>> = dialog
+        .content
+        .split('\n')
+        .map(|l| l.chars().collect())
+        .collect();
+    let wrapped_lines: Vec<Vec<(String, usize)>> = content_line_chars
+        .iter()
+        .map(|chars| wrap_chars_to_rows(chars, inner_width_content))
+        .collect();
+    let display_lines: Vec<Line> = wrapped_lines
+        .iter()
+        .flat_map(|rows| rows.iter().map(|(text, _)| Line::from(text.as_str())))
+        .collect();
+    let content_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(if content_active {
+            " Content (active, Tab → Title) "
+        } else {
+            " Content "
+        })
+        .title_style(content_border_style)
+        .border_style(content_border_style);
+    // The cursor's LOGICAL line/column (same as before wrapping was
+    // added), plus its position within that line's wrapped rows —
+    // used both to scroll (keep the cursor's DISPLAY row near the
+    // bottom of the visible area, same convention as
+    // `draw_note_compose`) and to place the on-screen cursor below.
+    let cursor_line = before_cursor.matches('\n').count();
+    let cursor_col = before_cursor.rsplit('\n').next().unwrap_or("").chars().count();
+    let (cursor_row_in_line, cursor_col_in_row) =
+        content_display_position(&wrapped_lines[cursor_line], cursor_col);
+    let cursor_display_row: usize = wrapped_lines[..cursor_line]
+        .iter()
+        .map(|rows| rows.len())
+        .sum::<usize>()
+        + cursor_row_in_line;
+    let inner_height_content = chunks[2].height.saturating_sub(2).max(1) as usize;
+    let scroll_y_content = cursor_display_row
+        .saturating_sub(inner_height_content.saturating_sub(1))
+        as u16;
+    let content_paragraph = Paragraph::new(display_lines)
+        .block(content_block)
+        .scroll((scroll_y_content, 0))
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
+    f.render_widget(content_paragraph, chunks[2]);
+
+    // ----- Footer hint -----
+    if chunks[3].height >= 1 {
+        let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+        let cancel_hint = if cancel_keys.is_empty() {
+            "no key bound".to_string()
+        } else {
+            cancel_keys
+        };
+        let footer = format!(
+            " Ctrl-S save · Tab next field · C-d/C-7/C-n notes · {} cancel ",
+            cancel_hint
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer, Theme::dim()))),
+            chunks[3],
+        );
+    }
+
+    // ----- Cursor -----
+    // The
+    // cursor
+    // only
+    // appears
+    // on the
+    // active
+    // field.
+    // For the
+    // Content
+    // field
+    // we
+    // also
+    // account
+    // for
+    // the
+    // scroll-y
+    // so the
+    // cursor
+    // follows
+    // the
+    // visible
+    // text
+    // (not
+    // the raw
+    // line
+    // number).
+    if title_active {
+        let cursor_x = chunks[0].x + 1 + dialog.title_cursor as u16;
+        let cursor_y = chunks[0].y + 1;
+        f.set_cursor_position((
+            cursor_x.min(chunks[0].x + chunks[0].width.saturating_sub(2)),
+            cursor_y,
+        ));
+    } else if content_active {
+        let visible_display_row = cursor_display_row.saturating_sub(scroll_y_content as usize);
+        let cursor_x = chunks[2].x + 1 + cursor_col_in_row as u16;
+        let cursor_y = chunks[2].y + 1 + visible_display_row as u16;
+        f.set_cursor_position((
+            cursor_x.min(chunks[2].x + chunks[2].width.saturating_sub(2)),
+            cursor_y.min(chunks[2].y + chunks[2].height.saturating_sub(2)),
+        ));
+    }
+
+    // ----- Completion menu overlay -----
+    // When the user has
+    // pressed `Tab` on a
+    // word starting with
+    // one of the supported
+    // prefixes (`@p:`, etc.)
+    // and the candidate list
+    // is non-empty, render a
+    // small inline menu
+    // below the active field
+    // showing the candidates
+    // with the currently
+    // selected one
+    // highlighted. The menu
+    // is positioned just
+    // above the footer hint
+    // so it doesn't overlap
+    // the Title / Content
+    // fields.
+    if let Some(ref menu) = dialog.completion
+        && !menu.candidates.is_empty()
+    {
+        let n = menu.candidates.len();
+        // Cap the menu height
+        // to a reasonable
+        // fraction of the
+        // dialog so it doesn't
+        // overflow the
+        // terminal. The user
+        // can scroll the
+        // candidate list with
+        // arrow keys (the
+        // menu's `selected`
+        // index is unbounded).
+        let visible = n.min(8);
+        let menu_height = (visible as u16) + 2; // +2 for top/bottom border
+        // Try to place the
+        // menu just above the
+        // footer. If the
+        // dialog is too
+        // short, fall back to
+        // a centered overlay
+        // below the dialog.
+        let menu_y = if chunks[3].y > menu_height {
+            chunks[3].y - menu_height - 1
+        } else {
+            // No room
+            // above
+            // the
+            // footer
+            // —
+            // fall
+            // back
+            // to
+            // a
+            // centered
+            // overlay
+            // that
+            // covers
+            // the
+            // middle
+            // of
+            // the
+            // dialog.
+            area.y + (area.height.saturating_sub(menu_height)) / 2
+        };
+        let menu_x = chunks[0].x;
+        let menu_w = chunks[0].width;
+        let menu_area = Rect {
+            x: menu_x,
+            y: menu_y,
+            width: menu_w,
+            height: menu_height.min(area.height.saturating_sub(menu_y - area.y)),
+        };
+        // The
+        // window
+        // the
+        // user
+        // is
+        // currently
+        // looking
+        // at:
+        // if
+        // `selected
+        // >=
+        // visible`,
+        // the
+        // menu
+        // scrolls
+        // the
+        // candidate
+        // list
+        // so
+        // the
+        // selected
+        // row
+        // stays
+        // visible.
+        // This
+        // mirrors
+        // the
+        // main
+        // completion
+        // menu's
+        // scroll-window
+        // behavior.
+        let scroll = if menu.selected >= visible {
+            menu.selected + 1 - visible
+        } else {
+            0
+        };
+        let items: Vec<ListItem> = (0..visible)
+            .map(|i| {
+                let idx = scroll + i;
+                if idx >= n {
+                    ListItem::new("")
+                } else {
+                    let candidate = &menu.candidates[idx];
+                    let style = if idx == menu.selected {
+                        Style::default()
+                            .fg(Theme::accent_color())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::dim_color())
+                    };
+                    let marker = if idx == menu.selected { "▸ " } else { "  " };
+                    ListItem::new(Line::from(Span::styled(
+                        format!("{marker}{candidate}"),
+                        style,
+                    )))
+                }
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .title(" Tab completion (Enter to commit, Esc to cancel) ")
+                    .title_style(Theme::accent())
+                    .border_style(Theme::dim())
+                    .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg))),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Theme::selection_color())
+                    .fg(PALETTE.with(|p| p.borrow().fg))
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▌")
+            .repeat_highlight_symbol(true);
+        // The
+        // menu
+        // doesn't
+        // need
+        // its
+        // own
+        // stateful
+        // widget
+        // (we
+        // already
+        // mark
+        // the
+        // selected
+        // item
+        // via
+        // a
+        // `▸`
+        // glyph
+        // in
+        // the
+        // line
+        // text).
+        let mut state = ratatui::widgets::ListState::default();
+        state.select(Some(menu.selected.min(visible - 1)));
+        f.render_stateful_widget(list, menu_area, &mut state);
+    }
 }
 
 /// Draw a centered overlay with a bordered title bar, clearing the
@@ -1674,6 +2207,11 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "todo",
         qp.todo.to_string(),
         "list open todos from the note_search database (selecting one opens $EDITOR at the line)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::CreateNote),
+        "open the two-field create-note dialog (Title + Content with `@` / `#` completion; Ctrl-S saves to the daily note's Yournal section)",
     );
     mode_row(
         &mut lines,
@@ -5571,8 +6109,29 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // continuation. The horizontal scroll is left at 0
     // (the default) so the leftmost column is always anchored
     // — the beginning of every line is always visible.
+    //
+    // Vertical scroll: windowed source-context modes
+    // (`tags` / `ag` / `codegraph` / `elements`) load a
+    // `SOURCE_CONTEXT_LINES` (50)-line window centered on
+    // the matched line. The matched line sits at position
+    // `half = 25` within that window. The preview area is
+    // usually only 10–20 lines tall, so without a scroll
+    // hint the matched line would be below the fold and
+    // the user would have to scroll down inside the
+    // preview pane to find the line they searched for.
+    // `row.preview_scroll` (set by `ensure_selected_context`
+    // in each windowed mode) carries the desired vertical
+    // offset; we clamp it so it doesn't push past the
+    // bottom of the loaded content (e.g. when the file
+    // has fewer than 50 lines, or the matched line is
+    // near the end of the file).
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total_lines = preview_lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll = (row.preview_scroll as usize).min(max_scroll);
     let paragraph = Paragraph::new(preview_lines)
         .block(block)
+        .scroll((scroll as u16, 0))
         .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)));
     f.render_widget(paragraph, area);
 }
@@ -5845,7 +6404,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{list_display_position, truncate_cmd_for_details_pane};
+    use super::{
+        content_display_position, list_display_position, truncate_cmd_for_details_pane,
+        wrap_chars_to_rows,
+    };
 
     /// History-mode (non-panes) rows are stored newest-first
     /// (data index 0 = newest), but the list DISPLAYS them
@@ -6831,6 +7393,87 @@ mod tests {
         let line = render_preview_line("");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "");
+    }
+
+    #[test]
+    fn wrap_chars_to_rows_short_line_is_one_row() {
+        let chars: Vec<char> = "hello".chars().collect();
+        let rows = wrap_chars_to_rows(&chars, 10);
+        assert_eq!(rows, vec![("hello".to_string(), 0)]);
+    }
+
+    #[test]
+    fn wrap_chars_to_rows_breaks_at_whitespace() {
+        let chars: Vec<char> = "the quick brown fox".chars().collect();
+        // width 10: "the quick " is 10 chars including the trailing
+        // space, so the break lands on that space (dropped) and
+        // "brown fox" (9 chars) fits the second row whole.
+        let rows = wrap_chars_to_rows(&chars, 10);
+        assert_eq!(
+            rows,
+            vec![
+                ("the quick".to_string(), 0),
+                ("brown fox".to_string(), 10),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_chars_to_rows_hard_breaks_a_word_longer_than_width() {
+        let chars: Vec<char> = "supercalifragilistic".chars().collect();
+        let rows = wrap_chars_to_rows(&chars, 5);
+        assert_eq!(
+            rows,
+            vec![
+                ("super".to_string(), 0),
+                ("calif".to_string(), 5),
+                ("ragil".to_string(), 10),
+                ("istic".to_string(), 15),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_chars_to_rows_empty_line_is_one_empty_row() {
+        let rows = wrap_chars_to_rows(&[], 10);
+        assert_eq!(rows, vec![(String::new(), 0)]);
+    }
+
+    #[test]
+    fn wrap_chars_to_rows_zero_width_returns_line_unwrapped() {
+        let chars: Vec<char> = "hello".chars().collect();
+        let rows = wrap_chars_to_rows(&chars, 0);
+        assert_eq!(rows, vec![("hello".to_string(), 0)]);
+    }
+
+    #[test]
+    fn content_display_position_mid_row() {
+        let rows = vec![("the quick".to_string(), 0), ("brown fox".to_string(), 10)];
+        // Cursor at char 4 ("the |quick") is mid-first-row.
+        assert_eq!(content_display_position(&rows, 4), (0, 4));
+        // Cursor at char 13 ("brown| fox", offset 13 - 10 = 3
+        // within the second row) is mid-second-row.
+        assert_eq!(content_display_position(&rows, 13), (1, 3));
+    }
+
+    #[test]
+    fn content_display_position_at_wrap_boundary_lands_on_next_row_start() {
+        // Break point is the whitespace at char 9 ("the quick" is
+        // chars 0..9, the space is char 9, "brown fox" starts at
+        // char 10). A cursor sitting on that space (offset 9) is
+        // "last start <= 9", which is still row 0 (start 0), giving
+        // col 9 — the right edge of row 0.
+        let rows = vec![("the quick".to_string(), 0), ("brown fox".to_string(), 10)];
+        assert_eq!(content_display_position(&rows, 9), (0, 9));
+        // Offset 10 (right after the dropped whitespace) is exactly
+        // where row 1 starts — lands at (1, 0), not (0, 10).
+        assert_eq!(content_display_position(&rows, 10), (1, 0));
+    }
+
+    #[test]
+    fn content_display_position_end_of_last_row() {
+        let rows = vec![("hello".to_string(), 0)];
+        assert_eq!(content_display_position(&rows, 5), (0, 5));
     }
 }
 

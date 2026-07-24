@@ -181,6 +181,8 @@ The first character of the query selects the prefix mode. Each mode answers a di
 
 All three stage a `note_search create-note` command and require `notes.database` to be configured.
 
+`Action::CreateNote` (unbound by default — bind `key.create-note=<spec>` or open it from the command palette / `Ctrl-Q`; also launchable standalone via `smarthistory tui --create-note`) opens a separate two-field Title + Content dialog with inline `@p:` / `@e:` / `@d:` / `@7:` (`@w:`) / `@n:` / `#` link and tag completion, plus `Ctrl-D` / `Ctrl-N` / `Ctrl-7` one-keystroke shortcuts for the `@d:` / `@n:` / `@7:` prefixes — see [`docs/actions.md`](docs/actions.md) for the full reference.
+
 ### Multiplexer integration (tmux + herdr)
 
 The `#` and `*` modes work with both tmux and herdr. The active backend is selected via the `multiplexer=` config key (default `tmux`):
