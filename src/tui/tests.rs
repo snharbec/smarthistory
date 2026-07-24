@@ -1167,6 +1167,14 @@ fn stats_test_app(rows: &[(&str, i64)]) -> App {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     app
@@ -1243,6 +1251,8 @@ fn global_test_app(rows: &[(&str, i64)]) -> App {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -1317,6 +1327,8 @@ fn global_test_app_with_dedup_index(rows: &[(&str, i64)]) -> App {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -1562,6 +1574,14 @@ fn cycle_exit_filter_refreshes_rows() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     let all_count = app.merged_rows().len();
@@ -2139,7 +2159,7 @@ fn selected_row_finds_labeled_only_rows() {
     // parallel. Hold the env lock for the entire
     // test so the read/modify/restore is atomic
     // relative to other env-touching tests.
-    let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _env_guard = lock_or_recover(&ENV_LOCK);
     // Build a DB with two rows that both match
     // the search query "git": one in the current
     // session (recent) and one in a *different*
@@ -2226,6 +2246,14 @@ fn selected_row_finds_labeled_only_rows() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     // Restore the env var as soon as the initial
@@ -2278,7 +2306,7 @@ fn select_for_run_on_labeled_only_row_stages_command() {
     // Hold the env lock for the whole test; see
     // `selected_row_finds_labeled_only_rows` for the
     // rationale.
-    let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _env_guard = lock_or_recover(&ENV_LOCK);
     use rusqlite::Connection;
     let conn = Connection::open_in_memory().expect("open in-memory db");
     conn.execute_batch(
@@ -2350,6 +2378,14 @@ fn select_for_run_on_labeled_only_row_stages_command() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     unsafe {
@@ -3554,6 +3590,8 @@ fn make_llm_app(query: &str, fake: FakeLlm) -> App {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -3574,7 +3612,14 @@ fn make_llm_app(query: &str, fake: FakeLlm) -> App {
 /// `parking_lot::Mutex` so the project stays
 /// dependency-free (this module already depends on
 /// `std` for everything else).
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// `pub(crate)` so `src/util.rs` and `src/main.rs`'s own
+/// `$HOME`-mutating tests (`expand_home_basic` and friends,
+/// `config_parses_user_file`) can share this SAME lock —
+/// `cargo test` runs every test in the crate in one process,
+/// so a lock private to this module wouldn't stop those
+/// other files' env mutations from racing this one.
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn is_llm_query_recognises_equals_prefix() {
@@ -3759,6 +3804,14 @@ fn run_llm_query_surfaces_not_configured_when_client_is_none() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.select_for_run();
     assert!(app.selection.is_none());
@@ -4620,6 +4673,8 @@ fn output_test_app(rows: &[(&str, &str)]) -> App {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -6867,7 +6922,7 @@ fn delete_word_backward_at_cursor_helper() {
 /// that mixes the partitions can't regress.
 #[test]
 fn labeled_only_row_appears_at_end_of_merged_list() {
-    let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _env_guard = lock_or_recover(&ENV_LOCK);
     use rusqlite::Connection;
     let conn = Connection::open_in_memory().expect("open in-memory db");
     conn.execute_batch(
@@ -6939,6 +6994,14 @@ fn labeled_only_row_appears_at_end_of_merged_list() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     // Restore env before any `?` can
     // short-circuit out of the test (so
@@ -6989,7 +7052,7 @@ fn labeled_only_row_appears_at_end_of_merged_list() {
 /// the merged list.
 #[test]
 fn labeled_row_already_in_primary_list_is_not_duplicated() {
-    let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _env_guard = lock_or_recover(&ENV_LOCK);
     use rusqlite::Connection;
     let conn = Connection::open_in_memory().expect("open in-memory db");
     conn.execute_batch(
@@ -7056,6 +7119,14 @@ fn labeled_row_already_in_primary_list_is_not_duplicated() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     if let Some(prev) = prev_session {
@@ -7099,7 +7170,7 @@ fn labeled_row_already_in_primary_list_is_not_duplicated() {
 /// expect: `[a (10), b (100), z (5)]`.
 #[test]
 fn labeled_only_row_stays_at_end_even_if_newer() {
-    let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _env_guard = lock_or_recover(&ENV_LOCK);
     use rusqlite::Connection;
     let conn = Connection::open_in_memory().expect("open in-memory db");
     conn.execute_batch(
@@ -7182,6 +7253,14 @@ fn labeled_only_row_stays_at_end_even_if_newer() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     if let Some(prev) = prev_session {
@@ -7225,7 +7304,7 @@ fn labeled_only_row_stays_at_end_even_if_newer() {
 /// primary partition dedupes to `[a, b]`.)
 #[test]
 fn labeled_only_partition_in_frequency_mode() {
-    let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+    let _env_guard = lock_or_recover(&ENV_LOCK);
     use rusqlite::Connection;
     let conn = Connection::open_in_memory().expect("open in-memory db");
     conn.execute_batch(
@@ -7313,6 +7392,14 @@ fn labeled_only_partition_in_frequency_mode() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.refresh();
     if let Some(prev) = prev_session {
@@ -9827,7 +9914,7 @@ fn directories_test_app(rows: &[(&str, &str, i64)]) -> App {
     // call
     // `directories_test_app_with_sessions`
     // below.
-    let mut app = App::new(
+    let app = App::new(
         conn,
         Mode::Global,
         String::new(),
@@ -9858,34 +9945,25 @@ fn directories_test_app(rows: &[(&str, &str, i64)]) -> App {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
-    // `App::new` calls
-    // `build_session_subdirs`
-    // (which reads the
-    // user's real
-    // `~/.config/smarthistory/config`)
-    // and `fetch_tmux_windows`
-    // (which runs
-    // `tmux list-windows -a`).
-    // Both of those would
-    // pollute the test
-    // with whatever the
-    // user happens to
-    // have configured or
-    // running. Clear the
-    // fields so each test
-    // sees a known-empty
-    // starting point.
-    // Tests that need a
-    // specific
-    // `session_subdirs`
-    // or `tmux_windows`
-    // set should call
-    // `directories_test_app_with_sessions`
-    // (or set the
-    // fields directly).
-    app.session_subdirs.clear();
-    app.tmux_windows.clear();
+    // `session_subdirs` and `tmux_windows` both start empty —
+    // `App::new` no longer reads the real `~/.config/smarthistory/config`
+    // or walks `sessiondirs=` internally (see the `Vec::new()`s
+    // passed above), and nothing populates `tmux_windows` at
+    // construction time either (that's `fetch_tmux_windows`,
+    // called lazily by `refresh()` in directories mode — this
+    // helper never calls `refresh()`). Tests that need a specific
+    // `session_subdirs` or `tmux_windows` set should call
+    // `directories_test_app_with_sessions` (or set the fields
+    // directly).
     app
 }
 
@@ -10107,34 +10185,18 @@ fn fetch_directories_applies_substring_filter() {
 /// not commands).
 #[test]
 fn fetch_directories_layout_swap() {
-    // The `~`-shortening
-    // depends on `$HOME` and
-    // the `home_map` config.
-    // We set `$HOME` for the
-    // duration of the test
-    // and clear `home_map`
-    // (the default empty
-    // list). This avoids
-    // depending on the
-    // caller's environment
-    // (parallel test runs
-    // could otherwise see
-    // different `home_map`
-    // values via the
-    // user's actual
-    // `~/.config/smarthistory/config`).
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var("HOME").ok();
-    // SAFETY: this test
-    // holds `ENV_LOCK` (the
-    // shared env-mutation
-    // mutex), so no other
-    // env-mutating test
-    // can run concurrently.
-    unsafe {
-        std::env::set_var("HOME", "/Users/har");
-    }
-    let mut app = directories_test_app(&[("ls -la /tmp/foo bar", "/Users/har/work/project", 60)]);
+    // The `~`-shortening depends on `app.home_list` (built from
+    // `$HOME` + `homemap=` config entries in production — see
+    // `build_home_list`). Rather than mutating the real `$HOME`
+    // env var (which used to be the only way to influence this,
+    // and risked racing other env-mutating tests, or worse,
+    // resolving to a REAL path on the machine running the tests),
+    // set `app.home_list` directly: a synthetic, test-only value
+    // fully under this test's control, with no dependency on the
+    // environment or the real `~/.config/smarthistory/config`.
+    let mut app =
+        directories_test_app(&[("ls -la /tmp/foo bar", "/home/testuser/work/project", 60)]);
+    app.home_list = vec!["/home/testuser".to_string()];
     app.query = "#".to_string();
     app.refresh();
     // Find the SQL-history
@@ -10143,59 +10205,29 @@ fn fetch_directories_layout_swap() {
     // rows may also be
     // present (cleared in
     // the test helper, but
-    // `refresh()` re-runs
-    // `fetch_tmux_windows`
-    // for `#`-mode queries
-    // and the user's
-    // production `tmux`
-    // panes may bleed in
-    // when HOME is set to
-    // a real path). We
-    // assert on the row
-    // whose `directory`
-    // matches what we
-    // inserted, not on
+    // `refresh()` re-runs `fetch_tmux_windows` for `#`-mode
+    // queries too, but `directories_test_app` clears the tmux
+    // fixture so no real panes bleed in. We assert on the row
+    // whose `directory` matches what we inserted, not on
     // `merged_rows()[0]`.
     let row = app
         .merged_rows()
         .iter()
-        .find(|r| r.directory == "/Users/har/work/project")
-        .expect("the SQL-history row for /Users/har/work/project must be in merged_rows");
-    // The primary text
-    // (which the user sees
-    // first in the list,
-    // and which the query
-    // highlights against)
-    // is the directory in
-    // `~/x` form. This is
-    // the load-bearing
-    // assertion: it locks
-    // in the swap.
+        .find(|r| r.directory == "/home/testuser/work/project")
+        .expect("the SQL-history row for /home/testuser/work/project must be in merged_rows");
+    // The primary text (which the user sees first in the list,
+    // and which the query highlights against) is the directory in
+    // `~/x` form. This is the load-bearing assertion: it locks in
+    // the swap.
     assert_eq!(row.command, "~/work/project");
-    // The secondary slot
-    // (the `# ...` comment
-    // in the rendered
-    // line) is the last
-    // command run in that
-    // directory. The
-    // command here is short
-    // (under the 60-char
-    // truncation threshold)
-    // so it appears
-    // verbatim.
+    // The secondary slot (the `# ...` comment in the rendered
+    // line) is the last command run in that directory. The
+    // command here is short (under the 60-char truncation
+    // threshold) so it appears verbatim.
     assert_eq!(row.comment, "ls -la /tmp/foo bar");
-    // The full directory
-    // (un-shortened) is
-    // still in `directory`
-    // for the tmux-pane
-    // lookup and Details
-    // pane.
-    assert_eq!(row.directory, "/Users/har/work/project");
-    if let Some(home) = saved_home {
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
-    }
+    // The full directory (un-shortened) is still in `directory`
+    // for the tmux-pane lookup and Details pane.
+    assert_eq!(row.directory, "/home/testuser/work/project");
 }
 
 /// Long commands are
@@ -10519,38 +10551,14 @@ fn directory_tmux_pane_id_handles_macos_volume_mount() {
 /// missing the `T`
 /// marker.
 ///
-/// We use `$HOME` via
-/// `set_var` (guarded
-/// by `ENV_LOCK` so
-/// the env mutation
-/// doesn't race with
-/// other env-mutating
-/// tests) and rely on
-/// `/tmp` (which
-/// always exists) as
-/// the test directory.
+/// `/tmp` (which always exists on every machine, no
+/// synthetic setup needed) is the test directory. Both sides
+/// compared in `directory_tmux_pane_id` are already-absolute
+/// canonical `/tmp` paths (no literal `~` in either), so this
+/// doesn't actually need `app.home_list` populated or `$HOME`
+/// overridden to pass — no env mutation, no `ENV_LOCK`.
 #[test]
 fn directory_tmux_pane_id_handles_tilde_form_db_row() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var("HOME").ok();
-    // SAFETY: holds
-    // `ENV_LOCK`.
-    unsafe {
-        std::env::set_var("HOME", "/tmp");
-    }
-    // Use `/tmp` as the
-    // test directory.
-    // `~/self_test_dir`
-    // is therefore
-    // `/tmp/self_test_dir`
-    // after homemap
-    // expansion, and the
-    // tmux pane has the
-    // same absolute path
-    // (already canonical,
-    // no macOS volume
-    // mount to worry
-    // about).
     let mut app = directories_test_app(&[("ls", "/tmp", 60)]);
     app.tmux_windows.push(TmuxWindowInfo {
         pane_id: "%99".to_string(),
@@ -10588,11 +10596,6 @@ fn directory_tmux_pane_id_handles_tilde_form_db_row() {
         Some("%99"),
         "absolute-path DB row must match the tmux pane"
     );
-    if let Some(home) = saved_home {
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
-    }
 }
 
 /// Regression test for the
@@ -11203,34 +11206,19 @@ fn select_unmarked_directory_quotes_paths_with_spaces() {
 /// tmux gets the right
 /// cwd.
 ///
-/// We can't easily test
-/// this through
-/// `directories_test_app`
-/// because the test inserts
-/// `/Users/har/...` paths
-/// into the DB (not
-/// `~/...`), and the
-/// `~` shorthand only
-/// matches paths that
-/// actually start with the
-/// home prefix. So the
-/// test inserts a
-/// home-prefixed absolute
-/// path and asserts the
-/// staged command has the
-/// `~`-shortened form.
+/// We can't easily test this through `directories_test_app`
+/// because the test inserts a home-prefixed absolute path into
+/// the DB (not `~/...`), and the `~` shorthand only matches
+/// paths that actually start with the home prefix. So the test
+/// inserts a home-prefixed absolute path and asserts the staged
+/// command has the `~`-shortened form — using a synthetic
+/// `app.home_list` (set directly, not via `$HOME`) so the test
+/// doesn't depend on, or risk touching, any real path on the
+/// machine running it.
 #[test]
 fn select_unmarked_directory_expands_tilde() {
-    // SAFETY: tests run
-    // single-threaded; see
-    // the parallel-runs-stable
-    // comment in
-    // `expand_home_basic`.
-    let saved_home = std::env::var("HOME").ok();
-    unsafe {
-        std::env::set_var("HOME", "/Users/har");
-    }
-    let mut app = directories_test_app(&[("ls", "/Users/har/work", 60)]);
+    let mut app = directories_test_app(&[("ls", "/home/testuser/work", 60)]);
+    app.home_list = vec!["/home/testuser".to_string()];
     app.query = "#".to_string();
     app.refresh();
     // Select the
@@ -11249,62 +11237,32 @@ fn select_unmarked_directory_expands_tilde() {
     let sql_row_idx = app
         .merged_rows()
         .iter()
-        .position(|r| r.directory == "/Users/har/work")
-        .expect("the SQL-history row for /Users/har/work must be in merged_rows");
+        .position(|r| r.directory == "/home/testuser/work")
+        .expect("the SQL-history row for /home/testuser/work must be in merged_rows");
     app.list_state.select(Some(sql_row_idx));
     app.select_for_run();
     let staged = app.selection.as_deref().expect("selection must be set");
-    // The directory in the
-    // staged `new-session
-    // -c` argument must use
-    // `~/work`, not the
-    // raw `/Users/har/work`,
-    // because the source
-    // directory is under
-    // `$HOME` and the user
-    // expects the `~`
-    // form.
+    // The directory in the staged `new-session -c` argument must
+    // use `~/work`, not the raw `/home/testuser/work`, because the
+    // source directory is under the (synthetic) home prefix and
+    // the user expects the `~` form.
     //
-    // Note: this test is
-    // *not* the same as the
-    // bug we're fixing (which
-    // was about *literal* `~`
-    // in the source directory).
-    // The DB-stored path is
-    // always absolute (per
-    // `fetch_directories`'s
-    // `directory` column),
-    // so the expansion we
-    // test here is the
-    // *display + command*
-    // shortening — a
-    // separate feature. The
-    // "no literal `~` in the
-    // source path" contract
-    // is covered implicitly:
-    // the source is always
-    // absolute, and the
-    // expansion is a pure
-    // function of the
-    // home-prefix match.
+    // Note: this test is *not* the same as the bug we're fixing
+    // (which was about *literal* `~` in the source directory). The
+    // DB-stored path is always absolute (per `fetch_directories`'s
+    // `directory` column), so the expansion we test here is the
+    // *display + command* shortening — a separate feature. The "no
+    // literal `~` in the source path" contract is covered
+    // implicitly: the source is always absolute, and the expansion
+    // is a pure function of the home-prefix match.
     assert!(
         staged.contains("tmux new-session"),
         "staged must create a new tmux session, got: {staged:?}"
     );
     assert!(
-        staged.contains("/Users/har/work"),
+        staged.contains("/home/testuser/work"),
         "staged must use the absolute path, got: {staged:?}"
     );
-    // Restore HOME.
-    if let Some(h) = saved_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var("HOME");
-        }
-    }
 }
 
 /// The user can pin a
@@ -16365,6 +16323,14 @@ fn push_char_in_global_mode_fires_search_immediately() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     // The initial
     // `refresh()` should
@@ -16488,6 +16454,14 @@ fn backspace_in_global_mode_fires_search_immediately() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     // Type `git` —
     // matching the
@@ -16598,6 +16572,14 @@ fn push_char_then_backspace_to_empty_does_not_re_fetch() {
         test_multiplexer(),
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        // Hermetic by default: no real `~/.config/smarthistory/config`
+        // `homemap=` entries and no real `sessiondirs=` filesystem
+        // walk. Tests that need specific `home_list` content set
+        // `app.home_list` directly after construction instead of
+        // mutating `$HOME` and depending on this being read from
+        // a real config file.
+        Vec::new(),
+        Vec::new(),
     );
     app.session_subdirs.clear();
     app.tmux_windows.clear();
@@ -18272,7 +18254,7 @@ fn select_for_run_in_jira_mode_stages_open_url() {
     // is just this function's body.)
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = lock_or_recover(&ENV_LOCK);
     let prev_server = std::env::var("JIRA_SERVER").ok();
     let prev_token = std::env::var("JIRA_API_TOKEN").ok();
     let prev_url = std::env::var("JIRA_URL").ok();
@@ -18346,7 +18328,7 @@ fn jira_not_configured_surfaces_status() {
     // the other test's window.
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = lock_or_recover(&ENV_LOCK);
     let prev_server = std::env::var("JIRA_SERVER").ok();
     let prev_token = std::env::var("JIRA_API_TOKEN").ok();
     unsafe {
@@ -19222,7 +19204,7 @@ fn smart_open_in_history_mode_falls_through_to_run() {
 fn smart_open_in_jira_mode_does_not_stage_or_exit() {
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = lock_or_recover(&ENV_LOCK);
     // Explicitly clear the JIRA env vars so `from_env()` returns
     // None → the background opener surfaces a "not configured"
     // status message instead of actually launching a browser.

@@ -1473,41 +1473,47 @@ mod tests {
     /// `/Users/har`.
     #[test]
     fn expand_home_shortens_paths_under_home() {
+        // `$HOME` is process-global and `cargo test` runs every
+        // test in the crate (this file, `main.rs`, `tui/tests.rs`)
+        // in one process, so this holds the SAME lock those other
+        // files' `$HOME`-mutating tests use — see
+        // `crate::tui::tests::ENV_LOCK`'s doc comment. A synthetic
+        // path (`/home/tester`), never a real path on the machine
+        // running the tests, is used throughout.
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved_home = std::env::var("HOME").ok();
-        // SAFETY: see
-        // expand_home_basic.
+        // SAFETY: holds `ENV_LOCK`, so no other env-mutating test
+        // can run concurrently; restored before returning below.
         unsafe {
-            std::env::set_var("HOME", "/Users/har");
+            std::env::set_var("HOME", "/home/tester");
         }
         // Direct subpath.
-        assert_eq!(expand_home("/Users/har/work").as_ref(), "~/work");
+        assert_eq!(expand_home("/home/tester/work").as_ref(), "~/work");
         // Deeper path.
-        assert_eq!(expand_home("/Users/har/a/b/c").as_ref(), "~/a/b/c");
+        assert_eq!(expand_home("/home/tester/a/b/c").as_ref(), "~/a/b/c");
         // The home dir itself
         // (no trailing path) →
         // `~`.
-        assert_eq!(expand_home("/Users/har").as_ref(), "~");
+        assert_eq!(expand_home("/home/tester").as_ref(), "~");
         // Trailing slash on the
         // input — preserve the
         // slash in the output.
-        assert_eq!(expand_home("/Users/har/work/").as_ref(), "~/work/");
-        // `/Users/harry/...` is
-        // NOT under `/Users/har`
-        // (the boundary check
-        // matches at `/`-or-end
-        // only). Pass through
+        assert_eq!(expand_home("/home/tester/work/").as_ref(), "~/work/");
+        // `/home/testerx/...` is NOT under `/home/tester` (the
+        // boundary check matches at `/`-or-end only). Pass through
         // unchanged.
         assert_eq!(
-            expand_home("/Users/harry/work").as_ref(),
-            "/Users/harry/work"
+            expand_home("/home/testerx/work").as_ref(),
+            "/home/testerx/work"
         );
         // Absolute path outside
         // $HOME — pass through.
         assert_eq!(expand_home("/etc/hosts").as_ref(), "/etc/hosts");
         // Restore HOME.
         if let Some(h) = saved_home {
-            // SAFETY: see
-            // expand_home_basic.
+            // SAFETY: see above.
             unsafe {
                 std::env::set_var("HOME", h);
             }
@@ -1531,30 +1537,21 @@ mod tests {
     /// `~user/...` form).
     #[test]
     fn expand_home_basic() {
-        // Pin HOME for the test so
-        // the assertions are
-        // deterministic. (HOME
-        // is normally set in the
-        // test env, but the test
-        // harness may not always
-        // pass it through. We
-        // check-and-set rather
-        // than set unconditionally
-        // to avoid clobbering the
-        // user's real env.)
+        // Pin HOME to something non-empty so the assertions are
+        // deterministic (none of them actually depend on HOME's
+        // specific value — they're all pass-through cases — but
+        // `expand_home_no_home_env` below covers the "HOME unset"
+        // behavior specifically, so this test needs HOME to be
+        // SET to rule that path out). Holds the crate-wide env
+        // lock — see `crate::tui::tests::ENV_LOCK`'s doc comment
+        // for why a lock private to this file wouldn't be enough.
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved_home = std::env::var("HOME").ok();
-        // SAFETY: tests run single-threaded by default
-        // (the parallel runner pins per-test
-        // parallelism via internal `Mutex`es and our
-        // test names are unique; no other test
-        // reads HOME). `set_var` / `remove_var` are
-        // process-global, but we restore the
-        // pre-test value at the end of the function
-        // (see below) so even if a future test
-        // interleave changes this, the saved
-        // value gets re-installed.
+        // SAFETY: holds `ENV_LOCK`; restored before returning below.
         unsafe {
-            std::env::set_var("HOME", "/Users/har");
+            std::env::set_var("HOME", "/home/tester");
         }
         // Bare `~` is pass-through
         // (idempotence: the
@@ -1641,9 +1638,13 @@ mod tests {
     /// failure.
     #[test]
     fn expand_home_no_home_env() {
+        // Holds the crate-wide env lock — see
+        // `crate::tui::tests::ENV_LOCK`'s doc comment.
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved_home = std::env::var("HOME").ok();
-        // SAFETY: see the
-        // expand_home_basic test.
+        // SAFETY: holds `ENV_LOCK`; restored before returning below.
         unsafe {
             std::env::remove_var("HOME");
         }
@@ -1678,11 +1679,13 @@ mod tests {
         // are also unchanged —
         // there's no prefix to
         // match against.
-        assert_eq!(expand_home("/Users/har/work").as_ref(), "/Users/har/work");
+        assert_eq!(
+            expand_home("/home/tester/work").as_ref(),
+            "/home/tester/work"
+        );
         // Restore HOME.
         if let Some(h) = saved_home {
-            // SAFETY: see
-            // expand_home_basic.
+            // SAFETY: see above.
             unsafe {
                 std::env::set_var("HOME", h);
             }

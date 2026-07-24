@@ -5250,6 +5250,14 @@ file2
 
     #[test]
     fn config_parses_user_file() {
+        // `$HOME` is process-global and `cargo test` runs every
+        // test in the crate in one process, so this holds the
+        // same lock `src/util.rs`'s and `src/tui/tests.rs`'s own
+        // `$HOME`-mutating tests use — see
+        // `crate::tui::tests::ENV_LOCK`'s doc comment.
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("smarthistory-test-{}", generate_uuid_v4()));
         let cfg_dir = dir.join(".config").join("smarthistory");
         std::fs::create_dir_all(&cfg_dir).expect("mkdir");

@@ -4804,6 +4804,18 @@ impl App {
         multiplexer: Box<dyn crate::multiplexer::MultiplexerBackend>,
         pane_visibility: crate::tui::state::PaneVisibility,
         pane_height: crate::tui::state::PaneHeight,
+        // `home_list` / `session_subdirs` are computed by the
+        // caller (`build_home_list` / `build_session_subdirs`,
+        // fed by an already-loaded `Config`) rather than inside
+        // this constructor — see those functions' doc comments
+        // for why: reading `Config::load()` and walking
+        // `sessiondirs=` from inside `App::new` meant every test
+        // that builds an `App` (i.e. nearly the whole suite)
+        // silently depended on the developer machine's real
+        // config file and filesystem. Test callers pass empty
+        // `Vec`s by default.
+        home_list: Vec<String>,
+        session_subdirs: Vec<std::path::PathBuf>,
     ) -> Self {
         // Capture the character-aligned initial cursor
         // position BEFORE moving `initial_query` into the
@@ -4914,22 +4926,12 @@ impl App {
             // from
             // `Config::multiplexer()`.
             multiplexer,
-            // Cached home-prefix
-            // list, computed once
-            // at construction.
-            // See the `home_list`
-            // field doc for the
-            // full rationale.
-            home_list: build_home_list(),
-            // Recursive walk of
-            // every
-            // `sessiondirs=...`
-            // entry, computed once
-            // at construction.
-            // See the
-            // `session_subdirs`
-            // field doc.
-            session_subdirs: build_session_subdirs(),
+            // Cached home-prefix list and recursive
+            // `sessiondirs=...` walk — computed by the caller
+            // (see the parameter doc comments above) and just
+            // stored here.
+            home_list,
+            session_subdirs,
             // Default to
             // `All` so first-time
             // users see
@@ -12432,6 +12434,8 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
         );
     }
 
+    let home_list = build_home_list(&app_cfg);
+    let session_subdirs = build_session_subdirs(&app_cfg);
     let app = App::new(
         conn,
         Mode::Global,
@@ -12460,6 +12464,8 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
         multiplexer,
         crate::tui::state::PaneVisibility::default(),
         crate::tui::state::PaneHeight::default(),
+        home_list,
+        session_subdirs,
     );
 
     let reports = crate::tui::mode::run_all_checks(&app, only);
@@ -12676,6 +12682,8 @@ pub fn run_tui_to_stdout(
         .as_deref()
         .and_then(crate::tui::state::PaneHeight::parse)
         .unwrap_or_default();
+    let home_list = build_home_list(&app_cfg);
+    let session_subdirs = build_session_subdirs(&app_cfg);
     let mut app = App::new(
         conn,
         effective_mode,
@@ -12699,6 +12707,8 @@ pub fn run_tui_to_stdout(
         crate::multiplexer::backend_for(app_cfg.multiplexer()),
         initial_pane_visibility,
         initial_pane_height,
+        home_list,
+        session_subdirs,
     );
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
@@ -15232,26 +15242,27 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
 /// used by both
 /// `directory_tmux_pane_id`
 /// and `fetch_directories`.
-/// Reads the user's `Config`
-/// once (so the call site
-/// doesn't need to thread it
-/// through) and returns
-/// `$HOME` followed by the
-/// `homemap=...` entries,
-/// sorted longest-first so
-/// the most-specific home
-/// wins. Same convention as
-/// `shorten_home_path` /
+/// Returns `$HOME` followed by `cfg`'s `homemap=...`
+/// entries, sorted longest-first so the most-specific
+/// home wins. Same convention as `shorten_home_path` /
 /// `expand_home_with_config`.
-/// Recomputed at App
-/// construction; per-TUI-
-/// session config changes
-/// don't propagate (same
-/// constraint the rest of
-/// the App has — config is
-/// read once at startup).
-fn build_home_list() -> Vec<String> {
-    let cfg = Config::load();
+///
+/// Takes `cfg` by reference rather than calling
+/// `Config::load()` itself — the two production call
+/// sites (`run_tui_to_stdout`, `run_check`) already have
+/// a loaded `Config` in scope and pass it in, and `App::new`
+/// takes the result as a plain `Vec<String>` parameter
+/// rather than computing it internally. This used to load
+/// `Config` (and therefore read `~/.config/smarthistory/config`
+/// off disk) from inside the `App` constructor itself,
+/// which every test that builds an `App` — i.e. nearly the
+/// whole suite — triggered unconditionally, making test
+/// output depend on whatever `homemap=` the machine running
+/// the tests happens to have configured. Test helpers now
+/// pass an empty `Vec` by default (a hermetic, machine-
+/// independent home list) and the handful of tests that
+/// need specific entries set `app.home_list` directly.
+fn build_home_list(cfg: &Config) -> Vec<String> {
     let mut homes: Vec<String> = std::iter::once(std::env::var("HOME").unwrap_or_default())
         .chain(
             cfg.home_map()
@@ -15423,17 +15434,17 @@ pub(crate) fn herdr_snapshot_debug_log(message: &str) {
 /// also collapse to one
 /// entry.
 ///
-/// Same
-/// per-TUI-session-static
-/// contract as
-/// `build_home_list`: the
-/// list is read once at
-/// App construction; the
-/// user has to restart the
-/// TUI for config changes
-/// to take effect.
-fn build_session_subdirs() -> Vec<std::path::PathBuf> {
-    let cfg = Config::load();
+/// Same per-TUI-session-static contract as `build_home_list`:
+/// the list is read once at App construction; the user has to
+/// restart the TUI for config changes to take effect. Also
+/// takes `cfg` by reference rather than calling `Config::load()`
+/// itself, for the same test-isolation reason documented on
+/// `build_home_list` — this does a REAL recursive filesystem
+/// walk of every `sessiondirs=` root, which every test that
+/// built an `App` used to trigger unconditionally against
+/// whatever `sessiondirs` the machine running the tests
+/// happened to have configured.
+fn build_session_subdirs(cfg: &Config) -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for root in cfg.session_dirs() {
@@ -16369,7 +16380,7 @@ fn delete_field_word_backward(field: &mut crate::tui::state::DialogField) {
 
 #[cfg(test)]
 #[path = "tui/tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod tui_session_tests {
