@@ -7811,6 +7811,142 @@ fn bare_at_today_in_notes_mode_filters_by_mtime() {
     let _ = fs::remove_file(&db_path);
 }
 
+/// `@#tag!` (trailing `!`) is the negated form: it excludes notes
+/// that have the tag, rather than requiring it. Covers both the
+/// text-query path (`@#urgent! rest`, going through
+/// `search_notes_by_query`) and the bare-negation path (`@#urgent!`
+/// alone, going through `fetch_recent_with_filter` since the
+/// remaining pattern is empty after the negated token is stripped).
+#[test]
+fn notes_negation_excludes_tagged_note() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-notes-negation-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(dir.join("tagged.md"), "# Tagged #urgent\n").expect("write tagged");
+    fs::write(dir.join("plain.md"), "# Plain\n").expect("write plain");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-notes-negation-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["tagged.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    // Sanity: bare `@` sees both notes.
+    app.query = "@".to_string();
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 2);
+    // Bare negation only — no remaining text pattern, so this
+    // exercises `fetch_recent_with_filter`'s exclusion path.
+    app.query = "@#urgent!".to_string();
+    app.refresh();
+    let cmds: Vec<&str> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        cmds,
+        vec!["plain.md"],
+        "negated tag must exclude tagged.md: {:?}",
+        cmds
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
+}
+
+/// `[key:value]!` (trailing `!`) is the negated form of the
+/// `[attr:value]` header-attribute query: it excludes notes whose
+/// attribute equals that value, rather than requiring it. Mirrors
+/// `notes_negation_excludes_tagged_note` but for the attribute DSL
+/// instead of tags. Uses `type` as the key — confirmed (via manual
+/// inspection of `process_markdown_file`'s output) to survive this
+/// machine's real `note_search` field-alias config unmapped, unlike
+/// `assignee` (see `notes_tab_complete_attr_test_app`'s
+/// `NOTE_SEARCH_CONFIG` isolation comment).
+#[test]
+fn notes_negation_excludes_note_with_matching_attribute() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-notes-attr-negation-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project.md"),
+        "---\ntype: project\n---\n\n# Project\n",
+    )
+    .expect("write project");
+    fs::write(dir.join("plain.md"), "# Plain\n").expect("write plain");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-notes-attr-negation-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["project.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = "@".to_string();
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 2);
+    app.query = "@[type:project]!".to_string();
+    app.refresh();
+    let cmds: Vec<&str> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        cmds,
+        vec!["plain.md"],
+        "negated attribute must exclude project.md: {:?}",
+        cmds
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
+}
+
 /// Regression test for the user's
 /// report in todo mode:
 /// `!@today` should restrict
@@ -8393,6 +8529,157 @@ fn fetch_todos_filters_by_link() {
     // which we don't need to
     // duplicate here.
     assert!(!cmds.is_empty(), "link filter returned empty: {:?}", cmds);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `!#tag!` (trailing `!`) is the negated form: it excludes todos
+/// whose file has the tag, rather than requiring it. `tagged.md`
+/// carries an inline `#urgent` hashtag (note-scoped, so it cascades
+/// to both of its todos) and `plain.md` has neither the tag nor the
+/// bang, so its todo passes through untouched. Note: a YAML
+/// frontmatter `tags:` array does NOT populate `note_tags` (only
+/// inline `#hashtag`s and todo-level tags do — see
+/// `write_markdown_data_to_sqlite_with_conn`'s `all_tags`
+/// computation upstream), so the fixture uses an inline hashtag.
+#[test]
+fn fetch_todos_negation_excludes_tagged_file() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-todo-negation-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("tagged.md"),
+        "# Tagged #urgent\n\n\
+                         - [ ] tagged task 1\n\
+                         - [ ] tagged task 2\n",
+    )
+    .expect("write tagged");
+    fs::write(
+        dir.join("plain.md"),
+        "# Plain\n\n\
+                         - [ ] plain task\n",
+    )
+    .expect("write plain");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-todo-negation-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["tagged.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    // Sanity: bare `!` sees all 3 todos.
+    app.query = "!".to_string();
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 3);
+    app.query = "!#urgent!".to_string();
+    app.refresh();
+    let cmds: Vec<&str> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        cmds,
+        vec!["plain task"],
+        "negated tag must exclude both of tagged.md's todos: {:?}",
+        cmds
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `![key:value]!` is the negated form of the `[attr:value]`
+/// header-attribute query for todos: it excludes todos whose note
+/// has the attribute set to that value. Mirrors
+/// `fetch_todos_negation_excludes_tagged_file` but for the
+/// attribute DSL instead of tags.
+#[test]
+fn fetch_todos_negation_excludes_todos_with_matching_attribute() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-todo-attr-negation-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project.md"),
+        "---\ntype: project\n---\n\n\
+                         - [ ] project task 1\n\
+                         - [ ] project task 2\n",
+    )
+    .expect("write project");
+    fs::write(
+        dir.join("plain.md"),
+        "# Plain\n\n\
+                         - [ ] plain task\n",
+    )
+    .expect("write plain");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-todo-attr-negation-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["project.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = "!".to_string();
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 3);
+    app.query = "![type:project]!".to_string();
+    app.refresh();
+    let cmds: Vec<&str> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        cmds,
+        vec!["plain task"],
+        "negated attribute must exclude both of project.md's todos: {:?}",
+        cmds
+    );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }
@@ -9284,6 +9571,33 @@ fn spawn_similar_search_with_empty_phrase_returns_empty_without_network() {
     );
 }
 
+/// A phrase that's ENTIRELY negation tokens (e.g. `[type:jira]!`
+/// alone, no remaining text) must also short-circuit to an empty
+/// result without calling out to Ollama or opening the database —
+/// `run_similar_search` strips negation tokens first, and the
+/// remaining phrase is empty, so it hits the same early-return as
+/// `spawn_similar_search_with_empty_phrase_returns_empty_without_network`.
+/// There's no "rank everything, then exclude" baseline for
+/// similarity search the way `:` mode's bare `:` has.
+#[test]
+fn spawn_similar_search_with_only_negation_tokens_returns_empty_without_network() {
+    let request = crate::tui::mode::similar::spawn_similar_search(
+        std::path::PathBuf::from("/nonexistent/notes.sqlite"),
+        None,
+        "[type:jira]!".to_string(),
+    );
+    let result = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("negation-only phrase should resolve immediately");
+    assert_eq!(
+        result,
+        Ok(Vec::new()),
+        "a phrase that's only negation tokens must short-circuit to an empty result: {:?}",
+        result
+    );
+}
+
 /// `build_merged_rows` takes the same cheap early-return path for
 /// similar-mode rows as segments mode (`self.rows.clone()`, no
 /// labeled-row interleave, no re-sort) — results are already ranked
@@ -9651,6 +9965,107 @@ fn fetch_segments_filters_by_heading_own_tag() {
         app.merged_rows().len(),
         total,
         "a tag in the segment's own header line must match that segment"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `:#tag!` (trailing `!`) is the negated form: it excludes segments
+/// that have the tag, rather than requiring it. `project.md`'s one
+/// segment carries `#urgent` in its header, so `:#urgent!` excludes
+/// it and the result is empty — the mirror image of
+/// `fetch_segments_filters_by_heading_own_tag`. Same for
+/// `:[[SomeLink]]!` against the direct link match exercised by
+/// `fetch_segments_filters_by_direct_link_match`.
+#[test]
+fn fetch_segments_negation_excludes_matching_tag_and_link() {
+    let (dir, db_path) = setup_segments_cascade_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    let total = app.merged_rows().len();
+    assert!(total > 0, "fixture must have at least one segment");
+
+    app.query = ":#urgent!".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert!(
+        app.merged_rows().is_empty(),
+        "negated tag must exclude the file's only segment, got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+
+    app.query = ":[[SomeLink]]!".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert!(
+        app.merged_rows().is_empty(),
+        "negated link must exclude the file's only segment, got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `:[key:value]!` is the negated form of the `[attr:value]`
+/// header-attribute query for segments: it excludes segments whose
+/// document has the attribute set to that value. Mirrors
+/// `fetch_segments_negation_excludes_matching_tag_and_link` but for
+/// the attribute DSL instead of tags/links.
+#[test]
+fn fetch_segments_negation_excludes_matching_attribute() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-segments-attr-negation-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project.md"),
+        "---\ntype: project\n---\n\n# Project\n\nsome body text\n",
+    )
+    .expect("write project.md");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-segments-attr-negation-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    let data = note_search::markdown_parser::process_markdown_file(&dir.join("project.md"), &dir)
+        .expect("process file");
+    note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+        .map_err(|e| format!("write: {e}"))
+        .expect("write db");
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = ":".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    let total = app.merged_rows().len();
+    assert!(total > 0, "fixture must have at least one segment");
+
+    app.query = ":[type:project]!".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert!(
+        app.merged_rows().is_empty(),
+        "negated attribute must exclude the file's only segment, got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
@@ -15977,6 +16392,249 @@ fn notes_tab_complete_test_app(tags: &[&str], links: &[&str]) -> (App, std::path
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_database = Some(db_path.clone());
     (app, db_path)
+}
+
+/// Build a minimal notes database with a single note whose
+/// YAML frontmatter carries the given `key: value` attribute
+/// pairs, wire it into a fresh app, and return both. Used by
+/// the `[attr:value]` tab-completion tests below.
+///
+/// Unlike `notes_tab_complete_test_app` (tags/links, which
+/// need the `note_tags`/`note_links` junction tables
+/// populated by the real write path), attribute completion
+/// reads `markdown_data.header_fields` directly, which
+/// `process_markdown_file` already populates straight from
+/// the frontmatter — no extra indexing step needed.
+fn notes_tab_complete_attr_test_app(attrs: &[(&str, &str)]) -> (App, std::path::PathBuf) {
+    use rusqlite::Connection;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-notes-tab-attr-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let db_path = dir.join("notes.sqlite");
+
+    let frontmatter: String = attrs
+        .iter()
+        .map(|(k, v)| format!("{}: {}\n", k, v))
+        .collect();
+    let body = format!("---\n{}---\n\nbody text\n", frontmatter);
+    std::fs::write(dir.join("test.md"), &body).expect("write test.md");
+
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn).expect("schema");
+    // `note_search`'s `process_markdown_file` applies an
+    // attribute-key ALIAS mapping (e.g. `assignee` → `people`)
+    // loaded from `$NOTE_SEARCH_CONFIG` (falling back to
+    // `$HOME/.config/note_search/config`) — see
+    // `note_search_core::commands::mapping::AttributeMappingConfig::load`.
+    // Without pinning this to a path that can't exist, the test
+    // picks up whatever real mapping config happens to be on the
+    // machine running it (discovered the hard way: `assignee`
+    // silently became `people` here because that's this
+    // developer's real vault convention), which is exactly the
+    // kind of machine-state leak this test suite is supposed to
+    // be isolated from. Point it at a path inside our own temp
+    // dir that's never created, guarded by `ENV_LOCK` since the
+    // env var is process-global.
+    let _env_guard = lock_or_recover(&ENV_LOCK);
+    let prev_config = std::env::var("NOTE_SEARCH_CONFIG").ok();
+    unsafe {
+        std::env::set_var(
+            "NOTE_SEARCH_CONFIG",
+            dir.join("unused-note-search-config"),
+        );
+    }
+    let data = note_search::markdown_parser::process_markdown_file(&dir.join("test.md"), &dir)
+        .expect("process file");
+    note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+        .map_err(|e| format!("write: {e}"))
+        .expect("write db");
+    unsafe {
+        match prev_config {
+            Some(v) => std::env::set_var("NOTE_SEARCH_CONFIG", v),
+            None => std::env::remove_var("NOTE_SEARCH_CONFIG"),
+        }
+    }
+    drop(_env_guard);
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_database = Some(db_path.clone());
+    (app, db_path)
+}
+
+/// `[assig<TAB>` expands to `[assignee:` (unique attribute-key
+/// match, trailing `:` so the cursor is ready for the value —
+/// no trailing space, unlike tag/link completion).
+#[test]
+fn notes_tab_completion_attr_key_unique_match_expands_with_colon() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah"), ("type", "project")]);
+    app.query = String::from("@[assig");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, "@[assignee:",
+        "[assig should expand to [assignee: with trailing colon, got: {:?}",
+        app.query
+    );
+}
+
+/// `[a<TAB>` is ambiguous between `assignee` and `author`, so
+/// it opens the completion menu rather than expanding to an
+/// LCP or applying either candidate directly.
+#[test]
+fn notes_tab_completion_attr_key_ambiguous_opens_menu() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah"), ("author", "bob")]);
+    app.query = String::from("@[a");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert!(
+        app.is_completion_menu_open(),
+        "ambiguous attribute key should open the completion menu"
+    );
+}
+
+/// `[assignee:sa<TAB>` expands to `[assignee:sarah ` (unique
+/// value match for the already-typed `assignee` key, trailing
+/// space; the closing `]` is left for the user to type).
+#[test]
+fn notes_tab_completion_attr_value_unique_match_expands_with_space() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from("@[assignee:sa");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, "@[assignee:sarah ",
+        "[assignee:sa should expand to [assignee:sarah with trailing space, got: {:?}",
+        app.query
+    );
+}
+
+/// Value completion is scoped to the key that was typed
+/// before the `:` — a prefix that matches a value under a
+/// DIFFERENT key must not be offered.
+#[test]
+fn notes_tab_completion_attr_value_scoped_to_key() {
+    let (mut app, _db) =
+        notes_tab_complete_attr_test_app(&[("assignee", "sarah"), ("reviewer", "sam")]);
+    app.query = String::from("@[assignee:sa");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, "@[assignee:sarah ",
+        "value completion must only consider values recorded under the typed key, got: {:?}",
+        app.query
+    );
+}
+
+/// No attribute key starts with the typed prefix: no-op +
+/// status message, matching the tag/link no-match convention.
+#[test]
+fn notes_tab_completion_attr_key_no_match_leaves_unchanged() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from("@[xyz");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(app.query, "@[xyz", "no-match attribute key must NOT modify query");
+    let status = app.status_message.as_ref().map(|(m, _)| m.clone());
+    assert!(
+        status.as_deref().unwrap_or("").contains("xyz"),
+        "status should mention unknown attribute, got: {status:?}"
+    );
+}
+
+/// No value under the typed key starts with the typed prefix:
+/// no-op + status message.
+#[test]
+fn notes_tab_completion_attr_value_no_match_leaves_unchanged() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from("@[assignee:xyz");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, "@[assignee:xyz",
+        "no-match attribute value must NOT modify query"
+    );
+    let status = app.status_message.as_ref().map(|(m, _)| m.clone());
+    assert!(
+        status.as_deref().unwrap_or("").contains("xyz"),
+        "status should mention unknown value, got: {status:?}"
+    );
+}
+
+/// Attribute completion works identically in todo/segments/
+/// similar mode — same bracket-detection logic runs
+/// regardless of which of the four prefixes is active.
+#[test]
+fn notes_tab_completion_attr_key_works_in_todo_mode() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from("![assig");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(app.query, "![assignee:", "got: {:?}", app.query);
+}
+
+#[test]
+fn notes_tab_completion_attr_key_works_in_segments_mode() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from(":[assig");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(app.query, ":[assignee:", "got: {:?}", app.query);
+}
+
+#[test]
+fn notes_tab_completion_attr_key_works_in_similar_mode() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from("\"[assig");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(app.query, "\"[assignee:", "got: {:?}", app.query);
+}
+
+/// Regression guard: the new `[`-bracket detection must not
+/// hijack `[[link]]` typing — a `[[` pair is explicitly
+/// rejected inside `attr_completion_context_at_cursor`, so
+/// `[[Some<TAB>` stays a no-op exactly like it was before
+/// attribute completion existed (there is no `@Some<TAB>`
+/// shorthand equivalent for a literal `[[...]]` prefix).
+#[test]
+fn notes_tab_completion_double_bracket_link_syntax_is_not_hijacked() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah")]);
+    app.query = String::from("@[[Some");
+    let original = app.query.clone();
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, original,
+        "[[link]] typing must not be treated as attribute completion, got: {:?}",
+        app.query
+    );
+}
+
+/// `Enter` on the completion menu for an ambiguous attribute
+/// KEY applies the selected candidate with a trailing `:`.
+#[test]
+fn handle_completion_menu_key_enter_applies_attr_key() {
+    let (mut app, _db) = notes_tab_complete_attr_test_app(&[("assignee", "sarah"), ("author", "bob")]);
+    app.query = String::from("@[a");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert!(app.is_completion_menu_open());
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_completion_menu_key(&mut app, enter);
+    assert!(!app.is_completion_menu_open(), "menu should close on Enter");
+    let selected = app.query.strip_prefix("@[").and_then(|s| s.strip_suffix(':'));
+    assert!(
+        selected == Some("assignee") || selected == Some("author"),
+        "selected candidate should be applied with a trailing `:`, got: {:?}",
+        app.query
+    );
 }
 
 /// `#feat<TAB>` inside notes mode
@@ -23782,3 +24440,4 @@ fn note_create_ctrl_d_n_7_shortcuts_act_like_typed_prefix() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_file(&db_path);
 }
+

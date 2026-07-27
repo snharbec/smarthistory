@@ -39,6 +39,11 @@
 //! `text` fields with no query DSL; upstream added `query_expr`
 //! support for segments in a follow-up commit ("Support query
 //! for segments").
+//!
+//! `#tag!` / `[[link]]!` / `[attr:value]!` / `[attr]!` (a
+//! smarthistory-side extension, not part of `note_search`'s own DSL)
+//! matches segments WITHOUT the given tag/link/attribute-value — see
+//! `crate::tui::mode::query_negation` and `run_segments_search`.
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
@@ -172,6 +177,13 @@ fn run_segments_search(
     notes_dir: Option<&std::path::Path>,
     pattern: &str,
 ) -> Result<Vec<HistoryRow>, String> {
+    // `#tag!` / `[[link]]!` negation tokens are stripped BEFORE
+    // `parse_query` sees the pattern — it has no negation
+    // primitive and would either error on the trailing `!` or
+    // silently fold it into a bare-word token. See
+    // `crate::tui::mode::query_negation`'s module doc comment.
+    let (pattern, negations) = crate::tui::mode::query_negation::split_negations(pattern);
+    let pattern = pattern.as_str();
     let query_expr = if pattern.is_empty() {
         None
     } else {
@@ -192,10 +204,43 @@ fn run_segments_search(
     debug_assert!(criteria.text.is_none());
 
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
-    let results = service
+    let mut results = service
         .search_segments(&criteria)
         .map_err(|e| format!("search failed: {}", e))?;
+
+    if !negations.is_empty() {
+        let excluded = excluded_segment_identities(&service, db_path, &negations)?;
+        results.retain(|r| !excluded.contains(&(r.filename.clone(), r.start_line)));
+    }
+
     Ok(map_segment_results(&results, notes_dir))
+}
+
+/// For each negated term (`#tag!` / `[[link]]!`), run the ordinary
+/// POSITIVE query and collect the (filename, start_line) identity of
+/// every segment that DOES have it — the set `run_segments_search`
+/// excludes from its own results. One extra local-SQLite round-trip
+/// per negated term; there's no single-query way to express "AND
+/// NOT" since `note_search` has no negation `QueryExpr`.
+fn excluded_segment_identities(
+    service: &note_search::database_service::DatabaseService,
+    db_path: &std::path::Path,
+    negations: &[crate::tui::mode::query_negation::NegatedTerm],
+) -> Result<std::collections::HashSet<(String, i32)>, String> {
+    let mut excluded = std::collections::HashSet::new();
+    for term in negations {
+        let criteria = note_search::SearchCriteria {
+            database_path: db_path.to_string_lossy().to_string(),
+            query_expr: Some(term.positive_query_expr()),
+            list_only: true,
+            ..Default::default()
+        };
+        let rows = service
+            .search_segments(&criteria)
+            .map_err(|e| format!("negation lookup for {:?} failed: {}", term, e))?;
+        excluded.extend(rows.into_iter().map(|r| (r.filename, r.start_line)));
+    }
+    Ok(excluded)
 }
 
 /// Map `note_search`'s `SegmentResult` rows into `HistoryRow`s.

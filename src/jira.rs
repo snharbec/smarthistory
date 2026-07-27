@@ -1770,6 +1770,121 @@ pub fn notes_link_complete(db_path: &std::path::Path, prefix: &str) -> Option<St
     Some(format!("[[{}]]{}", name, trailing_space))
 }
 
+/// Return all note attribute (header-field) keys that
+/// start with `prefix` (case-insensitive). Backs Tab
+/// completion for the `[attr:value]` / `[attr]` query
+/// syntax's KEY half (before the `:`). The completion
+/// menu uses this to show candidates when there are
+/// multiple keys sharing the prefix.
+pub fn notes_attr_key_matches(db_path: &std::path::Path, prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let keys = match note_search::commands::metadata::get_all_attributes(db_path) {
+        Ok(k) => k,
+        Err(_) => return Vec::new(),
+    };
+    let lower = prefix.to_ascii_lowercase();
+    keys.iter()
+        .filter(|k| k.to_ascii_lowercase().starts_with(&lower))
+        .cloned()
+        .collect()
+}
+
+/// Tab-completion for the attribute KEY half of
+/// `[attr:value]` / `[attr]`. Unlike tag/link
+/// completion (which appends a trailing space), a
+/// unique key match appends a trailing `:` so the
+/// cursor lands ready to type the value — the same
+/// convention `jira_field_complete_with_value` uses
+/// for `=`.
+///
+/// Returns:
+/// - `None` if no attribute key starts with the prefix.
+/// - `Some("key:")` if the prefix matches exactly one
+///   key.
+/// - `Some("key")` (no `:`) if multiple keys share a
+///   longest-common-prefix that extends the user's
+///   input.
+pub fn notes_attr_key_complete(db_path: &std::path::Path, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let keys = note_search::commands::metadata::get_all_attributes(db_path).ok()?;
+    let lower = prefix.to_ascii_lowercase();
+    let matches: Vec<&str> = keys
+        .iter()
+        .filter(|k| k.to_ascii_lowercase().starts_with(&lower))
+        .map(|s| s.as_str())
+        .collect();
+    match matches.len() {
+        0 => None,
+        1 => Some(format!("{}:", matches[0])),
+        _ => {
+            // Longest common prefix of all matches.
+            let first = matches[0];
+            let mut end = prefix.len();
+            while end < first.len() {
+                let candidate = &first[..end + 1];
+                if matches.iter().all(|m| {
+                    m.to_ascii_lowercase()
+                        .starts_with(&candidate.to_ascii_lowercase())
+                }) {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Some(first[..end].to_string())
+        }
+    }
+}
+
+/// Return all values recorded for attribute `key`
+/// that start with `prefix` (case-insensitive). Backs
+/// Tab completion for the `[attr:value]` VALUE half
+/// (after the `:`).
+///
+/// Note: `note_search::commands::metadata::get_unique_values`
+/// lowercases `key` internally before looking it up in
+/// each note's header-fields JSON, so this silently
+/// returns nothing for a `key` containing uppercase
+/// letters (an upstream note_search quirk, not
+/// something smarthistory controls).
+pub fn notes_attr_value_matches(db_path: &std::path::Path, key: &str, prefix: &str) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let field = format!("attr:{}", key);
+    let values = match note_search::commands::metadata::get_unique_values(db_path, &field) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let lower = prefix.to_ascii_lowercase();
+    values
+        .iter()
+        .filter(|v| v.to_ascii_lowercase().starts_with(&lower))
+        .cloned()
+        .collect()
+}
+
+/// Tab-completion for the attribute VALUE half of
+/// `[attr:value]`. Same trailing-space convention as
+/// tag completion (`#feat<TAB>` → `#feature `):
+/// `[assignee:sa<TAB>` → `[assignee:sarah ` on a
+/// unique match; the closing `]` is left for the user
+/// to type, matching tag completion's behaviour rather
+/// than risking a duplicate `]` if one is already
+/// present after the cursor.
+pub fn notes_attr_value_complete(db_path: &std::path::Path, key: &str, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let field = format!("attr:{}", key);
+    let values = note_search::commands::metadata::get_unique_values(db_path, &field).ok()?;
+    notes_complete_inner(&values, prefix)
+}
+
 /// Shared LCP / single-match logic for tag and link
 /// completion. Extracted so the two functions stay
 /// one-liners and the matching semantics are

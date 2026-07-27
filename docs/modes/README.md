@@ -65,6 +65,7 @@ Some modes share a token language for narrowing the search. The implementations 
 | `@me` / `@today` / `@week` / `@month` | jira | Built-in JIRA aliases. See [`jira.md`](jira.md). |
 | `@<name>` | jira | A user-defined JQL fragment from `jira.search.<name>=<jql>` in the config. Requires the leading `@`. |
 | `=desc` | llm (no `@` prefix in this case) | The `=` is the LLM-mode prefix; the rest of the body is the natural-language description. |
+| `#tag!` / `[[link]]!` / `[attr:value]!` / `[attr]!` | notes, todo, segments, similar | Negated tag/link/attribute search — matches entries that do **not** have the tag/link/attribute-value. Everywhere but similar mode this narrows a query DSL; in similar mode (no DSL) it's a post-filter over the similarity-ranked results instead. See [`notes.md#negated-taglinkattribute-search`](notes.md#negated-taglinkattribute-search). |
 
 ## Match algorithm (default: substring)
 

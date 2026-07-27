@@ -4751,6 +4751,40 @@ enum CompletionKind {
     /// double quotes inside the
     /// brackets.
     NotesLink,
+    /// Attribute key, the `attr` half of
+    /// `[attr:value]` (e.g. `assignee`).
+    /// Applied with a trailing `:` so the
+    /// cursor is ready for the value —
+    /// same convention as `JiraField`'s
+    /// trailing `=`.
+    AttrKey,
+    /// Attribute value, the `value` half
+    /// of `[attr:value]` (e.g. `sarah`).
+    /// Applied with a trailing space, same
+    /// convention as `NotesTag`. The
+    /// closing `]` is left for the user to
+    /// type.
+    AttrValue,
+}
+
+/// The half of `[attr:value]` a Tab press targets, plus the
+/// byte/char range in `App::query` that a completion replaces.
+/// Built by `App::attr_completion_context_at_cursor`.
+struct AttrCompletionContext {
+    replace_start_byte: usize,
+    replace_end_byte: usize,
+    replace_start_char: usize,
+    kind: AttrCompletionKind,
+}
+
+enum AttrCompletionKind {
+    /// No `:` typed yet between `[` and the cursor —
+    /// `prefix` is the attribute key typed so far.
+    Key { prefix: String },
+    /// A `:` was found between `[` and the cursor —
+    /// `key` is the (already-typed) attribute name and
+    /// `prefix` is the value typed so far.
+    Value { key: String, prefix: String },
 }
 
 impl CompletionMenu {
@@ -4814,6 +4848,8 @@ impl CompletionMenu {
             CompletionKind::JiraAlias => format!("@{} ", name),
             CompletionKind::NotesTag => format!("#{} ", name),
             CompletionKind::NotesLink => format!("[[{}]] ", name),
+            CompletionKind::AttrKey => format!("{}:", name),
+            CompletionKind::AttrValue => format!("{} ", name),
         }
     }
 }
@@ -7976,12 +8012,195 @@ impl App {
         }
     }
 
+    /// What half of `[attr:value]` a Tab press at the
+    /// cursor targets, plus the byte/char range that
+    /// gets replaced when a completion is applied.
+    /// Built by `attr_completion_context_at_cursor` and
+    /// consumed by `attr_tab_complete`.
+    fn attr_completion_context_at_cursor(
+        &self,
+        prefix_len: usize,
+    ) -> Option<AttrCompletionContext> {
+        let cursor_char = self.query_cursor;
+        // Scan backward (char indices) for the nearest
+        // unmatched `[`. Hitting a `]` first means the
+        // bracket immediately containing that position
+        // already closed before the cursor — we're not
+        // inside brackets at all.
+        let mut i = cursor_char;
+        let bracket_char = loop {
+            if i <= prefix_len {
+                return None;
+            }
+            i -= 1;
+            let byte_start = char_to_byte_index(&self.query, i);
+            let byte_end = char_to_byte_index(&self.query, i + 1);
+            let ch = self.query[byte_start..byte_end]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            match ch {
+                ']' => return None,
+                '[' => break i,
+                _ => {}
+            }
+        };
+        // Reject `[[link]]` syntax: the char immediately
+        // before or after the found `[` must not also be
+        // `[`, otherwise this is one bracket of a `[[...]]`
+        // pair, not an attribute token.
+        if bracket_char > 0 {
+            let byte_start = char_to_byte_index(&self.query, bracket_char - 1);
+            let byte_end = char_to_byte_index(&self.query, bracket_char);
+            if &self.query[byte_start..byte_end] == "[" {
+                return None;
+            }
+        }
+        let total_chars = self.query.chars().count();
+        if bracket_char + 1 < total_chars {
+            let byte_start = char_to_byte_index(&self.query, bracket_char + 1);
+            let byte_end = char_to_byte_index(&self.query, bracket_char + 2);
+            if &self.query[byte_start..byte_end] == "[" {
+                return None;
+            }
+        }
+        // Everything between the bracket and the cursor is
+        // either the attribute key (no `:` typed yet) or
+        // `key:value-so-far` (split on the first `:`).
+        let body_start_char = bracket_char + 1;
+        let body_start_byte = char_to_byte_index(&self.query, body_start_char);
+        let cursor_byte = char_to_byte_index(&self.query, cursor_char);
+        let body = &self.query[body_start_byte..cursor_byte];
+        if let Some(colon_byte) = body.find(':') {
+            let key = body[..colon_byte].trim().to_string();
+            if key.is_empty() {
+                return None;
+            }
+            let value_prefix = body[colon_byte + 1..].to_string();
+            let value_start_char = body_start_char + body[..=colon_byte].chars().count();
+            let value_start_byte = char_to_byte_index(&self.query, value_start_char);
+            Some(AttrCompletionContext {
+                replace_start_byte: value_start_byte,
+                replace_end_byte: cursor_byte,
+                replace_start_char: value_start_char,
+                kind: AttrCompletionKind::Value {
+                    key,
+                    prefix: value_prefix,
+                },
+            })
+        } else {
+            Some(AttrCompletionContext {
+                replace_start_byte: body_start_byte,
+                replace_end_byte: cursor_byte,
+                replace_start_char: body_start_char,
+                kind: AttrCompletionKind::Key {
+                    prefix: body.to_string(),
+                },
+            })
+        }
+    }
+
+    /// Apply (or open the ambiguous-match menu for) the
+    /// attribute key/value completion at `ctx`. Shares the
+    /// same debounce-rearm / refresh / status-message tail
+    /// as `notes_tab_complete_at_cursor`'s `#`/`@` paths,
+    /// just with a `:` (key) or ` ` (value) trailing
+    /// convention instead of a single hard-coded space.
+    fn attr_tab_complete(&mut self, ctx: AttrCompletionContext) {
+        let Some(db_path) = self.notes_database.clone() else {
+            self.set_status_message(
+                "notes-tab-complete: notes.database is not configured".to_string(),
+            );
+            return;
+        };
+        let (completion, kind_label, show_message) = match &ctx.kind {
+            AttrCompletionKind::Key { prefix } => {
+                if prefix.is_empty() {
+                    self.set_status_message(
+                        "notes-tab-complete: no attribute name to expand".to_string(),
+                    );
+                    return;
+                }
+                let matches = crate::jira::notes_attr_key_matches(&db_path, prefix);
+                if matches.len() >= 2 {
+                    self.open_completion_menu(
+                        matches,
+                        ctx.replace_start_byte,
+                        ctx.replace_end_byte,
+                        ctx.replace_start_char,
+                        CompletionKind::AttrKey,
+                    );
+                    return;
+                }
+                let result = match crate::jira::notes_attr_key_complete(&db_path, prefix) {
+                    Some(r) => r,
+                    None => {
+                        self.set_status_message(format!(
+                            "notes-tab-complete: no attribute starts with `{}`",
+                            prefix
+                        ));
+                        return;
+                    }
+                };
+                let show_message = result.ends_with(':');
+                (result, "attribute", show_message)
+            }
+            AttrCompletionKind::Value { key, prefix } => {
+                if prefix.is_empty() {
+                    self.set_status_message(
+                        "notes-tab-complete: no attribute value to expand".to_string(),
+                    );
+                    return;
+                }
+                let matches = crate::jira::notes_attr_value_matches(&db_path, key, prefix);
+                if matches.len() >= 2 {
+                    self.open_completion_menu(
+                        matches,
+                        ctx.replace_start_byte,
+                        ctx.replace_end_byte,
+                        ctx.replace_start_char,
+                        CompletionKind::AttrValue,
+                    );
+                    return;
+                }
+                let result = match crate::jira::notes_attr_value_complete(&db_path, key, prefix) {
+                    Some(r) => r,
+                    None => {
+                        self.set_status_message(format!(
+                            "notes-tab-complete: no value for `{}` starts with `{}`",
+                            key, prefix
+                        ));
+                        return;
+                    }
+                };
+                let show_message = result.ends_with(' ');
+                (result, "attribute value", show_message)
+            }
+        };
+        self.query
+            .replace_range(ctx.replace_start_byte..ctx.replace_end_byte, &completion);
+        let completion_chars = completion.chars().count();
+        self.query_cursor = ctx.replace_start_char + completion_chars;
+        self.llm_touch();
+        self.recompile_regex();
+        self.refresh();
+        if show_message {
+            self.set_status_message(format!(
+                "expanded {} `{}`",
+                kind_label,
+                completion.trim_end()
+            ));
+        }
+    }
+
     /// Tab-completion for notes (`@`) and todos (`!`)
     /// modes. The completion targets are tags (the
-    /// `#TAG` token) and wiki-link targets (the
-    /// `@LINK` token). Both completion lists come
-    /// from the `note_search` database via
-    /// `note_search::commands::metadata::get_unique_values`.
+    /// `#TAG` token), wiki-link targets (the `@LINK`
+    /// token), and `[attr:value]` / `[attr]`
+    /// attribute keys/values. All completion lists
+    /// come from the `note_search` database via
+    /// `note_search::commands::metadata::get_unique_values`
+    /// / `get_all_attributes`.
     ///
     /// Behaviour:
     /// - `#feat<TAB>` → `#feature ` (unique tag
@@ -7992,9 +8211,16 @@ impl App {
     ///   match)
     /// - `@xyz<TAB>` → no-op + status message (no
     ///   match)
+    /// - `[assig<TAB>` → `[assignee:` (unique
+    ///   attribute-key match, trailing `:` so the
+    ///   cursor is ready for the value)
+    /// - `[assignee:sa<TAB>` → `[assignee:sarah `
+    ///   (unique attribute-value match for the
+    ///   `assignee` key, trailing space; the closing
+    ///   `]` is left for the user to type)
     /// - Outside notes/todos mode, or when the word
-    ///   before the cursor doesn't start with `#`
-    ///   or `@`, the function is a no-op so the
+    ///   before the cursor doesn't start with `#`,
+    ///   `@`, or `[`, the function is a no-op so the
     ///   `Tab` key doesn't interfere with any other
     ///   mode.
     fn notes_tab_complete_at_cursor(&mut self) {
@@ -8026,6 +8252,19 @@ impl App {
             && first != self.query_prefixes.segments
             && first != self.query_prefixes.similar
         {
+            return;
+        }
+        // `[attr:value]` / `[attr]` completion: the cursor
+        // may be sitting inside an unmatched `[` anywhere in
+        // the query, targeting either the key (no `:` yet)
+        // or the value (after a `:`) half of the token. This
+        // is handled entirely separately from the `#`/`@`
+        // word-boundary walk below, which can't span the `:`.
+        // Checked (and, on a hit, returns) before that walk
+        // so `[[link]]` typing — rejected inside the bracket
+        // scan itself — still falls through unchanged.
+        if let Some(ctx) = self.attr_completion_context_at_cursor(prefix_len) {
+            self.attr_tab_complete(ctx);
             return;
         }
         // Walk left from the cursor

@@ -2002,7 +2002,7 @@ dependencies = [
 [[package]]
 name = "note_search"
 version = "1.0.0"
-source = "git+https://github.com/snharbec/note_search.git#34dbc59a9dafb234be5e592820f9addd11cd8d56"
+source = "git+https://github.com/snharbec/note_search.git#d6097c5573148f4f4bd66527b8fd22a993f47fa7"
 dependencies = [
  "axum",
  "base64",
@@ -2023,6 +2023,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strsim",
+ "tempfile",
  "tokio",
  "url",
  "walkdir",

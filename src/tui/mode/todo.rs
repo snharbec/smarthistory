@@ -265,6 +265,12 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // contain `older`.
     let raw_pattern = pattern(app).trim();
     let (pattern, filter) = crate::tui::parse_notes_query(raw_pattern);
+    // `#tag!` / `[[link]]!` negation tokens are stripped BEFORE
+    // `parse_query` sees the pattern — it has no negation
+    // primitive and would either error on the trailing `!` or fold
+    // it into a bare-word token. See
+    // `crate::tui::mode::query_negation`'s module doc comment.
+    let (pattern, negations) = crate::tui::mode::query_negation::split_negations(&pattern);
     let query_expr = if pattern.is_empty() {
         None
     } else {
@@ -311,13 +317,42 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     debug_assert!(criteria.text.is_none());
 
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
-    let results = match service.search_todos(&criteria) {
+    let mut results = match service.search_todos(&criteria) {
         Ok(r) => r,
         Err(e) => {
             app.set_status_message(format!("Todo mode: search failed: {}", e));
             return Ok(Vec::new());
         }
     };
+
+    // For each `#tag!` / `[[link]]!` negation, run the ordinary
+    // POSITIVE query and exclude any todo whose (filename,
+    // line_number) identity appears in that result — see
+    // `crate::tui::mode::query_negation`'s module doc comment for
+    // why this needs a separate lookup query per negated term.
+    if !negations.is_empty() {
+        let mut excluded: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
+        for term in &negations {
+            let lookup_criteria = note_search::SearchCriteria {
+                database_path: db_path.to_string_lossy().to_string(),
+                query_expr: Some(term.positive_query_expr()),
+                open: Some(true),
+                list_only: true,
+                ..Default::default()
+            };
+            match service.search_todos(&lookup_criteria) {
+                Ok(rows) => excluded.extend(rows.into_iter().map(|r| (r.filename, r.line_number))),
+                Err(e) => {
+                    app.set_status_message(format!(
+                        "Todo mode: negation lookup for {:?} failed: {}",
+                        term, e
+                    ));
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        results.retain(|r| !excluded.contains(&(r.filename.clone(), r.line_number)));
+    }
 
     // Map the library's `TodoResult` rows
     // into our `HistoryRow` representation.

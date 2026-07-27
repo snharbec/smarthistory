@@ -268,6 +268,7 @@ pub mod llm;
 pub mod notes;
 pub mod output;
 pub mod panes;
+pub mod query_negation;
 pub mod question;
 pub mod similar;
 pub mod tags;

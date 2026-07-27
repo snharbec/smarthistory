@@ -456,18 +456,32 @@ to `ModeKind`, and add a `prefix.<name> = 'X'` line to
 | `files.rs` | `~` | Local filesystem walk | Directories are filtered out (use `#` for directory navigation). |
 | `jira.rs` | `-` | JIRA REST v2 | The only mode with a `@`-prefix fragment syntax. |
 | `llm.rs` | `=` | Local `ollama` | The `llm_check` verifies `ollama.url` + `ollama.model` are set and the model is pulled. |
-| `notes.rs` | `@` | `note_search` SQLite DB | Has its own query syntax (Obsidian-style `#tag` / `[[link]]` / `[attr:value]`). |
+| `notes.rs` | `@` | `note_search` SQLite DB | Has its own query syntax (Obsidian-style `#tag` / `[[link]]` / `[attr:value]`, plus smarthistory's `#tag!` / `[[link]]!` / `[attr:value]!` negation extension). |
 | `output.rs` | `+` | (not a fetch — the `+` prefix is an in-refresh post-filter over the SQL output column) | |
 | `panes.rs` | `*` | Multiplexer (`tmux` / `herdr`) | Group-aware filter: searching for a pane command keeps the parent workspace header. |
 | `question.rs` | `%` | Local `ollama` | |
 | `tags.rs` | `$` | ctags `TAGS` file or CodeGraph fallback | Lazy source-context loading (50 lines, cached per file). |
-| `todo.rs` | `!` | `note_search` SQLite DB | One row per open todo, not per note. |
+| `todo.rs` | `!` | `note_search` SQLite DB | One row per open todo, not per note. Shares `notes.rs`'s query syntax, including `#tag!` / `[[link]]!` / `[attr:value]!` negation. |
 
 The two `stats` and `labeled` modules live in `src/tui/stats.rs`
 and `src/tui/labeled.rs` respectively — they aren't prefix
 modes (the first is the default `STATS` TUI scope, the second
 is the labeled-rows merge in the SQL fetch), so they don't
 fit the per-mode module convention.
+
+`src/tui/mode/query_negation.rs` is a small shared helper (not a
+prefix mode itself) used by `notes.rs`, `todo.rs`, `segments.rs`, and
+`similar.rs`: it extracts `#tag!` / `[[link]]!` / `[attr:value]!` /
+`[attr]!` tokens from the typed pattern before the remainder reaches
+`note_search::parse_query` (which has no negation primitive), and
+each caller runs one extra positive lookup query per negated term
+to exclude matching entries from the result set. `similar.rs` is the
+one caller that doesn't feed the remainder to `parse_query` at all
+(it has no query DSL — see its own module doc comment); it strips
+negation tokens from the phrase before embedding the rest, then
+applies the same exclusion as a post-filter over the
+similarity-ranked results. See
+[docs/modes/notes.md#negated-taglinkattribute-search](docs/modes/notes.md#negated-taglinkattribute-search).
 
 ### `App::refresh()` flow
 

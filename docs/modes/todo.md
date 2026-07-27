@@ -9,6 +9,7 @@ Todo mode scans every note in the `note_search` database for open todo entries (
 ## What it does
 
 - `!` (empty) — every open todo in every note. Closed todos (`- [x]`) are filtered out.
+- `!#urgent` / `![[ProjectX]]` / `![type:project]` — filter to todos whose note carries the tag/link/attribute-value (same `note_search::parse_query` DSL [`@` (Notes) mode](notes.md#shorthand-expansion-tui--note_search) uses). Add a trailing `!` (`!#urgent!`, `![type:project]!`) to negate — excludes todos whose note has the tag/link/attribute-value instead of requiring it. See [Negated tag/link/attribute search](notes.md#negated-taglinkattribute-search) — the syntax and implementation are shared across `@`/`!`/`:` modes.
 - `!@new remember to buy milk` — quick-create a new todo entry in today's daily note (see Quick-create below).
 - The displayed list shows the todo text (first column), the note basename (second), the line number, the exit code (`✓` for open, `✗` for done), and the timestamp.
 

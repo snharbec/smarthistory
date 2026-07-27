@@ -25,6 +25,7 @@ A segment's tags and links are the **union** of its own text (header line + body
 - `:#urgent` — every segment tagged `urgent`, including the cascade: its own text, any ancestor header's text, or anywhere else in the document (see "What counts as a segment" above).
 - `:[[ProjectX]]` — every segment linking to `ProjectX`, same cascade rule as tags.
 - `:(#urgent OR [[ProjectX]])` — OR-grouping, same Obsidian-like query language [`@` (Notes) mode](notes.md) and [`!` (Todo) mode](todo.md) use (`word`, `"quoted phrase"`, `#tag`, `[[link]]`, `[attr]`, `[attr:value]`, `(a OR b)`, terms AND-ed unless grouped). An invalid query (e.g. unbalanced parens) surfaces a status message rather than silently falling back to a text search.
+- `:#urgent!` / `:[[ProjectX]]!` / `:[type:project]!` — negated tag/link/attribute search: every segment that does **not** have the tag/link/attribute-value (same cascade rule as the positive form). See [Negated tag/link/attribute search](notes.md#negated-taglinkattribute-search) in the Notes doc — the syntax and implementation are shared across `@`/`!`/`:` modes.
 - A segment with a heading starts with a literal `#`/`##`/... in the result list — that's the segment's own header line (verbatim, as written in the file), not a prefix smarthistory adds.
 - A segment spanning multiple lines (its header plus everything below it) is shown with internal newlines joined by `" / "` — the same convention `note_search`'s own default output format uses.
 

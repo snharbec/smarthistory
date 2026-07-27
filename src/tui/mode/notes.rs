@@ -1,4 +1,9 @@
 //! `@` (note search) prefix mode.
+//!
+//! Supports the shared `#tag!` / `[[link]]!` / `[attr:value]!` / `[attr]!`
+//! negation syntax (see [`crate::tui::mode::query_negation`]) — a trailing
+//! `!` on a tag, link, or attribute token excludes notes that match it,
+//! instead of requiring it.
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
@@ -219,12 +224,22 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // disappears the moment the user clears
     // the alias token).
     app.notes_date_filter = filter;
+    let (pattern, negations) = crate::tui::mode::query_negation::split_negations(&pattern);
+    let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
+    let excluded = match excluded_note_filenames(&service, &negations) {
+        Ok(excluded) => excluded,
+        Err(e) => {
+            app.set_status_message(format!("Notes mode: negation lookup failed: {}", e));
+            return Ok(Vec::new());
+        }
+    };
     if pattern.is_empty() {
         // The user typed only the
-        // date alias (e.g. `@today`).
-        // We still need to fetch
-        // *all* notes (no text
-        // filter) so the date
+        // date alias (e.g. `@today`)
+        // and/or only negated terms
+        // (e.g. `#urgent!`). We still
+        // need to fetch *all* notes
+        // (no text filter) so the date
         // filter has something to
         // operate on, then apply
         // the cutoff post-hoc. The
@@ -235,10 +250,8 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // from `@` — the chip lit
         // up but the rows ignored
         // it.
-        return fetch_recent_with_filter(app, db_path, filter);
+        return fetch_recent_with_filter(app, &service, filter, &excluded);
     }
-
-    let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
 
     match service.search_notes_by_query(&pattern) {
         Ok(results) => {
@@ -263,6 +276,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                     None => true,
                     Some(c) => note.updated.or(note.created).unwrap_or(0) >= c,
                 })
+                .filter(|note| !excluded.contains(&note.filename))
                 .map(|note| {
                     let title = note.title.as_deref().unwrap_or("");
                     let comment = if title.is_empty() {
@@ -314,10 +328,10 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// result as fetching all notes unfiltered.
 fn fetch_recent_with_filter(
     app: &App,
-    db_path: &std::path::Path,
+    service: &note_search::database_service::DatabaseService,
     filter: NotesDateFilter,
+    excluded: &std::collections::HashSet<String>,
 ) -> Result<Vec<HistoryRow>> {
-    let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
     // Use default SearchCriteria to get all
     // notes (no query filter).
     let criteria = note_search::SearchCriteria::default();
@@ -341,6 +355,7 @@ fn fetch_recent_with_filter(
                     // recent.
                     Some(c) => note.updated.or(note.created).unwrap_or(0) >= c,
                 })
+                .filter(|note| !excluded.contains(&note.filename))
                 .map(|note| {
                     let title = note.title.as_deref().unwrap_or("");
                     let comment = if title.is_empty() {
@@ -371,6 +386,26 @@ fn fetch_recent_with_filter(
         }
         Err(_e) => Ok(Vec::new()),
     }
+}
+
+/// Resolve `#tag!` / `[[link]]!` negated terms (see
+/// [`crate::tui::mode::query_negation`]) to the set of note filenames that
+/// DO have the tag/link — i.e. the filenames `fetch` must exclude. Runs one
+/// ordinary positive `search_notes_by_query` lookup per term via
+/// `notes.rs`'s existing string-based convenience API, since `notes::fetch`
+/// doesn't otherwise build a `QueryExpr`/`SearchCriteria` directly.
+fn excluded_note_filenames(
+    service: &note_search::database_service::DatabaseService,
+    negations: &[crate::tui::mode::query_negation::NegatedTerm],
+) -> std::result::Result<std::collections::HashSet<String>, String> {
+    let mut excluded = std::collections::HashSet::new();
+    for term in negations {
+        let rows = service
+            .search_notes_by_query(&term.positive_query_string())
+            .map_err(|e| format!("negation lookup for {:?} failed: {}", term, e))?;
+        excluded.extend(rows.into_iter().map(|r| r.filename));
+    }
+    Ok(excluded)
 }
 
 /// Read the `updated` column from

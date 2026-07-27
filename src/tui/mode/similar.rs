@@ -10,6 +10,16 @@
 //! string (including any literal `#`/`[[`/`(` characters the user
 //! types or Tab-completes in) is embedded verbatim.
 //!
+//! The one exception is the shared `#tag!` / `[[link]]!` /
+//! `[attr:value]!` / `[attr]!` negation syntax (see
+//! `crate::tui::mode::query_negation`): unlike the rest of the query
+//! DSL, negated terms ARE recognised here — they're stripped from the
+//! phrase before embedding (so they don't pollute the semantic
+//! content being ranked) and applied as a post-filter over the
+//! similarity-ranked results, the same "run an extra positive lookup
+//! query and exclude its identities" mechanism `:` mode uses (see
+//! `excluded_similar_identities`).
+//!
 //! The phrase is embedded with `note_search::embeddings::embed_text`
 //! (a synchronous call to a local Ollama instance running the same
 //! `nomic-embed-text` model `note_search import` uses to compute each
@@ -142,19 +152,67 @@ fn run_similar_search(
     notes_dir: Option<&std::path::Path>,
     phrase: &str,
 ) -> Result<Vec<HistoryRow>, String> {
-    // An empty phrase has nothing to embed or compare against — unlike
-    // `:` mode's bare-prefix "list everything", similarity search is
-    // meaningless without a phrase. No-op rather than an error.
+    // `#tag!` / `[[link]]!` / `[attr:value]!` / `[attr]!` negation
+    // tokens are stripped BEFORE the phrase is embedded — they're a
+    // structural exclusion filter, not semantic content to rank
+    // against. See this module's doc comment and
+    // `crate::tui::mode::query_negation`.
+    let (phrase, negations) = crate::tui::mode::query_negation::split_negations(phrase);
+    let phrase = phrase.as_str();
+    // An empty remaining phrase has nothing to embed or compare
+    // against — unlike `:` mode's bare-prefix "list everything",
+    // similarity search is meaningless without a phrase. No-op
+    // rather than an error. This also covers a query that's ONLY
+    // negation tokens (e.g. `[type:jira]!` alone) — there's no
+    // "rank everything, then exclude" baseline for similarity
+    // search the way there is for `:` mode's bare `:`.
     if phrase.trim().is_empty() {
         return Ok(Vec::new());
     }
     let embedding = note_search::embeddings::embed_text(phrase)
         .map_err(|e| format!("embedding failed: {e}"))?;
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
-    let results = service
+    let mut results = service
         .search_similar_segments(&embedding, &[], &[], SIMILAR_RESULT_LIMIT)
         .map_err(|e| format!("search failed: {e}"))?;
+
+    if !negations.is_empty() {
+        let excluded = excluded_similar_identities(&service, db_path, &negations)?;
+        results.retain(|(el, _score)| !excluded.contains(&(el.filename.clone(), el.start_line)));
+    }
+
     Ok(map_similar_results(&results, notes_dir))
+}
+
+/// For each negated term (`#tag!` / `[[link]]!` / `[attr:value]!` /
+/// `[attr]!`), run the ordinary POSITIVE query and collect the
+/// (filename, start_line) identity of every segment that DOES match
+/// it — the set `run_similar_search` excludes from its own
+/// similarity-ranked results. Mirrors
+/// `crate::tui::mode::segments::excluded_segment_identities` exactly
+/// (same `SegmentResult` identity, same one-lookup-per-term
+/// mechanism) — duplicated rather than shared since each mode module
+/// is deliberately self-contained (see `src/tui/mode/mod.rs`'s doc
+/// comment on why these are free functions, not a shared trait).
+fn excluded_similar_identities(
+    service: &note_search::database_service::DatabaseService,
+    db_path: &std::path::Path,
+    negations: &[crate::tui::mode::query_negation::NegatedTerm],
+) -> Result<std::collections::HashSet<(String, i32)>, String> {
+    let mut excluded = std::collections::HashSet::new();
+    for term in negations {
+        let criteria = note_search::SearchCriteria {
+            database_path: db_path.to_string_lossy().to_string(),
+            query_expr: Some(term.positive_query_expr()),
+            list_only: true,
+            ..Default::default()
+        };
+        let rows = service
+            .search_segments(&criteria)
+            .map_err(|e| format!("negation lookup for {:?} failed: {}", term, e))?;
+        excluded.extend(rows.into_iter().map(|r| (r.filename, r.start_line)));
+    }
+    Ok(excluded)
 }
 
 /// Map `note_search`'s `(SegmentResult, similarity_score)` pairs into

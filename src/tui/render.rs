@@ -3138,6 +3138,8 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
         super::CompletionKind::JiraAlias => "JIRA alias",
         super::CompletionKind::NotesTag => "tag",
         super::CompletionKind::NotesLink => "link",
+        super::CompletionKind::AttrKey => "attribute",
+        super::CompletionKind::AttrValue => "attribute value",
     };
     let block = Block::default()
         .borders(Borders::ALL)
