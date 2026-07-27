@@ -718,15 +718,17 @@ fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
 /// 1. The captured-output overlay, if open. This is "the output
 ///    of this command" — the user is looking at the output and
 ///    yanking it is the natural action. Mode-agnostic: even in
-///    elements mode, if the user has the full preview open they
+///    segments mode, if the user has the full preview open they
 ///    want what they're looking at, not the filename.
-/// 2. In elements (`:`) mode, the containing note's filename
-///    (`row.comment`) rather than the matched element's own text
-///    (`row.command` — a paragraph/list-item/heading snippet,
-///    e.g. just `"kramfors"` for a bare `[[kramfors]]` reference
-///    line). The filename is the more useful thing to have on
-///    the clipboard — e.g. to paste into another command — than
-///    an isolated snippet of note content.
+/// 2. In segments (`:`) mode, the row's breadcrumb (`row.comment`
+///    — filename + ancestor headers' text, see
+///    `crate::tui::mode::segments`'s module doc comment) rather
+///    than the matched segment's own text (`row.command`, which
+///    can be a whole header-bounded section joined onto one line).
+///    The breadcrumb identifies WHERE the match is (which file,
+///    which section) — more useful on the clipboard, e.g. to
+///    paste into another command, than a long flattened section
+///    of note content.
 /// 3. Every other mode: the command of the currently-selected
 ///    history row. This is "the current document" — the command
 ///    line itself, in the same sense as a text editor's "current
@@ -744,7 +746,7 @@ fn pick_text_to_yank(app: &App) -> Option<String> {
         return Some(view.text.clone());
     }
     app.selected_row().map(|r| {
-        if app.is_elements_query() {
+        if app.is_segments_query() {
             r.comment.clone()
         } else {
             r.command.clone()
@@ -1952,12 +1954,12 @@ pub(crate) struct App {
     /// and cached rows.
     ag_state: crate::ag::AgState,
 
-    /// Aggregated elements-mode state: debounce timer, in-flight
+    /// Aggregated segments-mode state: debounce timer, in-flight
     /// search request, last searched pattern, and cached rows.
-    /// Same shape as `ag_state` — see `ElementsState`'s doc
+    /// Same shape as `ag_state` — see `SegmentsState`'s doc
     /// comment for why the query needed to move to a background
     /// thread.
-    elements_state: crate::tui::mode::elements::ElementsState,
+    segments_state: crate::tui::mode::segments::SegmentsState,
 
     /// User-configured additional
     /// directory basenames to
@@ -2163,7 +2165,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
         prefixes.tags,
         prefixes.codegraph,
         prefixes.ag,
-        prefixes.elements,
+        prefixes.segments,
     ];
     if known.contains(&c) {
         c
@@ -2393,20 +2395,21 @@ impl App {
         crate::tui::mode::ag::matches(self)
     }
 
-    /// Whether the query is an element-search request: the
-    /// query starts with the elements prefix (`:` by default).
-    /// Finer-grained than `is_notes_query` — searches individual
-    /// paragraphs/list-items/headings rather than whole files.
-    fn is_elements_query(&self) -> bool {
-        crate::tui::mode::elements::matches(self)
+    /// Whether the query is a segment-search request: the
+    /// query starts with the segments prefix (`:` by default).
+    /// Finer-grained than `is_notes_query` — searches header-
+    /// bounded sections (see `crate::tui::mode::segments`'s
+    /// module doc comment) rather than whole files.
+    fn is_segments_query(&self) -> bool {
+        crate::tui::mode::segments::matches(self)
     }
 
-    /// The element-search body, i.e. everything after the
-    /// leading elements prefix. Empty string when not in
-    /// elements mode.
+    /// The segment-search body, i.e. everything after the
+    /// leading segments prefix. Empty string when not in
+    /// segments mode.
     #[allow(dead_code)]
-    fn elements_pattern(&self) -> &str {
-        crate::tui::mode::elements::pattern(self)
+    fn segments_pattern(&self) -> &str {
+        crate::tui::mode::segments::pattern(self)
     }
 
     /// The ag-search body, i.e. everything after the
@@ -3158,7 +3161,7 @@ impl App {
                 || c == prefixes.tags
                 || c == prefixes.ag
                 || c == prefixes.codegraph
-                || c == prefixes.elements
+                || c == prefixes.segments
         });
         let body = if has_prefix {
             self.query.chars().skip(1).collect::<String>()
@@ -3249,10 +3252,10 @@ impl App {
         // search debounce. `ag_touch` is a
         // no-op outside `,` mode.
         self.ag_touch();
-        // Same co-location for the elements-mode
-        // search debounce. `elements_touch` is a
+        // Same co-location for the segments-mode
+        // search debounce. `segments_touch` is a
         // no-op outside `:` mode.
-        self.elements_touch();
+        self.segments_touch();
     }
 
     /// Fire the per-mode search immediately on a
@@ -4569,8 +4572,8 @@ impl PrefixPicker {
                 description: "search file contents with `ag` (The Silver Searcher)",
             },
             PrefixOption {
-                prefix: Some(prefixes.elements),
-                label: "Elements",
+                prefix: Some(prefixes.segments),
+                label: "Segments",
                 description: "search note paragraphs/list-items/headings individually",
             },
         ];
@@ -4951,7 +4954,7 @@ impl App {
             llm_in_flight: false,
             llm_request: None,
             ag_state: crate::ag::AgState::new(),
-            elements_state: crate::tui::mode::elements::ElementsState::new(),
+            segments_state: crate::tui::mode::segments::SegmentsState::new(),
             files_state: crate::files::FilesState::new(),
             files_ignores,
             jira_rows: Vec::new(),
@@ -5058,10 +5061,10 @@ impl App {
             app.ag_state.debounce_started = Some(std::time::Instant::now());
             app.ag_maybe_autocall();
         }
-        // Same priming for a restored elements query.
-        if app.is_elements_query() {
-            app.elements_state.debounce_started = Some(std::time::Instant::now());
-            app.elements_maybe_autocall();
+        // Same priming for a restored segments query.
+        if app.is_segments_query() {
+            app.segments_state.debounce_started = Some(std::time::Instant::now());
+            app.segments_maybe_autocall();
         }
         // Rows are ordered newest first; index 0 is the newest entry.
         // Keep the selection on the newest match so it appears at the
@@ -5403,14 +5406,14 @@ impl App {
         if self.is_panes_query() {
             return self.rows.clone();
         }
-        // Elements mode (`:`) rows come from `note_search`'s
-        // `elements` table, not command history — "labeled"
+        // Segments mode (`:`) rows come from `note_search`'s
+        // `segments` table, not command history — "labeled"
         // (starred/commented) rows are a command-history concept
         // that has no meaning here, and results are already
-        // ordered server-side (`run_elements_search` requests
+        // ordered server-side (`run_segments_search` requests
         // `SortOrder::Modified`). Falling through to the
         // labeled-row merge + `sort_partition` below would scan
-        // every labeled row AND re-sort the full element result
+        // every labeled row AND re-sort the full segment result
         // set on every keystroke (`build_merged_rows` runs
         // unconditionally in `refresh()`), which is exactly the
         // kind of per-keystroke main-thread work the background
@@ -5418,7 +5421,7 @@ impl App {
         // path — for a large notes vault this dwarfed the actual
         // debounced search cost. Return the already-sorted rows
         // as-is, same shape as the panes-mode early return above.
-        if self.is_elements_query() {
+        if self.is_segments_query() {
             return self.rows.clone();
         }
         // Directories / JIRA / files
@@ -5679,7 +5682,7 @@ impl App {
             crate::tui::mode::ModeKind::Tags => return crate::tui::mode::tags::fetch(self),
             crate::tui::mode::ModeKind::Codegraph => return crate::tui::mode::codegraph::fetch(self),
             crate::tui::mode::ModeKind::Ag => return crate::tui::mode::ag::fetch(self),
-            crate::tui::mode::ModeKind::Elements => return crate::tui::mode::elements::fetch(self),
+            crate::tui::mode::ModeKind::Segments => return crate::tui::mode::segments::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6211,7 +6214,7 @@ impl App {
             self.select_for_run_impl();
             return;
         }
-        if self.is_elements_query() {
+        if self.is_segments_query() {
             self.select_for_run_impl();
             return;
         }
@@ -6654,83 +6657,83 @@ impl App {
         }
     }
 
-    /// Arm the elements-mode debounce. Mirrors `ag_touch`.
-    fn elements_touch(&mut self) {
-        if self.is_elements_query() {
-            self.elements_state.debounce_started = Some(std::time::Instant::now());
-            if let Some(request) = self.elements_state.request.take() {
+    /// Arm the segments-mode debounce. Mirrors `ag_touch`.
+    fn segments_touch(&mut self) {
+        if self.is_segments_query() {
+            self.segments_state.debounce_started = Some(std::time::Instant::now());
+            if let Some(request) = self.segments_state.request.take() {
                 request.cancelled.store(true, Ordering::Relaxed);
             }
-            self.elements_state.in_flight = false;
+            self.segments_state.in_flight = false;
         } else {
-            self.elements_state.debounce_started = None;
-            self.elements_state.in_flight = false;
-            self.elements_state.request = None;
-            self.elements_state.last_pattern = None;
+            self.segments_state.debounce_started = None;
+            self.segments_state.in_flight = false;
+            self.segments_state.request = None;
+            self.segments_state.last_pattern = None;
         }
     }
 
-    /// Check whether the elements-mode debounce has elapsed and
+    /// Check whether the segments-mode debounce has elapsed and
     /// spawn a background search if so. Mirrors `ag_maybe_autocall`.
-    fn elements_maybe_autocall(&mut self) {
-        if !self.is_elements_query() {
+    fn segments_maybe_autocall(&mut self) {
+        if !self.is_segments_query() {
             return;
         }
-        if self.elements_state.in_flight {
+        if self.segments_state.in_flight {
             return;
         }
-        let Some(started) = self.elements_state.debounce_started else {
+        let Some(started) = self.segments_state.debounce_started else {
             return;
         };
-        if started.elapsed() < crate::tui::mode::elements::ELEMENTS_DEBOUNCE {
+        if started.elapsed() < crate::tui::mode::segments::SEGMENTS_DEBOUNCE {
             return;
         }
         let Some(ref db_path) = self.notes_database else {
-            self.set_status_message("Elements mode: notes.database is not configured".to_string());
-            self.elements_state.debounce_started = None;
+            self.set_status_message("Segments mode: notes.database is not configured".to_string());
+            self.segments_state.debounce_started = None;
             return;
         };
-        let pattern = crate::tui::mode::elements::ElementsState::current_pattern(
+        let pattern = crate::tui::mode::segments::SegmentsState::current_pattern(
             &self.query,
-            self.query_prefixes.elements,
+            self.query_prefixes.segments,
         );
-        if self.elements_state.has_results_for(&pattern) {
+        if self.segments_state.has_results_for(&pattern) {
             return;
         }
-        self.elements_state.last_pattern = Some(pattern.clone());
+        self.segments_state.last_pattern = Some(pattern.clone());
         let db_path = db_path.clone();
         let notes_dir = self.notes_dir.clone();
-        self.spawn_elements_search(db_path, notes_dir, pattern);
+        self.spawn_segments_search(db_path, notes_dir, pattern);
     }
 
-    /// Spawn a background thread that runs the elements query.
+    /// Spawn a background thread that runs the segments query.
     /// Mirrors `spawn_ag_search`.
-    fn spawn_elements_search(
+    fn spawn_segments_search(
         &mut self,
         db_path: std::path::PathBuf,
         notes_dir: Option<std::path::PathBuf>,
         pattern: String,
     ) {
-        let request = crate::tui::mode::elements::spawn_elements_search(db_path, notes_dir, pattern);
-        self.elements_state.in_flight = true;
-        self.elements_state.request = Some(request);
+        let request = crate::tui::mode::segments::spawn_segments_search(db_path, notes_dir, pattern);
+        self.segments_state.in_flight = true;
+        self.segments_state.request = Some(request);
     }
 
-    /// Process an elements-mode search result from the
+    /// Process an segments-mode search result from the
     /// background thread. Unlike `process_ag_result`, the
     /// channel carries a `Result` — an invalid query (unbalanced
     /// parens, etc.) or a search failure surfaces as a status
     /// message, same UX the old synchronous `fetch()` had.
-    fn process_elements_result(
+    fn process_segments_result(
         &mut self,
-        request: crate::tui::mode::elements::ElementsRequest,
+        request: crate::tui::mode::segments::SegmentsRequest,
         result: Result<Vec<HistoryRow>, String>,
     ) {
-        self.elements_state.in_flight = false;
-        self.elements_state.request = None;
-        let current = crate::tui::mode::elements::ElementsState::current_pattern(
+        self.segments_state.in_flight = false;
+        self.segments_state.request = None;
+        let current = crate::tui::mode::segments::SegmentsState::current_pattern(
             &self.query,
-            self.query_prefixes.elements,
+            self.query_prefixes.segments,
         );
         if current != request.pattern {
             // Stale result — the user has typed something else
@@ -6741,11 +6744,11 @@ impl App {
         }
         match result {
             Ok(rows) => {
-                self.elements_state.rows = rows;
+                self.segments_state.rows = rows;
                 self.refresh();
             }
             Err(e) => {
-                self.set_status_message(format!("Elements mode: {}", e));
+                self.set_status_message(format!("Segments mode: {}", e));
             }
         }
     }
@@ -7849,11 +7852,11 @@ impl App {
     ///   `Tab` key doesn't interfere with any other
     ///   mode.
     fn notes_tab_complete_at_cursor(&mut self) {
-        // Active in notes (`@`), todos (`!`), and elements (`:`)
+        // Active in notes (`@`), todos (`!`), and segments (`:`)
         // mode — all three share the same `notes.database` tag/
         // link namespace, so the completion source is identical.
         // The three prefixes are each a single char (the
-        // `query_prefixes.notes` / `.todo` / `.elements` fields).
+        // `query_prefixes.notes` / `.todo` / `.segments` fields).
         let prefix_len: usize = 1;
         if self.query_cursor < prefix_len {
             return;
@@ -7873,7 +7876,7 @@ impl App {
             .expect("query_cursor >= 1 implies non-empty");
         if first != self.query_prefixes.notes
             && first != self.query_prefixes.todo
-            && first != self.query_prefixes.elements
+            && first != self.query_prefixes.segments
         {
             return;
         }
@@ -12423,7 +12426,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.directories => Some(ModeKind::Directories),
             _ if c == query_prefixes.panes => Some(ModeKind::Panes),
             _ if c == query_prefixes.jira => Some(ModeKind::Jira),
-            _ if c == query_prefixes.elements => Some(ModeKind::Elements),
+            _ if c == query_prefixes.segments => Some(ModeKind::Segments),
             _ => None,
         }
     });
@@ -13101,13 +13104,13 @@ fn run_loop(
                 app.process_ag_result(request, result);
             }
 
-        // Check for elements-mode search result
+        // Check for segments-mode search result
         // from background thread. Mirrors the
         // ag-mode poll above.
-        if let Some(request) = app.elements_state.request.as_ref()
+        if let Some(request) = app.segments_state.request.as_ref()
             && let Ok(result) = request.receiver.try_recv()
-            && let Some(request) = app.elements_state.request.take() {
-                app.process_elements_result(request, result);
+            && let Some(request) = app.segments_state.request.take() {
+                app.process_segments_result(request, result);
             }
 
         // Check for JIRA comments-fetch result
@@ -13234,11 +13237,11 @@ fn run_loop(
                 // ag search after `AG_DEBOUNCE` of
                 // quiet typing in `,` mode.
                 app.ag_maybe_autocall();
-                // Same debounce drive for elements-mode
+                // Same debounce drive for segments-mode
                 // searches: spawns the background
-                // search after `ELEMENTS_DEBOUNCE` of
+                // search after `SEGMENTS_DEBOUNCE` of
                 // quiet typing in `:` mode.
-                app.elements_maybe_autocall();
+                app.segments_maybe_autocall();
                 continue;
             }
             Ok(true) => {}
@@ -13351,16 +13354,16 @@ fn run_loop(
         }
 
         // Same cancel handling for an in-flight
-        // elements search.
-        if app.elements_state.request.is_some()
+        // segments search.
+        if app.segments_state.request.is_some()
             && let Some(action) = action_for_key(&app.bindings, &key)
             && matches!(action, Action::Cancel)
         {
-            if let Some(request) = app.elements_state.request.take() {
+            if let Some(request) = app.segments_state.request.take() {
                 request.cancelled.store(true, Ordering::Relaxed);
             }
-            app.elements_state.in_flight = false;
-            app.set_status_message("elements search cancelled".to_string());
+            app.segments_state.in_flight = false;
+            app.set_status_message("segments search cancelled".to_string());
             continue;
         }
 
@@ -13978,14 +13981,14 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // search mode AND tag / link
             // names inside the notes
             // (`@`), todos (`!`), and
-            // elements (`:`) modes. The
+            // segments (`:`) modes. The
             // add-entry dialog handles
             // its own Tab as field-next
             // INSIDE the dialog, so the
             // two paths never collide.
             if app.is_jira_query() {
                 app.jira_field_complete_at_cursor();
-            } else if app.is_notes_query() || app.is_todo_query() || app.is_elements_query() {
+            } else if app.is_notes_query() || app.is_todo_query() || app.is_segments_query() {
                 app.notes_tab_complete_at_cursor();
             }
             // Outside all four

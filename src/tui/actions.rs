@@ -104,12 +104,12 @@ impl App {
                     self.pick_mode = Some(PickMode::Run);
                 }
             }
-            crate::tui::mode::ModeKind::Elements => {
-                // `:` queries are element-search requests.
+            crate::tui::mode::ModeKind::Segments => {
+                // `:` queries are segment-search requests.
                 // Same "open the file at the matching line"
                 // convention as Tags/Ag/Codegraph — the
                 // absolute path is in `row.directory`, the
-                // element's start line is in `row.session_id`.
+                // segment's start line is in `row.session_id`.
                 if let Some(row) = self.selected_row() {
                     let editor = std::env::var("EDITOR")
                         .ok()

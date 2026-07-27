@@ -1023,14 +1023,20 @@ pub struct QueryPrefixes {
     /// CodeGraph has indexed it.
     pub codegraph: char,
     pub jira: char,
-    /// Prefix for the element-search mode (default `:`).
-    /// Searches individual paragraphs, list items (with
-    /// nested children folded in), and headings via
-    /// `note_search`'s `elements` table — finer-grained
-    /// than `notes` (`@`), which searches whole files.
-    /// Selecting a row opens the file in `$EDITOR` at the
-    /// element's start line, same as `tags` / `codegraph`.
-    pub elements: char,
+    /// Prefix for the segment-search mode (default `:`).
+    /// Searches `note_search`'s `segments` table — a segment is
+    /// one markdown header (level 1-4) plus everything below it
+    /// up to the next level-<=4 header — finer-grained than
+    /// `notes` (`@`), which searches whole files. Selecting a row
+    /// opens the file in `$EDITOR` at the segment's start line,
+    /// same as `tags` / `codegraph`.
+    ///
+    /// Was called `elements` (`note_search`'s prior "element
+    /// search" feature) before upstream's segment redesign;
+    /// `prefix.elements=` in an existing config file is still
+    /// honored as an alias for `prefix.segments=` — see
+    /// `assign_prefix`.
+    pub segments: char,
 }
 
 impl Default for QueryPrefixes {
@@ -1048,7 +1054,7 @@ impl Default for QueryPrefixes {
             ag: ',',
             codegraph: '&',
             jira: '-',
-            elements: ':',
+            segments: ':',
         }
     }
 }
@@ -2583,7 +2589,12 @@ impl Config {
             "ag" => prefixes.ag = c,
             "codegraph" => prefixes.codegraph = c,
             "jira" => prefixes.jira = c,
-            "elements" => prefixes.elements = c,
+            "segments" => prefixes.segments = c,
+            // Back-compat: `elements` was this mode's name before
+            // note_search's segment redesign — an existing config
+            // file's `prefix.elements=` still applies rather than
+            // silently going unrecognized.
+            "elements" => prefixes.segments = c,
             _ => {}
         }
     }

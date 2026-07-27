@@ -1647,14 +1647,15 @@ fn pick_text_to_yank_uses_selected_row() {
     assert_eq!(text, "echo hello");
 }
 
-/// In elements (`:`) mode, `pick_text_to_yank` copies the
-/// containing note's FILENAME (`row.comment`) instead of the
-/// matched element's own text (`row.command`) — a bare
-/// `[[kramfors]]` reference line's own text can be as short as
-/// the link name itself, which is rarely what the user wants on
-/// the clipboard.
+/// In segments (`:`) mode, `pick_text_to_yank` copies the row's
+/// breadcrumb (`row.comment` — filename + ancestor headers'
+/// text, see `map_segment_results`) instead of the matched
+/// segment's own text (`row.command`, which can be a whole
+/// header-bounded section joined onto one line) — the breadcrumb
+/// identifies WHERE the match is, which is more useful on the
+/// clipboard than a long flattened section of note content.
 #[test]
-fn pick_text_to_yank_uses_filename_in_elements_mode() {
+fn pick_text_to_yank_uses_breadcrumb_in_segments_mode() {
     let mut app = global_test_app(&[]);
     app.query = ":kramfors".to_string();
     app.refresh();
@@ -1665,25 +1666,25 @@ fn pick_text_to_yank_uses_filename_in_elements_mode() {
         session_id: "5".to_string(),
         exit_code: 0,
         timestamp: 0,
-        comment: "project.md".to_string(),
+        comment: "project.md > Project X".to_string(),
         output: String::new(),
-        mode: "element".to_string(),
+        mode: "segment".to_string(),
         source: String::new(),
         ..Default::default()
     });
     app.list_state.select(Some(0));
     let text = pick_text_to_yank(&app).expect("a row is selected");
     assert_eq!(
-        text, "project.md",
-        "elements mode should yank the filename, not the element text"
+        text, "project.md > Project X",
+        "segments mode should yank the breadcrumb, not the segment text"
     );
 }
 
-/// Outside elements mode, `pick_text_to_yank` still yanks the
-/// row's `command` as before — the elements-mode special case
+/// Outside segments mode, `pick_text_to_yank` still yanks the
+/// row's `command` as before — the segments-mode special case
 /// must not leak into other modes.
 #[test]
-fn pick_text_to_yank_uses_command_outside_elements_mode() {
+fn pick_text_to_yank_uses_command_outside_segments_mode() {
     let app = stats_test_app(&[("echo hello", 30)]);
     assert!(!app.query.starts_with(':'));
     let text = pick_text_to_yank(&app).expect("a row is selected");
@@ -9161,93 +9162,94 @@ fn mark_todo_done_with_single_mark_preserves_precise_message() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-// --- Elements mode (`:` prefix) --------------------------------
+// --- Segments mode (`:` prefix) --------------------------------
 
-/// Elements-mode search runs on a background thread (debounced,
+/// Segments-mode search runs on a background thread (debounced,
 /// mirroring `,` ag mode) rather than synchronously inside
 /// `refresh()`. Tests need a deterministic way to drive that cycle:
-/// backdate the debounce so `elements_maybe_autocall` fires
+/// backdate the debounce so `segments_maybe_autocall` fires
 /// immediately, block on the worker thread's result, then feed it
-/// through `process_elements_result` exactly as the real run loop
+/// through `process_segments_result` exactly as the real run loop
 /// does. Call this after setting `app.query` to a `:` query instead
 /// of relying on `app.refresh()` alone to populate results.
-fn drive_elements_search(app: &mut App) {
+fn drive_segments_search(app: &mut App) {
     assert!(
-        app.is_elements_query(),
-        "drive_elements_search called outside elements-mode query"
+        app.is_segments_query(),
+        "drive_segments_search called outside segments-mode query"
     );
-    app.elements_state.debounce_started = Some(
+    app.segments_state.debounce_started = Some(
         std::time::Instant::now()
-            - crate::tui::mode::elements::ELEMENTS_DEBOUNCE
+            - crate::tui::mode::segments::SEGMENTS_DEBOUNCE
             - std::time::Duration::from_millis(10),
     );
-    app.elements_maybe_autocall();
-    if let Some(request) = app.elements_state.request.take() {
+    app.segments_maybe_autocall();
+    if let Some(request) = app.segments_state.request.take() {
         let result = request
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("elements search should complete");
-        app.process_elements_result(request, result);
+            .expect("segments search should complete");
+        app.process_segments_result(request, result);
     }
 }
 
-/// `:` is the default elements-mode prefix.
+/// `:` is the default segments-mode prefix.
 #[test]
-fn elements_default_prefix_is_colon() {
-    assert_eq!(crate::QueryPrefixes::default().elements, ':');
+fn segments_default_prefix_is_colon() {
+    assert_eq!(crate::QueryPrefixes::default().segments, ':');
 }
 
-/// `is_elements_query` recognises the `:` prefix, matching the
+/// `is_segments_query` recognises the `:` prefix, matching the
 /// `is_todo_query` / `is_notes_query` contract.
 #[test]
-fn is_elements_query_recognises_prefix() {
+fn is_segments_query_recognises_prefix() {
     let mut app = global_test_app(&[("a", 1)]);
-    assert!(!app.is_elements_query());
+    assert!(!app.is_segments_query());
     app.query = ":older".to_string();
-    assert!(app.is_elements_query());
+    assert!(app.is_segments_query());
     app.query = ":".to_string();
-    assert!(app.is_elements_query());
+    assert!(app.is_segments_query());
     app.query = "older".to_string();
-    assert!(!app.is_elements_query());
+    assert!(!app.is_segments_query());
     app.query = "!todo".to_string();
-    assert!(!app.is_elements_query());
+    assert!(!app.is_segments_query());
 }
 
-/// `elements_pattern` returns the body after the prefix; matches
+/// `segments_pattern` returns the body after the prefix; matches
 /// the `notes_pattern` / `todo_pattern` contract.
 #[test]
-fn elements_pattern_strips_prefix() {
+fn segments_pattern_strips_prefix() {
     let mut app = global_test_app(&[("a", 1)]);
     app.query = ":older todo".to_string();
-    assert_eq!(app.elements_pattern(), "older todo");
+    assert_eq!(app.segments_pattern(), "older todo");
     app.query = "older todo".to_string();
-    assert_eq!(app.elements_pattern(), "");
+    assert_eq!(app.segments_pattern(), "");
 }
 
-/// A bare `:` (empty pattern) lists every element indexed across
-/// every file — headings and list items. `setup_todo_db`'s
-/// fixture indexes to:
-///   older.md: "# Older" (heading), "older todo 1" (list item —
-///             the immediately-following "some prose in between"
-///             line has no blank-line separator, so `note_search`
-///             folds it into the SAME list item rather than
-///             treating it as its own paragraph), "older done 1"
-///             (list item), "older todo 2" (list item)
-///   newer.md: "# Newer" (heading), "newer todo 1", "newer todo 2"
-/// 7 elements total.
+/// A bare `:` (empty pattern) lists every segment indexed across
+/// every file. A segment is a whole header (level 1-4) plus
+/// everything below it up to the next level-<=4 header, so
+/// `setup_todo_db`'s fixture — each file has exactly ONE level-1
+/// header with everything else nested under it, no other headers
+/// — indexes to exactly one segment per file:
+///   older.md: the entire "# Older" section (header + all 4
+///             todo/prose lines below it, joined with " / ")
+///   newer.md: the entire "# Newer" section (header + both todo
+///             lines below it)
+/// 2 segments total.
 #[test]
-fn fetch_elements_lists_all_elements() {
+fn fetch_segments_lists_all_segments() {
     let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     assert_eq!(
         app.merged_rows().len(),
-        7,
-        "expected 7 elements (2 headings + 5 list-item elements) across both files, got: {:?}",
+        2,
+        "expected 2 segments (one per file — each file has a single \
+         level-1 header covering its whole body), got: {:?}",
         app.merged_rows()
             .iter()
             .map(|r| &r.command)
@@ -9258,7 +9260,7 @@ fn fetch_elements_lists_all_elements() {
 }
 
 /// `build_merged_rows` must take the same cheap early-return path
-/// as panes mode for elements rows (`self.rows.clone()`, no
+/// as panes mode for segment rows (`self.rows.clone()`, no
 /// labeled-row interleave, no re-sort) rather than falling through
 /// to the command-history "labeled rows" merge. That merge scans
 /// every labeled row and re-sorts the whole result set on every
@@ -9268,9 +9270,9 @@ fn fetch_elements_lists_all_elements() {
 /// reported per-keystroke lag. This test locks in the fix by
 /// planting a labeled row that would match the query text (so the
 /// old code path would have pulled it in) and asserting it's
-/// absent from the elements-mode result.
+/// absent from the segments-mode result.
 #[test]
-fn merged_rows_in_elements_mode_does_not_interleave_labeled_rows() {
+fn merged_rows_in_segments_mode_does_not_interleave_labeled_rows() {
     let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
@@ -9282,7 +9284,7 @@ fn merged_rows_in_elements_mode_does_not_interleave_labeled_rows() {
         session_id: String::new(),
         exit_code: 0,
         timestamp: 0,
-        comment: "a bookmark, not an element".to_string(),
+        comment: "a bookmark, not a segment".to_string(),
         output: String::new(),
         mode: "history".to_string(),
         source: String::new(),
@@ -9290,28 +9292,31 @@ fn merged_rows_in_elements_mode_does_not_interleave_labeled_rows() {
     });
     app.query = ":older".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     assert!(
-        app.merged_rows().iter().all(|r| r.mode == "element"),
-        "labeled command-history rows must not be interleaved into elements-mode results, got: {:?}",
+        app.merged_rows().iter().all(|r| r.mode == "segment"),
+        "labeled command-history rows must not be interleaved into segments-mode results, got: {:?}",
         app.merged_rows().iter().map(|r| (&r.mode, &r.command)).collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// A bare word in the typed pattern filters elements by
-/// substring (via `QueryExpr::Text`, the fallback case of the
-/// `#tag` / `[[link]]` query DSL `parse_query` produces).
+/// A bare word in the typed pattern filters segments by substring
+/// (via `QueryExpr::Text`, the fallback case of the `#tag` /
+/// `[[link]]` query DSL `parse_query` produces). "prose" only
+/// appears in older.md's body ("some prose in between"), so this
+/// matches that file's single segment (the whole "# Older"
+/// section) and not newer.md's.
 #[test]
-fn fetch_elements_applies_text_filter() {
+fn fetch_segments_applies_text_filter() {
     let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":prose".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let commands: Vec<String> = app
         .merged_rows()
         .iter()
@@ -9320,7 +9325,7 @@ fn fetch_elements_applies_text_filter() {
     assert_eq!(
         commands.len(),
         1,
-        "expected exactly the 'some prose in between' paragraph, got: {:?}",
+        "expected exactly the '# Older' segment (it's the only one containing \"prose\"), got: {:?}",
         commands
     );
     assert!(commands[0].contains("prose"), "got: {:?}", commands);
@@ -9328,20 +9333,22 @@ fn fetch_elements_applies_text_filter() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// Helper: index a single custom markdown file (with frontmatter
-/// link + a heading-level inline tag + nested list items) into a
+/// Helper: index a single custom markdown file (with a frontmatter
+/// link, a heading-level inline tag, and nested list items) into a
 /// fresh `note_search` DB, for testing the `#tag` / `[[link]]`
-/// query DSL cascade semantics on elements specifically. Mirrors
-/// the exact example from `note_search`'s own README "Cascading
-/// Tags and Links" section.
-fn setup_elements_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
+/// query DSL against segments specifically. The whole file is ONE
+/// segment (a single level-1 header, "# Project X #urgent", with
+/// no other headers to split on) — see the module-doc comment on
+/// `fetch_segments_frontmatter_link_does_not_cascade` for why that
+/// matters.
+fn setup_segments_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
     use rusqlite::Connection;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "smarthistory-elements-cascade-{}-{}",
+        "smarthistory-segments-cascade-{}-{}",
         std::process::id(),
         n
     ));
@@ -9360,7 +9367,7 @@ fn setup_elements_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
     )
     .expect("write project.md");
     let db_path = std::env::temp_dir().join(format!(
-        "smarthistory-elements-cascade-db-{}-{}.sqlite",
+        "smarthistory-segments-cascade-db-{}-{}.sqlite",
         std::process::id(),
         n
     ));
@@ -9378,56 +9385,60 @@ fn setup_elements_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
     (dir, db_path)
 }
 
-/// `:[[link]]` filters elements by the `#tag`/`[[link]]` query
-/// DSL (`QueryExpr::Link`), not just plain substring text — this
-/// is the capability upstream `note_search` added in a follow-up
-/// commit ("Support query for elements") after the initial
-/// element-search feature shipped text-only. A link in the
-/// document's frontmatter cascades to EVERY element in the file
-/// (same semantics as a heading-level tag/link — see the
-/// `elements` module doc comment).
+/// `:[[link]]` filters segments by the `#tag`/`[[link]]` query DSL
+/// (`QueryExpr::Link`), not just plain substring text.
+///
+/// Unlike the old element search (where a frontmatter tag/link
+/// cascaded to every element in the file), a segment's tags/links
+/// come ONLY from its own text — frontmatter is outside every
+/// segment's body, so it contributes nothing to any segment's
+/// `segment_tags`/`segment_links`. A `breadcrumb` (filename +
+/// ancestor headers) replaces the cascade for identifying context
+/// — see the `segments` module doc comment. This test locks in
+/// the NEW (non-cascading) behavior so a future note_search
+/// upgrade that reintroduces cascading would be caught here.
 #[test]
-fn fetch_elements_filters_by_frontmatter_link_cascade() {
-    let (dir, db_path) = setup_elements_cascade_db();
+fn fetch_segments_frontmatter_link_does_not_cascade() {
+    let (dir, db_path) = setup_segments_cascade_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
-    // Baseline: every element in the file, unfiltered.
+    // Baseline: the file's one segment, unfiltered.
     app.query = ":".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let total = app.merged_rows().len();
-    assert!(total > 0, "fixture should index at least one element");
+    assert_eq!(total, 1, "fixture should index exactly one segment");
 
-    // The frontmatter `ref: [[NeoVimNote]]` link cascades to
-    // every element in the file, so this should match the same
-    // total.
+    // The frontmatter `ref: [[NeoVimNote]]` link sits outside the
+    // segment's own text, so it must NOT match.
     app.query = ":[[NeoVimNote]]".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
-    assert_eq!(
-        app.merged_rows().len(),
-        total,
-        "frontmatter link should cascade to every element in the file"
+    drive_segments_search(&mut app);
+    assert!(
+        app.merged_rows().is_empty(),
+        "a frontmatter-only link must not match any segment; got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// `:[[link]]` on a link that only appears on ONE list item
-/// matches just that item (plus its nested child, folded into
-/// the same element) — not the whole file. Distinguishes the
-/// cascade case (frontmatter/heading) from the direct-reference
-/// case.
+/// `:[[link]]` on a link that appears in the segment's own body
+/// text matches — the whole file is one segment (a single level-1
+/// header, "# Project X #urgent", with no other headers to split
+/// on), so this also demonstrates that a match anywhere in a
+/// segment's text returns the WHOLE segment (header + all its
+/// list items), not just the matching line.
 #[test]
-fn fetch_elements_filters_by_direct_link_match() {
-    let (dir, db_path) = setup_elements_cascade_db();
+fn fetch_segments_filters_by_direct_link_match() {
+    let (dir, db_path) = setup_segments_cascade_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":[[SomeLink]]".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let commands: Vec<String> = app
         .merged_rows()
         .iter()
@@ -9436,7 +9447,7 @@ fn fetch_elements_filters_by_direct_link_match() {
     assert_eq!(
         commands.len(),
         1,
-        "expected exactly the '[[SomeLink]] project reference' list item, got: {:?}",
+        "expected exactly the file's one segment, got: {:?}",
         commands
     );
     assert!(
@@ -9448,30 +9459,30 @@ fn fetch_elements_filters_by_direct_link_match() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// `:#tag` on a tag that appears on a HEADING cascades to every
-/// element in that heading's section — the tag/link cascade
-/// applies symmetrically to `#tag` and `[[link]]` tokens.
+/// `:#tag` on a tag that appears in the segment's own header line
+/// matches — `# Project X #urgent` is the header of (and therefore
+/// part of the text of) the file's one and only segment, so this
+/// is a direct match on the segment's own text, not a cascade
+/// (segments don't cascade tags/links from ancestor headers — see
+/// `fetch_segments_frontmatter_link_does_not_cascade`).
 #[test]
-fn fetch_elements_filters_by_heading_tag_cascade() {
-    let (dir, db_path) = setup_elements_cascade_db();
+fn fetch_segments_filters_by_heading_own_tag() {
+    let (dir, db_path) = setup_segments_cascade_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let total = app.merged_rows().len();
 
-    // `# Project X #urgent` is the only heading in the file, so
-    // every element (the whole file is under that heading's
-    // section) should match.
     app.query = ":#urgent".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     assert_eq!(
         app.merged_rows().len(),
         total,
-        "heading-level tag should cascade to every element under it"
+        "a tag in the segment's own header line must match that segment"
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
@@ -9481,14 +9492,14 @@ fn fetch_elements_filters_by_heading_tag_cascade() {
 /// message and returns an empty list, rather than silently
 /// falling back to a literal-text search.
 #[test]
-fn fetch_elements_invalid_query_surfaces_status_message() {
+fn fetch_segments_invalid_query_surfaces_status_message() {
     let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":(unbalanced".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     assert!(app.merged_rows().is_empty());
     let status = app
         .status_message
@@ -9500,34 +9511,37 @@ fn fetch_elements_invalid_query_surfaces_status_message() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// Heading elements get a `#`/`##`/... prefix in `command` so the
-/// list visually distinguishes them from paragraphs / list items.
+/// A segment with a heading starts with a literal `#`/`##`/... in
+/// `command`, same as the source markdown — because the segment's
+/// own header line is verbatim the first line of `SegmentResult::text`
+/// (see `map_segment_results`), not a prefix smarthistory adds
+/// itself.
 #[test]
-fn fetch_elements_marks_headings_with_prefix() {
+fn fetch_segments_headings_start_with_hash() {
     let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":Older".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let heading_row = app
         .merged_rows()
         .iter()
         .find(|r| r.command.contains("Older"))
-        .expect("the '# Older' heading element should match");
+        .expect("the '# Older' segment should match");
     assert!(
         heading_row.command.starts_with('#'),
-        "heading element's command should start with a literal '#'; got: {:?}",
+        "segment's command should start with its own header's literal '#'; got: {:?}",
         heading_row.command
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// Selecting ANY element row — heading, paragraph, or list item —
+/// Selecting ANY segment row — heading, paragraph, or list item —
 /// loads context from the underlying file into the output
-/// preview, not just that element's own isolated text. A bare
+/// preview, not just that segment's own isolated text. A bare
 /// `[[link]]` reference line's own text can be as short as the
 /// link name itself, which isn't useful as a preview on its own.
 /// This fixture's file is short (well under the 50-line context
@@ -9552,14 +9566,14 @@ fn ensure_selected_context_produces_clean_markdown_without_line_number_prefix() 
     app.notes_database = Some(db_path.clone());
     app.query = ":Older".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let heading_idx = app
         .merged_rows()
         .iter()
         .position(|r| r.command.starts_with('#'))
         .expect("heading row should be present");
     app.list_state.select(Some(heading_idx));
-    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    crate::tui::mode::segments::ensure_selected_context(&mut app);
     let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     let output = ansi_re
         .replace_all(&app.merged_rows()[heading_idx].output, "")
@@ -9578,15 +9592,23 @@ fn ensure_selected_context_produces_clean_markdown_without_line_number_prefix() 
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// A segment's own `text` already covers its whole header-bounded
+/// section (see the module doc comment — unlike the old element
+/// search, there's no separate "heading row" vs "list-item row"
+/// distinction anymore, since every list item under a header folds
+/// into that header's ONE segment). This just confirms
+/// `ensure_selected_context` loads the underlying file's full
+/// content into `output` for that single segment row, not just an
+/// isolated fragment.
 #[test]
-fn ensure_selected_context_loads_full_file_for_any_element_row() {
+fn ensure_selected_context_loads_full_file_for_segment_row() {
     let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
     app.query = ":Older".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     // Strip ANSI escapes before asserting on substrings: `bat`
     // syntax-highlights each token as its own colored span, so a
     // multi-token phrase like "# Older" (hash + space + word,
@@ -9595,35 +9617,20 @@ fn ensure_selected_context_loads_full_file_for_any_element_row() {
     // is there.
     let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
 
-    // Heading row.
-    let heading_idx = app
+    let idx = app
         .merged_rows()
         .iter()
         .position(|r| r.command.starts_with('#'))
-        .expect("heading row should be present");
-    app.list_state.select(Some(heading_idx));
-    crate::tui::mode::elements::ensure_selected_context(&mut app);
-    let heading_output = app.merged_rows()[heading_idx].output.clone();
-    let plain_heading_output = ansi_re.replace_all(&heading_output, "").to_string();
+        .expect("the '# Older' segment row should be present");
+    app.list_state.select(Some(idx));
+    crate::tui::mode::segments::ensure_selected_context(&mut app);
+    let output = app.merged_rows()[idx].output.clone();
+    let plain_output = ansi_re.replace_all(&output, "").to_string();
     assert!(
-        plain_heading_output.contains("older todo 1"),
-        "expected the full file's content in output for the heading row, got: {:?}",
-        plain_heading_output
-    );
-
-    // Plain list-item row (NOT a heading) — same expectation.
-    let list_item_idx = app
-        .merged_rows()
-        .iter()
-        .position(|r| !r.command.starts_with('#') && r.command.contains("older todo 1"))
-        .expect("list-item row should be present");
-    app.list_state.select(Some(list_item_idx));
-    crate::tui::mode::elements::ensure_selected_context(&mut app);
-    let list_item_output = app.merged_rows()[list_item_idx].output.clone();
-    let plain_output = ansi_re.replace_all(&list_item_output, "").to_string();
-    assert!(
-        plain_output.contains("Older") && plain_output.contains("older todo 2"),
-        "expected the full file's content (including the heading and other list items, beyond just this list item's own text) in output for the list-item row, got: {:?}",
+        plain_output.contains("Older")
+            && plain_output.contains("older todo 1")
+            && plain_output.contains("older todo 2"),
+        "expected the full file's content in output, got: {:?}",
         plain_output
     );
 
@@ -9633,12 +9640,12 @@ fn ensure_selected_context_loads_full_file_for_any_element_row() {
 
 /// `ensure_selected_context` runs on every keystroke (via
 /// `App::refresh`), and `merged_rows` is rebuilt from scratch each
-/// time (with the raw, unhighlighted element text) — so without a
+/// time (with the raw, unhighlighted segment text) — so without a
 /// cache, re-selecting the same row on every keystroke would
 /// re-spawn `bat` every time, which is exactly the per-keystroke
 /// blocking work the background search thread was introduced to
 /// eliminate. Once a row's context has been computed, it must be
-/// served from `ElementsState::context_cache` on subsequent calls
+/// served from `SegmentsState::context_cache` on subsequent calls
 /// for the same file/line, not recomputed.
 #[test]
 fn ensure_selected_context_caches_by_file_and_line() {
@@ -9648,7 +9655,7 @@ fn ensure_selected_context_caches_by_file_and_line() {
     app.notes_database = Some(db_path.clone());
     app.query = ":Older".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     let heading_idx = app
         .merged_rows()
         .iter()
@@ -9661,20 +9668,20 @@ fn ensure_selected_context_caches_by_file_and_line() {
         .expect("session_id should be a line number");
     app.list_state.select(Some(heading_idx));
 
-    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    crate::tui::mode::segments::ensure_selected_context(&mut app);
     let highlighted_output = app.merged_rows()[heading_idx].output.clone();
     assert_eq!(
-        app.elements_state
+        app.segments_state
             .context_cache
             .get(&(filepath.clone(), line_number)),
         Some(&highlighted_output),
         "cache should hold the just-computed highlighted output under (file, line)"
     );
-    let cache_len_after_first = app.elements_state.context_cache.len();
+    let cache_len_after_first = app.segments_state.context_cache.len();
 
     // Simulate the next keystroke: `refresh()` rebuilds
     // `merged_rows` from the still-raw cached search rows (so
-    // `output` resets to the raw element text) and then, as part
+    // `output` resets to the raw segment text) and then, as part
     // of its own per-mode context step, calls
     // `ensure_selected_context` again for the same selected row —
     // this must be served from the cache rather than re-spawning
@@ -9686,7 +9693,7 @@ fn ensure_selected_context_caches_by_file_and_line() {
         "refresh's own context step should restore the cached highlighted output"
     );
     assert_eq!(
-        app.elements_state.context_cache.len(),
+        app.segments_state.context_cache.len(),
         cache_len_after_first,
         "re-selecting the same row must not grow the cache"
     );
@@ -9695,40 +9702,39 @@ fn ensure_selected_context_caches_by_file_and_line() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// When the file is LONGER than the 50-line context window, the
-/// preview must center on the matched element's own line — not
-/// just show the first 50 lines from the top of the file (which
-/// wouldn't even contain a match that occurs deep in the file).
-/// This is the concrete case the windowed-context fix addresses:
-/// `:[[kramfors]]` matching a paragraph far from the top of a
-/// long note must show THAT paragraph in the preview, not the
-/// unrelated paragraphs at the very start of the file.
+/// When the matched segment's OWN header is far from the top of a
+/// long file, the preview must center the 50-line window on that
+/// header's `start_line` — not just show the first 50 lines from
+/// the top of the file (which wouldn't even contain the segment
+/// that matched). Note a segment's `start_line` is its header's
+/// line, not the specific line the query text happened to appear
+/// on within the segment's body — segments are returned as whole
+/// header-bounded sections, not individual paragraphs, so
+/// "centering on the match" now means centering on the segment
+/// (see `crate::tui::mode::segments`'s module doc comment).
+///
+/// 40 short "# Filler N" sections (4 lines each = 160 lines)
+/// precede a "# Target" section containing `[[kramfors]]` near
+/// its own start (around line 162) — well beyond the 50-line
+/// window if it were (wrongly) anchored at the top of the file.
 #[test]
-fn ensure_selected_context_centers_window_on_match_line_for_long_file() {
+fn ensure_selected_context_centers_window_on_segment_start_for_long_file() {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "smarthistory-elements-longfile-{}-{}",
+        "smarthistory-segments-longfile-{}-{}",
         std::process::id(),
         n
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create dir");
-    // 80 short paragraphs (2 lines each incl. blank separator)
-    // before the target reference, then 20 more after — puts the
-    // `[[kramfors]]` match around line 165, well beyond the
-    // 50-line window if it were (wrongly) anchored at the top of
-    // the file.
     let mut body = String::from("---\ntitle: long\n---\n\n");
-    for i in 0..80 {
-        body.push_str(&format!("paragraph number {}\n\n", i));
+    for i in 0..40 {
+        body.push_str(&format!("# Filler {i}\n\ncontent {i}\n\n"));
     }
-    body.push_str("a reference to [[kramfors]] appears here\n\n");
-    for i in 80..100 {
-        body.push_str(&format!("paragraph number {}\n\n", i));
-    }
+    body.push_str("# Target\n\na reference to [[kramfors]] appears here\n\nmore content\n");
     fs::write(dir.join("long.md"), &body).expect("write long.md");
     let db_path = dir.join("notes.sqlite");
     let conn = rusqlite::Connection::open(&db_path).expect("open db");
@@ -9747,30 +9753,30 @@ fn ensure_selected_context_centers_window_on_match_line_for_long_file() {
     app.notes_database = Some(db_path.clone());
     app.query = ":[[kramfors]]".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     assert_eq!(
         app.merged_rows().len(),
         1,
-        "expected exactly the one paragraph referencing kramfors, got: {:?}",
+        "expected exactly the '# Target' segment referencing kramfors, got: {:?}",
         app.merged_rows()
             .iter()
             .map(|r| &r.command)
             .collect::<Vec<_>>()
     );
     app.list_state.select(Some(0));
-    crate::tui::mode::elements::ensure_selected_context(&mut app);
+    crate::tui::mode::segments::ensure_selected_context(&mut app);
     let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     let output = ansi_re
         .replace_all(&app.merged_rows()[0].output, "")
         .to_string();
     assert!(
         output.contains("kramfors"),
-        "expected the matched line itself to be visible in the windowed preview, got: {:?}",
+        "expected the matched segment's own header/text to be visible in the windowed preview, got: {:?}",
         output
     );
     assert!(
-        !output.contains("paragraph number 0\n"),
-        "window should be centered on the match, not on the unrelated paragraphs at the top of the file; got: {:?}",
+        !output.contains("Filler 0\n"),
+        "window should be centered on the matched segment's start line, not on the unrelated sections at the top of the file; got: {:?}",
         output
     );
     let _ = fs::remove_dir_all(&dir);
@@ -9780,12 +9786,12 @@ fn ensure_selected_context_centers_window_on_match_line_for_long_file() {
 /// Without `notes.database` configured, `fetch` returns an empty
 /// list with a status message — same UX as todo/notes mode.
 #[test]
-fn fetch_elements_requires_notes_database() {
+fn fetch_segments_requires_notes_database() {
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_database = None;
     app.query = ":anything".to_string();
     app.refresh();
-    drive_elements_search(&mut app);
+    drive_segments_search(&mut app);
     assert!(app.merged_rows().is_empty());
     let status = app
         .status_message
@@ -9795,14 +9801,14 @@ fn fetch_elements_requires_notes_database() {
     assert!(status.contains("notes.database"), "got: {:?}", status);
 }
 
-/// Selecting an element row stages `$EDITOR +<start_line>
+/// Selecting an segment row stages `$EDITOR +<start_line>
 /// <absolute-path>` — the same "open the file at the matching
 /// line" convention Tags/Ag/Codegraph use, keyed off
 /// `row.directory` (absolute path) and `row.session_id` (line
 /// number), NOT `row.id` (which is only a synthetic,
 /// not-necessarily-unique-across-files marker).
 #[test]
-fn select_for_run_in_elements_mode_stages_editor_at_line() {
+fn select_for_run_in_segments_mode_stages_editor_at_line() {
     let mut app = global_test_app(&[]);
     app.query = ":".to_string();
     app.refresh();
@@ -9815,7 +9821,7 @@ fn select_for_run_in_elements_mode_stages_editor_at_line() {
         timestamp: 0,
         comment: "older.md".to_string(),
         output: String::new(),
-        mode: "element".to_string(),
+        mode: "segment".to_string(),
         source: String::new(),
         ..Default::default()
     });
@@ -15932,43 +15938,43 @@ fn notes_tab_completion_works_in_todo_mode() {
     );
 }
 
-/// Tab completion works identically in elements mode (`:`) —
+/// Tab completion works identically in segments mode (`:`) —
 /// same tag/link namespace as notes/todo mode, just a different
 /// leading prefix char to recognise.
 #[test]
-fn notes_tab_completion_works_in_elements_mode() {
+fn notes_tab_completion_works_in_segments_mode() {
     let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
     app.query = String::from(":#feat");
     app.query_cursor = app.query.chars().count();
     app.notes_tab_complete_at_cursor();
     assert_eq!(
         app.query, ":#feature ",
-        "tag completion should work in elements mode, got: {:?}",
+        "tag completion should work in segments mode, got: {:?}",
         app.query
     );
 }
 
 /// Link completion (`@name` → `[[linkname]] `) also works in
-/// elements mode, same as tag completion.
+/// segments mode, same as tag completion.
 #[test]
-fn notes_tab_completion_link_works_in_elements_mode() {
+fn notes_tab_completion_link_works_in_segments_mode() {
     let (mut app, _db) = notes_tab_complete_test_app(&[], &["NeovimNote"]);
     app.query = String::from(":@Neo");
     app.query_cursor = app.query.chars().count();
     app.notes_tab_complete_at_cursor();
     assert_eq!(
         app.query, ":[[neovimnote]] ",
-        "link completion should work in elements mode, got: {:?}",
+        "link completion should work in segments mode, got: {:?}",
         app.query
     );
 }
 
 /// `Action::JiraFieldComplete` dispatches to
-/// `notes_tab_complete_at_cursor` in elements mode, not just
+/// `notes_tab_complete_at_cursor` in segments mode, not just
 /// notes/todo — this is the actual dispatch-site wiring, not
 /// just the lower-level `notes_tab_complete_at_cursor` gate.
 #[test]
-fn jira_field_complete_action_dispatches_in_elements_mode() {
+fn jira_field_complete_action_dispatches_in_segments_mode() {
     let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
     app.query = String::from(":#feat");
     app.query_cursor = app.query.chars().count();
@@ -18849,11 +18855,11 @@ fn apply_prefix_jira_then_output_cycles_ok() {
 /// query-history "did the mode change" checks. A prefix char
 /// missing from its lookup array would silently fall back to
 /// `MODE_NONE`, wrongly treating that mode's queries as plain
-/// history. Covers `:` (elements) explicitly since it's new;
+/// history. Covers `:` (segments) explicitly since it's new;
 /// the other 11 configured prefixes are exercised via
 /// `maybe_prefix_selection_with_space_skips_in_history_mode`.
 #[test]
-fn query_mode_char_recognises_elements_prefix() {
+fn query_mode_char_recognises_segments_prefix() {
     let prefixes = crate::QueryPrefixes::default();
     assert_eq!(query_mode_char(":symbol", &prefixes), ':');
     assert_eq!(query_mode_char("plain text", &prefixes), MODE_NONE);
@@ -18863,13 +18869,13 @@ fn query_mode_char_recognises_elements_prefix() {
 /// configured prefix char, not just a subset — a mode missing
 /// from that check would have its leading char treated as part
 /// of the body instead of stripped, leaving a stray character
-/// behind when cycling prefixes. Covers `:` (elements, the mode
+/// behind when cycling prefixes. Covers `:` (segments, the mode
 /// added in this change) and `&` (codegraph, which turned out to
 /// be missing from this same check already — an unrelated
-/// pre-existing gap fixed alongside elements since it's the
+/// pre-existing gap fixed alongside segments since it's the
 /// exact same bug shape).
 #[test]
-fn apply_prefix_strips_elements_and_codegraph_prefixes() {
+fn apply_prefix_strips_segments_and_codegraph_prefixes() {
     let mut app = global_test_app(&[("sym", 1)]);
     app.query = ":sym".to_string();
     app.apply_prefix(None);
@@ -19647,8 +19653,8 @@ fn global_history_previous_next_navigates_across_modes() {
     assert_eq!(app.query, ":newest");
     assert_eq!(app.global_query_draft.as_deref(), Some("live"));
     assert!(
-        app.is_elements_query(),
-        "recalling a `:` entry must switch the app into elements mode"
+        app.is_segments_query(),
+        "recalling a `:` entry must switch the app into segments mode"
     );
 
     // C-S-p again: one step older (now `$` mode).
@@ -20220,7 +20226,7 @@ fn maybe_prefix_selection_with_space_skips_in_history_mode() {
         ("tags", prefixes.tags),
         ("codegraph", prefixes.codegraph),
         ("ag", prefixes.ag),
-        ("elements", prefixes.elements),
+        ("segments", prefixes.segments),
     ] {
         assert_eq!(
             maybe_prefix_selection_with_space("cmd".to_string(), mode_char),
@@ -20239,11 +20245,11 @@ fn maybe_prefix_selection_with_space_skips_in_history_mode() {
     );
 }
 
-/// `draw_list`'s windowing (added alongside the elements-mode perf
-/// fix — see `draw_list_stays_fast_with_a_large_elements_result_set`
+/// `draw_list`'s windowing (added alongside the segments-mode perf
+/// fix — see `draw_list_stays_fast_with_a_large_segments_result_set`
 /// below) now builds `ListItem`s only for the slice
 /// `list_visible_window` picks out, instead of every row in
-/// `merged_rows`. This is a plain history-mode (not elements)
+/// `merged_rows`. This is a plain history-mode (not segments)
 /// integration check that the visible CONTENT is still correct
 /// after that rewrite — not just fast: with more rows than fit on
 /// screen, the newest rows must appear at the bottom by default
@@ -20312,7 +20318,7 @@ fn draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list() {
     );
 }
 
-/// Regression test for the elements-mode typing-lag report: on a
+/// Regression test for the segments-mode typing-lag report: on a
 /// large notes vault, `draw_list` used to build a `ListItem` for
 /// EVERY row in `merged_rows` on every redraw (ratatui's `List`
 /// widget only *paints* the visible slice, but by then the
@@ -20324,14 +20330,14 @@ fn draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list() {
 /// search itself. `draw_list` now only builds `ListItem`s for the
 /// slice `list_visible_window` says will actually be painted. This
 /// test drives real `refresh()` + `render::ui` calls (via
-/// `TestBackend`) against a synthetic 20,000-row elements result
+/// `TestBackend`) against a synthetic 20,000-row segments result
 /// set and asserts each keystroke's render stays well under what
 /// a full unbounded rebuild cost (hundreds of ms, per the manual
 /// measurement above) — a generous bound so the test isn't flaky
 /// on a loaded CI box, but tight enough to catch a regression back
 /// to the O(total rows) behavior.
 #[test]
-fn draw_list_stays_fast_with_a_large_elements_result_set() {
+fn draw_list_stays_fast_with_a_large_segments_result_set() {
     let dir = std::env::temp_dir().join(format!("smarthistory-perf-probe-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create dir");
@@ -20345,20 +20351,20 @@ fn draw_list_stays_fast_with_a_large_elements_result_set() {
     for i in 0..20_000 {
         rows.push(crate::tui::state::HistoryRow {
             id: -(i as i64),
-            command: format!("element number {} with some words in it", i),
+            command: format!("segment number {} with some words in it", i),
             directory: file_path.to_string_lossy().to_string(),
             session_id: "1".to_string(),
             exit_code: 0,
             timestamp: i as i64,
             comment: "shared.md".to_string(),
             output: format!("raw text {}", i),
-            mode: "element".to_string(),
+            mode: "segment".to_string(),
             source: String::new(),
             ..Default::default()
         });
     }
-    app.elements_state.rows = rows;
-    app.elements_state.last_pattern = Some(String::new());
+    app.segments_state.rows = rows;
+    app.segments_state.last_pattern = Some(String::new());
     app.query = ":".to_string();
     app.refresh();
 
@@ -20375,7 +20381,7 @@ fn draw_list_stays_fast_with_a_large_elements_result_set() {
         let render_elapsed = render_start.elapsed();
         assert!(
             render_elapsed < std::time::Duration::from_millis(100),
-            "keystroke {} ({:?}) took {:?} to render 20,000 elements rows — \
+            "keystroke {} ({:?}) took {:?} to render 20,000 segments rows — \
              draw_list should only build ListItems for the visible window, \
              not the full result set",
             i,
@@ -21802,17 +21808,17 @@ fn panes_select_initial_row_handles_empty_list() {
 // shorter than the scroll offset.
 
 #[test]
-fn elements_preview_scroll_hint_centers_segment_line() {
+fn segments_preview_scroll_hint_centers_segment_line() {
     // The post-load
     // state: a
-    // `mode = "element"`
+    // `mode = "segment"`
     // row with a 50-line
     // context window.
     // `preview_scroll`
     // should be set to
     // `SOURCE_CONTEXT_LINES / 2 - 2`
     // = 23 by
-    // `elements::ensure_selected_context`.
+    // `segments::ensure_selected_context`.
     use crate::tui::SOURCE_CONTEXT_LINES;
     let half = SOURCE_CONTEXT_LINES / 2;
     let expected_scroll = half.saturating_sub(2) as u16;
@@ -21830,7 +21836,7 @@ fn elements_preview_scroll_hint_centers_segment_line() {
     // full 50-line
     // window.
     let dir = std::env::temp_dir().join(format!(
-        "smarthistory_elements_scroll_test_{}",
+        "smarthistory_segments_scroll_test_{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
@@ -21851,7 +21857,7 @@ fn elements_preview_scroll_hint_centers_segment_line() {
     // Find the line
     // that the
     // `note_search`
-    // element index
+    // segment index
     // will land on.
     // We use a query
     // that matches a
@@ -21859,13 +21865,13 @@ fn elements_preview_scroll_hint_centers_segment_line() {
     // line 50.
     let mut app = directories_test_app(&[]);
     app.notes_dir = Some(dir.clone());
-    app.notes_database = Some(dir.join("nonexistent-elements.sql"));
+    app.notes_database = Some(dir.join("nonexistent-segments.sql"));
     // Inject a
     // synthetic
-    // element row
+    // segment row
     // pointing at
     // line 50.
-    app.elements_state.rows = vec![crate::tui::state::HistoryRow {
+    app.segments_state.rows = vec![crate::tui::state::HistoryRow {
         id: -1,
         command: "test-segment".to_string(),
         directory: file_path.to_string_lossy().to_string(),
@@ -21874,11 +21880,11 @@ fn elements_preview_scroll_hint_centers_segment_line() {
         timestamp: 0,
         comment: "note.md".to_string(),
         output: String::new(),
-        mode: "element".to_string(),
+        mode: "segment".to_string(),
         source: String::new(),
         ..Default::default()
     }];
-    app.elements_state.last_pattern = Some(String::new());
+    app.segments_state.last_pattern = Some(String::new());
     app.query = ":".to_string();
     app.refresh();
     // After
@@ -21886,7 +21892,7 @@ fn elements_preview_scroll_hint_centers_segment_line() {
     // `ensure_selected_context`
     // has run for
     // the selected
-    // element row.
+    // segment row.
     // The row's
     // `output` should
     // contain the

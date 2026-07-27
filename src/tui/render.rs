@@ -3745,7 +3745,7 @@ fn list_display_position(
 /// (expensive: string formatting + styled spans) construction cost
 /// for the other thousands of off-screen rows was already paid, on
 /// every keystroke. A large notes vault easily indexes tens of
-/// thousands of elements (`:` mode), which measured at ~400ms of
+/// thousands of segments (`:` mode), which measured at ~400ms of
 /// list-building work per keystroke — the actual dominant cost
 /// behind reports of `:` mode typing lag, well past the (already
 /// debounced, backgrounded) search itself. Calling this function
@@ -6035,11 +6035,12 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Ag-mode, tags-mode, codegraph-mode, JIRA-mode, notes-mode,
-    // todo-mode, files-mode, panes-mode, and elements-mode rows
+    // todo-mode, files-mode, panes-mode, and segments-mode rows
     // carry more than 4 lines of context. Ag/tags/codegraph/
-    // elements carry up to [`SOURCE_CONTEXT_LINES`] (50) lines of
-    // source context CENTERED on the matched line (elements mode
-    // via `read_source_context_with_cache`, same as tags/ag) plus,
+    // segments carry up to [`SOURCE_CONTEXT_LINES`] (50) lines of
+    // source context CENTERED on the matched line (segments mode
+    // via its own `bat`-highlighted window, see
+    // `crate::tui::mode::segments::ensure_selected_context`) plus,
     // for tags/codegraph, a callers/callees overlay. JIRA rows
     // carry a 3-line header (Status/Priority, Due/Assignee,
     // Description label) followed by the full issue description
@@ -6061,7 +6062,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         || row.mode == "todo"
         || row.mode == "file"
         || row.mode == "pane"
-        || row.mode == "element"
+        || row.mode == "segment"
     {
         crate::tui::SOURCE_CONTEXT_LINES
     } else {
@@ -6111,7 +6112,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // — the beginning of every line is always visible.
     //
     // Vertical scroll: windowed source-context modes
-    // (`tags` / `ag` / `codegraph` / `elements`) load a
+    // (`tags` / `ag` / `codegraph` / `segments`) load a
     // `SOURCE_CONTEXT_LINES` (50)-line window centered on
     // the matched line. The matched line sits at position
     // `half = 25` within that window. The preview area is
@@ -6470,7 +6471,7 @@ mod tests {
 
     /// Selection scrolled ABOVE the anchor window (e.g. the user
     /// pressed `Up` repeatedly past a bottom-anchored viewport, the
-    /// scenario a long elements-mode result list hits by default):
+    /// scenario a long segments-mode result list hits by default):
     /// the window slides up so the selected row is the first line.
     #[test]
     fn list_visible_window_selection_above_anchor_scrolls_up() {

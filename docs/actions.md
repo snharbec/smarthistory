@@ -475,7 +475,7 @@ Open the theme picker. Lists every available theme (manual + built-in). Navigati
 | Default key | `C-y` |
 | Category | tools |
 
-Copy the current selection to the system clipboard. The "selection" picks the most useful thing to copy at the moment: if the captured-output view is open, the output text is copied; in `:` (Elements) mode, the containing note's **filename** is copied instead of the matched element's own text (a bare `[[link]]` reference line's own text can be as short as the link name itself, which isn't useful on the clipboard); otherwise the selected history row's `command` is copied. The default `C-y` is the canonical readline / vim "yank" shortcut.
+Copy the current selection to the system clipboard. The "selection" picks the most useful thing to copy at the moment: if the captured-output view is open, the output text is copied; in `:` (Segments) mode, the row's **breadcrumb** (filename + ancestor headers' text) is copied instead of the matched segment's own text (a segment's text can be a whole header-bounded section joined onto one line, which is less useful on the clipboard than knowing exactly which file/section it came from); otherwise the selected history row's `command` is copied. The default `C-y` is the canonical readline / vim "yank" shortcut.
 
 ### `EditFileReference`
 
@@ -521,7 +521,7 @@ Download **every** JIRA issue matching the current query, not just the selected 
 
 Tab-completion for JQL field names inside the `-` mode. When the user has typed a token that matches the prefix of one or more JIRA field names (e.g. `lab<TAB>`), the token is expanded to the full field name (e.g. `labels=`). Multiple matches open the completion menu; the user picks from the candidates. Also handles `@`-prefixed alias / fragment completion (`@m<TAB>` → `@me`).
 
-Cross-mode: in `@` (Notes), `!` (Todo), and `:` (Elements) modes, the same key dispatches to tag / link completion. See [`docs/modes/jira.md`](modes/jira.md) for the full table.
+Cross-mode: in `@` (Notes), `!` (Todo), and `:` (Segments) modes, the same key dispatches to tag / link completion. See [`docs/modes/jira.md`](modes/jira.md) for the full table.
 
 ### `SmartOpen`
 

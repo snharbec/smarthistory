@@ -19,7 +19,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | Tags | `$` | [`tags.md`](tags.md) | List every symbol from the local ctags `tags` file. |
 | CodeGraph | `&` | [`codegraph.md`](codegraph.md) | Search symbols in the local `.codegraph/codegraph.db` index; the selected row's preview shows source context plus callers / callees. |
 | ag | `,` | [`ag.md`](ag.md) | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher) (The Silver Searcher). |
-| Elements | `:` | [`elements.md`](elements.md) | Search individual paragraphs, list items, and headings via `note_search`'s `elements` table — finer-grained than `@` (Notes), which searches whole files. |
+| Segments | `:` | [`segments.md`](segments.md) | Search header-anchored sections via `note_search`'s `segments` table — finer-grained than `@` (Notes), which searches whole files. |
 
 ## Cross-cutting topics
 
@@ -47,7 +47,7 @@ The first character of the query decides the mode. Examples:
 | `$@rust setUp` | Tags (rust symbols matching `setUp`). |
 | `&@java getSymbol` | CodeGraph. |
 | `,TODO *.rs` | ag. |
-| `:project reference` | Elements (paragraphs / list items / headings containing "project reference"). |
+| `:project reference` | Segments (header-anchored sections containing "project reference"). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 

@@ -131,7 +131,7 @@ pub struct HistoryRow {
     /// windowed source context
     /// (`tags`, `ag`,
     /// `codegraph`,
-    /// `elements`) use this
+    /// `segments`) use this
     /// to scroll the
     /// `Paragraph` so the
     /// matched line is visible

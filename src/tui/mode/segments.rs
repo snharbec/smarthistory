@@ -1,26 +1,37 @@
-//! `:` (element search) prefix mode.
+//! `:` (segment search) prefix mode.
 //!
-//! Finer-grained than `@` (notes): searches individual
-//! paragraphs, list items (with nested children folded into
-//! their parent, but each child also indexed as its own
-//! element), and headings via `note_search`'s `elements` table,
-//! rather than whole files. A tag or link on a heading (or in
-//! the document's frontmatter) cascades to every element in
-//! that heading's section — see the upstream `note_search`
-//! README's "Element Search" section for the full semantics.
+//! Finer-grained than `@` (notes), which searches whole files:
+//! searches `note_search`'s `segments` table, where a "segment" is
+//! one markdown header (level 1-4) plus everything below it up to
+//! the next level-<=4 header — the header line itself is part of
+//! the segment's text. Level 5/6 headers do NOT start a new
+//! segment; content before the first header (or a file with none)
+//! forms an implicit root segment. A tag or link search returns
+//! the specific section that references it, not just "this file
+//! mentions it somewhere."
+//!
+//! Unlike a heading cascade, a segment's tags/links come ONLY from
+//! its own text — a subsection does NOT inherit its parent
+//! header's tags/links. Instead each segment carries a
+//! `breadcrumb` (filename + ancestor headers' text, own header not
+//! included) so a nested result is still identifiable without
+//! pulling in the whole ancestor chain — see `map_segment_results`,
+//! which surfaces it in `HistoryRow::comment`. See the upstream
+//! `note_search` README's "Segment Search" section for the full
+//! semantics.
 //!
 //! Same query language as `notes` / `todo` mode: the typed
 //! pattern is parsed via `note_search::parse_query` into a
 //! `QueryExpr` tree and passed as `criteria.query_expr`, so
 //! `#tag`, `[[link]]`, `[attr:value]`, `(a OR b)`, and bare-word
-//! AND-matching all work here too (`QueryBuilder::build_element_query`
+//! AND-matching all work here too (`QueryBuilder::build_segment_query`
 //! recurses the same expression tree `build_query_from_expr` /
 //! `build_note_query_from_expr` use, just scoped to the
-//! `elements` table). This wasn't always true — `note_search`'s
-//! element search originally only took separate `tags`/`links`/
+//! `segments` table). This wasn't always true — `note_search`'s
+//! segment search originally only took separate `tags`/`links`/
 //! `text` fields with no query DSL; upstream added `query_expr`
-//! support for elements in a follow-up commit ("Support query
-//! for elements").
+//! support for segments in a follow-up commit ("Support query
+//! for segments").
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
@@ -30,16 +41,16 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// How long the elements-mode debounce waits after the last
+/// How long the segments-mode debounce waits after the last
 /// keystroke before spawning the background search. Same value
 /// as JIRA / ag / files mode (400 ms).
-pub const ELEMENTS_DEBOUNCE: Duration = Duration::from_millis(400);
+pub const SEGMENTS_DEBOUNCE: Duration = Duration::from_millis(400);
 
-/// An in-flight elements search. The background thread sends the
+/// An in-flight segments search. The background thread sends the
 /// result over `receiver`; the run loop polls it. `cancelled`
 /// lets the run loop abort a stale search (e.g. the user pressed
 /// `Cancel` or the query changed again before this one finished).
-pub struct ElementsRequest {
+pub struct SegmentsRequest {
     pub receiver: mpsc::Receiver<Result<Vec<HistoryRow>, String>>,
     pub cancelled: Arc<AtomicBool>,
     /// The pattern that was being searched for, so the caller can
@@ -48,18 +59,18 @@ pub struct ElementsRequest {
     pub pattern: String,
 }
 
-/// Aggregated elements-mode async-search state. Held by the TUI
+/// Aggregated segments-mode async-search state. Held by the TUI
 /// `App`, mirrors `AgState` / `FilesState` exactly: a query on
 /// this mode's own `SearchCriteria`/`DatabaseService` is a
 /// synchronous SQLite round-trip that can take long enough (an
 /// unfiltered `:` on a large notes vault touches every indexed
-/// paragraph/list-item/heading) to make the very first keystroke
-/// after switching into the mode feel like it's not registering.
+/// segment) to make the very first keystroke after switching into
+/// the mode feel like it's not registering.
 /// Running it on a background thread, debounced the same way
 /// `,` (ag) / `-` (JIRA) / `~` (files) mode already are, decouples
 /// typing responsiveness from how long the search itself takes.
-pub struct ElementsState {
-    /// Debounce timer, armed on every keystroke in elements mode.
+pub struct SegmentsState {
+    /// Debounce timer, armed on every keystroke in segments mode.
     pub debounce_started: Option<std::time::Instant>,
     /// Last successfully searched pattern. Prevents re-querying
     /// when the pattern hasn't changed.
@@ -67,14 +78,14 @@ pub struct ElementsState {
     /// Whether a search is currently in flight.
     pub in_flight: bool,
     /// In-flight request (background thread).
-    pub request: Option<ElementsRequest>,
+    pub request: Option<SegmentsRequest>,
     /// Cached results of the most recent search.
     pub rows: Vec<HistoryRow>,
     /// `bat`-highlighted output preview, keyed by (absolute file
     /// path, 1-based start line). `App::refresh()` runs on every
     /// keystroke, which rebuilds `merged_rows` from scratch (from
     /// this struct's own `rows`, whose `output` is always the raw
-    /// unhighlighted element text) — without this cache,
+    /// unhighlighted segment text) — without this cache,
     /// `ensure_selected_context` would re-spawn `bat` on the same
     /// selected row on every single keystroke, which is exactly
     /// the kind of per-keystroke blocking work the background
@@ -84,9 +95,9 @@ pub struct ElementsState {
     pub context_cache: std::collections::HashMap<(String, usize), String>,
 }
 
-impl ElementsState {
+impl SegmentsState {
     pub fn new() -> Self {
-        ElementsState {
+        SegmentsState {
             debounce_started: None,
             last_pattern: None,
             in_flight: false,
@@ -112,33 +123,33 @@ impl ElementsState {
     }
 }
 
-impl Default for ElementsState {
+impl Default for SegmentsState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Spawn a background thread that runs the `note_search` element
+/// Spawn a background thread that runs the `note_search` segment
 /// query and sends the mapped `HistoryRow`s (or an error message)
 /// back over the channel. Mirrors `crate::ag::spawn_ag_search`.
-pub fn spawn_elements_search(
+pub fn spawn_segments_search(
     db_path: std::path::PathBuf,
     notes_dir: Option<std::path::PathBuf>,
     pattern: String,
-) -> ElementsRequest {
+) -> SegmentsRequest {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_clone = cancelled.clone();
     let pattern_for_thread = pattern.clone();
 
     std::thread::spawn(move || {
-        let result = run_elements_search(&db_path, notes_dir.as_deref(), &pattern_for_thread);
+        let result = run_segments_search(&db_path, notes_dir.as_deref(), &pattern_for_thread);
         if !cancelled_clone.load(Ordering::Relaxed) {
             let _ = tx.send(result);
         }
     });
 
-    ElementsRequest {
+    SegmentsRequest {
         receiver: rx,
         cancelled,
         pattern,
@@ -146,10 +157,10 @@ pub fn spawn_elements_search(
 }
 
 /// The actual (synchronous, but run on a background thread)
-/// query + row-mapping. Factored out of `spawn_elements_search`
+/// query + row-mapping. Factored out of `spawn_segments_search`
 /// so it has no channel/thread concerns of its own — just "given
 /// a database and a pattern, return rows or an error message".
-fn run_elements_search(
+fn run_segments_search(
     db_path: &std::path::Path,
     notes_dir: Option<&std::path::Path>,
     pattern: &str,
@@ -175,33 +186,29 @@ fn run_elements_search(
 
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
     let results = service
-        .search_elements(&criteria)
+        .search_segments(&criteria)
         .map_err(|e| format!("search failed: {}", e))?;
-    Ok(map_element_results(&results, notes_dir))
+    Ok(map_segment_results(&results, notes_dir))
 }
 
-/// Map `note_search`'s `ElementResult` rows into `HistoryRow`s.
-fn map_element_results(
-    results: &[note_search::database_service::ElementResult],
+/// Map `note_search`'s `SegmentResult` rows into `HistoryRow`s.
+fn map_segment_results(
+    results: &[note_search::database_service::SegmentResult],
     notes_dir: Option<&std::path::Path>,
 ) -> Vec<HistoryRow> {
     results
         .iter()
         .map(|el| {
-            // Headings get a `#`/`##`/... prefix so the list
-            // visually distinguishes them from plain
-            // paragraphs / list items — the same convention
-            // markdown itself uses.
-            let heading_prefix = el
-                .heading_level
-                .filter(|l| *l > 0)
-                .map(|l| format!("{} ", "#".repeat(l as usize)))
-                .unwrap_or_default();
-            // Internal newlines (a list item's nested
-            // children, a multi-line paragraph) are joined
+            // Unlike the old element search (which indexed bare
+            // paragraphs/list-items with no heading markup of
+            // their own), a segment's `text` ALREADY includes its
+            // own header line verbatim when `heading_level` is
+            // set — note_search's segment boundary IS the header,
+            // so there's nothing to prepend here. Internal
+            // newlines (the header line + its body) are joined
             // with " / " for a scannable single line — same
-            // convention `note_search`'s own default output
-            // format uses (see `ElementResult::formatted_string`
+            // convention `note_search`'s own default CLI output
+            // uses (see `SegmentResult::formatted_string`
             // upstream).
             let display_text = el.text.replace('\n', " / ");
             let full_path = notes_dir
@@ -210,15 +217,14 @@ fn map_element_results(
             HistoryRow {
                 // Synthetic negative id, same convention as
                 // todo mode's `id = -(line_number)`. Not
-                // globally unique across files (two files
-                // can both have an element starting on the
-                // same line) — `App`'s `marked_ids` already
-                // handles that generically by keying on
-                // `(id, comment)`, and `directory` +
-                // `session_id` (not `id`) are what staging
-                // actually uses to open the right file.
+                // globally unique across files (two files can
+                // both have a segment starting on the same line)
+                // — `App`'s `marked_ids` already handles that
+                // generically by keying on `(id, comment)`, and
+                // `directory` + `session_id` (not `id`) are what
+                // staging actually uses to open the right file.
                 id: -(el.start_line as i64),
-                command: format!("{}{}", heading_prefix, display_text),
+                command: display_text,
                 // `directory` / `session_id` carry the
                 // absolute file path / line number — the
                 // same convention `tags` / `ag` / `codegraph`
@@ -227,16 +233,23 @@ fn map_element_results(
                 session_id: el.start_line.to_string(),
                 exit_code: 0,
                 timestamp: el.updated.unwrap_or(0),
-                // Set to the element's own text here;
+                // `breadcrumb` (filename + ancestor headers'
+                // text, own header not included — see the module
+                // doc comment) rather than the bare filename: a
+                // segment's tags/links come only from its own
+                // text (no cascade from ancestor headers), so the
+                // breadcrumb is what tells the user which section
+                // of the file this actually is.
+                //
                 // `ensure_selected_context` unconditionally
-                // replaces this with a window of the full
+                // replaces `output` with a window of the full
                 // underlying file once the row is actually
-                // selected, so this initial value is only
-                // what's briefly visible before that runs (or
-                // the fallback if the file can't be read).
-                comment: el.filename.clone(),
+                // selected, so `output` here is only what's
+                // briefly visible before that runs (or the
+                // fallback if the file can't be read).
+                comment: el.breadcrumb.clone(),
                 output: el.text.clone(),
-                mode: "element".to_string(),
+                mode: "segment".to_string(),
                 source: String::new(),
                 ..Default::default()
             }
@@ -244,35 +257,35 @@ fn map_element_results(
         .collect()
 }
 
-/// True if the current query is an element search request
-/// (prefixed with the configured elements prefix, default `:`).
+/// True if the current query is a segment search request
+/// (prefixed with the configured segments prefix, default `:`).
 pub(crate) fn matches(app: &App) -> bool {
-    let p = app.query_prefixes.elements;
+    let p = app.query_prefixes.segments;
     !app.query.is_empty() && app.query.starts_with(p)
 }
 
-/// The element search body, i.e. everything after the leading
-/// elements prefix.
+/// The segment search body, i.e. everything after the leading
+/// segments prefix.
 pub(crate) fn pattern(app: &App) -> &str {
     if matches(app) {
-        let p = app.query_prefixes.elements;
+        let p = app.query_prefixes.segments;
         &app.query[p.len_utf8()..]
     } else {
         ""
     }
 }
 
-/// Health check for the elements (`:`) mode. Mirrors
+/// Health check for the segments (`:`) mode. Mirrors
 /// `notes::check` step-for-step (same `notes.database`, same
-/// connection), but probes for the `elements` table instead of
+/// connection), but probes for the `segments` table instead of
 /// `todo_entries` — a notes database indexed by a
-/// `note_search` version older than the "search for elements"
+/// `note_search` version older than the "search for segments"
 /// feature won't have it yet, which is exactly the failure mode
 /// this check exists to surface clearly (rather than a cryptic
-/// "no such table: elements" SQL error at search time).
+/// "no such table: segments" SQL error at search time).
 pub(crate) fn check(app: &App) -> CheckReport {
     use crate::tui::mode::ModeKind;
-    let mode = ModeKind::Elements;
+    let mode = ModeKind::Segments;
 
     let Some(db_path) = app.notes_database.as_ref() else {
         return CheckReport::err(
@@ -314,12 +327,12 @@ pub(crate) fn check(app: &App) -> CheckReport {
         }
     };
 
-    // `elements` is the new table this whole mode depends on —
+    // `segments` is the new table this whole mode depends on —
     // a database indexed by an older `note_search` build won't
     // have it. `markdown_data` is checked too since
-    // `search_elements` joins against it for the `updated`
+    // `search_segments` joins against it for the `updated`
     // timestamp.
-    let required_tables = ["markdown_data", "elements"];
+    let required_tables = ["markdown_data", "segments"];
     for table in &required_tables {
         let present: Result<i64, _> = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -332,7 +345,7 @@ pub(crate) fn check(app: &App) -> CheckReport {
                 return CheckReport::err(
                     mode,
                     format!(
-                        "required table `{table}` is missing (re-run `note_search import` with a note_search build that supports element search, then re-index)"
+                        "required table `{table}` is missing (re-run `note_search import` with a note_search build that supports segment search, then re-index)"
                     ),
                 );
             }
@@ -344,12 +357,12 @@ pub(crate) fn check(app: &App) -> CheckReport {
 
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
     let criteria = note_search::SearchCriteria::default();
-    let rows = match service.search_elements(&criteria) {
+    let rows = match service.search_segments(&criteria) {
         Ok(r) => r,
         Err(e) => {
             return CheckReport::err(
                 mode,
-                format!("search_elements() failed on an empty query: {e}"),
+                format!("search_segments() failed on an empty query: {e}"),
             );
         }
     };
@@ -357,7 +370,7 @@ pub(crate) fn check(app: &App) -> CheckReport {
     if rows.is_empty() {
         return CheckReport::warn(
             mode,
-            "notes database is reachable but contains 0 indexed elements (re-index with a note_search build that supports element search)".to_string(),
+            "notes database is reachable but contains 0 indexed segments (re-index with a note_search build that supports segment search)".to_string(),
         )
         .with(CheckReport::ok(
             mode,
@@ -367,7 +380,7 @@ pub(crate) fn check(app: &App) -> CheckReport {
 
     CheckReport::ok(
         mode,
-        format!("{} elements indexed in {}", rows.len(), db_path.display()),
+        format!("{} segments indexed in {}", rows.len(), db_path.display()),
     )
     .with(CheckReport::ok(
         mode,
@@ -379,31 +392,35 @@ pub(crate) fn check(app: &App) -> CheckReport {
     ))
     .with(CheckReport::ok(
         mode,
-        format!("sample search_elements() returned {} row(s)", rows.len()),
+        format!("sample search_segments() returned {} row(s)", rows.len()),
     ))
 }
 
-/// Fetch the elements-mode result set. The actual query runs on
-/// a background thread (spawned by `App::elements_touch` →
-/// `spawn_elements_search`, debounced by `App::elements_maybe_autocall`),
-/// so this just clones the cached rows from `App::elements_state`
+/// Fetch the segments-mode result set. The actual query runs on
+/// a background thread (spawned by `App::segments_touch` →
+/// `spawn_segments_search`, debounced by `App::segments_maybe_autocall`),
+/// so this just clones the cached rows from `App::segments_state`
 /// — mirrors `crate::tui::mode::ag::fetch` exactly. Decoupling
 /// the query from this synchronous `fetch()` call is the whole
 /// point: `fetch()` runs on every keystroke (via `App::refresh`),
 /// and an unfiltered `:` on a large notes vault touches every
-/// indexed paragraph/list-item/heading — synchronously blocking
-/// on that from the main thread was making the first keystroke
-/// after switching into the mode feel unresponsive.
+/// indexed segment (every header-bounded section of every file)
+/// — synchronously blocking on that from the main thread was
+/// making the first keystroke after switching into the mode feel
+/// unresponsive.
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
-    Ok(app.elements_state.rows.clone())
+    Ok(app.segments_state.rows.clone())
 }
 
-/// Lazy-load context around the SELECTED element's own line
-/// into `output` — regardless of whether it's a heading, a
-/// paragraph, or a list item. An element's own
-/// `ElementResult::text` (e.g. just the word `"kramfors"` for a
-/// bare `[[kramfors]]` reference line) is rarely enough context
-/// on its own.
+/// Lazy-load context around the SELECTED segment's own start
+/// line into `output`. A segment's own `SegmentResult::text` can
+/// be a whole section (its header plus everything below it up to
+/// the next header), but for a short segment near the top or
+/// bottom of a long file, seeing just that section in isolation
+/// still loses the surrounding context the user would get from
+/// scrolling the real file — so this loads a window of the actual
+/// file around the segment's start line instead of just
+/// re-displaying `text` verbatim.
 ///
 /// Unlike `tags` / `ag` mode's `read_source_context_with_cache`
 /// (which prefixes every line with a line number and marks the
@@ -417,7 +434,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// so headings etc. no longer parse as such).
 ///
 /// The slice is a window of `SOURCE_CONTEXT_LINES` (50) lines
-/// CENTERED on the element's `start_line` (25 before, the line
+/// CENTERED on the segment's `start_line` (25 before, the line
 /// itself, 24 after), clamped to the file's boundaries — same
 /// centering math as `read_source_context_with_cache`, just
 /// without the per-line annotation. For a file shorter than the
@@ -433,7 +450,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     };
 
     let (filepath, line_number) = match app.merged_rows.get(idx) {
-        Some(r) if r.mode == "element" && !r.directory.is_empty() => {
+        Some(r) if r.mode == "segment" && !r.directory.is_empty() => {
             let line_number = r.session_id.parse::<usize>().unwrap_or(0);
             (r.directory.clone(), line_number)
         }
@@ -444,7 +461,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     }
 
     let cache_key = (filepath.clone(), line_number);
-    let highlighted = if let Some(cached) = app.elements_state.context_cache.get(&cache_key) {
+    let highlighted = if let Some(cached) = app.segments_state.context_cache.get(&cache_key) {
         cached.clone()
     } else {
         let path = std::path::PathBuf::from(&filepath);
@@ -476,7 +493,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
 
         let highlighted =
             crate::highlight::highlight_with_bat_auto(&window, &filepath).unwrap_or(window);
-        app.elements_state
+        app.segments_state
             .context_cache
             .insert(cache_key, highlighted.clone());
         highlighted
