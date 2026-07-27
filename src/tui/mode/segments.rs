@@ -10,15 +10,22 @@
 //! the specific section that references it, not just "this file
 //! mentions it somewhere."
 //!
-//! Unlike a heading cascade, a segment's tags/links come ONLY from
-//! its own text — a subsection does NOT inherit its parent
-//! header's tags/links. Instead each segment carries a
-//! `breadcrumb` (filename + ancestor headers' text, own header not
-//! included) so a nested result is still identifiable without
-//! pulling in the whole ancestor chain — see `map_segment_results`,
-//! which surfaces it in `HistoryRow::comment`. See the upstream
-//! `note_search` README's "Segment Search" section for the full
-//! semantics.
+//! A segment's tags and links are the UNION of its own text (header
+//! line + body), every ancestor header's own text, and the whole
+//! document's aggregate tags/links — so every segment always
+//! carries the full document's tags/links on top of whatever its
+//! own text and ancestor headers add (a frontmatter tag/link
+//! reaches every segment in the file). Since tags/links always
+//! cascade the same way, they don't tell two matching segments
+//! apart on their own — every segment also carries a `breadcrumb`
+//! (filename + ancestor headers' text, own header not included) for
+//! that, which is what actually distinguishes WHICH section a
+//! search hit is in — see `map_segment_results`, which surfaces it
+//! in `HistoryRow::comment`. See the upstream `note_search`
+//! README's "Segment Search" section for the full semantics
+//! (this cascade behavior has changed more than once upstream;
+//! `fetch_segments_frontmatter_link_cascades_to_every_segment` in
+//! the test suite locks in the CURRENT one).
 //!
 //! Same query language as `notes` / `todo` mode: the typed
 //! pattern is parsed via `note_search::parse_query` into a

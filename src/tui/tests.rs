@@ -9225,6 +9225,169 @@ fn segments_pattern_strips_prefix() {
     assert_eq!(app.segments_pattern(), "");
 }
 
+/// `"` is the default similar-mode prefix.
+#[test]
+fn similar_default_prefix_is_double_quote() {
+    assert_eq!(crate::QueryPrefixes::default().similar, '"');
+}
+
+/// `is_similar_query` recognises the `"` prefix, matching the
+/// `is_segments_query` contract.
+#[test]
+fn is_similar_query_recognises_prefix() {
+    let mut app = global_test_app(&[("a", 1)]);
+    assert!(!app.is_similar_query());
+    app.query = "\"budget planning".to_string();
+    assert!(app.is_similar_query());
+    app.query = "\"".to_string();
+    assert!(app.is_similar_query());
+    app.query = "budget planning".to_string();
+    assert!(!app.is_similar_query());
+    app.query = ":older".to_string();
+    assert!(!app.is_similar_query());
+}
+
+/// `similar_pattern` returns the body after the prefix — the
+/// literal phrase to embed, matching the `segments_pattern`
+/// contract.
+#[test]
+fn similar_pattern_strips_prefix() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = "\"budget planning".to_string();
+    assert_eq!(app.similar_pattern(), "budget planning");
+    app.query = "budget planning".to_string();
+    assert_eq!(app.similar_pattern(), "");
+}
+
+/// `spawn_similar_search` with an empty phrase must resolve to an
+/// empty result WITHOUT calling out to Ollama — `run_similar_search`
+/// short-circuits before `embed_text` when the trimmed phrase is
+/// empty (see its doc comment). This is the one similar-mode search
+/// path that's safe to exercise in a unit test without a live
+/// embedding service; anything with a non-empty phrase needs a real
+/// Ollama instance and isn't covered here.
+#[test]
+fn spawn_similar_search_with_empty_phrase_returns_empty_without_network() {
+    let request = crate::tui::mode::similar::spawn_similar_search(
+        std::path::PathBuf::from("/nonexistent/notes.sqlite"),
+        None,
+        String::new(),
+    );
+    let result = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("empty-phrase search should resolve immediately");
+    assert_eq!(
+        result,
+        Ok(Vec::new()),
+        "an empty phrase must short-circuit to an empty result, not attempt to embed or query"
+    );
+}
+
+/// `build_merged_rows` takes the same cheap early-return path for
+/// similar-mode rows as segments mode (`self.rows.clone()`, no
+/// labeled-row interleave, no re-sort) — results are already ranked
+/// by similarity score, and re-sorting by timestamp would scramble
+/// that ranking.
+#[test]
+fn merged_rows_in_similar_mode_does_not_interleave_labeled_rows() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.labeled_rows.push(crate::tui::state::HistoryRow {
+        id: 999,
+        command: "budget unrelated labeled command".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "a bookmark, not a similar-mode result".to_string(),
+        output: String::new(),
+        mode: "history".to_string(),
+        source: String::new(),
+        ..Default::default()
+    });
+    app.query = "\"budget".to_string();
+    app.similar_state.rows = vec![crate::tui::state::HistoryRow {
+        id: -5,
+        command: "[0.91] budget planning notes".to_string(),
+        directory: "/home/user/notes/budget.md".to_string(),
+        session_id: "5".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "budget.md".to_string(),
+        output: String::new(),
+        mode: "similar".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.similar_state.last_pattern = Some("budget".to_string());
+    app.refresh();
+    assert!(
+        app.merged_rows().iter().all(|r| r.mode == "similar"),
+        "labeled command-history rows must not be interleaved into similar-mode results, got: {:?}",
+        app.merged_rows().iter().map(|r| (&r.mode, &r.command)).collect::<Vec<_>>()
+    );
+}
+
+/// Selecting a similar-mode row stages `$EDITOR +<start_line>
+/// <file>` — identical staging to a segments-mode row, since both
+/// come from the same `SegmentResult`-backed `directory`/`session_id`
+/// convention.
+#[test]
+fn select_for_run_in_similar_mode_stages_editor_at_line() {
+    let mut app = global_test_app(&[]);
+    app.query = "\"budget".to_string();
+    app.similar_state.rows = vec![crate::tui::state::HistoryRow {
+        id: -5,
+        command: "[0.91] budget planning notes".to_string(),
+        directory: "/home/user/notes/budget.md".to_string(),
+        session_id: "5".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "budget.md".to_string(),
+        output: String::new(),
+        mode: "similar".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.similar_state.last_pattern = Some("budget".to_string());
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    let staged = app.selection.as_deref().expect("selection must be set");
+    assert!(staged.contains("+5"), "got: {staged:?}");
+    assert!(staged.contains("/home/user/notes/budget.md"), "got: {staged:?}");
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// In similar mode, `pick_text_to_yank` copies the row's breadcrumb
+/// (`row.comment`), not the `[score] text` shown in the list — same
+/// rationale as segments mode (see
+/// `pick_text_to_yank_uses_breadcrumb_in_segments_mode`).
+#[test]
+fn pick_text_to_yank_uses_breadcrumb_in_similar_mode() {
+    let mut app = global_test_app(&[]);
+    app.query = "\"budget".to_string();
+    app.merged_rows.push(crate::tui::state::HistoryRow {
+        id: -5,
+        command: "[0.91] budget planning notes".to_string(),
+        directory: "/home/user/notes/budget.md".to_string(),
+        session_id: "5".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "budget.md > Q3".to_string(),
+        output: String::new(),
+        mode: "similar".to_string(),
+        source: String::new(),
+        ..Default::default()
+    });
+    app.list_state.select(Some(0));
+    let text = pick_text_to_yank(&app).expect("a row is selected");
+    assert_eq!(
+        text, "budget.md > Q3",
+        "similar mode should yank the breadcrumb, not the scored segment text"
+    );
+}
+
 /// A bare `:` (empty pattern) lists every segment indexed across
 /// every file. A segment is a whole header (level 1-4) plus
 /// everything below it up to the next level-<=4 header, so
@@ -9388,17 +9551,20 @@ fn setup_segments_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
 /// `:[[link]]` filters segments by the `#tag`/`[[link]]` query DSL
 /// (`QueryExpr::Link`), not just plain substring text.
 ///
-/// Unlike the old element search (where a frontmatter tag/link
-/// cascaded to every element in the file), a segment's tags/links
-/// come ONLY from its own text — frontmatter is outside every
-/// segment's body, so it contributes nothing to any segment's
-/// `segment_tags`/`segment_links`. A `breadcrumb` (filename +
-/// ancestor headers) replaces the cascade for identifying context
-/// — see the `segments` module doc comment. This test locks in
-/// the NEW (non-cascading) behavior so a future note_search
-/// upgrade that reintroduces cascading would be caught here.
+/// note_search's segments feature has changed its tag/link cascade
+/// semantics twice now: the original element search cascaded a
+/// heading/frontmatter tag or link to every element in scope; the
+/// first segment redesign made segment tags/links come ONLY from a
+/// segment's own text (no cascade at all, `breadcrumb` replacing it
+/// for context); the version this test runs against reintroduced a
+/// cascade — every segment's tags/links are now the UNION of its
+/// own text, its ancestor headers' text, AND the whole document's
+/// aggregate tags/links (so a frontmatter link/tag reaches every
+/// segment in the file again, this time unconditionally rather
+/// than only from a heading). This test locks in that CURRENT
+/// behavior so a future note_search change would be caught here.
 #[test]
-fn fetch_segments_frontmatter_link_does_not_cascade() {
+fn fetch_segments_frontmatter_link_cascades_to_every_segment() {
     let (dir, db_path) = setup_segments_cascade_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
@@ -9410,14 +9576,16 @@ fn fetch_segments_frontmatter_link_does_not_cascade() {
     let total = app.merged_rows().len();
     assert_eq!(total, 1, "fixture should index exactly one segment");
 
-    // The frontmatter `ref: [[NeoVimNote]]` link sits outside the
-    // segment's own text, so it must NOT match.
+    // The frontmatter `ref: [[NeoVimNote]]` link is part of the
+    // document's aggregate link set, which is unioned into every
+    // segment — so it matches the file's one segment.
     app.query = ":[[NeoVimNote]]".to_string();
     app.refresh();
     drive_segments_search(&mut app);
-    assert!(
-        app.merged_rows().is_empty(),
-        "a frontmatter-only link must not match any segment; got: {:?}",
+    assert_eq!(
+        app.merged_rows().len(),
+        total,
+        "a frontmatter link must cascade to every segment in the file; got: {:?}",
         app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -9638,6 +9806,70 @@ fn ensure_selected_context_loads_full_file_for_segment_row() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// `crate::tui::mode::similar::ensure_selected_context` is the same
+/// windowed-`bat`-preview code as segments mode's, just reading from
+/// `similar_state` instead of `segments_state` — this doesn't need a
+/// live Ollama instance to test, since it operates purely on the
+/// selected row's `directory`/`session_id` and the real file on
+/// disk, regardless of how that row got into the list.
+#[test]
+fn ensure_selected_context_loads_full_file_for_similar_row() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-similar-context-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let file_path = dir.join("budget.md");
+    std::fs::write(
+        &file_path,
+        "# Budget\n\nQ3 planning notes go here.\n\nMore detail below.\n",
+    )
+    .expect("write budget.md");
+
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = "\"budget".to_string();
+    app.similar_state.rows = vec![crate::tui::state::HistoryRow {
+        id: -1,
+        command: "[0.91] # Budget / Q3 planning notes go here.".to_string(),
+        directory: file_path.to_string_lossy().to_string(),
+        session_id: "1".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "budget.md".to_string(),
+        output: String::new(),
+        mode: "similar".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.similar_state.last_pattern = Some("budget".to_string());
+    app.refresh();
+
+    let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    let idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| r.mode == "similar")
+        .expect("the similar-mode row should be present");
+    app.list_state.select(Some(idx));
+    crate::tui::mode::similar::ensure_selected_context(&mut app);
+    let output = app.merged_rows()[idx].output.clone();
+    let plain_output = ansi_re.replace_all(&output, "").to_string();
+    assert!(
+        plain_output.contains("Budget")
+            && plain_output.contains("Q3 planning notes")
+            && plain_output.contains("More detail below"),
+        "expected the full file's content in output, got: {:?}",
+        plain_output
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `ensure_selected_context` runs on every keystroke (via
 /// `App::refresh`), and `merged_rows` is rebuilt from scratch each
 /// time (with the raw, unhighlighted segment text) — so without a
@@ -9751,7 +9983,16 @@ fn ensure_selected_context_centers_window_on_segment_start_for_long_file() {
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
-    app.query = ":[[kramfors]]".to_string();
+    // A plain bare-word query (not `[[link]]` syntax) matches
+    // against the segment's own `text` column only — unlike tags/
+    // links, plain text matching was NOT changed to union in the
+    // whole document's aggregate content, so this still correctly
+    // isolates just the one segment whose OWN text contains
+    // "kramfors" (see the doc comment on
+    // `fetch_segments_frontmatter_link_cascades_to_every_segment`
+    // for why a `[[link]]` query can no longer be used to isolate
+    // a single segment in a multi-segment file).
+    app.query = ":kramfors".to_string();
     app.refresh();
     drive_segments_search(&mut app);
     assert_eq!(
@@ -15982,6 +16223,49 @@ fn jira_field_complete_action_dispatches_in_segments_mode() {
     assert_eq!(app.query, ":#feature ", "got: {:?}", app.query);
 }
 
+/// Tab completion works identically in similar mode (`"`) too —
+/// same tag/link namespace, just a different leading prefix char.
+/// The completed `[[link]]`/`#tag` text becomes part of the
+/// literal phrase similar mode embeds; it isn't extracted as a
+/// separate filter, so this only needs to prove the SAME
+/// completion fires, not anything about what happens to it
+/// afterward (that's `run_similar_search`, which needs a live
+/// Ollama instance to test end-to-end).
+#[test]
+fn notes_tab_completion_works_in_similar_mode() {
+    let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+    app.query = String::from("\"#feat");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, "\"#feature ",
+        "tag completion should work in similar mode, got: {:?}",
+        app.query
+    );
+}
+
+#[test]
+fn notes_tab_completion_link_works_in_similar_mode() {
+    let (mut app, _db) = notes_tab_complete_test_app(&[], &["NeovimNote"]);
+    app.query = String::from("\"@Neo");
+    app.query_cursor = app.query.chars().count();
+    app.notes_tab_complete_at_cursor();
+    assert_eq!(
+        app.query, "\"[[neovimnote]] ",
+        "link completion should work in similar mode, got: {:?}",
+        app.query
+    );
+}
+
+#[test]
+fn jira_field_complete_action_dispatches_in_similar_mode() {
+    let (mut app, _db) = notes_tab_complete_test_app(&["feature"], &[]);
+    app.query = String::from("\"#feat");
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    assert_eq!(app.query, "\"#feature ", "got: {:?}", app.query);
+}
+
 /// Outside notes and todos
 /// modes, the completion is a
 /// no-op (the user is just
@@ -18915,9 +19199,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_fourteen_entries() {
+fn prefix_picker_has_fifteen_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 14);
+    assert_eq!(picker.options.len(), 15);
 }
 
 #[test]
@@ -19012,7 +19296,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 13);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 14);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);

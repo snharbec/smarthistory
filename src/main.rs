@@ -1037,6 +1037,15 @@ pub struct QueryPrefixes {
     /// honored as an alias for `prefix.segments=` — see
     /// `assign_prefix`.
     pub segments: char,
+    /// Prefix for the similar/phrase-search mode (default `"`).
+    /// Same `segments` table and Tab-completion namespace as
+    /// `segments` (`:`), but the whole typed body is one literal
+    /// phrase — embedded via `note_search::embeddings::embed_text`
+    /// (a local Ollama call) and ranked against every segment's
+    /// stored embedding by cosine similarity, rather than parsed
+    /// as a query DSL. Requires a `note_search` build with segment-
+    /// embeddings support and a reachable local Ollama instance.
+    pub similar: char,
 }
 
 impl Default for QueryPrefixes {
@@ -1055,6 +1064,7 @@ impl Default for QueryPrefixes {
             codegraph: '&',
             jira: '-',
             segments: ':',
+            similar: '"',
         }
     }
 }
@@ -2595,6 +2605,7 @@ impl Config {
             // file's `prefix.elements=` still applies rather than
             // silently going unrecognized.
             "elements" => prefixes.segments = c,
+            "similar" => prefixes.similar = c,
             _ => {}
         }
     }

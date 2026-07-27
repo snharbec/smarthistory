@@ -62,7 +62,7 @@ The date filter is the only token that's *removed* from the body rather than rew
 
 ## Tab completion
 
-Press `Tab` while typing in `@` mode (also works identically in [`!` (Todo)](todo.md) and [`:` (Segments)](segments.md) mode — all three share the same `notes.database` tag/link namespace) to open a completion menu for the token under the cursor. The kind of completion depends on which prefix the cursor is on:
+Press `Tab` while typing in `@` mode (also works identically in [`!` (Todo)](todo.md), [`:` (Segments)](segments.md), and [`"` (Similar)](similar.md) mode — all four share the same `notes.database` tag/link namespace) to open a completion menu for the token under the cursor. The kind of completion depends on which prefix the cursor is on:
 
 | Cursor shape | Completion kind | Source |
 | --- | --- | --- |
@@ -85,6 +85,7 @@ Link-name completion case-folds the prefix for matching but inserts the **canoni
 
 - [Todo mode — the sibling mode for open todo entries; the same shorthand expansion and Tab completion apply because the underlying `note_search::parse_query` is shared](todo.md)
 - [Segments mode — finer-grained search over header-anchored sections; same query DSL and Tab completion](segments.md)
+- [Similar mode — same segments table, ranked by embedding similarity to a phrase instead of a query DSL; same Tab completion](similar.md)
 - [JIRA — the `jira-issue` action downloads a JIRA issue as a local note, which then becomes searchable in `@` mode](jira.md)
 - [TECHNICAL — note_search integration details](../../TECHNICAL.md#notes-mode-integration)
 - [`parse_notes_query` in `src/tui.rs`](../../src/tui.rs) — the implementation of the shorthand expansion

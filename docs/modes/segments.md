@@ -16,14 +16,14 @@ This mode used to be called "Elements mode" (`note_search`'s prior "element sear
 
 Fenced code blocks are kept as part of the enclosing segment's text (a `#` inside one is never mistaken for a heading), but are otherwise scanned like any other text.
 
-Unlike the old element search's heading cascade, a segment's tags and links come **only from its own text** — a subsection does NOT inherit its parent header's tags/links, and a frontmatter tag/link does not reach into any segment at all (frontmatter sits outside every segment's body). Instead every segment carries a **breadcrumb**: the note's filename followed by its ancestor headers' text (not including its own header), so a nested result is still identifiable without pulling in the whole ancestor chain's tags. The breadcrumb is what `Ctrl-Y` (yank) copies for a segment row — see "Selecting a row" below.
+A segment's tags and links are the **union** of its own text (header line + body), every ancestor header's own text, and the whole document's aggregate tags/links (the same set that feeds `@` mode's tag/link search) — so every segment always carries the full document's tags/links, on top of whatever its own text and ancestor headers add. A frontmatter tag or link therefore reaches every segment in the file. Since tags/links always cascade the same way, they don't tell two matching segments apart on their own — every segment also carries a **breadcrumb**: the note's filename followed by its ancestor headers' text (not including its own header), which is what actually distinguishes WHICH section a search hit is in. The breadcrumb is what `Ctrl-Y` (yank) copies for a segment row — see "Selecting a row" below. (Note this cascade behavior has changed more than once upstream; this describes the current one.)
 
 ## What it does
 
 - `:` (empty) — every indexed segment across every note.
-- `:project reference` — every segment whose text contains "project reference" (bare words AND-match, case-insensitive). Because a segment can be a whole section, a match anywhere in that section returns the section's FULL text, not just the matching line.
-- `:#urgent` — every segment tagged `urgent` in its own text (its header line and/or body — NOT a cascade from an ancestor header or the file's frontmatter, see "What counts as a segment" above).
-- `:[[ProjectX]]` — every segment linking to `ProjectX` in its own text, same non-cascading rule as tags.
+- `:project reference` — every segment whose text contains "project reference" (bare words AND-match, case-insensitive). Because a segment can be a whole section, a match anywhere in that section returns the section's FULL text, not just the matching line. Unlike tag/link matching below, plain-word text matching is NOT unioned with the document's aggregate content — it only checks the segment's own `text`.
+- `:#urgent` — every segment tagged `urgent`, including the cascade: its own text, any ancestor header's text, or anywhere else in the document (see "What counts as a segment" above).
+- `:[[ProjectX]]` — every segment linking to `ProjectX`, same cascade rule as tags.
 - `:(#urgent OR [[ProjectX]])` — OR-grouping, same Obsidian-like query language [`@` (Notes) mode](notes.md) and [`!` (Todo) mode](todo.md) use (`word`, `"quoted phrase"`, `#tag`, `[[link]]`, `[attr]`, `[attr:value]`, `(a OR b)`, terms AND-ed unless grouped). An invalid query (e.g. unbalanced parens) surfaces a status message rather than silently falling back to a text search.
 - A segment with a heading starts with a literal `#`/`##`/... in the result list — that's the segment's own header line (verbatim, as written in the file), not a prefix smarthistory adds.
 - A segment spanning multiple lines (its header plus everything below it) is shown with internal newlines joined by `" / "` — the same convention `note_search`'s own default output format uses.
@@ -61,4 +61,5 @@ Same as `@` / `!` mode: `notes.database` and `notes.dir`. See [notes.md](notes.m
 
 - [Notes mode — the parent whole-file search this mode complements](notes.md)
 - [Todo mode — todo checkbox lines are indexed separately by line, not folded into segments](todo.md)
+- [Similar mode — same `segments` table, but the typed body is one phrase ranked by embedding similarity instead of a query DSL](similar.md)
 - [TECHNICAL — JIRA / notes mode implementation details](../../TECHNICAL.md)

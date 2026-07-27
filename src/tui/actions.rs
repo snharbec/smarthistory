@@ -123,6 +123,23 @@ impl App {
                     self.pick_mode = Some(PickMode::Run);
                 }
             }
+            crate::tui::mode::ModeKind::Similar => {
+                // `"` queries are similar-phrase search requests
+                // over the same `segments` table — identical
+                // staging to `ModeKind::Segments` above.
+                if let Some(row) = self.selected_row() {
+                    let editor = std::env::var("EDITOR")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "vi".to_string());
+                    self.selection = Some(stage_editor_open_at_line(
+                        &editor,
+                        &row.directory,
+                        &row.session_id,
+                    ));
+                    self.pick_mode = Some(PickMode::Run);
+                }
+            }
             crate::tui::mode::ModeKind::Ag => {
                 // `,` queries are ag content-search
                 // requests. Selecting a match opens

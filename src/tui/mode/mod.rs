@@ -80,6 +80,12 @@ pub enum ModeKind {
     /// where a segment is one markdown header (level 1-4) plus
     /// everything below it up to the next level-<=4 header.
     Segments,
+    /// `"` (default). Same `segments` table as `Segments`, but the
+    /// typed body is one literal phrase, embedded and ranked
+    /// against every segment's stored embedding by similarity
+    /// (`note_search::embeddings` + a local Ollama call) instead of
+    /// parsed as a query DSL.
+    Similar,
 }
 
 impl ModeKind {
@@ -102,6 +108,7 @@ impl ModeKind {
             ModeKind::Codegraph => '&',
             ModeKind::Jira => '-',
             ModeKind::Segments => ':',
+            ModeKind::Similar => '"',
         }
     }
 
@@ -124,6 +131,7 @@ impl ModeKind {
             ModeKind::Codegraph => "codegraph",
             ModeKind::Jira => "jira",
             ModeKind::Segments => "segments",
+            ModeKind::Similar => "similar",
         }
     }
 
@@ -155,6 +163,7 @@ impl ModeKind {
             ModeKind::Codegraph => "CodeGraph",
             ModeKind::Jira => "JIRA",
             ModeKind::Segments => "Segments",
+            ModeKind::Similar => "Similar",
         }
     }
 
@@ -179,6 +188,7 @@ impl ModeKind {
             ModeKind::Codegraph => prefixes.codegraph,
             ModeKind::Jira => prefixes.jira,
             ModeKind::Segments => prefixes.segments,
+            ModeKind::Similar => prefixes.similar,
         }
     }
 
@@ -241,6 +251,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Jira
     } else if c == p.segments {
         ModeKind::Segments
+    } else if c == p.similar {
+        ModeKind::Similar
     } else {
         ModeKind::History
     }
@@ -257,15 +269,16 @@ pub mod notes;
 pub mod output;
 pub mod panes;
 pub mod question;
+pub mod similar;
 pub mod tags;
 pub mod todo;
 
 /// Lazy-load the selected row's preview context for every mode that
-/// needs it (tags/codegraph/notes/todo/files/panes/segments). Each
-/// mode's own `ensure_selected_context` bails out immediately via its
-/// own `matches(app)` check, so calling all seven unconditionally is
-/// cheap and correct regardless of which mode is active — this is the
-/// single dispatch point every call site should use instead of
+/// needs it (tags/codegraph/notes/todo/files/panes/segments/similar).
+/// Each mode's own `ensure_selected_context` bails out immediately via
+/// its own `matches(app)` check, so calling all eight unconditionally
+/// is cheap and correct regardless of which mode is active — this is
+/// the single dispatch point every call site should use instead of
 /// re-listing the calls inline (previously duplicated across
 /// `App::refresh`, `App::move_selection`, `App::show_output_view`,
 /// and `run_loop`).
@@ -277,6 +290,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     crate::tui::mode::files::ensure_selected_context(app);
     crate::tui::mode::panes::ensure_selected_context(app);
     crate::tui::mode::segments::ensure_selected_context(app);
+    crate::tui::mode::similar::ensure_selected_context(app);
 }
 
 /// The colour used to tint the input border / title for a given
@@ -302,6 +316,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Ag => Some(Theme::warning()),
         ModeKind::Jira => Some(Theme::info()),
         ModeKind::Segments => Some(Theme::accent()),
+        ModeKind::Similar => Some(Theme::accent()),
         ModeKind::History => None,
     }
 }
@@ -335,6 +350,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Codegraph => ("&".to_string(), format!(" codegraph{} ", algo)),
         ModeKind::Ag => (",".to_string(), format!(" ag{} ", algo)),
         ModeKind::Segments => (":".to_string(), format!(" segments{} ", algo)),
+        ModeKind::Similar => ("\"".to_string(), format!(" similar{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -537,6 +553,7 @@ pub fn run_all_checks(
             ModeKind::Notes => crate::tui::mode::notes::check(app),
             ModeKind::Todo => crate::tui::mode::todo::check(app),
             ModeKind::Segments => crate::tui::mode::segments::check(app),
+            ModeKind::Similar => crate::tui::mode::similar::check(app),
             ModeKind::Tags => crate::tui::mode::tags::check(app),
             ModeKind::Codegraph => crate::tui::mode::codegraph::check(app),
             ModeKind::Files => crate::tui::mode::files::check(app),
@@ -563,6 +580,7 @@ impl ModeKind {
             ModeKind::Notes,
             ModeKind::Todo,
             ModeKind::Segments,
+            ModeKind::Similar,
             ModeKind::Tags,
             ModeKind::Codegraph,
             ModeKind::Files,
@@ -603,6 +621,7 @@ mod tests {
             ModeKind::Codegraph,
             ModeKind::Jira,
             ModeKind::Segments,
+            ModeKind::Similar,
         ] {
             let title = kind.list_title();
             assert!(!title.is_empty(), "{:?} returned empty title", kind);

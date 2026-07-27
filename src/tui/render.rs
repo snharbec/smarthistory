@@ -6035,12 +6035,14 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Ag-mode, tags-mode, codegraph-mode, JIRA-mode, notes-mode,
-    // todo-mode, files-mode, panes-mode, and segments-mode rows
-    // carry more than 4 lines of context. Ag/tags/codegraph/
-    // segments carry up to [`SOURCE_CONTEXT_LINES`] (50) lines of
-    // source context CENTERED on the matched line (segments mode
-    // via its own `bat`-highlighted window, see
-    // `crate::tui::mode::segments::ensure_selected_context`) plus,
+    // todo-mode, files-mode, panes-mode, segments-mode, and
+    // similar-mode rows carry more than 4 lines of context.
+    // Ag/tags/codegraph/segments/similar carry up to
+    // [`SOURCE_CONTEXT_LINES`] (50) lines of source context
+    // CENTERED on the matched line (segments AND similar mode via
+    // the same `bat`-highlighted window, see
+    // `crate::tui::mode::segments::ensure_selected_context` /
+    // `crate::tui::mode::similar::ensure_selected_context`) plus,
     // for tags/codegraph, a callers/callees overlay. JIRA rows
     // carry a 3-line header (Status/Priority, Due/Assignee,
     // Description label) followed by the full issue description
@@ -6063,6 +6065,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         || row.mode == "file"
         || row.mode == "pane"
         || row.mode == "segment"
+        || row.mode == "similar"
     {
         crate::tui::SOURCE_CONTEXT_LINES
     } else {
@@ -6112,7 +6115,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // — the beginning of every line is always visible.
     //
     // Vertical scroll: windowed source-context modes
-    // (`tags` / `ag` / `codegraph` / `segments`) load a
+    // (`tags` / `ag` / `codegraph` / `segments` / `similar`) load a
     // `SOURCE_CONTEXT_LINES` (50)-line window centered on
     // the matched line. The matched line sits at position
     // `half = 25` within that window. The preview area is

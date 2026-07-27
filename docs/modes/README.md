@@ -20,6 +20,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | CodeGraph | `&` | [`codegraph.md`](codegraph.md) | Search symbols in the local `.codegraph/codegraph.db` index; the selected row's preview shows source context plus callers / callees. |
 | ag | `,` | [`ag.md`](ag.md) | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher) (The Silver Searcher). |
 | Segments | `:` | [`segments.md`](segments.md) | Search header-anchored sections via `note_search`'s `segments` table — finer-grained than `@` (Notes), which searches whole files. |
+| Similar | `"` | [`similar.md`](similar.md) | Rank the same `segments` table by embedding similarity to a typed phrase, instead of an exact tag/link/text query. |
 
 ## Cross-cutting topics
 
@@ -48,6 +49,7 @@ The first character of the query decides the mode. Examples:
 | `&@java getSymbol` | CodeGraph. |
 | `,TODO *.rs` | ag. |
 | `:project reference` | Segments (header-anchored sections containing "project reference"). |
+| `"budget planning for next quarter` | Similar (segments ranked by embedding similarity to that phrase). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 

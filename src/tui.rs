@@ -720,15 +720,15 @@ fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
 ///    yanking it is the natural action. Mode-agnostic: even in
 ///    segments mode, if the user has the full preview open they
 ///    want what they're looking at, not the filename.
-/// 2. In segments (`:`) mode, the row's breadcrumb (`row.comment`
-///    — filename + ancestor headers' text, see
+/// 2. In segments (`:`) or similar (`"`) mode, the row's breadcrumb
+///    (`row.comment` — filename + ancestor headers' text, see
 ///    `crate::tui::mode::segments`'s module doc comment) rather
 ///    than the matched segment's own text (`row.command`, which
-///    can be a whole header-bounded section joined onto one line).
-///    The breadcrumb identifies WHERE the match is (which file,
-///    which section) — more useful on the clipboard, e.g. to
-///    paste into another command, than a long flattened section
-///    of note content.
+///    can be a whole header-bounded section joined onto one line,
+///    plus a `[score]` prefix in similar mode). The breadcrumb
+///    identifies WHERE the match is (which file, which section) —
+///    more useful on the clipboard, e.g. to paste into another
+///    command, than a long flattened section of note content.
 /// 3. Every other mode: the command of the currently-selected
 ///    history row. This is "the current document" — the command
 ///    line itself, in the same sense as a text editor's "current
@@ -746,7 +746,7 @@ fn pick_text_to_yank(app: &App) -> Option<String> {
         return Some(view.text.clone());
     }
     app.selected_row().map(|r| {
-        if app.is_segments_query() {
+        if app.is_segments_query() || app.is_similar_query() {
             r.comment.clone()
         } else {
             r.command.clone()
@@ -1961,6 +1961,12 @@ pub(crate) struct App {
     /// thread.
     segments_state: crate::tui::mode::segments::SegmentsState,
 
+    /// Aggregated similar-mode (`"`) state: same shape as
+    /// `segments_state`, just backed by
+    /// `crate::tui::mode::similar::SimilarState` — embed-then-rank
+    /// instead of query-DSL search.
+    similar_state: crate::tui::mode::similar::SimilarState,
+
     /// User-configured additional
     /// directory basenames to
     /// skip during the walk
@@ -2152,7 +2158,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
     let Some(c) = query.chars().next() else {
         return MODE_NONE;
     };
-    let known: [char; 13] = [
+    let known: [char; 14] = [
         prefixes.output,
         prefixes.llm,
         prefixes.question,
@@ -2166,6 +2172,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
         prefixes.codegraph,
         prefixes.ag,
         prefixes.segments,
+        prefixes.similar,
     ];
     if known.contains(&c) {
         c
@@ -2410,6 +2417,24 @@ impl App {
     #[allow(dead_code)]
     fn segments_pattern(&self) -> &str {
         crate::tui::mode::segments::pattern(self)
+    }
+
+    /// Whether the query is a similar-phrase search request: the
+    /// query starts with the similar prefix (`"` by default). Same
+    /// underlying `segments` table as `is_segments_query`, but the
+    /// body is one literal phrase (embedded + ranked by similarity)
+    /// rather than a query DSL — see
+    /// `crate::tui::mode::similar`'s module doc comment.
+    fn is_similar_query(&self) -> bool {
+        crate::tui::mode::similar::matches(self)
+    }
+
+    /// The similar-phrase search body, i.e. everything after the
+    /// leading similar prefix. Empty string when not in similar
+    /// mode.
+    #[allow(dead_code)]
+    fn similar_pattern(&self) -> &str {
+        crate::tui::mode::similar::pattern(self)
     }
 
     /// The ag-search body, i.e. everything after the
@@ -3162,6 +3187,7 @@ impl App {
                 || c == prefixes.ag
                 || c == prefixes.codegraph
                 || c == prefixes.segments
+                || c == prefixes.similar
         });
         let body = if has_prefix {
             self.query.chars().skip(1).collect::<String>()
@@ -3256,6 +3282,10 @@ impl App {
         // search debounce. `segments_touch` is a
         // no-op outside `:` mode.
         self.segments_touch();
+        // Same co-location for the similar-mode
+        // search debounce. `similar_touch` is a
+        // no-op outside `"` mode.
+        self.similar_touch();
     }
 
     /// Fire the per-mode search immediately on a
@@ -4574,7 +4604,12 @@ impl PrefixPicker {
             PrefixOption {
                 prefix: Some(prefixes.segments),
                 label: "Segments",
-                description: "search note paragraphs/list-items/headings individually",
+                description: "search note segments (header-anchored sections) individually",
+            },
+            PrefixOption {
+                prefix: Some(prefixes.similar),
+                label: "Similar",
+                description: "rank note segments by similarity to a phrase (embedding search)",
             },
         ];
         // Pre-select the row
@@ -4955,6 +4990,7 @@ impl App {
             llm_request: None,
             ag_state: crate::ag::AgState::new(),
             segments_state: crate::tui::mode::segments::SegmentsState::new(),
+            similar_state: crate::tui::mode::similar::SimilarState::new(),
             files_state: crate::files::FilesState::new(),
             files_ignores,
             jira_rows: Vec::new(),
@@ -5065,6 +5101,11 @@ impl App {
         if app.is_segments_query() {
             app.segments_state.debounce_started = Some(std::time::Instant::now());
             app.segments_maybe_autocall();
+        }
+        // Same priming for a restored similar-phrase query.
+        if app.is_similar_query() {
+            app.similar_state.debounce_started = Some(std::time::Instant::now());
+            app.similar_maybe_autocall();
         }
         // Rows are ordered newest first; index 0 is the newest entry.
         // Keep the selection on the newest match so it appears at the
@@ -5424,6 +5465,12 @@ impl App {
         if self.is_segments_query() {
             return self.rows.clone();
         }
+        // Same reasoning for similar-phrase mode (`"`) — results
+        // are already ranked by similarity score, not by timestamp,
+        // so re-sorting would scramble the ranking.
+        if self.is_similar_query() {
+            return self.rows.clone();
+        }
         // Directories / JIRA / files
         // modes are completely
         // different views that must NOT
@@ -5683,6 +5730,7 @@ impl App {
             crate::tui::mode::ModeKind::Codegraph => return crate::tui::mode::codegraph::fetch(self),
             crate::tui::mode::ModeKind::Ag => return crate::tui::mode::ag::fetch(self),
             crate::tui::mode::ModeKind::Segments => return crate::tui::mode::segments::fetch(self),
+            crate::tui::mode::ModeKind::Similar => return crate::tui::mode::similar::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6218,6 +6266,10 @@ impl App {
             self.select_for_run_impl();
             return;
         }
+        if self.is_similar_query() {
+            self.select_for_run_impl();
+            return;
+        }
         // Default: history mode.
         if let Some(row) = self.selected_row() {
             if row.mode == "llm" && !row.output.is_empty() {
@@ -6749,6 +6801,100 @@ impl App {
             }
             Err(e) => {
                 self.set_status_message(format!("Segments mode: {}", e));
+            }
+        }
+    }
+
+    /// Arm the similar-mode debounce. Mirrors `segments_touch`.
+    fn similar_touch(&mut self) {
+        if self.is_similar_query() {
+            self.similar_state.debounce_started = Some(std::time::Instant::now());
+            if let Some(request) = self.similar_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            self.similar_state.in_flight = false;
+        } else {
+            self.similar_state.debounce_started = None;
+            self.similar_state.in_flight = false;
+            self.similar_state.request = None;
+            self.similar_state.last_pattern = None;
+        }
+    }
+
+    /// Check whether the similar-mode debounce has elapsed and
+    /// spawn a background embed+search if so. Mirrors
+    /// `segments_maybe_autocall`.
+    fn similar_maybe_autocall(&mut self) {
+        if !self.is_similar_query() {
+            return;
+        }
+        if self.similar_state.in_flight {
+            return;
+        }
+        let Some(started) = self.similar_state.debounce_started else {
+            return;
+        };
+        if started.elapsed() < crate::tui::mode::similar::SIMILAR_DEBOUNCE {
+            return;
+        }
+        let Some(ref db_path) = self.notes_database else {
+            self.set_status_message("Similar mode: notes.database is not configured".to_string());
+            self.similar_state.debounce_started = None;
+            return;
+        };
+        let pattern = crate::tui::mode::similar::SimilarState::current_pattern(
+            &self.query,
+            self.query_prefixes.similar,
+        );
+        if self.similar_state.has_results_for(&pattern) {
+            return;
+        }
+        self.similar_state.last_pattern = Some(pattern.clone());
+        let db_path = db_path.clone();
+        let notes_dir = self.notes_dir.clone();
+        self.spawn_similar_search(db_path, notes_dir, pattern);
+    }
+
+    /// Spawn a background thread that embeds the phrase and runs
+    /// the similarity query. Mirrors `spawn_segments_search`.
+    fn spawn_similar_search(
+        &mut self,
+        db_path: std::path::PathBuf,
+        notes_dir: Option<std::path::PathBuf>,
+        pattern: String,
+    ) {
+        let request = crate::tui::mode::similar::spawn_similar_search(db_path, notes_dir, pattern);
+        self.similar_state.in_flight = true;
+        self.similar_state.request = Some(request);
+    }
+
+    /// Process a similar-mode search result from the background
+    /// thread. Mirrors `process_segments_result` — an embedding
+    /// failure (e.g. Ollama unreachable) or a search failure
+    /// surfaces as a status message.
+    fn process_similar_result(
+        &mut self,
+        request: crate::tui::mode::similar::SimilarRequest,
+        result: Result<Vec<HistoryRow>, String>,
+    ) {
+        self.similar_state.in_flight = false;
+        self.similar_state.request = None;
+        let current = crate::tui::mode::similar::SimilarState::current_pattern(
+            &self.query,
+            self.query_prefixes.similar,
+        );
+        if current != request.pattern {
+            // Stale result — the user has typed something else
+            // since this search was fired. Discard silently.
+            return;
+        }
+        match result {
+            Ok(rows) => {
+                self.similar_state.rows = rows;
+                self.refresh();
+            }
+            Err(e) => {
+                self.set_status_message(format!("Similar mode: {}", e));
             }
         }
     }
@@ -7852,11 +7998,12 @@ impl App {
     ///   `Tab` key doesn't interfere with any other
     ///   mode.
     fn notes_tab_complete_at_cursor(&mut self) {
-        // Active in notes (`@`), todos (`!`), and segments (`:`)
-        // mode — all three share the same `notes.database` tag/
-        // link namespace, so the completion source is identical.
-        // The three prefixes are each a single char (the
-        // `query_prefixes.notes` / `.todo` / `.segments` fields).
+        // Active in notes (`@`), todos (`!`), segments (`:`), and
+        // similar (`"`) mode — all four share the same
+        // `notes.database` tag/link namespace, so the completion
+        // source is identical. The four prefixes are each a
+        // single char (the `query_prefixes.notes` / `.todo` /
+        // `.segments` / `.similar` fields).
         let prefix_len: usize = 1;
         if self.query_cursor < prefix_len {
             return;
@@ -7877,6 +8024,7 @@ impl App {
         if first != self.query_prefixes.notes
             && first != self.query_prefixes.todo
             && first != self.query_prefixes.segments
+            && first != self.query_prefixes.similar
         {
             return;
         }
@@ -12427,6 +12575,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.panes => Some(ModeKind::Panes),
             _ if c == query_prefixes.jira => Some(ModeKind::Jira),
             _ if c == query_prefixes.segments => Some(ModeKind::Segments),
+            _ if c == query_prefixes.similar => Some(ModeKind::Similar),
             _ => None,
         }
     });
@@ -13113,6 +13262,14 @@ fn run_loop(
                 app.process_segments_result(request, result);
             }
 
+        // Check for similar-mode search result from background
+        // thread. Mirrors the segments-mode poll above.
+        if let Some(request) = app.similar_state.request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+            && let Some(request) = app.similar_state.request.take() {
+                app.process_similar_result(request, result);
+            }
+
         // Check for JIRA comments-fetch result
         // from background thread (mirrors the
         // search poll above). When the
@@ -13242,6 +13399,11 @@ fn run_loop(
                 // search after `SEGMENTS_DEBOUNCE` of
                 // quiet typing in `:` mode.
                 app.segments_maybe_autocall();
+                // Same debounce drive for similar-mode
+                // searches: spawns the background embed +
+                // search after `SIMILAR_DEBOUNCE` of quiet
+                // typing in `"` mode.
+                app.similar_maybe_autocall();
                 continue;
             }
             Ok(true) => {}
@@ -13364,6 +13526,21 @@ fn run_loop(
             }
             app.segments_state.in_flight = false;
             app.set_status_message("segments search cancelled".to_string());
+            continue;
+        }
+
+        // Same cancel handling for an in-flight similar-phrase
+        // search (the embed call is the slow part, and unlike a
+        // plain SQL query it can genuinely take a few seconds).
+        if app.similar_state.request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+            && matches!(action, Action::Cancel)
+        {
+            if let Some(request) = app.similar_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            app.similar_state.in_flight = false;
+            app.set_status_message("similar search cancelled".to_string());
             continue;
         }
 
@@ -13980,15 +14157,20 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // names inside the JIRA
             // search mode AND tag / link
             // names inside the notes
-            // (`@`), todos (`!`), and
-            // segments (`:`) modes. The
+            // (`@`), todos (`!`),
+            // segments (`:`), and
+            // similar (`"`) modes. The
             // add-entry dialog handles
             // its own Tab as field-next
             // INSIDE the dialog, so the
             // two paths never collide.
             if app.is_jira_query() {
                 app.jira_field_complete_at_cursor();
-            } else if app.is_notes_query() || app.is_todo_query() || app.is_segments_query() {
+            } else if app.is_notes_query()
+                || app.is_todo_query()
+                || app.is_segments_query()
+                || app.is_similar_query()
+            {
                 app.notes_tab_complete_at_cursor();
             }
             // Outside all four
