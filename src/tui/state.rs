@@ -527,7 +527,11 @@ impl PanesFilter {
             PanesFilter::All => "",
             PanesFilter::Windows => "PANES",
             PanesFilter::Hosts => "HOSTS",
-            PanesFilter::Sessions => "SESSIONS",
+            // Displayed as "Directories" in the list (see
+            // `configured_sections_into` in `panes.rs`); the
+            // variant name and config keys stay `sessions` for
+            // backward compatibility.
+            PanesFilter::Sessions => "DIRECTORIES",
         }
     }
 
@@ -551,7 +555,9 @@ impl PanesFilter {
             "all" => Some(PanesFilter::All),
             "windows" | "panes" | "win" => Some(PanesFilter::Windows),
             "hosts" | "host" => Some(PanesFilter::Hosts),
-            "sessions" | "session" => Some(PanesFilter::Sessions),
+            "sessions" | "session" | "directories" | "directory" | "dir" | "dirs" => {
+                Some(PanesFilter::Sessions)
+            }
             _ => None,
         }
     }
@@ -1716,6 +1722,31 @@ impl MatchAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::HistoryRow;
+    use super::PanesFilter;
+
+    /// The configured-sessions panes filter is displayed as
+    /// "DIRECTORIES" (renamed from "SESSIONS" — see
+    /// `configured_sections_into` in `panes.rs`), while the enum
+    /// variant itself stays `Sessions` for backward compatibility
+    /// with existing `key.filter-panes-sessions=...` bindings.
+    #[test]
+    fn panes_filter_sessions_label_is_directories() {
+        assert_eq!(PanesFilter::Sessions.label(), "DIRECTORIES");
+    }
+
+    /// `parse` accepts both the legacy "sessions"/"session" spelling
+    /// and the new "directories"/"directory"/"dir"/"dirs" aliases —
+    /// all resolve to the same `PanesFilter::Sessions` variant.
+    #[test]
+    fn panes_filter_parse_accepts_directories_aliases() {
+        for s in ["sessions", "session", "directories", "directory", "dir", "dirs", "DIR"] {
+            assert_eq!(
+                PanesFilter::parse(s),
+                Some(PanesFilter::Sessions),
+                "expected {s:?} to parse as Sessions"
+            );
+        }
+    }
 
     /// A real history row (positive
     /// `id`, `exit_code == 0`) is

@@ -138,6 +138,130 @@ pub(crate) fn check(app: &App) -> CheckReport {
     }
 }
 
+/// One group in the panes-mode row tree: a header row (`mode ==
+/// "workspace"` — a live tmux/herdr workspace, the configured
+/// `Directories` section, or the configured `hosts` section) plus
+/// its children, identified by index range within whatever row
+/// slice `compute_groups` was called on (`section_rows` in
+/// `fetch`, `merged_rows` in `App::select_initial_row`).
+pub(crate) struct PaneGroup {
+    pub start: usize,
+    pub end: usize,
+    /// The header row's own `command` text, lowercased once so
+    /// `classify_pattern_tokens` doesn't redo it per token.
+    pub label_lc: String,
+}
+
+/// Segment `rows` into contiguous groups: each `mode == "workspace"`
+/// row starts a new group that extends up to (not including) the
+/// next `mode == "workspace"` row or the end of the slice. Live
+/// workspaces, the configured `Directories` section, and the
+/// configured `hosts` section are all `mode == "workspace"` headers
+/// (see `configured_sections_into` and `refresh_session_panes_impl`),
+/// so this one function segments all of them uniformly.
+pub(crate) fn compute_groups(rows: &[HistoryRow]) -> Vec<PaneGroup> {
+    let mut groups = Vec::new();
+    let mut idx = 0;
+    while idx < rows.len() {
+        if rows[idx].mode == "workspace" {
+            let start = idx;
+            let mut end = idx + 1;
+            while end < rows.len() && rows[end].mode != "workspace" {
+                end += 1;
+            }
+            groups.push(PaneGroup {
+                start,
+                end,
+                label_lc: rows[start].command.to_lowercase(),
+            });
+            idx = end;
+        } else {
+            idx += 1;
+        }
+    }
+    groups
+}
+
+/// A group-scoping token must be at least this many characters —
+/// otherwise almost every group's label would contain it (e.g. "a"
+/// is a substring of nearly any workspace name), making short,
+/// ordinary content tokens accidentally scope the list instead of
+/// being searched for.
+const MIN_GROUP_SCOPE_TOKEN_LEN: usize = 3;
+
+/// Split the panes-mode query pattern into the tokens that should
+/// be matched against row content, and the set of group indices
+/// (into `groups`, if any) the query scopes down to. A token (at
+/// least `MIN_GROUP_SCOPE_TOKEN_LEN` characters) scopes to a group
+/// when it's a case-insensitive substring of that group's header
+/// label — e.g. `"note claude"` against a `NoteSearch` live
+/// workspace splits into content token `"claude"` plus a scope on
+/// the `NoteSearch` group, so the whole workspace stays visible
+/// while `"claude"` is what actually has to match a pane — the
+/// same mechanism that already worked for the fixed `Directories` /
+/// `hosts` groups now applies uniformly to live tmux/herdr
+/// workspaces too, since both are just `mode == "workspace"` header
+/// rows with a label. Group-label matching is always
+/// case-insensitive, independent of `case_sensitive` (which only
+/// affects how the returned `content_tokens` are later compared
+/// against row text).
+pub(crate) fn classify_pattern_tokens(
+    pattern: &str,
+    case_sensitive: bool,
+    groups: &[PaneGroup],
+) -> (Vec<String>, Option<std::collections::HashSet<usize>>) {
+    let mut content_tokens = Vec::new();
+    let mut scoped: Option<std::collections::HashSet<usize>> = None;
+    for raw_tok in pattern.split_whitespace().filter(|t| !t.is_empty()) {
+        let lower = raw_tok.to_lowercase();
+        let mut matched_group = false;
+        if lower.chars().count() >= MIN_GROUP_SCOPE_TOKEN_LEN {
+            for (i, g) in groups.iter().enumerate() {
+                if g.label_lc.contains(lower.as_str()) {
+                    scoped.get_or_insert_with(std::collections::HashSet::new).insert(i);
+                    matched_group = true;
+                }
+            }
+        }
+        if !matched_group {
+            content_tokens.push(if case_sensitive {
+                raw_tok.to_string()
+            } else {
+                lower
+            });
+        }
+    }
+    (content_tokens, scoped)
+}
+
+/// Substring-mode content match: every token in `content_tokens`
+/// must appear (case already normalized by the caller) in the
+/// row's command, comment, or output. An empty `content_tokens`
+/// matches every row (vacuous AND) — this is what makes a
+/// group-scope-only query (e.g. just `"dir"`) show the WHOLE
+/// scoped group rather than narrowing further. Shared by
+/// `fetch`'s group-aware filter and `App::select_initial_row`'s
+/// smart pane/session/host selection so both use identical
+/// matching semantics.
+pub(crate) fn row_matches_content_tokens(
+    row: &HistoryRow,
+    content_tokens: &[String],
+    case_sensitive: bool,
+) -> bool {
+    if case_sensitive {
+        content_tokens.iter().all(|tok| {
+            row.command.contains(tok) || row.comment.contains(tok) || row.output.contains(tok)
+        })
+    } else {
+        let cmd_lc = row.command.to_lowercase();
+        let dir_lc = row.comment.to_lowercase();
+        let tab_lc = row.output.to_lowercase();
+        content_tokens
+            .iter()
+            .all(|tok| cmd_lc.contains(tok) || dir_lc.contains(tok) || tab_lc.contains(tok))
+    }
+}
+
 /// The session-panes filter body, i.e. everything
 /// after the leading `*` prefix. Empty when not in
 /// panes mode.
@@ -261,18 +385,44 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     };
     let filter = app.panes_pattern().trim();
     let case_sensitive = app.is_case_sensitive();
-    let tokens: Vec<String> = filter
-        .split_whitespace()
-        .filter(|t| !t.is_empty())
-        .map(|t| {
-            if case_sensitive {
-                t.to_string()
-            } else {
-                t.to_lowercase()
+    // Group-scoping tokens (e.g. `note` -> a live `NoteSearch`
+    // workspace, `dir` -> the `Directories` group) are a
+    // Substring-mode-only convenience layered on top of the plain
+    // AND-token check — Fuzzy/Regex mode matches the whole
+    // `app.query` as one pattern via `query_matches_text` below,
+    // not per-token, so scoping is skipped there and `tokens` is
+    // computed the plain way (unchanged from before this feature
+    // existed).
+    let groups = compute_groups(&section_rows);
+    let (tokens, scoped_group_idxs): (Vec<String>, Option<std::collections::HashSet<usize>>) =
+        if app.match_algorithm == MatchAlgorithm::Substring {
+            classify_pattern_tokens(filter, case_sensitive, &groups)
+        } else {
+            (
+                filter
+                    .split_whitespace()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| if case_sensitive { t.to_string() } else { t.to_lowercase() })
+                    .collect(),
+                None,
+            )
+        };
+    // Narrow to the scoped group(s), if any token matched a
+    // group's header label. Applied on top of the F7/F8/F9
+    // panes-filter restriction above.
+    let section_rows: Vec<HistoryRow> = match &scoped_group_idxs {
+        Some(idxs) => {
+            let mut sorted: Vec<&usize> = idxs.iter().collect();
+            sorted.sort();
+            let mut kept = Vec::new();
+            for &i in sorted {
+                kept.extend_from_slice(&section_rows[groups[i].start..groups[i].end]);
             }
-        })
-        .collect();
-    if tokens.is_empty() {
+            kept
+        }
+        None => section_rows,
+    };
+    if tokens.is_empty() && scoped_group_idxs.is_none() {
         return Ok(section_rows);
     }
     // Per-row match predicate. Used for both
@@ -289,69 +439,44 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                 || app.query_matches_text(&r.comment)
                 || (!r.output.is_empty() && app.query_matches_text(&r.output));
         }
-        if case_sensitive {
-            tokens.iter().all(|tok| {
-                r.command.contains(tok) || r.comment.contains(tok) || r.output.contains(tok)
-            })
-        } else {
-            let cmd_lc = r.command.to_lowercase();
-            let dir_lc = r.comment.to_lowercase();
-            let tab_lc = r.output.to_lowercase();
-            tokens
-                .iter()
-                .all(|tok| cmd_lc.contains(tok) || dir_lc.contains(tok) || tab_lc.contains(tok))
-        }
+        row_matches_content_tokens(r, &tokens, case_sensitive)
     };
-    // Group-aware filter: the panes-mode rows
-    // are already laid out as a linearised
-    // tree (`workspace_header, pane, pane, …,
-    // workspace_header, pane, …`) by
-    // `fetch_session_panes_impl`. Each group is
-    // "one workspace header followed by its
-    // zero-or-more child pane rows". A group
-    // matches if ANY row in the group matches
-    // (workspace-label match OR any-child-pane
-    // match), in which case the WHOLE group is
-    // emitted. This is what the user asked
-    // for: "I searched for `SmartHistory`, I
-    // want to see the workspace AND its panes".
-    // Hosts (`source == "hosts"`) and sessions
-    // (`source == "sessions"`) are standalone
-    // rows (no children) and use the legacy
-    // per-row filter.
+    // Group-aware filter: the panes-mode rows are already laid
+    // out as a linearised tree (`header, child, child, …,
+    // header, child, …`) by `fetch_session_panes_impl` +
+    // `configured_sections_into` — a header row always has
+    // `mode == "workspace"` (live workspace, the `Directories`
+    // section, or the `hosts` section), followed by its
+    // zero-or-more children (`pane` / `session` / `host`) up to
+    // the next header or end of list. A group matches if ANY
+    // row in it matches (header-label match OR any-child
+    // match), in which case the WHOLE group is emitted — the
+    // parent-wins-and-child-wins semantic: typing a workspace
+    // label keeps the whole workspace, typing a pane command
+    // keeps that pane AND its parent header, and typing (say)
+    // "Home" keeps the `Directories` header AND every configured
+    // session, not just the one that matched — the header would
+    // otherwise vanish from a list where the only match is one
+    // of its children.
     let mut out: Vec<HistoryRow> = Vec::new();
     let mut idx = 0;
     while idx < section_rows.len() {
         let row = &section_rows[idx];
-        if row.source == "workspace" {
-            // Collect the contiguous group:
-            // this `workspace` header plus every
-            // immediately following row whose
-            // `source` is `"pane"`. Rows after
-            // the first non-`pane` row start a
-            // new group.
+        if row.mode == "workspace" {
             let group_start = idx;
             let mut group_end = idx + 1;
-            while group_end < section_rows.len() && section_rows[group_end].source == "pane" {
+            while group_end < section_rows.len() && section_rows[group_end].mode != "workspace" {
                 group_end += 1;
             }
             let group = &section_rows[group_start..group_end];
-            // Group matches if any row in it
-            // matches. This is the
-            // parent-wins-and-child-wins semantic:
-            // typing the workspace label keeps
-            // the whole workspace; typing a pane
-            // command keeps that pane AND its
-            // parent workspace header.
             if group.iter().any(row_matches) {
                 out.extend_from_slice(group);
             }
             idx = group_end;
         } else {
-            // Standalone row (hosts, sessions,
-            // or a stray pane that lost its
-            // header for any reason): per-row
-            // filter.
+            // A stray child that lost its header for any reason
+            // (defensive — shouldn't happen given the two
+            // builders above always emit header-then-children).
             if row_matches(row) {
                 out.push(row.clone());
             }
@@ -427,7 +552,17 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
     if !app.sessions.is_empty() {
         out.push(HistoryRow {
             id: -20_000,
-            command: "sessions".to_string(),
+            // Displayed group label. Renamed from "sessions" to
+            // "Directories" — these are directory quick-launch
+            // shortcuts (`session.N` config entries), not tmux/herdr
+            // sessions in the multiplexer sense, and "sessions" read
+            // confusingly next to the live `# <workspace>` headers
+            // above it. The internal `source`/`session_id`
+            // ("sessions") are unchanged — only this display text
+            // moved — so `PanesFilter::Sessions`, the F9 keybinding,
+            // and `stage_directory_selection`'s row matching all
+            // keep working without any other change.
+            command: "Directories".to_string(),
             directory: String::new(),
             session_id: "sessions".to_string(),
             exit_code: 0,

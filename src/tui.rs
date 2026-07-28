@@ -5374,35 +5374,83 @@ impl App {
         if self.is_panes_query()
             && !self.panes_pattern().trim().is_empty()
         {
-            // Pane mode + non-empty
-            // query: find the first
-            // pane row whose agent /
-            // command line matches
-            // the query. The user
-            // explicitly asked for
-            // this ("when I search
-            // for `claude` I want
-            // the `claude` pane
-            // selected, not the
+            // Pane / session / host mode + non-empty query: find
+            // the specific child row that actually matches, not
+            // the group header it's shown under. The user
+            // explicitly asked for this ("when I search for
+            // `claude` I want the `claude` pane selected, not the
             // workspace header").
-            // Pane rows have
-            // `mode = "pane"` and
-            // the agent / cmdline
-            // in `command`. We use
-            // `query_matches_text`
-            // for the same
-            // Substring / Fuzzy /
-            // Regex match the
-            // `panes::fetch`
-            // group-aware filter
-            // uses, so the
-            // selection matches the
-            // visible row set.
-            if let Some(idx) = self
-                .merged_rows
-                .iter()
-                .position(|r| r.mode == "pane" && self.query_matches_text(&r.command))
-            {
+            //
+            // In Substring mode this is group-scope-aware, using
+            // the SAME mechanism `panes::fetch` uses to decide
+            // what's even visible (`panes::compute_groups` +
+            // `panes::classify_pattern_tokens`): a token that's a
+            // substring of a group's own header label (a live
+            // workspace name, "Directories", or "hosts") scopes the
+            // search to that group's children instead of needing to
+            // literally appear in the matched row's own text. E.g.
+            // "note claude" against a `NoteSearch` workspace scopes
+            // to that workspace via "note" and then looks for
+            // "claude" among its panes — without this, "claude"
+            // alone would find the pane fine, but "note claude"
+            // would fail to find ANY row satisfying both tokens (no
+            // pane's own text contains "note") and fall back to
+            // selecting the header. A scope-only query (e.g. just
+            // "note" or "dir", no remaining content token) selects
+            // the scoped group's header instead of an arbitrary
+            // child, since there's nothing left to pick one by.
+            //
+            // Fuzzy/Regex mode has no group-scoping (see
+            // `panes::fetch`'s own scope limitation), so it falls
+            // back to the plain `query_matches_text` check against
+            // each child row's own command text, unchanged from
+            // before this feature existed.
+            if self.match_algorithm == MatchAlgorithm::Substring {
+                let groups = crate::tui::mode::panes::compute_groups(&self.merged_rows);
+                let (content_tokens, scoped_group_idxs) =
+                    crate::tui::mode::panes::classify_pattern_tokens(
+                        self.panes_pattern().trim(),
+                        self.is_case_sensitive(),
+                        &groups,
+                    );
+                let case_sensitive = self.is_case_sensitive();
+                if !content_tokens.is_empty() {
+                    let search_ranges: Vec<(usize, usize)> = match &scoped_group_idxs {
+                        Some(idxs) => {
+                            let mut sorted: Vec<&usize> = idxs.iter().collect();
+                            sorted.sort();
+                            sorted
+                                .into_iter()
+                                .map(|&i| (groups[i].start, groups[i].end))
+                                .collect()
+                        }
+                        None => vec![(0, self.merged_rows.len())],
+                    };
+                    for (start, end) in search_ranges {
+                        if let Some(rel_idx) = self.merged_rows[start..end].iter().position(|r| {
+                            r.mode != "workspace"
+                                && crate::tui::mode::panes::row_matches_content_tokens(
+                                    r,
+                                    &content_tokens,
+                                    case_sensitive,
+                                )
+                        }) {
+                            self.list_state.select(Some(start + rel_idx));
+                            return;
+                        }
+                    }
+                } else if let Some(idxs) = &scoped_group_idxs {
+                    let mut sorted: Vec<&usize> = idxs.iter().collect();
+                    sorted.sort();
+                    if let Some(&&i) = sorted.first() {
+                        self.list_state.select(Some(groups[i].start));
+                        return;
+                    }
+                }
+            } else if let Some(idx) = self.merged_rows.iter().position(|r| {
+                (r.mode == "pane" || r.mode == "session" || r.mode == "host")
+                    && self.query_matches_text(&r.command)
+            }) {
                 self.list_state.select(Some(idx));
                 return;
             }

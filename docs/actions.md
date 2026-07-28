@@ -644,7 +644,7 @@ Delete every marked row (with confirmation) — same `y`/`n`/`Esc`/`Ctrl-C` dial
 | Default key | `F5` |
 | Category | config |
 
-Add the selected row's directory as a new `session.<id>` entry in the config file. Opens a multi-field dialog (Name, Dir, Exec) that writes the entry to `~/.config/smarthistory/config` and reloads the in-memory session list. The new session appears in the `*` panes view under a `# sessions` header.
+Add the selected row's directory as a new `session.<id>` entry in the config file. Opens a multi-field dialog (Name, Dir, Exec) that writes the entry to `~/.config/smarthistory/config` and reloads the in-memory session list. The new session appears in the `*` panes view under the `# Directories` header (renamed from `# sessions` — see [`panes.md`](modes/panes.md#configured-groups-directories-and-hosts)).
 
 ### `AddHost`
 
@@ -719,7 +719,7 @@ These three actions only fire inside `*` (panes) mode; they're no-ops with a sta
 | Default key | `F7` |
 | Category | panes |
 
-Filter the `*`-mode panes view to show only live multiplexer panes (hide `# sessions` and `# hosts`). Pressing the key again (when already filtered to Windows) resets to `All`.
+Filter the `*`-mode panes view to show only live multiplexer panes (hide `# Directories` and `# hosts`). Pressing the key again (when already filtered to Windows) resets to `All`.
 
 ### `FilterPanesHosts`
 
@@ -737,11 +737,11 @@ Filter the `*`-mode panes view to show only the `# hosts` block. Pressing the ke
 | Field | Value |
 | --- | --- |
 | Config key | `filter-panes-sessions` |
-| Display name | Filter panes: sessions only |
+| Display name | Filter panes: directories only |
 | Default key | `F9` |
 | Category | panes |
 
-Filter the `*`-mode panes view to show only the `# sessions` block. Pressing the key again resets to `All`.
+Filter the `*`-mode panes view to show only the `# Directories` block (config key and value stay `sessions` for backward compatibility — `directories` / `directory` / `dir` / `dirs` are also accepted as `--panes-filter` values). Pressing the key again resets to `All`.
 
 ---
 

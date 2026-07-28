@@ -2075,7 +2075,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         binding_for(Action::FilterPanesSessions),
-        "panes: show only the `# sessions` block",
+        "panes: show only the `# Directories` block",
     );
 
     lines.push(Line::from(""));

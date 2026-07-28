@@ -22570,6 +22570,86 @@ fn panes_select_initial_row_finds_pane_matching_query() {
     assert_eq!(selected_row.session_id, "w34:p1");
 }
 
+/// The user's follow-up report: group-name scoping worked for the
+/// fixed `Directories`/`hosts` groups but not for live tmux/herdr
+/// workspaces. "note claude" against a `NoteSearch` workspace (one
+/// header, two panes — built via `panes_sort_test_app`, which
+/// groups same-labeled panes under a single header, matching real
+/// multiplexer behavior) must scope to that workspace via "note" (a
+/// substring of its own label, not either pane's text), keep the
+/// WHOLE workspace visible (header + both panes, not narrowed to
+/// just the claude match), and select the pane matching "claude" —
+/// not fall back to selecting the `NoteSearch` header, which is
+/// what happened before `classify_pattern_tokens` learned to treat
+/// every `mode == "workspace"` header's own label as a scope
+/// candidate instead of only the two fixed configured groups.
+#[test]
+fn panes_select_initial_row_selects_pane_with_workspace_scope_and_content_query() {
+    let mut app = panes_sort_test_app(vec![
+        ("w34:p1", "w34", "NoteSearch", "/tmp/notes", "claude", false),
+        ("w34:p2", "w34", "NoteSearch", "/tmp/notes", "zsh", false),
+    ]);
+    app.query = "*note claude".to_string();
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    assert_eq!(
+        app.merged_rows.iter().filter(|r| r.mode == "pane").count(),
+        2,
+        "the whole NoteSearch group must stay visible, not just the claude match, got: {:?}",
+        app.merged_rows.iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let selected_row = &app.merged_rows[selected];
+    assert_eq!(
+        selected_row.mode, "pane",
+        "\"note claude\" must select the claude pane, not the NoteSearch header"
+    );
+    assert!(
+        selected_row.command.contains("claude"),
+        "got command={:?}",
+        selected_row.command
+    );
+    assert_eq!(selected_row.session_id, "w34:p1");
+}
+
+/// Two live workspaces, each with its own `claude` pane. The scope
+/// token "note" only matches the `NoteSearch` label (not
+/// `SmartHistory`), so `SmartHistory` — including its own `claude`
+/// pane — must be excluded entirely, and selection must land on
+/// `NoteSearch`'s `claude` pane specifically, not leak into the
+/// other workspace's same-named pane.
+#[test]
+fn panes_select_initial_row_workspace_scope_does_not_leak_into_other_workspace() {
+    let mut app = panes_sort_test_app(vec![
+        ("w34:p1", "w34", "NoteSearch", "/tmp/notes", "claude", false),
+        ("w34:p2", "w34", "NoteSearch", "/tmp/notes", "zsh", false),
+        ("w9:p1", "w9", "SmartHistory", "/tmp/sh", "claude", false),
+    ]);
+    app.query = "*note claude".to_string();
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    assert!(
+        app.merged_rows
+            .iter()
+            .all(|r| r.command != "SmartHistory" && r.session_id != "w9:p1"),
+        "scoping to NoteSearch must exclude the unrelated SmartHistory workspace entirely, got: {:?}",
+        app.merged_rows
+            .iter()
+            .map(|r| (&r.mode, &r.command))
+            .collect::<Vec<_>>()
+    );
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let selected_row = &app.merged_rows[selected];
+    assert_eq!(selected_row.mode, "pane");
+    assert!(selected_row.command.contains("claude"));
+    assert_eq!(
+        selected_row.session_id, "w34:p1",
+        "must select NoteSearch's own claude pane (w34:p1), not SmartHistory's (w9:p1)"
+    );
+}
+
 #[test]
 fn panes_select_initial_row_falls_back_to_workspace_header_when_no_pane_matches() {
     // The user searches
@@ -22605,6 +22685,167 @@ fn panes_select_initial_row_falls_back_to_workspace_header_when_no_pane_matches(
         "when only the workspace label matches, selection must fall back to the workspace header"
     );
     assert_eq!(selected_row.command, "NoteSearch");
+}
+
+/// The configured-sessions group header is displayed as
+/// "Directories" (renamed from "sessions" — these are directory
+/// quick-launch shortcuts, not multiplexer sessions), and it must
+/// stay visible — along with every sibling entry, not just the
+/// one that matched — when a query matches one of its children.
+/// Before this fix, the header used the standalone per-row filter
+/// (not the group-aware one live workspaces use), so a query that
+/// only matched a child's text made the header disappear entirely.
+#[test]
+fn panes_directories_group_header_is_renamed_and_stays_visible_when_child_matches() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_sort_test_app(vec![("wA:p1", "wA", "wA", "/tmp", "zsh", true)]);
+    app.sessions = vec![
+        HistoryRow {
+            command: "⛩️ Home".to_string(),
+            directory: "~/".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "📥 Downloads".to_string(),
+            directory: "~/Downloads".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*Home".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let header = rows
+        .iter()
+        .find(|r| r.mode == "workspace" && r.source == "sessions")
+        .expect("Directories header must stay visible when a child matches");
+    assert_eq!(header.command, "Directories");
+    let session_count = rows.iter().filter(|r| r.mode == "session").count();
+    assert_eq!(
+        session_count, 2,
+        "group visibility keeps every sibling session, not just the one that matched"
+    );
+    assert!(rows.iter().any(|r| r.mode == "session" && r.command.contains("Home")));
+    assert!(rows.iter().any(|r| r.mode == "session" && r.command.contains("Downloads")));
+}
+
+/// A query token that's a case-insensitive substring of the
+/// `Directories` group's label (e.g. "dir") scopes the whole list
+/// down to just that group — live workspace/pane rows and the
+/// `hosts` group are excluded, even though nothing in their own
+/// text mentions "dir".
+#[test]
+fn panes_directories_scope_token_narrows_to_directories_group_only() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_sort_test_app(vec![("wA:p1", "wA", "wA", "/tmp", "zsh", true)]);
+    app.sessions = vec![HistoryRow {
+        command: "⛩️ Home".to_string(),
+        ..Default::default()
+    }];
+    app.hosts = vec![HistoryRow {
+        command: "💾 Proxmox".to_string(),
+        ..Default::default()
+    }];
+    app.query = "*dir".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert!(
+        !rows.is_empty() && rows.iter().all(|r| r.source == "sessions"),
+        "scope token 'dir' must narrow to ONLY the Directories group, got sources: {:?}",
+        rows.iter().map(|r| &r.source).collect::<Vec<_>>()
+    );
+    assert!(rows.iter().any(|r| r.mode == "workspace" && r.command == "Directories"));
+    assert!(rows.iter().any(|r| r.mode == "session" && r.command.contains("Home")));
+}
+
+/// Combining a group-scope token with a content token — `"Home
+/// dir"` — selects the `Home` entry specifically (not the
+/// `Directories` header), even though "dir" never appears in the
+/// `Home` row's own text; "dir" scopes to the group instead of
+/// needing to be literal row content.
+#[test]
+fn panes_select_initial_row_selects_session_with_combined_scope_and_content_query() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_sort_test_app(vec![("wA:p1", "wA", "wA", "/tmp", "zsh", true)]);
+    app.sessions = vec![
+        HistoryRow {
+            command: "⛩️ Home".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "📥 Downloads".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*Home dir".to_string();
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    assert_eq!(
+        app.merged_rows.iter().filter(|r| r.mode == "session").count(),
+        2,
+        "the whole Directories group must stay visible, not just the Home match"
+    );
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let row = &app.merged_rows[selected];
+    assert_eq!(row.mode, "session", "got row: {:?}", row.command);
+    assert!(row.command.contains("Home"), "got {:?}", row.command);
+}
+
+/// The user's literal example: searching for just "Home" (no
+/// group-scope token) selects the `Home` session entry, not the
+/// `Directories` header.
+#[test]
+fn panes_select_initial_row_selects_session_matching_plain_content_query() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_sort_test_app(vec![("wA:p1", "wA", "wA", "/tmp", "zsh", true)]);
+    app.sessions = vec![
+        HistoryRow {
+            command: "⛩️ Home".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "📥 Downloads".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*Home".to_string();
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let row = &app.merged_rows[selected];
+    assert_eq!(row.mode, "session");
+    assert!(row.command.contains("Home"), "got {:?}", row.command);
+}
+
+/// A scope-only query (just "dir", no remaining content token) has
+/// nothing left to pick a specific child by, so selection falls
+/// back to the group header rather than arbitrarily picking the
+/// first session.
+#[test]
+fn panes_select_initial_row_scope_only_query_falls_back_to_header() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_sort_test_app(vec![("wA:p1", "wA", "wA", "/tmp", "zsh", true)]);
+    app.sessions = vec![
+        HistoryRow {
+            command: "⛩️ Home".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "📥 Downloads".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*dir".to_string();
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.select_initial_row();
+    let selected = app.list_state.selected().expect("selected");
+    let row = &app.merged_rows[selected];
+    assert_eq!(
+        row.mode, "workspace",
+        "scope-only query with no content token should select the group header, not an arbitrary child, got mode={:?}",
+        row.mode
+    );
+    assert_eq!(row.command, "Directories");
 }
 
 #[test]

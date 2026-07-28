@@ -747,7 +747,7 @@ impl Action {
             Action::CreateNote => "Create a new note (Title + Content)",
             Action::FilterPanesWindows => "Filter panes: windows only",
             Action::FilterPanesHosts => "Filter panes: hosts only",
-            Action::FilterPanesSessions => "Filter panes: sessions only",
+            Action::FilterPanesSessions => "Filter panes: directories only",
             Action::Describe => "Describe selected command",
             Action::Correct => "Correct selected command",
             Action::DownloadJiraIssue => "Download JIRA issue as note",

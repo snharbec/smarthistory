@@ -28,7 +28,7 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
 - **Output capture** for both tmux (`pipe-pane` log) and herdr (`herdr pane read`): captured output is searchable via the `+` prefix and viewable via `Ctrl+L`.
 - **Note/todo integration** with [note_search](https://github.com/snharbec/note_search): search notes (`@`), list open todos (`!`), and create new entries (`@new <text>` / `!@new <text>`) directly from the TUI.
-- **Named sessions** (config): define sessions directly in `~/.config/smarthistory/config` via `session.<id> = "name"` + `session.<id>.dir = "~/path"`. They appear in the panes (`*`) view under a `# sessions` header; selecting one creates/switches a workspace.
+- **Named sessions** (config): define sessions directly in `~/.config/smarthistory/config` via `session.<id> = "name"` + `session.<id>.dir = "~/path"`. They appear in the panes (`*`) view under a `# Directories` header; selecting one creates/switches a workspace.
 - **Single Rust binary, no runtime dependencies.** No `fzf`, no `uuidgen`, no `/dev/urandom` access.
 
 ## Installation
@@ -87,7 +87,7 @@ smarthistory tui [--mode SESS|DIR|GLOBAL] [--prefix <char>] [--exec] [QUERY]
 - `--prefix <char>` — start directly in a prefix mode (`*` for panes, `#` for directories, `@` for notes, etc.). Overrides the persisted session query.
 - `--exec` — execute the selected command directly via `sh -c` instead of printing it to stdout. Use when launching from outside a shell (e.g. a herdr keybinding or GUI launcher).
 - `--pane <LAYOUT>` — set the initial detail pane layout: `both` (default, side-by-side), `details` (only the Details pane), `output` (only the Output Preview pane). Overrides the persisted session value.
-- `--panes-filter <FILTER>` — set the initial filter for panes (`*`) mode: `all` (default), `windows` (live multiplexer panes only), `hosts` (only the `# hosts` block), `sessions` (only the `# sessions` block). Only effective when the initial query starts with the panes prefix.
+- `--panes-filter <FILTER>` — set the initial filter for panes (`*`) mode: `all` (default), `windows` (live multiplexer panes only), `hosts` (only the `# hosts` block), `sessions` (only the `# Directories` block — `directories` / `directory` / `dir` / `dirs` are also accepted). Only effective when the initial query starts with the panes prefix.
 
 ### TUI key bindings (subset)
 
@@ -123,7 +123,7 @@ own config.
 | `F11` / `S-F11` | Grow / shrink the details + output preview row height by one line (8-line floor). |
 | `F7` | Panes filter: show only live multiplexer windows (`*` mode). |
 | `F8` | Panes filter: show only the `# hosts` block (`*` mode). |
-| `F9` | Panes filter: show only the `# sessions` block (`*` mode). |
+| `F9` | Panes filter: show only the `# Directories` block (`*` mode). |
 | `C-c`, `Esc` | Close any overlay / cancel the picker. |
 
 The duplicate filter and the "delete matching" actions
