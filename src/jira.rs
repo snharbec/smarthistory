@@ -1889,7 +1889,7 @@ pub fn notes_attr_value_complete(db_path: &std::path::Path, key: &str, prefix: &
 /// completion. Extracted so the two functions stay
 /// one-liners and the matching semantics are
 /// identical.
-fn notes_complete_inner(names: &[String], prefix: &str) -> Option<String> {
+pub(crate) fn notes_complete_inner(names: &[String], prefix: &str) -> Option<String> {
     let lower = prefix.to_ascii_lowercase();
     let matches: Vec<&str> = names
         .iter()

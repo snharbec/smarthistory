@@ -1157,6 +1157,7 @@ fn stats_test_app(rows: &[(&str, i64)]) -> App {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -1241,6 +1242,7 @@ fn global_test_app(rows: &[(&str, i64)]) -> App {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -1317,6 +1319,7 @@ fn global_test_app_with_dedup_index(rows: &[(&str, i64)]) -> App {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -1564,6 +1567,7 @@ fn cycle_exit_filter_refreshes_rows() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -2237,6 +2241,7 @@ fn selected_row_finds_labeled_only_rows() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -2369,6 +2374,7 @@ fn select_for_run_on_labeled_only_row_stages_command() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -3581,6 +3587,7 @@ fn make_llm_app(query: &str, fake: FakeLlm) -> App {
         KeyBindings::defaults(),
         Some(Box::new(fake)),
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -3795,6 +3802,7 @@ fn run_llm_query_surfaces_not_configured_when_client_is_none() {
         KeyBindings::defaults(),
         None, // <-- the missing LLM config
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -4664,6 +4672,7 @@ fn output_test_app(rows: &[(&str, &str)]) -> App {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -6985,6 +6994,7 @@ fn labeled_only_row_appears_at_end_of_merged_list() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -7110,6 +7120,7 @@ fn labeled_row_already_in_primary_list_is_not_duplicated() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -7244,6 +7255,7 @@ fn labeled_only_row_stays_at_end_even_if_newer() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -7383,6 +7395,7 @@ fn labeled_only_partition_in_frequency_mode() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -9779,6 +9792,57 @@ fn merged_rows_in_segments_mode_does_not_interleave_labeled_rows() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// Paperless-mode rows are pre-sorted newest-`added`-first by
+/// `paperless::spawn_search`. `merged_rows()` must preserve that
+/// order verbatim — no labeled-row interleaving, and no
+/// Frequency-sort override — even when the user has toggled
+/// `SortOrder::Frequency` (`F4`) globally. Mirrors
+/// `merged_rows_in_segments_mode_does_not_interleave_labeled_rows`.
+#[test]
+fn merged_rows_in_paperless_mode_preserves_added_order_and_ignores_frequency_sort() {
+    let mut app = directories_test_app(&[]);
+    app.sort_order = SortOrder::Frequency;
+    app.labeled_rows.push(crate::tui::state::HistoryRow {
+        id: 999,
+        command: "older unrelated labeled command".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "a bookmark, not a document".to_string(),
+        output: String::new(),
+        mode: "history".to_string(),
+        source: String::new(),
+        ..Default::default()
+    });
+    app.paperless_state.rows = vec![
+        crate::tui::state::HistoryRow {
+            id: -2,
+            command: "Newest document".to_string(),
+            timestamp: 200,
+            mode: "paperless".to_string(),
+            source: "paperless".to_string(),
+            ..Default::default()
+        },
+        crate::tui::state::HistoryRow {
+            id: -1,
+            command: "Oldest document".to_string(),
+            timestamp: 100,
+            mode: "paperless".to_string(),
+            source: "paperless".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "<".to_string();
+    app.refresh();
+    let commands: Vec<String> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(
+        commands,
+        vec!["Newest document", "Oldest document"],
+        "paperless rows must keep the pre-sorted added-timestamp order, ignoring Frequency sort and labeled rows"
+    );
+}
+
 /// A bare word in the typed pattern filters segments by substring
 /// (via `QueryExpr::Text`, the fallback case of the `#tag` /
 /// `[[link]]` query DSL `parse_query` produces). "prose" only
@@ -10589,6 +10653,7 @@ fn directories_test_app(rows: &[(&str, &str, i64)]) -> App {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -17261,6 +17326,7 @@ fn push_char_in_global_mode_fires_search_immediately() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -17392,6 +17458,7 @@ fn backspace_in_global_mode_fires_search_immediately() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -17510,6 +17577,7 @@ fn push_char_then_backspace_to_empty_does_not_re_fetch() {
         KeyBindings::defaults(),
         None,
         None,
+        None, // paperless_config
         crate::QueryPrefixes::default(),
         None,
         None,
@@ -19264,6 +19332,168 @@ fn select_for_run_in_jira_mode_stages_open_url() {
     assert_eq!(app.pick_mode, Some(PickMode::Run));
 }
 
+/// Selecting a paperless (`<`) row stages `open "<url>/documents/<id>/details"`
+/// and exits, same as `select_for_run_in_jira_mode_stages_open_url` above.
+/// `paperless_config` lives on `App` directly (config-file based, not env
+/// vars like JIRA), so no env-var juggling is needed here.
+#[test]
+fn select_for_run_in_paperless_mode_stages_open_url() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_config = Some(crate::paperless::PaperlessConfig {
+        url: "https://paperless.example.com".to_string(),
+        token: "tok".to_string(),
+    });
+    app.paperless_state.rows.push(crate::tui::state::HistoryRow {
+        id: -42,
+        command: "Annual report".to_string(),
+        directory: String::new(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "paperless".to_string(),
+        source: "paperless".to_string(),
+
+        ..Default::default()
+    });
+    app.query = String::from("<");
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some(
+            format!(
+                "{} \"https://paperless.example.com/documents/42/details\"",
+                if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                }
+            )
+            .as_str()
+        ),
+        "got: {:?}",
+        app.selection
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// Selecting a paperless row when `paperless.url` /
+/// `paperless.token` are not configured surfaces the
+/// `NotConfigured` status message instead of staging a
+/// broken `open ""` command.
+#[test]
+fn select_for_run_in_paperless_mode_without_config_surfaces_status() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_config = None;
+    app.paperless_state.rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "Annual report".to_string(),
+        directory: String::new(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "paperless".to_string(),
+        source: "paperless".to_string(),
+
+        ..Default::default()
+    });
+    app.query = String::from("<");
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(app.selection, None);
+    assert!(app.status_message.is_some());
+}
+
+/// `<#inv<TAB>` expands to `<#invoice ` (unique tag match, same
+/// shape as `notes_tab_completion_tag_unique_match_expands_with_space`
+/// but the candidate source is `paperless_state.tag_names`, not a
+/// SQLite database).
+#[test]
+fn paperless_tab_completion_tag_unique_match_expands_with_space() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_state.tag_names = vec!["invoice".to_string()];
+    app.query = String::from("<#inv");
+    app.query_cursor = app.query.chars().count();
+    app.paperless_tab_complete_at_cursor();
+    assert_eq!(app.query, "<#invoice ", "got: {:?}", app.query);
+    assert_eq!(app.query_cursor, 10);
+}
+
+/// `<@ac<TAB>` expands to `<@Acme Corp ` (unique correspondent
+/// match). Unlike notes-mode link completion, the canonical
+/// casing is preserved verbatim (correspondent names are
+/// arbitrary display strings, not an Obsidian-style
+/// case-insensitive namespace).
+#[test]
+fn paperless_tab_completion_correspondent_unique_match_preserves_casing() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_state.correspondent_names = vec!["Acme Corp".to_string()];
+    app.query = String::from("<@ac");
+    app.query_cursor = app.query.chars().count();
+    app.paperless_tab_complete_at_cursor();
+    assert_eq!(app.query, "<@Acme Corp ", "got: {:?}", app.query);
+}
+
+/// Ambiguous tag prefix opens the completion menu (same shape as
+/// `notes_tab_completion_link_ambiguous_opens_menu`) — the query
+/// is unchanged until the user picks a candidate.
+#[test]
+fn paperless_tab_completion_tag_ambiguous_opens_menu() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_state.tag_names = vec!["invoice".to_string(), "invalid".to_string()];
+    app.query = String::from("<#inv");
+    app.query_cursor = app.query.chars().count();
+    app.paperless_tab_complete_at_cursor();
+    assert_eq!(app.query, "<#inv", "got: {:?}", app.query);
+    assert!(app.is_completion_menu_open(), "completion menu should be open");
+}
+
+/// No tag in the catalogue starts with the typed prefix — a
+/// status message surfaces and the query is left unchanged.
+#[test]
+fn paperless_tab_completion_no_match_surfaces_status() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_state.tag_names = vec!["invoice".to_string()];
+    app.query = String::from("<#xyz");
+    app.query_cursor = app.query.chars().count();
+    app.paperless_tab_complete_at_cursor();
+    assert_eq!(app.query, "<#xyz");
+    assert!(app.status_message.is_some());
+}
+
+/// Before any search has completed, `tag_names` /
+/// `correspondent_names` are empty — Tab surfaces a "run a
+/// search first" status message instead of silently doing
+/// nothing.
+#[test]
+fn paperless_tab_completion_no_catalogue_yet_surfaces_status() {
+    let mut app = directories_test_app(&[]);
+    app.query = String::from("<#inv");
+    app.query_cursor = app.query.chars().count();
+    app.paperless_tab_complete_at_cursor();
+    assert_eq!(app.query, "<#inv");
+    assert!(app.status_message.is_some());
+}
+
+/// A plain word (title search, no `#`/`@`) has no completion
+/// candidates — Tab is a silent no-op, same as the notes-mode
+/// "plain text" fallthrough.
+#[test]
+fn paperless_tab_completion_plain_word_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.paperless_state.tag_names = vec!["invoice".to_string()];
+    app.query = String::from("<inv");
+    app.query_cursor = app.query.chars().count();
+    app.paperless_tab_complete_at_cursor();
+    assert_eq!(app.query, "<inv");
+}
+
 /// `jira_maybe_autocall` shows a status message
 /// (and fires nothing) when JIRA isn't configured
 /// — no env vars and no injected client.
@@ -19857,9 +20087,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_fifteen_entries() {
+fn prefix_picker_has_sixteen_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 15);
+    assert_eq!(picker.options.len(), 16);
 }
 
 #[test]
@@ -19954,7 +20184,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 14);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 15);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);

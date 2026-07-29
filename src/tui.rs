@@ -1361,6 +1361,14 @@ pub(crate) struct App {
     /// threads can create their own `OllamaClient` instances
     /// for async requests.
     llm_config: Option<crate::llm::LlmConfig>,
+    /// Paperless-ngx configuration for the `<...` query mode.
+    /// `None` means the feature is not configured; the TUI
+    /// surfaces a clear status message instead of attempting
+    /// the call.
+    paperless_config: Option<crate::paperless::PaperlessConfig>,
+    /// Aggregated paperless-mode search state (debounce,
+    /// in-flight request, cached rows). Mirrors `files_state`.
+    paperless_state: crate::paperless::PaperlessState,
     /// User-customizable query prefix characters.
     query_prefixes: crate::QueryPrefixes,
     /// Path to the note_search database, if configured.
@@ -2485,6 +2493,23 @@ impl App {
         crate::tui::mode::jira::pattern(self)
     }
 
+    /// Whether the query is a paperless document-search
+    /// request: the query starts with the paperless prefix
+    /// (`<` by default). The body is parsed by
+    /// `crate::paperless::build_query` into tag / correspondent /
+    /// title tokens.
+    fn is_paperless_query(&self) -> bool {
+        crate::tui::mode::paperless::matches(self)
+    }
+
+    /// The paperless search body, i.e. everything after the
+    /// leading `<` prefix. Empty string when not in paperless
+    /// mode.
+    #[allow(dead_code)] // convention API, matching every other `<mode>_pattern` accessor
+    fn paperless_pattern(&self) -> &str {
+        crate::tui::mode::paperless::pattern(self)
+    }
+
     /// The todo search body, i.e. everything
     /// after the leading todo prefix. Same
     /// contract as `notes_pattern`: empty string
@@ -3286,6 +3311,10 @@ impl App {
         // search debounce. `similar_touch` is a
         // no-op outside `"` mode.
         self.similar_touch();
+        // Same co-location for the paperless-mode
+        // search debounce. `paperless_touch` is a
+        // no-op outside `<` mode.
+        self.paperless_touch();
     }
 
     /// Fire the per-mode search immediately on a
@@ -4611,6 +4640,11 @@ impl PrefixPicker {
                 label: "Similar",
                 description: "rank note segments by similarity to a phrase (embedding search)",
             },
+            PrefixOption {
+                prefix: Some(prefixes.paperless),
+                label: "Paperless",
+                description: "search documents on a Paperless-ngx backend by title/tag/author",
+            },
         ];
         // Pre-select the row
         // matching the current
@@ -4765,6 +4799,16 @@ enum CompletionKind {
     /// closing `]` is left for the user to
     /// type.
     AttrValue,
+    /// Paperless-ngx tag (e.g. `invoice`).
+    /// Applied with a leading `#` and
+    /// trailing space, same convention as
+    /// `NotesTag`.
+    PaperlessTag,
+    /// Paperless-ngx correspondent name
+    /// (e.g. `Acme Corp`). Applied with a
+    /// leading `@` and trailing space, same
+    /// convention as `JiraAlias`.
+    PaperlessCorrespondent,
 }
 
 /// The half of `[attr:value]` a Tab press targets, plus the
@@ -4850,6 +4894,8 @@ impl CompletionMenu {
             CompletionKind::NotesLink => format!("[[{}]] ", name),
             CompletionKind::AttrKey => format!("{}:", name),
             CompletionKind::AttrValue => format!("{} ", name),
+            CompletionKind::PaperlessTag => format!("#{} ", name),
+            CompletionKind::PaperlessCorrespondent => format!("@{} ", name),
         }
     }
 }
@@ -4868,6 +4914,7 @@ impl App {
         bindings: KeyBindings,
         llm: Option<Box<dyn crate::llm::LlmClient>>,
         llm_config: Option<crate::llm::LlmConfig>,
+        paperless_config: Option<crate::paperless::PaperlessConfig>,
         query_prefixes: crate::QueryPrefixes,
         notes_database: Option<std::path::PathBuf>,
         notes_dir: Option<std::path::PathBuf>,
@@ -4951,6 +4998,8 @@ impl App {
             status_message: None,
             llm,
             llm_config,
+            paperless_config,
+            paperless_state: crate::paperless::PaperlessState::new(),
             query_prefixes,
             notes_database,
             notes_dir,
@@ -5555,6 +5604,17 @@ impl App {
         if self.is_similar_query() {
             return self.rows.clone();
         }
+        // Paperless mode (`<`) rows are always sorted by the
+        // document's `added` (inserted) timestamp, newest first —
+        // see `paperless::spawn_search`. Falling through to the
+        // generic sort below would let the Age/Frequency toggle
+        // (`F4`) override that with a per-command-string frequency
+        // sort, which has no meaning for documents; "labeled" rows
+        // are a command-history concept that doesn't apply here
+        // either. Same early-return shape as segments/similar above.
+        if self.is_paperless_query() {
+            return self.rows.clone();
+        }
         // Directories / JIRA / files
         // modes are completely
         // different views that must NOT
@@ -5815,6 +5875,7 @@ impl App {
             crate::tui::mode::ModeKind::Ag => return crate::tui::mode::ag::fetch(self),
             crate::tui::mode::ModeKind::Segments => return crate::tui::mode::segments::fetch(self),
             crate::tui::mode::ModeKind::Similar => return crate::tui::mode::similar::fetch(self),
+            crate::tui::mode::ModeKind::Paperless => return crate::tui::mode::paperless::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6354,6 +6415,10 @@ impl App {
             self.select_for_run_impl();
             return;
         }
+        if self.is_paperless_query() {
+            self.select_for_run_impl();
+            return;
+        }
         // Default: history mode.
         if let Some(row) = self.selected_row() {
             if row.mode == "llm" && !row.output.is_empty() {
@@ -6720,6 +6785,100 @@ impl App {
         if current == request.pattern {
             self.files_state.rows = rows;
             self.refresh();
+        }
+    }
+
+    // ---- Paperless (`<`-prefix) document search ----
+
+    /// Arm or clear the paperless-mode search debounce. Called
+    /// from every keystroke path (co-located with `files_touch`
+    /// et al.). Re-arms the timer when the user is still in
+    /// paperless mode; resets all pending state when they leave.
+    fn paperless_touch(&mut self) {
+        if self.is_paperless_query() {
+            self.paperless_state.debounce_started = Some(std::time::Instant::now());
+            if let Some(request) = self.paperless_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            self.paperless_state.in_flight = false;
+        } else {
+            self.paperless_state.debounce_started = None;
+            self.paperless_state.in_flight = false;
+            self.paperless_state.request = None;
+            self.paperless_state.last_pattern = None;
+        }
+    }
+
+    /// Check whether the paperless-mode debounce has elapsed
+    /// and, if so, spawn a background search. Called from the
+    /// run loop's idle tick (same pattern as
+    /// `files_maybe_autocall`). Returns immediately when not in
+    /// paperless mode, when a search is already in flight, or
+    /// when the debounce window hasn't elapsed.
+    fn paperless_maybe_autocall(&mut self) {
+        if !self.is_paperless_query() {
+            return;
+        }
+        if self.paperless_state.in_flight {
+            return;
+        }
+        let Some(started) = self.paperless_state.debounce_started else {
+            return;
+        };
+        if started.elapsed() < crate::paperless::PAPERLESS_DEBOUNCE {
+            return;
+        }
+        let pattern = crate::paperless::PaperlessState::current_pattern(
+            &self.query,
+            self.query_prefixes.paperless,
+        );
+        if self.paperless_state.has_results_for(&pattern) {
+            return;
+        }
+        self.paperless_state.last_pattern = Some(pattern.clone());
+        let Some(config) = self.paperless_config.clone() else {
+            self.set_status_message(crate::paperless::PaperlessError::NotConfigured.to_string());
+            self.paperless_state.debounce_started = None;
+            return;
+        };
+        self.paperless_state.debounce_started = None;
+        self.paperless_state.in_flight = true;
+        self.paperless_state.request = Some(crate::paperless::spawn_search(config, pattern));
+        self.set_status_message("Searching paperless…".to_string());
+    }
+
+    /// Process a paperless-mode search result that arrived from
+    /// the background thread. Caches the rows in
+    /// `self.paperless_state.rows` and refreshes the list on
+    /// success; surfaces the error as a status message on
+    /// failure (the list keeps the previous result). Mirrors
+    /// `process_files_result` / `process_jira_result`.
+    fn process_paperless_result(
+        &mut self,
+        request: crate::paperless::PaperlessRequest,
+        result: Result<crate::paperless::PaperlessSearchOutcome, crate::paperless::PaperlessError>,
+    ) {
+        self.paperless_state.in_flight = false;
+        self.paperless_state.request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        match result {
+            Ok(outcome) => {
+                self.paperless_state.rows = outcome.rows;
+                // The name catalogues are independent of the
+                // matched rows (see `PaperlessSearchResult`'s doc
+                // comment) — refreshed on every successful search
+                // so `<#` / `<@` Tab completion stays current with
+                // tags/correspondents created after the TUI opened.
+                self.paperless_state.tag_names = outcome.tag_names;
+                self.paperless_state.correspondent_names = outcome.correspondent_names;
+                self.status_message = None;
+                self.refresh();
+            }
+            Err(e) => {
+                self.set_status_message(e.to_string());
+            }
         }
     }
 
@@ -8593,6 +8752,123 @@ impl App {
         // distracting.
         if completion.ends_with(' ') {
             self.set_status_message(format!("expanded {} `{}`", kind, completion.trim_end()));
+        }
+    }
+
+    /// Tab-completion of tag (`#`) and correspondent (`@`) names
+    /// inside paperless (`<`) mode. Mirrors
+    /// `notes_tab_complete_at_cursor`'s word-boundary walk and
+    /// single/ambiguous-match handling, but the candidate source
+    /// is `self.paperless_state.tag_names` /
+    /// `.correspondent_names` (refreshed from the Paperless-ngx
+    /// API on every search — see `PaperlessSearchResult`) rather
+    /// than a local SQLite database. No `[attr:value]` handling
+    /// (paperless mode has no such syntax) and only a single-char
+    /// prefix, so this is simpler than the notes/todo/segments/
+    /// similar version.
+    fn paperless_tab_complete_at_cursor(&mut self) {
+        let prefix_len: usize = 1;
+        if self.query_cursor < prefix_len {
+            return;
+        }
+        // Walk left from the cursor, stopping at the first
+        // character that is NOT alphanumeric or underscore. Same
+        // walk as `notes_tab_complete_at_cursor`.
+        let mut start_char = self.query_cursor;
+        while start_char > prefix_len {
+            let prev = start_char - 1;
+            let ch = self.query[char_to_byte_index(&self.query, prev)
+                ..char_to_byte_index(&self.query, start_char)]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                start_char = prev;
+            } else {
+                break;
+            }
+        }
+        // Include a leading `#` or `@` in the word (the walk
+        // above stops before it, since neither is alphanumeric).
+        if start_char > prefix_len {
+            let prev_char_byte = char_to_byte_index(&self.query, start_char - 1);
+            let curr_char_byte = char_to_byte_index(&self.query, start_char);
+            let prev_ch = self.query[prev_char_byte..curr_char_byte]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if prev_ch == '#' || prev_ch == '@' {
+                start_char -= 1;
+            }
+        }
+        let start_byte = char_to_byte_index(&self.query, start_char);
+        let cursor_byte = char_to_byte_index(&self.query, self.query_cursor);
+        let word = &self.query[start_byte..cursor_byte];
+        if word.is_empty() {
+            self.set_status_message(
+                "paperless-tab-complete: no tag or correspondent name to expand".to_string(),
+            );
+            return;
+        }
+        let first_char_of_word = word
+            .chars()
+            .next()
+            .expect("word is non-empty, checked above");
+        let (names, name, kind, what): (&[String], &str, CompletionKind, &str) =
+            match first_char_of_word {
+                '#' => (
+                    &self.paperless_state.tag_names,
+                    &word[1..],
+                    CompletionKind::PaperlessTag,
+                    "tag",
+                ),
+                '@' => (
+                    &self.paperless_state.correspondent_names,
+                    &word[1..],
+                    CompletionKind::PaperlessCorrespondent,
+                    "correspondent",
+                ),
+                _ => {
+                    // Plain text (title search) — no completion
+                    // candidates to offer; Tab is a no-op.
+                    return;
+                }
+            };
+        if names.is_empty() {
+            self.set_status_message(
+                "paperless-tab-complete: no tags/correspondents loaded yet (run a search first)"
+                    .to_string(),
+            );
+            return;
+        }
+        let lower = name.to_ascii_lowercase();
+        let matches: Vec<String> = names
+            .iter()
+            .filter(|n| n.to_ascii_lowercase().starts_with(&lower))
+            .cloned()
+            .collect();
+        if matches.len() >= 2 {
+            self.open_completion_menu(matches, start_byte, cursor_byte, start_char, kind);
+            return;
+        }
+        let Some(completion) = crate::jira::notes_complete_inner(names, name) else {
+            self.set_status_message(format!(
+                "paperless-tab-complete: no {} starts with `{}`",
+                what, name
+            ));
+            return;
+        };
+        let prefix_char = first_char_of_word;
+        let mut with_prefix = String::from(prefix_char);
+        with_prefix.push_str(&completion);
+        self.query.replace_range(start_byte..cursor_byte, &with_prefix);
+        let completion_chars = with_prefix.chars().count();
+        self.query_cursor = start_char + completion_chars;
+        self.paperless_touch();
+        self.recompile_regex();
+        self.refresh();
+        if with_prefix.ends_with(' ') {
+            self.set_status_message(format!("expanded {} `{}`", what, with_prefix.trim_end()));
         }
     }
 
@@ -12863,6 +13139,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.jira => Some(ModeKind::Jira),
             _ if c == query_prefixes.segments => Some(ModeKind::Segments),
             _ if c == query_prefixes.similar => Some(ModeKind::Similar),
+            _ if c == query_prefixes.paperless => Some(ModeKind::Paperless),
             _ => None,
         }
     });
@@ -12893,6 +13170,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
         bindings,
         None,                  // llm client
         llm_config,
+        app_cfg.paperless().cloned(),
         query_prefixes,
         notes_database,
         notes_dir,
@@ -13136,6 +13414,7 @@ pub fn run_tui_to_stdout(
         bindings,
         llm,
         llm_config,
+        app_cfg.paperless().cloned(),
         query_prefixes,
         notes_database,
         notes_dir,
@@ -13531,6 +13810,14 @@ fn run_loop(
                 app.process_files_result(request, result);
             }
 
+        // Check for paperless-mode search result from
+        // background thread. Mirrors the files-mode poll above.
+        if let Some(request) = app.paperless_state.request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+            && let Some(request) = app.paperless_state.request.take() {
+                app.process_paperless_result(request, result);
+            }
+
         // Check for ag-mode search result
         // from background thread. Mirrors the
         // files-mode poll above.
@@ -13691,6 +13978,11 @@ fn run_loop(
                 // search after `SIMILAR_DEBOUNCE` of quiet
                 // typing in `"` mode.
                 app.similar_maybe_autocall();
+                // Same debounce drive for paperless-mode
+                // searches: spawns the background REST
+                // search after `PAPERLESS_DEBOUNCE` of quiet
+                // typing in `<` mode.
+                app.paperless_maybe_autocall();
                 continue;
             }
             Ok(true) => {}
@@ -14442,15 +14734,18 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         Action::JiraFieldComplete => {
             // Tab-completion of JQL field
             // names inside the JIRA
-            // search mode AND tag / link
+            // search mode; tag / link
             // names inside the notes
             // (`@`), todos (`!`),
             // segments (`:`), and
-            // similar (`"`) modes. The
-            // add-entry dialog handles
-            // its own Tab as field-next
-            // INSIDE the dialog, so the
-            // two paths never collide.
+            // similar (`"`) modes; and
+            // tag / correspondent names
+            // inside paperless (`<`)
+            // mode. The add-entry dialog
+            // handles its own Tab as
+            // field-next INSIDE the
+            // dialog, so the paths never
+            // collide.
             if app.is_jira_query() {
                 app.jira_field_complete_at_cursor();
             } else if app.is_notes_query()
@@ -14459,8 +14754,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 || app.is_similar_query()
             {
                 app.notes_tab_complete_at_cursor();
+            } else if app.is_paperless_query() {
+                app.paperless_tab_complete_at_cursor();
             }
-            // Outside all four
+            // Outside all five
             // modes, Tab is a
             // no-op.
             false

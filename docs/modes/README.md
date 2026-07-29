@@ -21,6 +21,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | ag | `,` | [`ag.md`](ag.md) | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher) (The Silver Searcher). |
 | Segments | `:` | [`segments.md`](segments.md) | Search header-anchored sections via `note_search`'s `segments` table — finer-grained than `@` (Notes), which searches whole files. |
 | Similar | `"` | [`similar.md`](similar.md) | Rank the same `segments` table by embedding similarity to a typed phrase, instead of an exact tag/link/text query. |
+| Paperless | `<` | [`paperless.md`](paperless.md) | Search documents on a Paperless-ngx backend by title, tag (`#TAG`), or correspondent (`@AUTHOR`). |
 
 ## Cross-cutting topics
 
@@ -50,6 +51,7 @@ The first character of the query decides the mode. Examples:
 | `,TODO *.rs` | ag. |
 | `:project reference` | Segments (header-anchored sections containing "project reference"). |
 | `"budget planning for next quarter` | Similar (segments ranked by embedding similarity to that phrase). |
+| `<invoice #work @acme` | Paperless (title contains "invoice", tagged `work`, correspondent contains "acme"). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 
@@ -93,7 +95,7 @@ The substring / fuzzy / regex algorithms apply to most modes. Toggle with `Ctrl-
 
 The TUI honors zsh's `HIST_NO_STORE` convention: **any command whose first character is whitespace is treated as "do not record".** This applies in two places:
 
-1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `~` / `@` / `!` / `-` / `,` / `:` / `=` / `%` / `#` / `*`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
+1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `~` / `@` / `!` / `-` / `,` / `:` / `=` / `%` / `#` / `*` / `<`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
 2. **User-typed space-prefixed commands** get the same treatment. Type `git push` (with a leading space) and the precmd hook skips the DB write; `git push` (no space) is recorded normally.
 
 The convention is also honored by the `Ctrl-S` (next-probable-command) widget: a space-prefixed command is deliberately NOT remembered as `_smarthistory_last_cmd`, so the widget will not suggest a sensitive command as the "next probable" one. The cycle index is still reset so the next `Ctrl-S` press starts with the most probable candidate from the (non-sensitive) recent past.

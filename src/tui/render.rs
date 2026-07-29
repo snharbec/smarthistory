@@ -2275,6 +2275,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         qp.ag.to_string(),
         "search file contents with ag (The Silver Searcher); `*` tokens restrict file patterns, `@lang` filters by language",
     );
+    mode_row(
+        &mut lines,
+        "paperless",
+        qp.paperless.to_string(),
+        "search a Paperless-ngx backend by title (bare words), tag (#TAG), or correspondent (@AUTHOR); Tab completes tag/correspondent names; needs paperless.url + paperless.token",
+    );
 
     lines.push(Line::from(""));
 
@@ -3140,6 +3146,8 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
         super::CompletionKind::NotesLink => "link",
         super::CompletionKind::AttrKey => "attribute",
         super::CompletionKind::AttrValue => "attribute value",
+        super::CompletionKind::PaperlessTag => "paperless tag",
+        super::CompletionKind::PaperlessCorrespondent => "paperless correspondent",
     };
     let block = Block::default()
         .borders(Borders::ALL)

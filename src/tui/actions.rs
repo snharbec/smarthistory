@@ -207,6 +207,13 @@ impl App {
                 // in `stage_jira_selection`.
                 self.stage_jira_selection();
             }
+            crate::tui::mode::ModeKind::Paperless => {
+                // `<...` queries are paperless
+                // document-search requests. The
+                // open-in-browser flow lives
+                // in `stage_paperless_selection`.
+                self.stage_paperless_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for
@@ -1388,6 +1395,37 @@ impl App {
             }
             None => {
                 self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            }
+        }
+    }
+
+    /// Stage the paperless (`<`) mode selection: open the
+    /// selected document's details page in the system browser.
+    /// Mirrors `stage_jira_selection` — the document id is
+    /// recovered from the row's synthetic negative `id` (see
+    /// `paperless::document_to_row`), and the browse URL is
+    /// rebuilt from the configured `paperless.url` rather than
+    /// stored on the row.
+    fn stage_paperless_selection(&mut self) {
+        let id: i64 = match self.selected_row() {
+            Some(r) => r.id.unsigned_abs() as i64,
+            None => return,
+        };
+        match self.paperless_config.as_ref() {
+            Some(cfg) => {
+                let url = cfg.document_url(id);
+                let opener = if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                };
+                self.selection = Some(format!("{} \"{}\"", opener, url));
+                self.pick_mode = Some(PickMode::Run);
+            }
+            None => {
+                self.set_status_message(
+                    crate::paperless::PaperlessError::NotConfigured.to_string(),
+                );
             }
         }
     }

@@ -58,6 +58,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [Files (`~` mode)](#files--mode)
   - [JIRA (`-` mode)](#jira--mode)
   - [LLM (`=` mode)](#llm--mode)
+  - [Paperless (`<` mode)](#paperless--mode)
 - [Environment variables](#environment-variables)
 - [All keys at a glance](#all-keys-at-a-glance)
 
@@ -296,6 +297,7 @@ The first character the user types to enter a mode. The default keymap covers ev
 | `prefix.jira` | JIRA | `-` | JIRA issue search |
 | `prefix.segments` | segment search | `:` | note_search `segments` table (header-anchored sections); `prefix.elements=` still works as a back-compat alias |
 | `prefix.similar` | similar/phrase search | `"` | same `segments` table, ranked by embedding similarity to the typed phrase (requires a reachable Ollama instance) |
+| `prefix.paperless` | paperless document search | `<` | search a Paperless-ngx backend by title / tag / correspondent |
 
 ```ini
 # Move JIRA off `-` (a frequently mistyped key) to backtick:
@@ -592,6 +594,22 @@ ollama.model=qwen2.5-coder:7b
 
 Full reference: **[docs/modes/llm.md](modes/llm.md)**.
 
+### Paperless (`<` mode)
+
+The `<` mode requires a self-hosted Paperless-ngx v3 instance. The configuration is **config-file only** (no env vars) and the feature is opt-in: if either `paperless.url` or `paperless.token` is missing, the mode is disabled with a stderr warning.
+
+| Key | Meaning |
+| --- | --- |
+| `paperless.url` | The Paperless-ngx base URL (e.g. `https://paperless.example.com`). Used both as the REST API base and the web-UI base for the details-page URL opened on `Enter`. |
+| `paperless.token` | The API token, sent as `Authorization: Token <token>`. Create one in Paperless-ngx under Settings → API Tokens. |
+
+```ini
+paperless.url=https://paperless.example.com
+paperless.token=abcdef0123456789abcdef0123456789abcdef01
+```
+
+Full reference: **[docs/modes/paperless.md](modes/paperless.md)**.
+
 ---
 
 ## Environment variables
@@ -660,6 +678,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `prefix.jira` | char | `-` | [Query prefixes](#query-prefixes) |
 | `prefix.segments` | char | `:` | [Query prefixes](#query-prefixes) |
 | `prefix.similar` | char | `"` | [Query prefixes](#query-prefixes) |
+| `prefix.paperless` | char | `<` | [Query prefixes](#query-prefixes) |
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |
 | `homemap` | path prefix list | — | [Multiplexer integration](#multiplexer-integration) |
@@ -684,6 +703,8 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `jira.search.<name>` | JQL | — | [JIRA (`-` mode)](#jira--mode) |
 | `ollama.url` | URL | — (LLM disabled) | [LLM (`=` mode)](#llm--mode) |
 | `ollama.model` | model name | — (LLM disabled) | [LLM (`=` mode)](#llm--mode) |
+| `paperless.url` | URL | — (paperless disabled) | [Paperless (`<` mode)](#paperless--mode) |
+| `paperless.token` | API token | — (paperless disabled) | [Paperless (`<` mode)](#paperless--mode) |
 
 ---
 
@@ -714,6 +735,7 @@ The `check` command builds the same `App` as the TUI startup (so it reads the sa
 - **Ag (`,`)**: `ag` binary is on `$PATH` → `ag --version` succeeds.
 - **LLM (`=`)**: `ollama.url` + `ollama.model` are configured → ollama server is reachable (`GET /api/tags`) → the configured model is in the loaded-models list.
 - **JIRA (`-`)**: `JIRA_SERVER` + `JIRA_API_TOKEN` env vars are set → the server is reachable (`GET /rest/api/3/myself` with Bearer auth) → the `JIRA_PROJECT` (if set) exists.
+- **Paperless (`<`)**: `paperless.url` + `paperless.token` are configured → the server is reachable and the token is accepted (`GET /api/documents/?page_size=1` with `Authorization: Token ...`).
 - **Directories (`#`)**: SQL history DB is open (with a `COUNT(DISTINCT directory)` round-trip) → multiplexer backend is configured → each `sessiondirs` entry exists on disk.
 - **Panes (`*`)**: the user is inside a multiplexer session (`$TMUX` or `$HERDR_PANE_ID` is set) → the backend's `snapshot_current_panes` returns at least one pane.
 

@@ -86,6 +86,11 @@ pub enum ModeKind {
     /// (`note_search::embeddings` + a local Ollama call) instead of
     /// parsed as a query DSL.
     Similar,
+    /// `<` (default). Paperless-ngx document search. Body tokens:
+    /// `#TAG` (tag), `@AUTHOR` (correspondent), bare word (title).
+    /// Requires `paperless.url` + `paperless.token` in the config
+    /// file.
+    Paperless,
 }
 
 impl ModeKind {
@@ -109,6 +114,7 @@ impl ModeKind {
             ModeKind::Jira => '-',
             ModeKind::Segments => ':',
             ModeKind::Similar => '"',
+            ModeKind::Paperless => '<',
         }
     }
 
@@ -132,6 +138,7 @@ impl ModeKind {
             ModeKind::Jira => "jira",
             ModeKind::Segments => "segments",
             ModeKind::Similar => "similar",
+            ModeKind::Paperless => "paperless",
         }
     }
 
@@ -164,6 +171,7 @@ impl ModeKind {
             ModeKind::Jira => "JIRA",
             ModeKind::Segments => "Segments",
             ModeKind::Similar => "Similar",
+            ModeKind::Paperless => "Paperless",
         }
     }
 
@@ -189,6 +197,7 @@ impl ModeKind {
             ModeKind::Jira => prefixes.jira,
             ModeKind::Segments => prefixes.segments,
             ModeKind::Similar => prefixes.similar,
+            ModeKind::Paperless => prefixes.paperless,
         }
     }
 
@@ -253,6 +262,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Segments
     } else if c == p.similar {
         ModeKind::Similar
+    } else if c == p.paperless {
+        ModeKind::Paperless
     } else {
         ModeKind::History
     }
@@ -267,6 +278,7 @@ pub mod jira;
 pub mod llm;
 pub mod notes;
 pub mod output;
+pub mod paperless;
 pub mod panes;
 pub mod query_negation;
 pub mod question;
@@ -318,6 +330,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Jira => Some(Theme::info()),
         ModeKind::Segments => Some(Theme::accent()),
         ModeKind::Similar => Some(Theme::accent()),
+        ModeKind::Paperless => Some(Theme::info()),
         ModeKind::History => None,
     }
 }
@@ -352,6 +365,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Ag => (",".to_string(), format!(" ag{} ", algo)),
         ModeKind::Segments => (":".to_string(), format!(" segments{} ", algo)),
         ModeKind::Similar => ("\"".to_string(), format!(" similar{} ", algo)),
+        ModeKind::Paperless => ("<".to_string(), format!(" paperless{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -563,6 +577,7 @@ pub fn run_all_checks(
             ModeKind::Jira => crate::tui::mode::jira::check(app),
             ModeKind::Directories => crate::tui::mode::directories::check(app),
             ModeKind::Panes => crate::tui::mode::panes::check(app),
+            ModeKind::Paperless => crate::tui::mode::paperless::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -590,6 +605,7 @@ impl ModeKind {
             ModeKind::Jira,
             ModeKind::Directories,
             ModeKind::Panes,
+            ModeKind::Paperless,
         ]
     }
 }
@@ -623,6 +639,7 @@ mod tests {
             ModeKind::Jira,
             ModeKind::Segments,
             ModeKind::Similar,
+            ModeKind::Paperless,
         ] {
             let title = kind.list_title();
             assert!(!title.is_empty(), "{:?} returned empty title", kind);
@@ -681,6 +698,7 @@ mod tests {
             ModeKind::Ag,
             ModeKind::Codegraph,
             ModeKind::Jira,
+            ModeKind::Paperless,
         ];
         for kind in others {
             let title = kind.list_title();
@@ -715,6 +733,7 @@ mod tests {
             ModeKind::Files,
             ModeKind::Tags,
             ModeKind::Jira,
+            ModeKind::Paperless,
         ];
         for kind in single_word_kinds {
             let title = kind.list_title();

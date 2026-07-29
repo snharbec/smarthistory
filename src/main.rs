@@ -7,6 +7,7 @@ mod highlight;
 mod jira;
 mod llm;
 mod multiplexer;
+mod paperless;
 mod ssh_config;
 mod tui;
 mod util;
@@ -201,7 +202,8 @@ enum Commands {
         /// JIRA, `--prefix '~'` for files, `--prefix '='`
         /// for LLM command generation, `--prefix '%'`
         /// for the question mode, `--prefix '+'`
-        /// for output search). The prefix character is
+        /// for output search, `--prefix '<'` for
+        /// paperless document search). The prefix character is
         /// the user's configured one — see
         /// `prefix.<mode>=...` in the config file; the
         /// example values above are the defaults.
@@ -1046,6 +1048,15 @@ pub struct QueryPrefixes {
     /// as a query DSL. Requires a `note_search` build with segment-
     /// embeddings support and a reachable local Ollama instance.
     pub similar: char,
+    /// Prefix for the paperless-ngx document-search mode
+    /// (default `<`). Searches a configured Paperless-ngx v3
+    /// backend by title (bare words), tag (`#TAG`), or
+    /// correspondent/author (`@AUTHOR`). Requires
+    /// `paperless.url` and `paperless.token` in the config
+    /// file. `%` was the natural first choice ("a search
+    /// question against an external source") but is already
+    /// the general-question ollama mode's default prefix.
+    pub paperless: char,
 }
 
 impl Default for QueryPrefixes {
@@ -1065,6 +1076,7 @@ impl Default for QueryPrefixes {
             jira: '-',
             segments: ':',
             similar: '"',
+            paperless: '<',
         }
     }
 }
@@ -1136,6 +1148,14 @@ pub struct Config {
     /// `llm` module returns `LlmError::NotConfigured` and the
     /// TUI surfaces a clear status message.
     llm: Option<llm::LlmConfig>,
+    /// Optional Paperless-ngx configuration for the `<...` TUI
+    /// query mode. `None` means the feature is disabled — the
+    /// `paperless` module returns `PaperlessError::NotConfigured`
+    /// and the TUI surfaces a clear status message. Set via
+    /// `paperless.url` + `paperless.token` in the config file
+    /// (both required; a half-configured pair disables the
+    /// feature with a stderr warning, same policy as `ollama.*`).
+    paperless: Option<paperless::PaperlessConfig>,
     /// Path to the note_search SQLite database. When set, the `@`
     /// prefix searches notes instead of shell history.
     /// Can also be set via the NOTE_SEARCH_DATABASE env var.
@@ -1428,6 +1448,9 @@ impl Config {
             // file; we only store a config when both fields
             // are present (see `parse`).
             llm: None,
+            // Paperless is opt-in, same pairing policy as `llm`
+            // above: empty config means "feature disabled".
+            paperless: None,
             notes_database: None,
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
@@ -1545,6 +1568,11 @@ impl Config {
         // overrides an earlier one.
         let mut ollama_url = String::new();
         let mut ollama_model = String::new();
+        // Accumulator for `paperless.url` / `paperless.token`,
+        // same "finalize after the loop" rationale as ollama_*
+        // above.
+        let mut paperless_url = String::new();
+        let mut paperless_token = String::new();
         for raw_line in contents.lines() {
             let line = raw_line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -1598,6 +1626,12 @@ impl Config {
                 }
                 "ollama.model" => {
                     ollama_model = value.to_string();
+                }
+                "paperless.url" => {
+                    paperless_url = value.trim_end_matches('/').to_string();
+                }
+                "paperless.token" => {
+                    paperless_token = value.to_string();
                 }
                 "notes.database" => {
                     let path = expand_tilde(value);
@@ -2016,6 +2050,27 @@ impl Config {
                 });
             }
         }
+        // Same pairing validation for `paperless.url` /
+        // `paperless.token`.
+        if !paperless_url.is_empty() || !paperless_token.is_empty() {
+            if paperless_url.is_empty() || paperless_token.is_empty() {
+                eprintln!(
+                    "warning: paperless.{} is set but the other half is missing; \
+                     paperless mode is disabled. Set both paperless.url and \
+                     paperless.token in ~/.config/smarthistory/config.",
+                    if paperless_url.is_empty() {
+                        "url"
+                    } else {
+                        "token"
+                    }
+                );
+            } else {
+                self.paperless = Some(paperless::PaperlessConfig {
+                    url: paperless_url,
+                    token: paperless_token,
+                });
+            }
+        }
         // Merge `~/.ssh/config` into `self.hosts`.
         // For every `Host` block in the SSH
         // config, look up a `host.<id>` entry
@@ -2306,6 +2361,12 @@ impl Config {
     /// `None`, the `=` and `%` TUI modes are disabled.
     pub fn llm(&self) -> Option<&llm::LlmConfig> {
         self.llm.as_ref()
+    }
+
+    /// Resolved Paperless-ngx configuration, if any. When
+    /// `None`, the `<` TUI mode is disabled.
+    pub fn paperless(&self) -> Option<&paperless::PaperlessConfig> {
+        self.paperless.as_ref()
     }
 
     /// Resolved query prefix characters.
@@ -2606,6 +2667,7 @@ impl Config {
             // silently going unrecognized.
             "elements" => prefixes.segments = c,
             "similar" => prefixes.similar = c,
+            "paperless" => prefixes.paperless = c,
             _ => {}
         }
     }
