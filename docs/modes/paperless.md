@@ -8,23 +8,23 @@ Paperless mode searches documents on a self-hosted [Paperless-ngx](https://docs.
 
 ## What it does
 
-- `<invoice` — every document whose title contains "invoice".
-- `<#work` — every document tagged `work`.
-- `<@acme` — every document whose correspondent name contains "acme".
-- `<invoice #work @acme` — title AND tag AND correspondent, all combined (whitespace-separated tokens are ANDed).
+- `<invoice` — every document whose title contains "invoice" (substring match).
+- `<#work` — every document tagged exactly `work` (whole-word match).
+- `<@acme` — every document whose correspondent name is exactly `acme` (whole-word match, case-insensitive — but not partial).
+- `<invoice #work @acme` — title AND tag AND correspondent, all combined.
 - The primary text is the document title; the secondary `# ...` text is the correspondent name and tags (e.g. `Acme Corp · #work #2024`).
 
 ## Special tokens
 
-The body is split on whitespace by [`crate::paperless::build_query`](../../src/paperless.rs); each token is translated into a Paperless-ngx advanced-search filter and the filters are joined with spaces before being sent as the `query` parameter of `GET /api/documents/`.
+The body is split on whitespace by [`crate::paperless::parse_pattern`](../../src/paperless.rs) into a [`PaperlessFilters`](../../src/paperless.rs), sent as Django REST filterset query parameters on `GET /api/documents/` — **not** Paperless-ngx's full-text `query=` search parameter. An earlier version used `query=` with the documented `title:`/`tag:`/`correspondent:` syntax plus `*wildcard*` markers for substring matching, but real-world testing against a live instance showed the wildcard forms (`*word*`, `word*`, and a bare unscoped `*word*`) all still only matched whole words. The Django filterset lookups below are plain ORM queries (`WHERE ... ILIKE '%value%'` / `= value`), independent of whatever full-text index Paperless-ngx has built, so they don't have this failure mode — verified against a live instance.
 
-| Pattern | Category | Behaviour |
-| --- | --- | --- |
-| `#TAG` | tag | `tag:TAG` |
-| `@AUTHOR` | correspondent | `correspondent:AUTHOR` |
-| anything else | title word | `title:WORD` |
+| Pattern | Category | Filter param | Behaviour |
+| --- | --- | --- | --- |
+| anything else | title words | `title__icontains` | **substring**, case-insensitive. Multiple bare words are joined with a space (in typed order) into ONE value — `<annual report` searches for the literal substring "annual report", not "annual" AND "report" independently. This is a real narrowing forced by the API (`icontains` takes one value; Django can't AND two of the same filter in one request), not a design choice. |
+| `#TAG` | tag | `tags__name__iexact` | whole-word / exact, case-insensitive. Only the LAST `#TAG` token in the query is used — same one-value-per-field reason. |
+| `@AUTHOR` | correspondent | `correspondent__name__iexact` | whole-word / exact, case-insensitive. Only the LAST `@AUTHOR` token is used. |
 
-A value containing anything outside `[A-Za-z0-9_-]` is double-quoted (e.g. `#foo/bar` → `tag:"foo/bar"`) so Paperless-ngx's query tokenizer doesn't split on the embedded punctuation. A bare `#` or `@` (empty tag/author) is dropped rather than producing an empty filter.
+A bare `#` or `@` (empty tag/author) is dropped rather than producing an empty filter. An unset filter is omitted from the request entirely (not sent as `field=`).
 
 ## Tab completion
 

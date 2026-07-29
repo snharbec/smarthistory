@@ -7,17 +7,37 @@
 //! JIRA's `Bearer` convention in `src/jira.rs`).
 //!
 //! The search body supports three token kinds, parsed by
-//! [`build_query`]:
-//! - `#TAG` — matches documents carrying that tag.
-//! - `@AUTHOR` — matches documents whose correspondent name
-//!   contains `AUTHOR`.
-//! - a bare word — matches the document title.
+//! [`parse_pattern`]:
+//! - `#TAG` — the LAST such token; matches documents whose tag
+//!   name equals `TAG` (case-insensitive, whole tag).
+//! - `@AUTHOR` — the LAST such token; matches documents whose
+//!   correspondent name equals `AUTHOR` (case-insensitive, whole
+//!   name).
+//! - bare words — joined with a space (in typed order); matches
+//!   documents whose title *contains* that substring
+//!   (case-insensitive).
 //!
-//! These map onto Paperless-ngx's own advanced search syntax
-//! (`tag:`, `correspondent:`, `title:` — see the "Basic Usage /
-//! Searching" section of the Paperless-ngx docs), so the built
-//! query string is sent verbatim as the `query` parameter of
-//! `GET /api/documents/`.
+//! These are sent as Django REST filterset query parameters
+//! (`title__icontains`, `tags__name__iexact`,
+//! `correspondent__name__iexact` on `GET /api/documents/`) —
+//! **not** Paperless-ngx's full-text `query=` search parameter.
+//! An earlier version of this module built a `query=` string using
+//! the documented `title:`/`tag:`/`correspondent:` advanced-search
+//! syntax plus `*wildcard*` substring markers, but real-world
+//! testing against a live instance showed the wildcard forms
+//! (`*word*`, `word*`, and a bare unscoped `*word*`) all still only
+//! matched whole words — apparently a search-index quirk/version
+//! difference, not something this client can rely on. The Django
+//! filterset lookups are plain ORM `WHERE ... ILIKE '%value%'` /
+//! `= value` queries, independent of whatever full-text index
+//! Paperless-ngx has built, so they don't have this failure mode.
+//!
+//! The one-value-per-field nature of these filters means only the
+//! LAST `#TAG` / `@AUTHOR` token in a query is honored (Django
+//! doesn't AND repeated same-key GET params), and multiple bare
+//! title words become one substring (the words joined with a
+//! space, in order) rather than independently-ANDed substrings —
+//! see `parse_pattern`'s doc comment for the exact semantics.
 //!
 //! Background-thread orchestration (debounce, cancellation,
 //! result channel) mirrors `src/files.rs`'s `FilesState` — see
@@ -168,47 +188,67 @@ pub struct PaperlessSearchResult {
 /// can inject canned responses without hitting a real server
 /// (same shape as `jira::JiraClient`).
 pub trait PaperlessClient: Send + Sync {
-    fn search(&self, query: &str) -> Result<PaperlessSearchResult, PaperlessError>;
+    fn search(&self, filters: &PaperlessFilters) -> Result<PaperlessSearchResult, PaperlessError>;
 }
 
-/// Split the paperless-mode query pattern into a Paperless-ngx
-/// advanced-search query string. Whitespace-separated tokens:
-/// - `#TAG` → `tag:TAG`
-/// - `@AUTHOR` → `correspondent:AUTHOR`
-/// - anything else → `title:WORD`
+/// Parsed paperless-mode search tokens, sent as Django REST
+/// filterset query parameters on `GET /api/documents/` (see this
+/// module's doc comment for why — `icontains`/`iexact` ORM
+/// lookups instead of Paperless-ngx's full-text `query=` search,
+/// which turned out not to support substring matching on a real
+/// instance despite its documented wildcard syntax).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaperlessFilters {
+    /// `title__icontains` value. Empty means "no title filter"
+    /// (the param is omitted entirely, not sent as `=`).
+    pub title_contains: String,
+    /// `tags__name__iexact` value, from the LAST `#TAG` token
+    /// typed. `None` means "no tag filter".
+    pub tag_exact: Option<String>,
+    /// `correspondent__name__iexact` value, from the LAST
+    /// `@AUTHOR` token typed. `None` means "no correspondent
+    /// filter".
+    pub correspondent_exact: Option<String>,
+}
+
+/// Parse the paperless-mode query body into [`PaperlessFilters`].
+/// Whitespace-separated tokens:
+/// - `#TAG` — sets `tag_exact` (overwriting any earlier `#TAG`
+///   token — Django's `tags__name__iexact` filter takes exactly
+///   one value, so it can't AND multiple tags in a single
+///   request; "last one wins" matches this app's existing
+///   later-wins config-parsing convention).
+/// - `@AUTHOR` — sets `correspondent_exact` (same "last one
+///   wins" reasoning).
+/// - anything else — appended to `title_contains`, space-joined
+///   in typed order. `title__icontains` is a single substring
+///   lookup, so `<annual report` searches for the literal
+///   substring "annual report" (adjacent, in that order) rather
+///   than "title contains annual AND title contains report"
+///   independently — a real (API-forced) narrowing from the
+///   independently-ANDed-substrings behavior every other
+///   multi-word search in this app has, but the only form
+///   expressible as one filter value.
 ///
-/// Empty tokens (a bare `#` or `@`) are dropped. Values
-/// containing characters outside `[A-Za-z0-9_-]` are
-/// double-quoted so Paperless-ngx's query parser doesn't choke
-/// on embedded punctuation.
-pub fn build_query(pattern: &str) -> String {
-    pattern
-        .split_whitespace()
-        .filter_map(|tok| {
-            if let Some(tag) = tok.strip_prefix('#') {
-                (!tag.is_empty()).then(|| format!("tag:{}", quote_if_needed(tag)))
-            } else if let Some(author) = tok.strip_prefix('@') {
-                (!author.is_empty()).then(|| format!("correspondent:{}", quote_if_needed(author)))
-            } else {
-                Some(format!("title:{}", quote_if_needed(tok)))
+/// Empty tokens (a bare `#` or `@`) are dropped.
+pub fn parse_pattern(pattern: &str) -> PaperlessFilters {
+    let mut filters = PaperlessFilters::default();
+    let mut title_words: Vec<&str> = Vec::new();
+    for tok in pattern.split_whitespace() {
+        if let Some(tag) = tok.strip_prefix('#') {
+            if !tag.is_empty() {
+                filters.tag_exact = Some(tag.to_string());
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Wrap `value` in double quotes when it contains any character
-/// outside the safe bareword set, so it survives Paperless-ngx's
-/// query tokenizer as a single value.
-fn quote_if_needed(value: &str) -> String {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        value.to_string()
-    } else {
-        format!("\"{}\"", value.replace('"', "'"))
+        } else if let Some(author) = tok.strip_prefix('@') {
+            if !author.is_empty() {
+                filters.correspondent_exact = Some(author.to_string());
+            }
+        } else {
+            title_words.push(tok);
+        }
     }
+    filters.title_contains = title_words.join(" ");
+    filters
 }
 
 /// Real Paperless-ngx backend. Uses `reqwest::blocking` (already
@@ -297,14 +337,40 @@ struct ApiDocument {
     added: String,
 }
 
+/// Build the `GET /api/documents/` query parameters for
+/// `filters`. Each is a plain Django ORM lookup (`WHERE ...
+/// ILIKE '%value%'` / `= value`), independent of Paperless-ngx's
+/// full-text search index — see this module's doc comment for
+/// why that index's `query=`/wildcard mechanism was abandoned.
+/// A filter is omitted entirely when unset (an empty
+/// `title__icontains=` matches everything, which is correct for
+/// "no title filter", but there's no reason to send a redundant
+/// empty param). Extracted from `RestPaperlessClient::search` so
+/// the exact wire params are unit-testable without a live server
+/// or network access.
+fn filter_query_params(filters: &PaperlessFilters) -> Vec<(&'static str, &str)> {
+    let mut params: Vec<(&'static str, &str)> = vec![("page_size", "100")];
+    if !filters.title_contains.is_empty() {
+        params.push(("title__icontains", &filters.title_contains));
+    }
+    if let Some(ref tag) = filters.tag_exact {
+        params.push(("tags__name__iexact", tag));
+    }
+    if let Some(ref correspondent) = filters.correspondent_exact {
+        params.push(("correspondent__name__iexact", correspondent));
+    }
+    params
+}
+
 impl PaperlessClient for RestPaperlessClient {
-    fn search(&self, query: &str) -> Result<PaperlessSearchResult, PaperlessError> {
+    fn search(&self, filters: &PaperlessFilters) -> Result<PaperlessSearchResult, PaperlessError> {
         let client = self.build_client()?;
         let url = format!("{}/api/documents/", self.config.url);
+        let params = filter_query_params(filters);
         let resp = client
             .get(&url)
             .header("Authorization", format!("Token {}", self.config.token))
-            .query(&[("query", query), ("page_size", "25")])
+            .query(&params)
             .send()
             .map_err(|e| PaperlessError::Http(describe_reqwest_error(&e)))?;
         let status = resp.status();
@@ -528,10 +594,10 @@ pub fn spawn_search(config: PaperlessConfig, pattern: String) -> PaperlessReques
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_clone = cancelled.clone();
-    let query = build_query(&pattern);
+    let filters = parse_pattern(&pattern);
     std::thread::spawn(move || {
         let client = RestPaperlessClient::new(config);
-        let result = client.search(&query).map(|result| {
+        let result = client.search(&filters).map(|result| {
             let mut rows: Vec<HistoryRow> =
                 result.documents.into_iter().map(document_to_row).collect();
             // Always newest-added-first, independent of
@@ -561,42 +627,136 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_query_plain_word_is_title() {
-        assert_eq!(build_query("invoice"), "title:invoice");
+    fn parse_pattern_plain_words_become_title_contains() {
+        let f = parse_pattern("invoice");
+        assert_eq!(f.title_contains, "invoice");
+        assert_eq!(f.tag_exact, None);
+        assert_eq!(f.correspondent_exact, None);
     }
 
     #[test]
-    fn build_query_tag_token() {
-        assert_eq!(build_query("#work"), "tag:work");
+    fn parse_pattern_tag_token() {
+        let f = parse_pattern("#work");
+        assert_eq!(f.tag_exact.as_deref(), Some("work"));
+        assert_eq!(f.title_contains, "");
     }
 
     #[test]
-    fn build_query_author_token() {
-        assert_eq!(build_query("@acme"), "correspondent:acme");
+    fn parse_pattern_author_token() {
+        let f = parse_pattern("@acme");
+        assert_eq!(f.correspondent_exact.as_deref(), Some("acme"));
+        assert_eq!(f.title_contains, "");
     }
 
     #[test]
-    fn build_query_mixed_tokens_join_with_space() {
+    fn parse_pattern_mixed_tokens() {
+        let f = parse_pattern("invoice #work @acme");
+        assert_eq!(f.title_contains, "invoice");
+        assert_eq!(f.tag_exact.as_deref(), Some("work"));
+        assert_eq!(f.correspondent_exact.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn parse_pattern_multiple_title_words_join_with_space_in_order() {
+        // `title__icontains` is a single substring lookup, so
+        // multiple bare words become ONE joined phrase rather
+        // than independently-ANDed substrings — see
+        // `parse_pattern`'s doc comment.
+        let f = parse_pattern("annual report");
+        assert_eq!(f.title_contains, "annual report");
+    }
+
+    #[test]
+    fn parse_pattern_repeated_tag_token_last_one_wins() {
+        // `tags__name__iexact` takes one value; Django can't AND
+        // two repeated GET params for the same field.
+        let f = parse_pattern("#work #urgent");
+        assert_eq!(f.tag_exact.as_deref(), Some("urgent"));
+    }
+
+    #[test]
+    fn parse_pattern_drops_empty_tag_and_author_tokens() {
+        let f = parse_pattern("# @ invoice");
+        assert_eq!(f.tag_exact, None);
+        assert_eq!(f.correspondent_exact, None);
+        assert_eq!(f.title_contains, "invoice");
+    }
+
+    #[test]
+    fn parse_pattern_empty_pattern_is_all_unset() {
+        let f = parse_pattern("");
+        assert_eq!(f, PaperlessFilters::default());
+        let f = parse_pattern("   ");
+        assert_eq!(f, PaperlessFilters::default());
+    }
+
+    #[test]
+    fn filter_query_params_title_only() {
+        let filters = PaperlessFilters {
+            title_contains: "invoice".to_string(),
+            tag_exact: None,
+            correspondent_exact: None,
+        };
         assert_eq!(
-            build_query("invoice #work @acme"),
-            "title:invoice tag:work correspondent:acme"
+            filter_query_params(&filters),
+            vec![("page_size", "100"), ("title__icontains", "invoice")]
         );
     }
 
     #[test]
-    fn build_query_quotes_tokens_with_special_chars() {
-        assert_eq!(build_query("#foo/bar"), "tag:\"foo/bar\"");
+    fn filter_query_params_all_three_set() {
+        let filters = PaperlessFilters {
+            title_contains: "annual report".to_string(),
+            tag_exact: Some("work".to_string()),
+            correspondent_exact: Some("acme".to_string()),
+        };
+        assert_eq!(
+            filter_query_params(&filters),
+            vec![
+                ("page_size", "100"),
+                ("title__icontains", "annual report"),
+                ("tags__name__iexact", "work"),
+                ("correspondent__name__iexact", "acme"),
+            ]
+        );
     }
 
     #[test]
-    fn build_query_drops_empty_tag_and_author_tokens() {
-        assert_eq!(build_query("# @ invoice"), "title:invoice");
+    fn filter_query_params_empty_filters_only_page_size() {
+        assert_eq!(
+            filter_query_params(&PaperlessFilters::default()),
+            vec![("page_size", "100")]
+        );
     }
 
+    /// End-to-end regression test for the actual wire request:
+    /// builds a real `reqwest::blocking::Client` request (via
+    /// `.build()`, no network I/O) and asserts on the exact URL,
+    /// so a future change to `filter_query_params` or the
+    /// underlying reqwest version can't silently reintroduce a
+    /// broken query string without a test failure. This mirrors
+    /// the manual diagnostic that found the fix in the first
+    /// place — `*` is sent literally, `:` gets percent-encoded
+    /// (both round-trip correctly through Django's URL decoding).
     #[test]
-    fn build_query_empty_pattern_is_empty_string() {
-        assert_eq!(build_query(""), "");
-        assert_eq!(build_query("   "), "");
+    fn search_request_url_matches_expected_wire_format() {
+        let filters = PaperlessFilters {
+            title_contains: "invoice".to_string(),
+            tag_exact: Some("work".to_string()),
+            correspondent_exact: None,
+        };
+        let params = filter_query_params(&filters);
+        let client = reqwest::blocking::Client::new();
+        let request = client
+            .get("http://paperless.example.com/api/documents/")
+            .header("Authorization", "Token secret")
+            .query(&params)
+            .build()
+            .expect("request should build without sending");
+        assert_eq!(
+            request.url().as_str(),
+            "http://paperless.example.com/api/documents/?page_size=100&title__icontains=invoice&tags__name__iexact=work"
+        );
     }
 
     #[test]
