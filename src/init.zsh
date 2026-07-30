@@ -195,6 +195,13 @@ fi
 # convention) candidate commands for the current render.
 typeset -g _smarthistory_dropdown_visible=0
 typeset -g _smarthistory_dropdown_selected=0
+# Whether the user has actually navigated the menu (Tab / Shift-Tab)
+# since it was last (re)painted with a new candidate set. Enter only
+# commits `_smarthistory_dropdown_selected` when this is 1 — with no
+# explicit choice, `_smarthistory_dropdown_selected` sits at its
+# default 0 but nothing is highlighted and Enter just runs the typed
+# buffer. See `_smarthistory_reset_and_accept`.
+typeset -g _smarthistory_dropdown_chosen=0
 typeset -ga _smarthistory_dropdown_candidates
 
 # Clear the menu (if any) and mark it not visible. Safe to call
@@ -202,6 +209,7 @@ typeset -ga _smarthistory_dropdown_candidates
 _smarthistory_dropdown_clear() {
     [[ -n "$POSTDISPLAY" ]] && POSTDISPLAY=""
     _smarthistory_dropdown_visible=0
+    _smarthistory_dropdown_chosen=0
 }
 
 # Redraw POSTDISPLAY from the current `_smarthistory_dropdown_candidates`
@@ -229,7 +237,7 @@ _smarthistory_dropdown_paint() {
         # same convention the Rust TUI list uses for the same reason.
         c=${c//$'\n'/↵}
         c=${c//$'\r'/}
-        if (( i == _smarthistory_dropdown_selected )); then
+        if (( _smarthistory_dropdown_chosen == 1 && i == _smarthistory_dropdown_selected )); then
             marker="❯ "
         else
             marker="  "
@@ -270,7 +278,7 @@ _smarthistory_dropdown_paint() {
     # characters, same safety as the box itself.
     local side
     for (( i = 0; i < ${#rows}; i++ )); do
-        if (( i == _smarthistory_dropdown_selected )); then
+        if (( _smarthistory_dropdown_chosen == 1 && i == _smarthistory_dropdown_selected )); then
             side="┃"
         else
             side="│"
@@ -332,6 +340,10 @@ _smarthistory_dropdown_render() {
         return
     fi
     _smarthistory_dropdown_visible=1
+    # A fresh candidate set from a new keystroke always starts
+    # unchosen — the user must re-navigate (Tab / Shift-Tab) to pick a
+    # row again, even if they had one highlighted before this render.
+    _smarthistory_dropdown_chosen=0
     if (( _smarthistory_dropdown_selected >= ${#_smarthistory_dropdown_candidates} )); then
         _smarthistory_dropdown_selected=0
     fi
@@ -379,7 +391,14 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # we're taking over `^I`).
     _smarthistory_dropdown_accept() {
         if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
+            # Tab always advances the selection, even from the
+            # unchosen default (index 0) — so a lone-candidate menu
+            # still lets Tab "choose" it in place rather than needing
+            # a wraparound press.
+            if (( _smarthistory_dropdown_chosen == 1 )); then
+                _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
+            fi
+            _smarthistory_dropdown_chosen=1
             _smarthistory_dropdown_paint
             return
         fi
@@ -405,7 +424,12 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # when no menu is showing.
     _smarthistory_dropdown_accept_prev() {
         if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
+            # Same "first press just highlights index 0" rule as Tab
+            # above — see `_smarthistory_dropdown_accept`.
+            if (( _smarthistory_dropdown_chosen == 1 )); then
+                _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
+            fi
+            _smarthistory_dropdown_chosen=1
             _smarthistory_dropdown_paint
             return
         fi
@@ -433,6 +457,9 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_dropdown_clear
         _smarthistory_dropdown_selected=0
     }
+    # ^ `_smarthistory_dropdown_clear` already resets `_chosen`; the
+    # explicit `_selected=0` above just picks a sane default row for
+    # whenever the menu reopens.
     # Ctrl-E: select the highlighted candidate, cursor at the end.
     # Falls through to zsh's default `end-of-line` when no menu is
     # showing (we're taking over `^E`, so preserve its prior meaning
@@ -821,13 +848,16 @@ bindkey '^S' _smarthistory_next_history
 # _smarthistory_index from the previous walk and lands on an
 # unexpected match.
 _smarthistory_reset_and_accept() {
-    # If the live dropdown is showing, Enter commits whatever's
-    # currently highlighted (Tab only cycles the selection — see
-    # `_smarthistory_dropdown_accept` — so this is the one place the
-    # highlighted candidate actually lands in BUFFER). Must read the
-    # candidate BEFORE `_smarthistory_reset_state` clears the
-    # dropdown state below.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
+    # If the live dropdown is showing AND the user has actually
+    # navigated to a row (Tab / Shift-Tab — see
+    # `_smarthistory_dropdown_accept`), Enter commits that row instead
+    # of running the typed buffer. With no explicit choice (the
+    # default state right after the menu opens), `_dropdown_chosen` is
+    # 0 and Enter falls through to `zle .accept-line` on whatever was
+    # typed, ignoring the menu entirely. Must read the candidate
+    # BEFORE `_smarthistory_reset_state` clears the dropdown state
+    # below.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 && $_smarthistory_dropdown_chosen -eq 1 ]]; then
         local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         BUFFER=$(_smarthistory_unescape "$raw")
         CURSOR=${#BUFFER}
