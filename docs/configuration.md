@@ -37,6 +37,10 @@ smarthistory config check     # exits non-zero on errors, prints warnings
 - [History list & filtering](#history-list--filtering)
   - [`duplicatefilter`](#duplicatefilter)
   - [`initialmode`](#initialmode)
+- [Live dropdown completion](#live-dropdown-completion)
+  - [`dropdown.enabled`](#dropdownenabled)
+  - [`dropdown.limit`](#dropdownlimit)
+  - [`dropdown.minchars`](#dropdownminchars)
 - [Theme](#theme)
   - [`tuicolor.*`](#tuicolor)
 - [Key bindings](#key-bindings)
@@ -172,6 +176,54 @@ The `SESS` and `DIR` scopes require a running tmux session with `TMUX_PANE` set;
 
 ```ini
 initialmode=SESS
+```
+
+---
+
+## Live dropdown completion
+
+**Status: config surface only.** These three keys are parsed and readable via `smarthistory config get` today; the zsh-side live-as-you-type dropdown UI itself (a `POSTDISPLAY`-based multi-candidate menu, Fig/IRIS-style) is still being built in `src/init.zsh` and is not wired up in this build yet. Documented now so the config surface is stable ahead of that landing.
+
+### `dropdown.enabled`
+
+| | |
+| --- | --- |
+| **Type** | `on` \| `off` |
+| **Default** | `off` |
+| **Env override** | — |
+
+Whether the live dropdown is active. Defaults off — unlike most opt-in features in this app, enabling it means every keystroke at the shell prompt triggers a `smarthistory search` call and a render, so it's a bigger behavior change than e.g. `ollama.*` or `paperless.*`, which only activate on an explicit prefix character.
+
+```ini
+dropdown.enabled=on
+```
+
+### `dropdown.limit`
+
+| | |
+| --- | --- |
+| **Type** | positive integer |
+| **Default** | `6` |
+| **Env override** | — |
+
+Maximum number of candidates shown in the dropdown. Passed as `--limit` to the same `smarthistory search` call the `Up`/`Down` history-walk widget already uses.
+
+```ini
+dropdown.limit=10
+```
+
+### `dropdown.minchars`
+
+| | |
+| --- | --- |
+| **Type** | non-negative integer |
+| **Default** | `1` |
+| **Env override** | — |
+
+Minimum number of typed characters (with the cursor at end-of-buffer) before the dropdown appears. Keeps an empty or near-empty prompt from showing a large, low-signal candidate list.
+
+```ini
+dropdown.minchars=2
 ```
 
 ---
@@ -648,6 +700,9 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `capturelines.<cmd>` | `ALL` \| int | — | [Capture & output](#capture--output) |
 | `duplicatefilter` | `on` \| `off` | `on` | [History list & filtering](#history-list--filtering) |
 | `initialmode` | enum | `SESS` | [History list & filtering](#history-list--filtering) |
+| `dropdown.enabled` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
+| `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |
+| `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |
 | `tuicolor.bg` | color | theme's `bg` | [Theme](#theme) |
 | `tuicolor.fg` | color | theme's `fg` | [Theme](#theme) |
 | `tuicolor.accent` | color | theme's `accent` | [Theme](#theme) |

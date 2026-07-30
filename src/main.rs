@@ -157,6 +157,20 @@ enum Commands {
         /// widget so the chosen command is inserted verbatim.
         #[arg(long)]
         no_highlight: bool,
+        /// Match only commands that START WITH `query` (a plain
+        /// prefix match), instead of the default substring match
+        /// anywhere in the command. Also drops the comment-substring
+        /// side of the default OR entirely (see
+        /// `build_filter_sql`'s doc comment) rather than prefix-
+        /// matching it, since a comment matching mid-word is exactly
+        /// the kind of unrelated hit this flag exists to rule out.
+        /// Used by the live dropdown-completion widget in
+        /// `init.zsh`, where a substring match on the whole command
+        /// produces surprising results (e.g. typing "ls" matching
+        /// `open "http://.../details"` because it contains "ls"
+        /// somewhere inside the URL).
+        #[arg(long)]
+        prefix: bool,
     },
     /// Search history and print matching rows, like `search` but
     /// with a 1000-row default limit.
@@ -907,6 +921,13 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         "  duplicatefilter = {}",
         if cfg.duplicate_filter { "on" } else { "off" }
     );
+    let _ = writeln!(
+        f,
+        "  dropdown.enabled = {}",
+        if cfg.dropdown_enabled { "on" } else { "off" }
+    );
+    let _ = writeln!(f, "  dropdown.limit = {}", cfg.dropdown_limit);
+    let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
     use crate::tui::bindings::ALL_ACTIONS;
@@ -1156,6 +1177,23 @@ pub struct Config {
     /// (both required; a half-configured pair disables the
     /// feature with a stderr warning, same policy as `ollama.*`).
     paperless: Option<paperless::PaperlessConfig>,
+    /// Whether the live-as-you-type zsh dropdown suggestion menu
+    /// (`init.zsh`'s self-insert-triggered `POSTDISPLAY` overlay)
+    /// is enabled. Default `false` — a bigger behavior change than
+    /// existing opt-in features (it hooks every keystroke), so it
+    /// defaults off. Set via `dropdown.enabled=on|off`.
+    dropdown_enabled: bool,
+    /// Max number of candidates the dropdown shows. Read by
+    /// `init.zsh` via `smarthistory config get dropdown.limit` at
+    /// shell-init time and passed as `--limit` to the same
+    /// `smarthistory search` call Up/Down already uses. Set via
+    /// `dropdown.limit=<N>`.
+    dropdown_limit: usize,
+    /// Minimum number of typed characters (after the cursor is at
+    /// end-of-buffer) before the dropdown appears. Avoids showing
+    /// a huge, low-signal candidate list on an empty or 1-char
+    /// buffer. Set via `dropdown.minchars=<N>`.
+    dropdown_min_chars: usize,
     /// Path to the note_search SQLite database. When set, the `@`
     /// prefix searches notes instead of shell history.
     /// Can also be set via the NOTE_SEARCH_DATABASE env var.
@@ -1451,6 +1489,9 @@ impl Config {
             // Paperless is opt-in, same pairing policy as `llm`
             // above: empty config means "feature disabled".
             paperless: None,
+            dropdown_enabled: false,
+            dropdown_limit: 6,
+            dropdown_min_chars: 1,
             notes_database: None,
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
@@ -1602,6 +1643,23 @@ impl Config {
                 "duplicatefilter" => {
                     self.duplicate_filter = crate::util::parse_bool(value, true);
                 }
+                "dropdown.enabled" => {
+                    self.dropdown_enabled = crate::util::parse_bool(value, false);
+                }
+                "dropdown.limit" => match value.trim().parse::<usize>() {
+                    Ok(n) if n > 0 => self.dropdown_limit = n,
+                    _ => eprintln!(
+                        "warning: dropdown.limit={:?} is not a positive integer; keeping the previous value",
+                        value
+                    ),
+                },
+                "dropdown.minchars" => match value.trim().parse::<usize>() {
+                    Ok(n) => self.dropdown_min_chars = n,
+                    _ => eprintln!(
+                        "warning: dropdown.minchars={:?} is not a non-negative integer; keeping the previous value",
+                        value
+                    ),
+                },
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
                     if matches!(
@@ -3335,29 +3393,49 @@ fn build_filter_sql(
     exit_code: Option<&str>,
     query_column: Option<(&str, Option<&str>)>,
     qualified_column_prefix: &str,
+    prefix_only: bool,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut clause = String::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-    // Substring filter on the command (and optionally the joined
-    // comment column).
+    // Substring (or, with `prefix_only`, prefix-only) filter on the
+    // command (and optionally the joined comment column).
     if let Some(q) = query {
         let escaped = escape_like(q);
+        // `prefix_only` drops the comment side of the OR entirely
+        // (not just switches it to a prefix match): a comment
+        // matching the typed text as a substring is exactly the
+        // kind of unrelated hit `prefix_only` exists to rule out
+        // (e.g. typing "ls" matching a comment that happens to
+        // contain "ls" mid-word), so it's simplest and most
+        // correct to only ever prefix-match the command itself.
+        let pattern = if prefix_only {
+            format!("{}%", escaped)
+        } else {
+            format!("%{}%", escaped)
+        };
         match query_column {
             Some(("command", None)) => {
                 clause.push_str(&format!(
                     " AND {prefix}command LIKE ? ESCAPE '\\'",
                     prefix = qualified_column_prefix
                 ));
-                params.push(Box::new(format!("%{}%", escaped)));
+                params.push(Box::new(pattern));
+            }
+            Some(("command", Some("comment"))) if prefix_only => {
+                clause.push_str(&format!(
+                    " AND {prefix}command LIKE ? ESCAPE '\\'",
+                    prefix = qualified_column_prefix
+                ));
+                params.push(Box::new(pattern));
             }
             Some(("command", Some("comment"))) => {
                 let p = qualified_column_prefix;
                 clause.push_str(&format!(
                     " AND ({p}command LIKE ? ESCAPE '\\' OR c.comment LIKE ? ESCAPE '\\')",
                 ));
-                params.push(Box::new(format!("%{}%", escaped)));
-                params.push(Box::new(format!("%{}%", escaped)));
+                params.push(Box::new(pattern.clone()));
+                params.push(Box::new(pattern));
             }
             Some((col, _)) => {
                 // Caller asked for an unknown column; fall back to
@@ -3371,7 +3449,7 @@ fn build_filter_sql(
                     " AND {prefix}command LIKE ? ESCAPE '\\'",
                     prefix = qualified_column_prefix
                 ));
-                params.push(Box::new(format!("%{}%", escaped)));
+                params.push(Box::new(pattern));
             }
             None => { /* no query filter */ }
         }
@@ -3430,6 +3508,7 @@ fn build_where_clause(
         exit_code,
         Some(("command", None)),
         "",
+        false,
     );
     (format!(" WHERE 1=1{}", extra), params)
 }
@@ -3442,15 +3521,19 @@ fn build_search_where_clause(
     directory: Option<String>,
     session_flag: bool,
     exit_code: Option<&str>,
+    prefix_only: bool,
 ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let (extra, params) = build_filter_sql(
         query,
         directory.as_deref(),
         session_flag,
         exit_code,
-        // Match command OR the joined comment column.
+        // Match command OR the joined comment column (unless
+        // `prefix_only`, which drops the comment side — see
+        // `build_filter_sql`'s doc comment on that branch).
         Some(("command", Some("comment"))),
         "h.",
+        prefix_only,
     );
     let prefix = " FROM history h \
                    LEFT JOIN command_comments c ON h.command = c.command \
@@ -3723,6 +3806,7 @@ fn main() -> anyhow::Result<()> {
             fields,
             limit,
             no_highlight,
+            prefix,
         } => {
             let selected_fields = fields.unwrap_or_else(|| vec!["command".to_string()]);
             let (raw_fields, derived) = split_fields(&selected_fields);
@@ -3756,6 +3840,7 @@ fn main() -> anyhow::Result<()> {
                 directory_canonical,
                 session,
                 exit_code.as_deref(),
+                prefix,
             );
             sql.push_str(&where_clause);
 
@@ -3822,6 +3907,7 @@ fn main() -> anyhow::Result<()> {
                 directory_canonical,
                 session,
                 exit_code.as_deref(),
+                false,
             );
             sql.push_str(&where_clause);
 
@@ -4249,6 +4335,11 @@ fn main() -> anyhow::Result<()> {
                         None => println!("ALL"),
                     },
                     "multiplexer" => println!("{}", cfg.multiplexer().as_str()),
+                    "dropdown.enabled" => {
+                        println!("{}", if cfg.dropdown_enabled { "on" } else { "off" })
+                    }
+                    "dropdown.limit" => println!("{}", cfg.dropdown_limit),
+                    "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
                     other => anyhow::bail!("unknown config key: {other}"),
                 }
             }
@@ -4966,6 +5057,106 @@ mod tests {
             [],
         )
         .expect("upsert must succeed against the rebuilt table");
+    }
+
+    /// Build the minimal schema `build_search_where_clause`'s SQL
+    /// needs: `history` plus the `command_comments` table it LEFT
+    /// JOINs (the comment column it optionally matches against).
+    fn search_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY,
+                command TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                exit_code INTEGER,
+                timestamp INTEGER
+            );
+             CREATE TABLE command_comments (command TEXT PRIMARY KEY, comment TEXT NOT NULL);
+             CREATE TABLE history_output (history_id INTEGER PRIMARY KEY, output TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, exit_code, timestamp) VALUES
+             ('ls -la', '/tmp', 's1', 0, 1),
+             ('open \"http://paperless.fritz.box:8000/documents/2738/details\"', '/tmp', 's1', 0, 2),
+             ('cargo build --release', '/tmp', 's1', 0, 3)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Reproduces the exact false positive reported against the live
+    /// dropdown: a plain substring search for "ls" matches
+    /// `open "http://.../details"` because it contains "ls" mid-word
+    /// (inside "details"). `--prefix` (the `prefix_only` flag on
+    /// `build_search_where_clause`) must exclude it.
+    #[test]
+    fn build_search_where_clause_substring_matches_unrelated_mid_word_hit() {
+        let conn = search_test_db();
+        let (where_clause, params) =
+            build_search_where_clause(Some("ls"), None, false, None, false);
+        let sql = format!("SELECT h.command{}", where_clause);
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let matches: Vec<String> = stmt
+            .query_map(&params_ref[..], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            matches,
+            vec![
+                "ls -la".to_string(),
+                "open \"http://paperless.fritz.box:8000/documents/2738/details\"".to_string(),
+            ],
+            "default substring search reproduces the reported false positive: {:?}",
+            matches
+        );
+    }
+
+    #[test]
+    fn build_search_where_clause_prefix_only_excludes_mid_word_hit() {
+        let conn = search_test_db();
+        let (where_clause, params) =
+            build_search_where_clause(Some("ls"), None, false, None, true);
+        let sql = format!("SELECT h.command{}", where_clause);
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let matches: Vec<String> = stmt
+            .query_map(&params_ref[..], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            matches,
+            vec!["ls -la".to_string()],
+            "prefix_only must exclude the mid-word 'ls' inside 'details', got: {:?}",
+            matches
+        );
+    }
+
+    #[test]
+    fn build_search_where_clause_prefix_only_matches_actual_prefix() {
+        let conn = search_test_db();
+        let (where_clause, params) =
+            build_search_where_clause(Some("open"), None, false, None, true);
+        let sql = format!("SELECT h.command{}", where_clause);
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let matches: Vec<String> = stmt
+            .query_map(&params_ref[..], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            matches,
+            vec!["open \"http://paperless.fritz.box:8000/documents/2738/details\"".to_string()],
+            "a genuine prefix match must still be found, got: {:?}",
+            matches
+        );
     }
 
     /// Build the minimal schema `import_history_rows` needs

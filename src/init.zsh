@@ -22,6 +22,11 @@ _smarthistory_preexec() {
 # prompt) and record both the command and its real exit code.
 _smarthistory_precmd() {
     local exit_code=$?
+    # Defensive: make sure no stale dropdown POSTDISPLAY can possibly
+    # bleed into the next prompt (belt-and-suspenders on top of the
+    # accept-line/send-break clears below; BUFFER is fresh here anyway,
+    # but this costs nothing and closes the last edge case).
+    _smarthistory_dropdown_clear
     # Skip empty command lines (e.g. bare Enter presses).
     [ -n "$_smarthistory_cmd" ] || return 0
     # Skip space-prefixed command lines. Zsh's
@@ -156,11 +161,333 @@ _smarthistory_mode="sess"
 # append our mode indicator without clobbering their customization.
 typeset -g _smarthistory_rprompt_save="$RPROMPT"
 
+# ---- Live dropdown completion (opt-in, config file only) ----
+#
+# Shows a live, multi-candidate suggestion menu below the cursor as
+# the user types — unlike every other widget in this file, which
+# fires on an explicit keypress (Ctrl+R, Up/Down, Ctrl+S). Off by
+# default: this hooks every keystroke, a bigger behavior change than
+# the prefix-triggered features. Enable with `dropdown.enabled=on`
+# in ~/.config/smarthistory/config (requires a new shell — config is
+# read once here at init time, same as every other cached value in
+# this file, e.g. `_smarthistory_rprompt_save` above).
+#
+# Rendering uses zsh's `POSTDISPLAY` parameter (the same mechanism
+# zsh-autosuggestions uses for ghost text) rather than hand-rolled
+# ANSI cursor math — `POSTDISPLAY` isn't limited to one line, and
+# zle's own redisplay engine handles redraw-diffing and off-screen
+# scroll-safety for it. See docs/dropdown-completion.md for the full
+# design rationale (why POSTDISPLAY, why no color in v1, why no
+# debounce).
+typeset -g _smarthistory_dropdown_enabled="0"
+typeset -g _smarthistory_dropdown_limit=6
+typeset -g _smarthistory_dropdown_minchars=1
+if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
+    _smarthistory_dropdown_enabled="1"
+    _smarthistory_dropdown_limit_raw=$(smarthistory config get dropdown.limit 2>/dev/null)
+    [[ "$_smarthistory_dropdown_limit_raw" == <-> ]] && _smarthistory_dropdown_limit=$_smarthistory_dropdown_limit_raw
+    _smarthistory_dropdown_minchars_raw=$(smarthistory config get dropdown.minchars 2>/dev/null)
+    [[ "$_smarthistory_dropdown_minchars_raw" == <-> ]] && _smarthistory_dropdown_minchars=$_smarthistory_dropdown_minchars_raw
+    unset _smarthistory_dropdown_limit_raw _smarthistory_dropdown_minchars_raw
+fi
+# Whether the menu is currently drawn, the 0-based highlighted row,
+# and the raw (still `\n`/`\r`-escaped, per the CLI's one-line-per-row
+# convention) candidate commands for the current render.
+typeset -g _smarthistory_dropdown_visible=0
+typeset -g _smarthistory_dropdown_selected=0
+typeset -ga _smarthistory_dropdown_candidates
+
+# Clear the menu (if any) and mark it not visible. Safe to call
+# unconditionally (e.g. from precmd) even when nothing is showing.
+_smarthistory_dropdown_clear() {
+    [[ -n "$POSTDISPLAY" ]] && POSTDISPLAY=""
+    _smarthistory_dropdown_visible=0
+}
+
+# Redraw POSTDISPLAY from the current `_smarthistory_dropdown_candidates`
+# / `_smarthistory_dropdown_selected` state, WITHOUT re-querying the DB
+# (used by Up/Down to move the selection, and after any state change
+# that doesn't change the candidate set).
+_smarthistory_dropdown_paint() {
+    local -a rows
+    local raw c marker row i=0
+    # Leave margin for the box border (`│ ` / ` │` on each side, 4
+    # columns) plus a little breathing room, so a candidate can't
+    # wrap onto a second physical row (which would desync "one
+    # candidate = one POSTDISPLAY row").
+    local interior_max=$(( COLUMNS > 12 ? COLUMNS - 8 : 4 ))
+    # Clamp to available terminal rows so a long candidate list can't
+    # push content off the bottom of the screen. The extra -2 (on top
+    # of the existing headroom) accounts for the box's own top/bottom
+    # border rows.
+    local max_rows=$(( LINES > 8 ? LINES - 6 : 2 ))
+    for raw in "${_smarthistory_dropdown_candidates[@]}"; do
+        (( i >= max_rows )) && break
+        c=$(_smarthistory_unescape "$raw")
+        # A multiline command would otherwise break the one-row-per-
+        # candidate layout; show the visible-newline marker instead,
+        # same convention the Rust TUI list uses for the same reason.
+        c=${c//$'\n'/↵}
+        c=${c//$'\r'/}
+        if (( i == _smarthistory_dropdown_selected )); then
+            marker="❯ "
+        else
+            marker="  "
+        fi
+        row="${marker}${c}"
+        if (( ${#row} > interior_max )); then
+            row="${row[1,$((interior_max-1))]}…"
+        fi
+        rows+=("$row")
+        i=$((i+1))
+    done
+    if (( ${#rows} == 0 )); then
+        POSTDISPLAY=""
+        return
+    fi
+    # Box width = the widest row actually produced this render (not
+    # the full interior_max budget) — every row pads to this exact
+    # width so the right border lines up, and the box visibly shrinks
+    # when the candidate set does, same as the un-boxed layout did.
+    # `─`/`│`/`╭╮╰╯` are plain printable Unicode characters, not ANSI
+    # escape codes — POSTDISPLAY's width math (and zle's own
+    # redraw-diffing) handles them like any other text, unlike color
+    # SGR codes, which is why this part carries no open safety
+    # question the way color does.
+    local width=0
+    for row in "${rows[@]}"; do
+        (( ${#row} > width )) && width=${#row}
+    done
+    # `${(l:width::─:)}` pads an empty string to `width` columns using
+    # `─` as the fill character — i.e. `width` dashes, built by zsh's
+    # own padding expansion rather than a manual loop.
+    local hr="${(l:width::─:)}"
+    local out=$'\n'"╭─${hr}─╮"
+    # No color is available (POSTDISPLAY doesn't interpret ANSI SGR
+    # codes — see the module doc comment), so the selected row is set
+    # apart with a thicker `┃` side border instead of the plain `│`
+    # every other row gets — still just plain printable Unicode
+    # characters, same safety as the box itself.
+    local side
+    for (( i = 0; i < ${#rows}; i++ )); do
+        if (( i == _smarthistory_dropdown_selected )); then
+            side="┃"
+        else
+            side="│"
+        fi
+        # `${(r:width:: :)row}` left-justifies `row` and pads it with
+        # spaces on the right to exactly `width` columns.
+        out+=$'\n'"${side} ${(r:width:: :)rows[$((i+1))]} ${side}"
+    done
+    out+=$'\n'"╰─${hr}─╯"
+    POSTDISPLAY="$out"
+}
+
+# Re-query smarthistory for the current LBUFFER and redraw. Called
+# after every keystroke (via the wrapped self-insert/delete/paste
+# widgets below) when the dropdown is enabled.
+_smarthistory_dropdown_render() {
+    [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return
+    # POSTDISPLAY always renders after the buffer's current end, so
+    # the menu only makes sense with the cursor there — same
+    # constraint zsh-autosuggestions' ghost text has, for the same
+    # reason.
+    if [[ $CURSOR -ne $#BUFFER ]]; then
+        _smarthistory_dropdown_clear
+        return
+    fi
+    # Privacy convention: never suggest for a space-prefixed line
+    # (see the precmd hook's HIST_NO_STORE handling above).
+    if [[ "$LBUFFER" == [[:space:]]* ]]; then
+        _smarthistory_dropdown_clear
+        return
+    fi
+    if (( $#LBUFFER < _smarthistory_dropdown_minchars )); then
+        _smarthistory_dropdown_clear
+        return
+    fi
+    local -a args
+    # `--prefix`: match commands that START WITH what's typed, not a
+    # substring anywhere in the command — a plain substring match
+    # made "ls" match `open "http://.../details"` (contains "ls"
+    # inside the URL), which is surprising for a live as-you-type
+    # completion (unlike Up/Down's keypress-triggered walk, which
+    # keeps the broader substring match).
+    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --no-highlight --prefix)
+    case "$_smarthistory_mode" in
+        sess)   args+=(--session) ;;
+        dir)    args+=(--directory "$PWD") ;;
+        global) ;;
+    esac
+    local raw
+    raw=$(smarthistory search "${args[@]}" 2>/dev/null)
+    _smarthistory_dropdown_candidates=("${(f)raw}")
+    # `${(f)raw}` on an empty string yields one empty element, not
+    # zero — drop it so "no matches" is correctly detected below.
+    if (( ${#_smarthistory_dropdown_candidates} == 1 )) && [[ -z "${_smarthistory_dropdown_candidates[1]}" ]]; then
+        _smarthistory_dropdown_candidates=()
+    fi
+    if (( ${#_smarthistory_dropdown_candidates} == 0 )); then
+        _smarthistory_dropdown_clear
+        return
+    fi
+    _smarthistory_dropdown_visible=1
+    if (( _smarthistory_dropdown_selected >= ${#_smarthistory_dropdown_candidates} )); then
+        _smarthistory_dropdown_selected=0
+    fi
+    _smarthistory_dropdown_paint
+}
+
+# Wrap (not replace) a keystroke-handling widget so whatever was
+# bound before still runs, then re-render the dropdown after it.
+# `.widget` is only valid as an argument TO `zle` (to call a builtin
+# bypassing overrides), not as a `zle -N` target directly — a plain
+# `zle -N $orig .$widget` fails with "No such shell function". The
+# fix (the exact pattern zsh-autosuggestions uses in src/bind.zsh):
+# define a tiny wrapper function whose body does the dot-call, then
+# register THAT function as the widget.
+_smarthistory_dropdown_bind_widget() {
+    local widget=$1
+    local orig="_smarthistory_dropdown_orig_${widget}"
+    case ${widgets[$widget]:-} in
+        user:_smarthistory_dropdown_wrap_*) return ;;  # already wrapped (re-sourced init.zsh)
+        builtin)
+            eval "${orig}() { zle .${widget} }"
+            zle -N $orig $orig
+            ;;
+        user:*)
+            zle -N $orig ${widgets[$widget]#user:}
+            ;;
+        *) return ;;
+    esac
+    eval "_smarthistory_dropdown_wrap_${widget}() { zle $orig -- \"\$@\"; _smarthistory_dropdown_render; }"
+    zle -N $widget _smarthistory_dropdown_wrap_${widget}
+}
+if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
+    for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
+        backward-delete-char delete-char backward-kill-word \
+        kill-whole-line bracketed-paste; do
+        _smarthistory_dropdown_bind_widget $_smarthistory_dropdown_w
+    done
+    unset _smarthistory_dropdown_w
+    # Tab cycles the highlighted candidate forward (same wraparound
+    # math as Down) WITHOUT touching BUFFER or closing the menu —
+    # only Enter (see `_smarthistory_reset_and_accept` below) commits
+    # the highlighted candidate. Falls through to the normal
+    # completion widget when no menu is showing (zsh's documented
+    # default Tab binding in emacs mode, preserved explicitly since
+    # we're taking over `^I`).
+    _smarthistory_dropdown_accept() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
+            _smarthistory_dropdown_paint
+            return
+        fi
+        zle expand-or-complete
+    }
+    zle -N _smarthistory_dropdown_accept
+    bindkey '^I' _smarthistory_dropdown_accept
+    # Esc dismisses the menu without touching BUFFER. Nothing was
+    # bound to bare Esc before this feature existed, so the "menu
+    # not visible" branch is a genuine no-op (preserves prior
+    # behavior exactly).
+    _smarthistory_dropdown_dismiss() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_clear
+        fi
+    }
+    zle -N _smarthistory_dropdown_dismiss
+    bindkey '^[' _smarthistory_dropdown_dismiss
+    # Shift-Tab cycles backward — the mirror of Tab above. Nothing
+    # was bound to it before this feature (the terminal sends
+    # `\e[Z`); falls through to `reverse-menu-complete`, the natural
+    # backward-cycle analog of Tab's `expand-or-complete` fallback,
+    # when no menu is showing.
+    _smarthistory_dropdown_accept_prev() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
+            _smarthistory_dropdown_paint
+            return
+        fi
+        zle reverse-menu-complete
+    }
+    zle -N _smarthistory_dropdown_accept_prev
+    bindkey '^[[Z' _smarthistory_dropdown_accept_prev
+    # Commit the highlighted candidate into BUFFER and close the
+    # menu. `$1` is where CURSOR lands afterward ("start" or "end") —
+    # shared by Ctrl-A/Ctrl-E below. (Enter has its own copy of this
+    # logic in `_smarthistory_reset_and_accept`, outside this block,
+    # since it must run before `_smarthistory_reset_state` at a
+    # different call site.)
+    _smarthistory_dropdown_commit() {
+        local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
+        BUFFER=$(_smarthistory_unescape "$raw")
+        if [[ "$1" == "start" ]]; then
+            CURSOR=0
+        else
+            CURSOR=${#BUFFER}
+        fi
+        _smarthistory_dropdown_clear
+        _smarthistory_dropdown_selected=0
+    }
+    # Ctrl-E: select the highlighted candidate, cursor at the end.
+    # Falls through to zsh's default `end-of-line` when no menu is
+    # showing (we're taking over `^E`, so preserve its prior meaning
+    # explicitly).
+    _smarthistory_dropdown_select_end() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_commit end
+            return
+        fi
+        zle end-of-line
+    }
+    zle -N _smarthistory_dropdown_select_end
+    bindkey '^E' _smarthistory_dropdown_select_end
+    # Ctrl-A: select the highlighted candidate, cursor at the start.
+    # Falls through to `beginning-of-line` otherwise, same reasoning.
+    _smarthistory_dropdown_select_start() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_commit start
+            return
+        fi
+        zle beginning-of-line
+    }
+    zle -N _smarthistory_dropdown_select_start
+    bindkey '^A' _smarthistory_dropdown_select_start
+    # Right arrow: select the highlighted candidate, cursor at the
+    # end — same commit as Ctrl-E, different key. Falls through to
+    # normal cursor-right (`forward-char`) when no menu is showing,
+    # so ordinary editing is completely unaffected.
+    _smarthistory_dropdown_select_end_arrow() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_commit end
+            return
+        fi
+        zle forward-char
+    }
+    zle -N _smarthistory_dropdown_select_end_arrow
+    bindkey '^[[C' _smarthistory_dropdown_select_end_arrow
+    # Left arrow: select the highlighted candidate, cursor at the
+    # start — same commit as Ctrl-A. Falls through to normal
+    # cursor-left (`backward-char`) otherwise.
+    _smarthistory_dropdown_select_start_arrow() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_commit start
+            return
+        fi
+        zle backward-char
+    }
+    zle -N _smarthistory_dropdown_select_start_arrow
+    bindkey '^[[D' _smarthistory_dropdown_select_start_arrow
+fi
+
 _smarthistory_reset_state() {
     _smarthistory_matches=""
     _smarthistory_index=0
     _smarthistory_query_key=""
     _smarthistory_last_match=""
+    _smarthistory_dropdown_clear
+    _smarthistory_dropdown_selected=0
     _smarthistory_debug_log "reset_state: cleared all caches"
 }
 
@@ -191,6 +518,13 @@ _smarthistory_cycle_mode() {
     # the new scope.
     _smarthistory_reset_state
     _smarthistory_update_rprompt
+    # `_smarthistory_reset_state` just cleared the dropdown (if any
+    # was showing); re-render immediately under the new scope rather
+    # than leaving the buffer bare until the next keystroke. Ctrl-G
+    # doesn't fire self-insert, so nothing else would trigger this.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
+        _smarthistory_dropdown_render
+    fi
 }
 
 # Populate the match cache for the current (mode, pwd, prefix) triple.
@@ -299,6 +633,17 @@ _smarthistory_unescape() {
 
 
 _smarthistory_up_history() {
+    # When the live dropdown is showing, Up/Down move the highlighted
+    # row instead of walking the (separate, keypress-only) Up/Down
+    # history cache below — pure index arithmetic against the
+    # already-fetched candidate array, no subprocess call. Everything
+    # below this branch is completely unchanged from before the
+    # dropdown feature existed.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
+        _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
+        _smarthistory_dropdown_paint
+        return
+    fi
     # Always use smarthistory, even with an empty LBUFFER (an empty
     # query means "give me the oldest command in the current scope").
     _smarthistory_prime_cache
@@ -340,6 +685,13 @@ _smarthistory_up_history() {
     _smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
 }
 _smarthistory_down_history() {
+    # Same dropdown-navigation branch as `_smarthistory_up_history`
+    # above — see its comment for the rationale.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
+        _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
+        _smarthistory_dropdown_paint
+        return
+    fi
     # Down walks the match list in the *opposite* direction of Up
     # (Up advances through the array from oldest to newest, Down
     # walks back from newest to oldest). At the very start of the
@@ -441,6 +793,17 @@ bindkey '^S' _smarthistory_next_history
 # _smarthistory_index from the previous walk and lands on an
 # unexpected match.
 _smarthistory_reset_and_accept() {
+    # If the live dropdown is showing, Enter commits whatever's
+    # currently highlighted (Tab only cycles the selection — see
+    # `_smarthistory_dropdown_accept` — so this is the one place the
+    # highlighted candidate actually lands in BUFFER). Must read the
+    # candidate BEFORE `_smarthistory_reset_state` clears the
+    # dropdown state below.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
+        local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
+        BUFFER=$(_smarthistory_unescape "$raw")
+        CURSOR=${#BUFFER}
+    fi
     _smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
     _smarthistory_reset_state
     zle .accept-line
