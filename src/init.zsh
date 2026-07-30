@@ -414,19 +414,22 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     zle -N _smarthistory_dropdown_accept_prev
     bindkey '^[[Z' _smarthistory_dropdown_accept_prev
     # Commit the highlighted candidate into BUFFER and close the
-    # menu. `$1` is where CURSOR lands afterward ("start" or "end") —
-    # shared by Ctrl-A/Ctrl-E below. (Enter has its own copy of this
-    # logic in `_smarthistory_reset_and_accept`, outside this block,
-    # since it must run before `_smarthistory_reset_state` at a
-    # different call site.)
+    # menu. `$1` decides where CURSOR ends up: "start" -> 0, "end" ->
+    # end of the new BUFFER, anything else (including no argument) ->
+    # leave CURSOR at whatever value it already had (used by the
+    # Right/Left arrow widgets below, which commit without repositioning
+    # the cursor at all). Shared by Ctrl-A/Ctrl-E/Right/Left. (Enter
+    # has its own copy of this logic in `_smarthistory_reset_and_accept`,
+    # outside this block, since it must run before
+    # `_smarthistory_reset_state` at a different call site.)
     _smarthistory_dropdown_commit() {
         local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         BUFFER=$(_smarthistory_unescape "$raw")
-        if [[ "$1" == "start" ]]; then
-            CURSOR=0
-        else
-            CURSOR=${#BUFFER}
-        fi
+        case "$1" in
+            start) CURSOR=0 ;;
+            end)   CURSOR=${#BUFFER} ;;
+            *)     ;;  # leave CURSOR untouched
+        esac
         _smarthistory_dropdown_clear
         _smarthistory_dropdown_selected=0
     }
@@ -454,31 +457,36 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     }
     zle -N _smarthistory_dropdown_select_start
     bindkey '^A' _smarthistory_dropdown_select_start
-    # Right arrow: select the highlighted candidate, cursor at the
-    # end — same commit as Ctrl-E, different key. Falls through to
-    # normal cursor-right (`forward-char`) when no menu is showing,
-    # so ordinary editing is completely unaffected.
+    # Right arrow: select the highlighted candidate WITHOUT moving
+    # the cursor — unlike Ctrl-E, CURSOR is left exactly where it was
+    # (typically mid-word, right after whatever prefix the user had
+    # typed), not jumped to the start or end of the (now longer)
+    # committed text. Falls through to normal cursor-right
+    # (`forward-char`) when no menu is showing, so ordinary editing
+    # is completely unaffected. The actual key bindings (including
+    # terminfo/symbolic fallbacks, for terminals that emit a
+    # different escape sequence) are registered further down, next
+    # to the Up/Down bindings — see the comment there.
     _smarthistory_dropdown_select_end_arrow() {
         if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_commit end
+            _smarthistory_dropdown_commit
             return
         fi
         zle forward-char
     }
     zle -N _smarthistory_dropdown_select_end_arrow
-    bindkey '^[[C' _smarthistory_dropdown_select_end_arrow
-    # Left arrow: select the highlighted candidate, cursor at the
-    # start — same commit as Ctrl-A. Falls through to normal
-    # cursor-left (`backward-char`) otherwise.
+    # Left arrow: same commit-without-moving-cursor behavior as Right
+    # above (both do exactly the same thing to CURSOR — "leave it" —
+    # they only differ in their non-visible-menu fallback). Falls
+    # through to normal cursor-left (`backward-char`) otherwise.
     _smarthistory_dropdown_select_start_arrow() {
         if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_commit start
+            _smarthistory_dropdown_commit
             return
         fi
         zle backward-char
     }
     zle -N _smarthistory_dropdown_select_start_arrow
-    bindkey '^[[D' _smarthistory_dropdown_select_start_arrow
 fi
 
 _smarthistory_reset_state() {
@@ -779,6 +787,26 @@ bindkey '<Up>' _smarthistory_up_history
 bindkey '<Down>' _smarthistory_down_history
 bindkey '^[[A' _smarthistory_up_history
 bindkey '^[[B' _smarthistory_down_history
+# Same terminfo + symbolic + raw redundancy for the dropdown's
+# Right/Left widgets (registered earlier, in the dropdown-enabled
+# block above, via plain `zle -N` — only the actual key bindings live
+# here). A single raw `bindkey '^[[C'` isn't enough: depending on
+# whether the terminal is in "normal" vs "application" cursor-key
+# mode (DECCKM — e.g. left toggled-on by a prior curses/ratatui
+# program, like smarthistory's own TUI, not fully resetting it),
+# Right/Left can send `^[[C`/`^[[D` OR `^[OC`/`^[OD` instead —
+# exactly the ambiguity this same 4-fold pattern already exists to
+# paper over for Up/Down.
+if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
+    bind_key_universal kcuf1 _smarthistory_dropdown_select_end_arrow
+    bind_key_universal kcub1 _smarthistory_dropdown_select_start_arrow
+    bindkey '<Right>' _smarthistory_dropdown_select_end_arrow
+    bindkey '<Left>' _smarthistory_dropdown_select_start_arrow
+    bindkey '^[[C' _smarthistory_dropdown_select_end_arrow
+    bindkey '^[[D' _smarthistory_dropdown_select_start_arrow
+    bindkey '^[OC' _smarthistory_dropdown_select_end_arrow
+    bindkey '^[OD' _smarthistory_dropdown_select_start_arrow
+fi
 # Ctrl-g: cycle the search scope (SESS -> DIR -> GLOBAL -> SESS) and
 # show the current scope in the RPROMPT.
 bindkey '^G' _smarthistory_cycle_mode
