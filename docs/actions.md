@@ -687,18 +687,20 @@ Open the two-field `create-note` dialog: a single-line **Title** and a multi-lin
 
 Also launchable standalone via `smarthistory tui --create-note`, which implies `--exec` (runs the staged command itself instead of just printing it) so it works from a bare shell invocation, a herdr keybinding, or a shell alias without needing `eval "$(...)"`.
 
-**Inline link/tag completion** — in either field, `Tab` on a word starting with one of these prefixes opens a completion menu of matching notes (candidates are note file BASENAMEs, not frontmatter titles):
+**Inline link/tag completion** — in either field, `Tab` on a word starting with one of these prefixes opens a completion menu:
 
 | Prefix | Matches |
 | --- | --- |
-| `@p:` | notes with frontmatter `type: project` |
-| `@e:` | notes with frontmatter `type: people` |
-| `@d:` | notes created today (frontmatter `created:` date) |
-| `@7:` / `@w:` | notes created in the last 7 days (today and the 6 days before it — a rolling window, not the previous calendar week) |
-| `@n:` | all notes |
-| `#...` | all notes, tag-style (`#basename`) |
+| `@` | note **links** — real link targets from the vault's `note_links` table (same source and helper, `crate::jira::notes_link_matches`, as the Notes (`@`) prefix mode's own Tab completion), candidate `[[link]]` |
+| `[[` | same as `@` — link completion, for the user who typed the literal wiki-link brackets instead of the `@` shorthand |
+| `#` | note **tags** — real tag names from the vault's `note_tags` table (`crate::jira::notes_tag_matches`), candidate `#tag` |
+| `@p:` | notes with frontmatter `type: project`, candidate `[[basename]]` |
+| `@e:` | notes with frontmatter `type: people`, candidate `[[basename]]` |
+| `@d:` | notes created today (frontmatter `created:` date), candidate `[[basename]]` |
+| `@7:` / `@w:` | notes created in the last 7 days (today and the 6 days before it — a rolling window, not the previous calendar week), candidate `[[basename]]` |
+| `@n:` | all notes, candidate `[[basename]]` |
 
-Typed text after the prefix narrows the candidates by a case-insensitive substring match against the basename, live — while the menu is open, printable characters and `Backspace` keep filtering the list instead of being swallowed. A single match is inserted directly (no menu to confirm); `[[basename]]` for the `@*:` prefixes, `#basename` for `#`. Navigate a multi-match menu with `Up`/`Down`, `Tab`/`Shift-Tab` (`BackTab`), `Home`/`End`; `Enter` commits the selected candidate, `Esc` dismisses the menu (keeping whatever was typed) without closing the dialog.
+`@`/`[[`/`#` require at least one character typed after the prefix (an empty prefix returns no candidates, same as the Notes (`@`) prefix mode's query input); the `@p:`/`@e:`/`@d:`/`@7:`/`@w:`/`@n:` variants list every match with no text typed. Typed text after any prefix narrows the candidates by a case-insensitive prefix match, live — while the menu is open, printable characters and `Backspace` keep filtering the list instead of being swallowed. A single match is inserted directly (no menu to confirm). Navigate a multi-match menu with `Up`/`Down`, `Tab`/`Shift-Tab` (`BackTab`), `Home`/`End`; `Enter` commits the selected candidate, `Esc` dismisses the menu (keeping whatever was typed) without closing the dialog.
 
 `Ctrl-D` / `Ctrl-N` / `Ctrl-7` are one-keystroke shortcuts for `@d:` / `@n:` / `@7:` — same as typing the prefix and pressing `Tab`. (`Ctrl-W` was the natural mnemonic for "last 7 days" but was already taken by delete-word-backward, so `Ctrl-7` is used instead.)
 

@@ -24464,19 +24464,26 @@ fn try_note_create_completion_opens_menu_with_matching_notes() {
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create notes dir");
+    // Each note also carries a real `#tag` and `[[link]]` token in
+    // its body (in addition to the `type:` attribute used by the
+    // `@p:`/`@e:` sub-tests below) so the `#`/`@`/`[[` completion
+    // sub-tests further down have real `note_tags`/`note_links`
+    // rows to match against. The tag/link names all share a common
+    // prefix (`tag*` / `link*`) so a partial prefix exercises the
+    // multi-match menu, the same way `@p:` does above.
     fs::write(
         dir.join("project_alpha.md"),
-        "---\ntitle: Project Alpha\ntype: project\n---\n# Project Alpha\n",
+        "---\ntitle: Project Alpha\ntype: project\n---\n# Project Alpha\n#tagalpha [[linkalpha]]\n",
     )
     .expect("write project_alpha.md");
     fs::write(
         dir.join("project_bravo.md"),
-        "---\ntitle: Project Bravo\ntype: project\n---\n# Project Bravo\n",
+        "---\ntitle: Project Bravo\ntype: project\n---\n# Project Bravo\n#tagbravo [[linkbravo]]\n",
     )
     .expect("write project_bravo.md");
     fs::write(
         dir.join("people_charlie.md"),
-        "---\ntitle: People Charlie\ntype: people\n---\n# People Charlie\n",
+        "---\ntitle: People Charlie\ntype: people\n---\n# People Charlie\n#tagcharlie [[linkcharlie]]\n",
     )
     .expect("write people_charlie.md");
     // Build the sqlite DB the same way the existing notes-mode
@@ -24587,51 +24594,61 @@ fn try_note_create_completion_opens_menu_with_matching_notes() {
         "the sole `@e:` match must be inserted directly, not opened as a menu"
     );
     assert_eq!(d.title, "[[people_charlie]] ");
-    // Now type `#` (the tag-completion prefix) with no search term
-    // — all three notes match, so this is a multi-match menu case.
+    // Bare `#` (the tag-completion prefix) with NO search term must
+    // NOT open a menu — `crate::jira::notes_tag_matches` (the same
+    // helper the Notes (`@`) prefix mode's own Tab completion uses)
+    // early-returns an empty candidate list for an empty prefix, so
+    // the user has to type at least one filtering character, same
+    // as in the `@` prefix mode's query input.
     app.note_create_clear();
     app.note_create_push_char('#');
     let opened = app.try_note_create_completion();
     assert!(
-        opened,
-        "Tab on the `#` prefix must open the completion menu"
+        !opened,
+        "Tab on a bare `#` with no search term must NOT open a menu \
+         (notes_tag_matches requires a non-empty prefix)"
     );
+    // Typing `#tag` matches all three notes' `#tag*` tokens, so this
+    // is a multi-match menu case. `#` candidates come from the real
+    // `note_tags` table (via `crate::jira::notes_tag_matches`) — not
+    // a basename guess.
+    for c in "tag".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "Tab on `#tag` must open the completion menu");
     let d = app.note_create.as_ref().unwrap();
     let menu = d
         .completion
         .as_ref()
-        .expect("menu is open after Tab on `#` (3 notes match, no filter)");
-    // `#` completion candidates are each note's file BASENAME
-    // prefixed with `#` (see `try_note_create_completion`'s doc
-    // comment) — not the frontmatter title or an attribute/tag
-    // name — so with no filter it must offer all three basenames.
+        .expect("menu is open after Tab on `#tag` (3 tags match)");
     assert!(
-        menu.candidates.iter().any(|c| c == "#project_alpha"),
-        "tag completion must include project_alpha's basename; got: {:?}",
+        menu.candidates.iter().any(|c| c == "#tagalpha"),
+        "tag completion must include #tagalpha; got: {:?}",
         menu.candidates
     );
     assert!(
-        menu.candidates.iter().any(|c| c == "#project_bravo"),
-        "tag completion must include project_bravo's basename; got: {:?}",
+        menu.candidates.iter().any(|c| c == "#tagbravo"),
+        "tag completion must include #tagbravo; got: {:?}",
         menu.candidates
     );
     assert!(
-        menu.candidates.iter().any(|c| c == "#people_charlie"),
-        "tag completion must include people_charlie's basename; got: {:?}",
+        menu.candidates.iter().any(|c| c == "#tagcharlie"),
+        "tag completion must include #tagcharlie; got: {:?}",
         menu.candidates
     );
-    // Narrow `#` by typed search text down to a single match
-    // ("charlie" only matches people_charlie). This is the
-    // regression check for "tag completion ignores the text typed
-    // so far": if the search term were dropped, all 3 candidates
-    // would still be there and this would stay a menu instead of
-    // auto-applying the one narrowed match.
+    // Narrow further down to a single match ("tagcharlie" only
+    // matches #tagcharlie). This is the regression check for "tag
+    // completion ignores the text typed so far": if the search term
+    // were dropped, all 3 candidates would still be there and this
+    // would stay a menu instead of auto-applying the one narrowed
+    // match.
     crate::tui::handle_note_create_completion_key(&mut app, esc());
     for c in "charlie".chars() {
         app.note_create_push_char(c);
     }
     let opened = app.try_note_create_completion();
-    assert!(opened, "narrowed `#charlie` must be handled by Tab");
+    assert!(opened, "narrowed `#tagcharlie` must be handled by Tab");
     let d = app.note_create.as_ref().unwrap();
     assert!(
         d.completion.is_none(),
@@ -24639,12 +24656,95 @@ fn try_note_create_completion_opens_menu_with_matching_notes() {
          (if this fails, the typed search text after `#` is being ignored)"
     );
     assert_eq!(
-        d.title, "#people_charlie ",
-        "narrowing `#charlie` must resolve to the one matching note's basename; got: {:?}",
+        d.title, "#tagcharlie ",
+        "narrowing `#tagcharlie` must resolve to the one matching tag; got: {:?}",
         d.title
     );
-    // And a bare word (no `@`/`#` prefix) should NOT open a menu —
-    // Tab on a plain word toggles fields instead.
+    // Bare `@` (no `p:`/`e:`/`d:`/`7:`/`w:`/`n:` suffix) completes
+    // to a note LINK, sourced from the real `note_links` table via
+    // `crate::jira::notes_link_matches` — the same helper the Notes
+    // (`@`) prefix mode's own Tab completion uses. Like `#`, an
+    // empty search term must not open a menu.
+    app.note_create_clear();
+    app.note_create_push_char('@');
+    let opened = app.try_note_create_completion();
+    assert!(
+        !opened,
+        "Tab on a bare `@` with no search term must NOT open a menu \
+         (notes_link_matches requires a non-empty prefix)"
+    );
+    // Typing `@link` matches all three `[[link*]]` tokens, so this
+    // opens a menu. Note that `notes_link_matches` lowercases every
+    // candidate (Obsidian links are case-insensitive) — here the
+    // source links are already lowercase, so this is a no-op, but
+    // matches the same convention the Notes (`@`) prefix mode uses.
+    for c in "link".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "Tab on `@link` must open the completion menu");
+    let d = app.note_create.as_ref().unwrap();
+    let menu = d
+        .completion
+        .as_ref()
+        .expect("menu is open after Tab on `@link` (3 links match)");
+    assert!(
+        menu.candidates.iter().any(|c| c == "[[linkalpha]]"),
+        "bare `@` link completion must include [[linkalpha]]; got: {:?}",
+        menu.candidates
+    );
+    assert!(
+        menu.candidates.iter().any(|c| c == "[[linkbravo]]"),
+        "bare `@` link completion must include [[linkbravo]]; got: {:?}",
+        menu.candidates
+    );
+    assert!(
+        menu.candidates.iter().any(|c| c == "[[linkcharlie]]"),
+        "bare `@` link completion must include [[linkcharlie]]; got: {:?}",
+        menu.candidates
+    );
+    // Narrow down to a single match ("linkcharlie" only matches
+    // [[linkcharlie]]) — must auto-apply directly, replacing the
+    // typed `@linkcharlie` with the full `[[linkcharlie]] `
+    // expansion.
+    crate::tui::handle_note_create_completion_key(&mut app, esc());
+    for c in "charlie".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "narrowed `@linkcharlie` must be handled by Tab");
+    let d = app.note_create.as_ref().unwrap();
+    assert!(
+        d.completion.is_none(),
+        "a single narrowed `@` link match must be inserted directly, not opened as a menu"
+    );
+    assert_eq!(
+        d.title, "[[linkcharlie]] ",
+        "narrowing `@linkcharlie` must resolve to the sole matching link, wrapped in [[ ]]; \
+         got: {:?}",
+        d.title
+    );
+    // `[[` (the user having already typed the literal wiki-link
+    // opening brackets) completes the same way as bare `@` — same
+    // `notes_link_matches` source, same `[[link]]` candidate shape.
+    app.note_create_clear();
+    for c in "[[linkb".chars() {
+        app.note_create_push_char(c);
+    }
+    let opened = app.try_note_create_completion();
+    assert!(opened, "narrowed `[[linkb` must be handled by Tab");
+    let d = app.note_create.as_ref().unwrap();
+    assert!(
+        d.completion.is_none(),
+        "a single narrowed `[[` link match must be inserted directly, not opened as a menu"
+    );
+    assert_eq!(
+        d.title, "[[linkbravo]] ",
+        "narrowing `[[linkb` must resolve to the sole matching link; got: {:?}",
+        d.title
+    );
+    // And a bare word (no `@`/`[[`/`#` prefix) should NOT open a
+    // menu — Tab on a plain word toggles fields instead.
     app.note_create_clear();
     app.note_create_push_char('h');
     app.note_create_push_char('i');

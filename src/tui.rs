@@ -11850,151 +11850,47 @@ impl App {
         true
     }
 
-    /// Open the
-    /// inline
-    /// completion
-    /// menu for
-    /// the
-    /// create-note
-    /// dialog
-    /// when the
-    /// cursor
-    /// sits on a
-    /// word that
-    /// starts
-    /// with one
-    /// of the
-    /// supported
-    /// prefixes
-    /// (`@p:`,
-    /// `@e:`,
-    /// `@d:`,
-    /// `@7:` /
-    /// `@w:`,
-    /// `@n:`, or
-    /// `#`).
-    /// Returns
-    /// `true`
-    /// when a
-    /// menu was
-    /// opened,
-    /// `false`
-    /// when no
-    /// completion
-    /// was
-    /// triggered
-    /// (so the
-    /// caller
-    /// can
-    /// fall
-    /// through
-    /// to the
-    /// default
-    /// `Tab`
-    /// behavior
-    /// — field
-    /// toggle).
+    /// Open the inline completion menu for the create-note dialog
+    /// when the cursor sits on a word that starts with one of the
+    /// supported prefixes (`@`, `[[`, `#`, or one of the
+    /// attribute/date-filtered `@p:` / `@e:` / `@d:` / `@7:` /
+    /// `@w:` / `@n:` variants). Returns `true` when a menu was
+    /// opened (or a single match was auto-applied), `false` when no
+    /// completion was triggered (so the caller can fall through to
+    /// the default `Tab` behavior — field toggle).
     ///
-    /// Completion
-    /// candidates
-    /// are loaded
-    /// from
-    /// `note_search::DatabaseService::search_notes`
-    /// with the
-    /// prefix's
-    /// filter:
-    /// `@p:` →
-    /// `attribute: project`,
-    /// `@e:` →
-    /// `attribute: people`,
-    /// `@d:` →
-    /// `date_range: Today`,
-    /// `@7:` /
-    /// `@w:` →
-    /// rolling 7-day
-    /// `date_range: Custom`
-    /// (today and the
-    /// 6 days before
-    /// it — NOT
-    /// `DateRange::LastWeek`,
-    /// which is the
-    /// previous
-    /// calendar
-    /// week),
-    /// `@n:` →
-    /// no
-    /// filter
-    /// (all
-    /// notes),
-    /// `#` →
-    /// all
-    /// notes'
-    /// titles
-    /// (tag
-    /// completion).
-    /// Each
-    /// candidate
-    /// is
-    /// the
-    /// note's
-    /// file
-    /// BASENAME
-    /// (filename
-    /// minus
-    /// directory
-    /// and
-    /// extension)
-    /// — never
-    /// the
-    /// frontmatter
-    /// title —
-    /// formatted
-    /// as
-    /// `[[basename]]`,
-    /// and
-    /// narrowed
-    /// by
-    /// whatever
-    /// the
-    /// user
-    /// typed
-    /// after
-    /// the
-    /// prefix
-    /// (case-
-    /// insensitive
-    /// substring
-    /// match
-    /// against
-    /// the
-    /// basename).
+    /// `@` and `[[` both complete to a note **link**: the candidate
+    /// list comes from `crate::jira::notes_link_matches`, backed by
+    /// `note_search::commands::metadata::get_unique_values(db, "link")`
+    /// — the same `note_links` junction table (and the same helper
+    /// function) the Notes (`@`) prefix mode's own Tab completion
+    /// uses (`notes_tab_complete_at_cursor`). Each candidate is
+    /// formatted as `[[link]]`; `@Neo` and `[[Neo` both expand the
+    /// same way, replacing the whole typed prefix+word with the
+    /// bracketed form.
     ///
-    /// The
-    /// existing
-    /// `CompletionMenu`
-    /// (used
-    /// by
-    /// the
-    /// main
-    /// query
-    /// input)
-    /// is
-    /// re-used
-    /// here
-    /// so
-    /// the
-    /// user
-    /// navigates
-    /// with
-    /// the
-    /// same
-    /// arrow-key
-    /// /
-    /// Enter
-    /// pattern
-    /// they
-    /// already
-    /// know.
+    /// `#` completes to a note **tag**: candidates come from
+    /// `crate::jira::notes_tag_matches`
+    /// (`get_unique_values(db, "tag")`), formatted as `#tag` — again
+    /// the same source and helper the `@` prefix mode's Tab
+    /// completion uses for tags.
+    ///
+    /// The `@p:` / `@e:` / `@d:` / `@7:` / `@w:` / `@n:` variants are
+    /// a separate, dialog-only convenience: they filter
+    /// `note_search::DatabaseService::search_notes` by attribute or
+    /// date range (`@p:` → `attribute: project`, `@e:` → `attribute:
+    /// people`, `@d:` → `date_range: Today`, `@7:` / `@w:` → rolling
+    /// 7-day `date_range: Custom` — today and the 6 days before it,
+    /// NOT `DateRange::LastWeek`, which is the previous calendar
+    /// week — `@n:` → no filter/all notes), and the candidate is the
+    /// matching note's file BASENAME (never the frontmatter title)
+    /// wrapped in `[[basename]]`. All prefixes narrow by whatever
+    /// the user typed after them (case-insensitive substring match).
+    ///
+    /// The menu itself is the dialog-local `NoteCreateCompletion`,
+    /// NOT the `CompletionMenu` used by the main query input (see
+    /// its doc comment in `src/tui/state.rs` for why), but the user
+    /// navigates it with the same arrow-key / Enter pattern.
     fn try_note_create_completion(&mut self) -> bool {
         let opened = self.try_note_create_completion_inner();
         if !opened {
@@ -12095,6 +11991,10 @@ impl App {
             ("@w:", rest)
         } else if let Some(rest) = word.strip_prefix("@n:") {
             ("@n:", rest)
+        } else if let Some(rest) = word.strip_prefix("[[") {
+            ("[[", rest)
+        } else if let Some(rest) = word.strip_prefix('@') {
+            ("@", rest)
         } else if word.starts_with('#') {
             ("#", &word[1..])
         } else {
@@ -12121,6 +12021,43 @@ impl App {
             );
             return false;
         };
+        // `@`, `[[`, and `#` are completed exactly like the Notes
+        // (`@`) prefix mode's own Tab completion
+        // (`notes_tab_complete_at_cursor`): real tags/links read from
+        // the `note_tags`/`note_links` junction tables via
+        // `crate::jira::notes_tag_matches` / `notes_link_matches`
+        // (both backed by `note_search::commands::metadata::get_unique_values`)
+        // — the actual vault vocabulary, not a `search_notes` +
+        // basename guess. `@` and `[[` both trigger link completion
+        // (the user typed either the bare `@` shorthand or the
+        // literal opening `[[`); either way the candidate is the
+        // full `[[LINK]]` form.
+        if matches!(prefix, "@" | "[[" | "#") {
+            let candidates: Vec<String> = if prefix == "#" {
+                crate::jira::notes_tag_matches(db_path, search_term)
+                    .into_iter()
+                    .map(|t| format!("#{t}"))
+                    .collect()
+            } else {
+                crate::jira::notes_link_matches(db_path, search_term)
+                    .into_iter()
+                    .map(|l| format!("[[{l}]]"))
+                    .collect()
+            };
+            if candidates.is_empty() {
+                self.set_status_message(format!("no notes match {prefix}"));
+                return false;
+            }
+            if candidates.len() == 1 {
+                self.note_create_apply_completion(word_start_char, active_cursor, &candidates[0]);
+                return true;
+            }
+            dialog.completion = Some(crate::tui::state::NoteCreateCompletion {
+                candidates,
+                selected: 0,
+            });
+            return true;
+        }
         let service = note_search::database_service::DatabaseService::new(
             &db_path.display().to_string(),
         );
@@ -12167,8 +12104,8 @@ impl App {
                     end: today.format("%Y%m%d").to_string(),
                 });
             }
-            // "@n:" and "#" use
-            // no filter (all
+            // "@n:" uses no
+            // filter (all
             // notes).
             _ => {}
         }
@@ -12184,11 +12121,9 @@ impl App {
         // can share a title, but basenames are what `[[link]]`
         // actually resolves against. For `@p:` / `@e:` / `@d:`
         // / `@7:` / `@w:` / `@n:`, the candidate is the
-        // basename wrapped in `[[ ]]`. For `#`, the candidate
-        // is the basename prefixed with `#` (tag-style
-        // completion). Narrowed by whatever the user typed
-        // after the prefix (case-insensitive substring match
-        // against the basename).
+        // basename wrapped in `[[ ]]`. Narrowed by whatever the
+        // user typed after the prefix (case-insensitive
+        // substring match against the basename).
         let search_term_lower = search_term.to_lowercase();
         let candidates: Vec<String> = rows
             .iter()
@@ -12204,10 +12139,7 @@ impl App {
                 {
                     return None;
                 }
-                Some(match prefix {
-                    "#" => format!("#{basename}"),
-                    _ => format!("[[{basename}]]"),
-                })
+                Some(format!("[[{basename}]]"))
             })
             .collect();
         if candidates.is_empty() {

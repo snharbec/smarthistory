@@ -1135,10 +1135,15 @@ pub enum NoteCreateField {
 /// composer: a single-line
 /// Title, a multi-line
 /// Content, and inline
-/// completion for `@`-prefixed
-/// note links (`@p:`, `@e:`,
-/// `@d:`, `@7:`, `@w:`, `@n:`)
-/// and `#`-prefixed tags.
+/// completion for note links
+/// (`@` or `[[`, plus the
+/// attribute/date-filtered
+/// `@p:`, `@e:`, `@d:`, `@7:`,
+/// `@w:`, `@n:` variants) and
+/// `#`-prefixed tags — see
+/// `App::try_note_create_completion`'s
+/// doc comment for the full
+/// mechanics.
 ///
 /// On `Ctrl-S` the dialog
 /// formats the body as a
@@ -1162,26 +1167,18 @@ pub enum NoteCreateField {
 /// across either field
 /// before submitting.
 ///
-/// Completion: the dialog
-/// shares the `CompletionMenu`
-/// shape used by the main
-/// query input — same
-/// `candidates` / `selected`
-/// / byte-range replacement
-/// fields — so the user
-/// navigates with the same
-/// arrow-key / Enter pattern
-/// they already know. The
-/// candidate list is
-/// computed on demand via
-/// `note_search`'s
-/// `DatabaseService::search_notes`
-/// with the prefix's
-/// attribute / date filter
-/// (e.g. `@p:` → attributes
-/// filter `["project"]`,
-/// `@7:` → date_range =
-/// `LastWeek`).
+/// Completion: the dialog has its own `NoteCreateCompletion` menu
+/// (below) with a `candidates` / `selected` shape modeled on the
+/// main query input's `CompletionMenu`, so the user navigates with
+/// the same arrow-key / Enter pattern they already know. For `@`,
+/// `[[`, and `#` the candidate list comes straight from
+/// `crate::jira::notes_link_matches` / `notes_tag_matches` — the
+/// same `note_tags`/`note_links`-backed helpers the Notes (`@`)
+/// prefix mode's own Tab completion uses. The `@p:` / `@e:` / `@d:`
+/// / `@7:` / `@w:` / `@n:` variants instead query
+/// `note_search`'s `DatabaseService::search_notes` with an
+/// attribute or date filter (e.g. `@p:` → `type: project`, `@7:` →
+/// a rolling 7-day window) and offer matching notes' basenames.
 #[derive(Debug, Clone)]
 pub struct NoteCreateDialog {
     /// Single-line title
@@ -1230,9 +1227,12 @@ pub struct NoteCreateDialog {
     /// a word that starts
     /// with one of the
     /// supported prefixes
-    /// (`@p:`, `@e:`, `@d:`,
-    /// `@7:`, `@w:`, `@n:`,
-    /// `#`). `None` when
+    /// (`@`, `[[`, `#`, or
+    /// the attribute/date-
+    /// filtered `@p:`, `@e:`,
+    /// `@d:`, `@7:`, `@w:`,
+    /// `@n:` variants).
+    /// `None` when
     /// the user is typing
     /// freely without a
     /// completion in
