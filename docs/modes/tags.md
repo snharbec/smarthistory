@@ -49,5 +49,5 @@ When no `tags` file is found anywhere in the tree, `$` mode falls back to the [C
 ## Cross-references
 
 - [CodeGraph mode — the same symbol lookup backed by `.codegraph/codegraph.db`, the `$`-mode fallback when no `tags` file exists](codegraph.md)
-- [Files mode — `~` searches the file system; `$` searches the symbols *in* those files](files.md)
-- [ag mode — searches the file *contents*; `$` searches the symbols; `~` searches the file *names*](ag.md)
+- [Files mode — `/` searches the file system; `$` searches the symbols *in* those files](files.md)
+- [ag mode — searches the file *contents*; `$` searches the symbols; `/` searches the file *names*](ag.md)

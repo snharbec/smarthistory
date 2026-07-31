@@ -1,4 +1,4 @@
-//! `%` (general LLM question) prefix mode.
+//! `?` (general LLM question) prefix mode.
 //!
 //! Like the LLM mode, requires non-whitespace text after the
 //! prefix.
@@ -14,7 +14,7 @@ pub(crate) fn matches(app: &App) -> bool {
 }
 
 /// The question body, i.e. everything after the leading
-/// `%` prefix. Empty string when not in question mode.
+/// `?` prefix. Empty string when not in question mode.
 pub(crate) fn pattern(app: &App) -> &str {
     if matches(app) {
         let p = app.query_prefixes.question;

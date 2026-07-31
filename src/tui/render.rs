@@ -1555,7 +1555,7 @@ fn draw_correct_view(f: &mut Frame, app: &App, view: &CorrectView) {
 }
 
 /// Full-screen overlay for the general question
-/// action (prefixed with `%`).
+/// action (prefixed with `?`).
 ///
 /// Mirrors the describe overlay in shape (a piece of
 /// text + a scroll offset) but is driven by the user's
@@ -6176,7 +6176,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     //   primary signal).
     // - notes (`@`): success (green — search/
     //   navigation colour).
-    // - question (`%`): info (blue — queries
+    // - question (`?`): info (blue — queries
     //   return information).
     // - todo (`!`): warning (yellow — calls
     //   attention to action items).

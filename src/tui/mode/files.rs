@@ -1,4 +1,4 @@
-//! `~` (files) prefix mode.
+//! `/` (files) prefix mode.
 //!
 //! Lists every file in the current directory and
 //! subdirectories, filtered by the typed pattern.
@@ -11,8 +11,8 @@ use crate::tui::App;
 use anyhow::Result;
 
 /// Whether the query is a files-view request:
-/// the query starts with the files prefix (`~` by
-/// default). The body (everything after `~`) is a
+/// the query starts with the files prefix (`/` by
+/// default). The body (everything after `/`) is a
 /// substring filter matched against each file's
 /// path (relative to cwd).
 pub(crate) fn matches(app: &App) -> bool {
@@ -20,7 +20,7 @@ pub(crate) fn matches(app: &App) -> bool {
     !app.query.is_empty() && app.query.starts_with(p)
 }
 
-/// Health check for the files (`~`) mode. The
+/// Health check for the files (`/`) mode. The
 /// files mode has no external dependencies — it
 /// just walks the local filesystem — so the
 /// check verifies:
@@ -96,7 +96,7 @@ pub(crate) fn check(_app: &App) -> CheckReport {
 }
 
 /// The files-view body, i.e. everything after the
-/// leading `~` prefix. Empty string when not in
+/// leading `/` prefix. Empty string when not in
 /// files mode.
 #[allow(dead_code)] // convention API; `App::files_pattern` delegates here
 pub(crate) fn pattern(app: &App) -> &str {
@@ -113,7 +113,7 @@ pub(crate) fn pattern(app: &App) -> &str {
 /// `App::files_touch` → `crate::files::spawn_walk`),
 /// so this just clones the cached rows from
 /// `App::files_state` and filters out pure
-/// directory rows. The files (`~`) mode is for
+/// directory rows. The files (`/`) mode is for
 /// opening files; directories are reachable via the
 /// directories (`#`) mode if the user wants
 /// directory-level navigation. Showing directories
@@ -130,7 +130,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 }
 
 /// Lazy-load the first 50 lines of the currently-selected file
-/// (`~` mode) into `output` for preview in the output preview
+/// (`/` mode) into `output` for preview in the output preview
 /// pane. Called from `App::refresh()` on every selection change.
 /// The file row carries the absolute path in `directory` (set
 /// during `walk_dir`). We read the first 50 lines and pipe

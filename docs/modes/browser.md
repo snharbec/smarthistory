@@ -48,7 +48,7 @@ Every browser's database file is typically held open (and often locked) by a run
 
 ## Match algorithm
 
-Toggle with `Ctrl-F`. The default is `sub` (case-insensitive substring, AND'd by whitespace-separated word across the combined `"<tag> <title> <url>"` text) — same convention as [Files (`~`) mode](files.md).
+Toggle with `Ctrl-F`. The default is `sub` (case-insensitive substring, AND'd by whitespace-separated word across the combined `"<tag> <title> <url>"` text) — same convention as [Files (`/`) mode](files.md).
 
 ## Debounce
 
@@ -68,6 +68,6 @@ Like every other prefix mode except plain history search, selecting a `^`-mode r
 
 ## Cross-references
 
-- [`~` (Files) — the closest architectural sibling: a local-disk background walk, debounced, filtered by AND'd substring tokens](files.md)
+- [`/` (Files) — the closest architectural sibling: a local-disk background walk, debounced, filtered by AND'd substring tokens](files.md)
 - [`-` (JIRA) / `<` (Paperless) — the other two "selecting a row opens a URL in the system browser" modes](jira.md)
 - [`README.md`](README.md) — mode index, common actions, match algorithms

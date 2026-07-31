@@ -9,13 +9,13 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | History | *(none)* | [`history.md`](history.md) | Plain-text search over the shell history. |
 | Output | `+` | [`output.md`](output.md) | Search the captured stdout / stderr of each command. |
 | LLM command | `=` | [`llm.md`](llm.md) | Ask the LLM to generate a Bash command from a natural-language description. |
-| Question | `%` | [`question.md`](question.md) | Ask the LLM a short factual question; answer is shown in an overlay. |
+| Question | `?` | [`question.md`](question.md) | Ask the LLM a short factual question; answer is shown in an overlay. |
 | Notes | `@` | [`notes.md`](notes.md) | Search the `note_search` SQLite database. |
 | Todo | `!` | [`todo.md`](todo.md) | List open todo entries from the `note_search` database. |
 | Directories | `#` | [`directories.md`](directories.md) | List every directory the shell has ever been in. |
 | Panes | `*` | [`panes.md`](panes.md) | List every pane across every tmux / herdr session. |
 | JIRA | `-` | [`jira.md`](jira.md) | Search JIRA issues via the REST API. |
-| Files | `~` | [`files.md`](files.md) | List every file under the current directory. |
+| Files | `/` | [`files.md`](files.md) | List every file under the current directory. |
 | Tags | `$` | [`tags.md`](tags.md) | List every symbol from the local ctags `tags` file. |
 | CodeGraph | `&` | [`codegraph.md`](codegraph.md) | Search symbols in the local `.codegraph/codegraph.db` index; the selected row's preview shows source context plus callers / callees. |
 | ag | `,` | [`ag.md`](ag.md) | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher) (The Silver Searcher). |
@@ -40,13 +40,13 @@ The first character of the query decides the mode. Examples:
 | `git status` | History (no prefix). |
 | `+OutOfMemory` | Output. |
 | `=find duplicates in csv` | LLM command. |
-| `%when was TCP invented` | Question. |
+| `?when was TCP invented` | Question. |
 | `@docker compose` | Notes. |
 | `!@new remember to buy milk` | Todo (quick-create). |
 | `#src` | Directories. |
 | `*nvim` | Panes. |
 | `-@me @kramfors status=Open` | JIRA. |
-| `~/work/**/*.toml` | Files. |
+| `/work/**/*.toml` | Files. |
 | `$@rust setUp` | Tags (rust symbols matching `setUp`). |
 | `&@java getSymbol` | CodeGraph. |
 | `,TODO *.rs` | ag. |
@@ -64,7 +64,7 @@ Some modes share a token language for narrowing the search. The implementations 
 | Token | Used by | Meaning |
 | --- | --- | --- |
 | `@<lang>` | tags, codegraph, ag | Filter by language. The value is matched against the `nodes.language` column (codegraph) or the file extension (tags / ag). Examples: `@rust`, `@java`, `@python`. |
-| `*<glob>` | ag, files (via `~`) | Restrict to files whose name matches `<glob>`. The glob is a shell-style pattern (`*` = any chars). |
+| `*<glob>` | ag, files (via `/`) | Restrict to files whose name matches `<glob>`. The glob is a shell-style pattern (`*` = any chars). |
 | `<field>=<value>` | jira | JQL-style `key=value` constraint, e.g. `status=Open`, `priority=Blocker`. |
 | `@me` / `@today` / `@week` / `@month` | jira | Built-in JIRA aliases. See [`jira.md`](jira.md). |
 | `@<name>` | jira | A user-defined JQL fragment from `jira.search.<name>=<jql>` in the config. Requires the leading `@`. |
@@ -97,7 +97,7 @@ The substring / fuzzy / regex algorithms apply to most modes. Toggle with `Ctrl-
 
 The TUI honors zsh's `HIST_NO_STORE` convention: **any command whose first character is whitespace is treated as "do not record".** This applies in two places:
 
-1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `~` / `@` / `!` / `-` / `,` / `:` / `=` / `%` / `#` / `*` / `<` / `^`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
+1. **The TUI prepends a single space to staged selections in every mode *except* history mode.** `Enter` in `&` / `$` / `/` / `@` / `!` / `-` / `,` / `:` / `=` / `?` / `#` / `*` / `<` / `^`, `Ctrl-]` SmartOpen, `Ctrl-V` EditFileReference, `Ctrl-M-s` DownloadJiraIssue, etc. all stage a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB. The space prefix keeps both the shell history and the smarthistory DB focused on commands worth recalling. **History mode (no prefix) is the explicit exception**: picking a row from history is a command the user *wants* recorded — recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches.
 2. **User-typed space-prefixed commands** get the same treatment. Type `git push` (with a leading space) and the precmd hook skips the DB write; `git push` (no space) is recorded normally.
 
 The convention is also honored by the `Ctrl-S` (next-probable-command) widget: a space-prefixed command is deliberately NOT remembered as `_smarthistory_last_cmd`, so the widget will not suggest a sensitive command as the "next probable" one. The cycle index is still reset so the next `Ctrl-S` press starts with the most probable candidate from the (non-sensitive) recent past.

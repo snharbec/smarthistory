@@ -1165,7 +1165,7 @@ pub(crate) struct App {
     /// the comment), pressing `Esc` cancels.
     correct_view: Option<CorrectView>,
     /// When `Some`, the general question overlay is open.
-    /// The user asked a question (prefixed with `%`) and
+    /// The user asked a question (prefixed with `?`) and
     /// the LLM's answer is displayed here.
     question_view: Option<QuestionView>,
     /// When `Some`, the help overlay is open. The contained `scroll`
@@ -1757,10 +1757,10 @@ pub(crate) struct App {
     /// them.
     jira_fragments: std::collections::HashMap<String, String>,
     /// Per-extension shell commands invoked by
-    /// `Action::SmartOpen` in `~` (files) mode.
+    /// `Action::SmartOpen` in `/` (files) mode.
     /// Loaded from the config file's
     /// `smart-open.<ext>=<cmd>` lines. The TUI's
-    /// `~`-mode SmartOpen dispatch looks up the
+    /// `/`-mode SmartOpen dispatch looks up the
     /// selected file's extension (lowercase, no
     /// leading `.`) in this map; the matched
     /// command is staged with the file path
@@ -2042,11 +2042,11 @@ const JIRA_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400)
 const JIRA_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Sentinel for the plain (no-prefix) mode in the per-mode
-/// query-history maps. Real prefix chars (`+`, `=`, `%`, `@`,
-/// `!`, `#`, `*`, `~`, `$`, `&`, `,`, `-`) are all printable;
-/// `'\0'` can't be one, so it uniquely identifies "the query
-/// has no leading prefix char" without colliding with a real
-/// mode. Used as the `char` key in
+/// query-history maps. Real prefix chars (`+`, `=`, `?`, `@`,
+/// `!`, `#`, `*`, `/`, `$`, `&`, `,`, `-`, `:`, `"`, `<`, `^`) are
+/// all printable; `'\0'` can't be one, so it uniquely identifies
+/// "the query has no leading prefix char" without colliding with
+/// a real mode. Used as the `char` key in
 /// [`App::mode_query_history`] / `mode_query_drafts` /
 /// `mode_query_history_index` for the plain-mode slot.
 const MODE_NONE: char = '\0';
@@ -2254,7 +2254,7 @@ impl App {
     /// For the default history mode (no prefix), it's the
     /// full query. For output mode (`+...`), it's the text
     /// after the `+`. For LLM/question modes, it's the text
-    /// after the `=`/`%`. This is the canonical body that
+    /// after the `=`/`?`. This is the canonical body that
     /// `query_matches_text` and `recompile_regex` operate
     /// on regardless of the active match algorithm.
     fn search_body(&self) -> &str {
@@ -2389,8 +2389,8 @@ impl App {
     }
 
     /// Whether the query is a files-view request:
-    /// the query starts with the files prefix (`~` by
-    /// default). The body (everything after `~`) is a
+    /// the query starts with the files prefix (`/` by
+    /// default). The body (everything after `/`) is a
     /// substring filter matched against each file's
     /// path (relative to cwd).
     fn is_files_query(&self) -> bool {
@@ -3156,13 +3156,13 @@ impl App {
     ///    default text-search mode.
     /// 2. `+` (output)
     /// 3. `=` (LLM)
-    /// 4. `%` (question)
+    /// 4. `?` (question)
     /// 5. `@` (notes)
     /// 6. `!` (todo)
     /// 7. `#` (directories)
     /// 8. `*` (panes)
     /// 9. `-` (JIRA)
-    /// 10. `~` (files)
+    /// 10. `/` (files)
     /// 11. `$` (tags)
     /// 12. `,` (ag)
     /// 13. **No prefix** (history) — wrap
@@ -3319,7 +3319,7 @@ impl App {
         self.jira_touch();
         // Same co-location for the files-mode
         // walk debounce. `files_touch` is a
-        // no-op outside `~` mode, so putting
+        // no-op outside `/` mode, so putting
         // it here means every edit path also
         // drives files search-as-you-type.
         self.files_touch();
@@ -3405,7 +3405,7 @@ impl App {
     ///   `#`, symbols `$`,
     ///   todos `!`, notes `@`,
     ///   tags `$`, ag `,`,
-    ///   files `~`): call
+    ///   files `/`): call
     ///   `self.refresh()` so the
     ///   row set is re-fetched
     ///   immediately. The
@@ -4002,7 +4002,7 @@ struct CorrectView {
     corrected_command: String,
 }
 
-/// State for the general question overlay (prefixed with `%`).
+/// State for the general question overlay (prefixed with `?`).
 /// Mirrors the describe overlay in shape (a piece of text +
 /// a scroll offset) but is driven by the user's question.
 ///
@@ -4013,7 +4013,7 @@ struct CorrectView {
 /// run it through any sanitizer — the response is *prose*,
 /// not a command — but we still trim leading/trailing whitespace.
 struct QuestionView {
-    /// The question that was asked (prefixed with `%`).
+    /// The question that was asked (prefixed with `?`).
     question: String,
     /// The LLM's answer (at most 4 sentences of plain prose).
     text: String,
@@ -6221,8 +6221,8 @@ impl App {
     /// first — the query gains
     /// the `#` prefix (any
     /// existing search-mode
-    /// prefix like `/`, `?`,
-    /// `+`, `=`, `%`, `@`, `!`
+    /// prefix like `?`,
+    /// `+`, `=`, `@`, `!`
     /// is stripped), the body
     /// is preserved so the user
     /// can keep narrowing by
@@ -6284,7 +6284,7 @@ impl App {
     /// user has already typed.
     /// Strips a leading
     /// search-mode prefix
-    /// (`/`, `?`, `+`, `=`, `%`,
+    /// (`?`, `+`, `=`,
     /// `@`, `!`, or `#` itself)
     /// before prepending the
     /// directories prefix, so
@@ -9894,7 +9894,7 @@ impl App {
     }
 
     /// Persist a general question to the history table with
-    /// `question` (prefixed with `%`) as the command and
+    /// `question` (prefixed with `?`) as the command and
     /// `answer` stored as the output (but not as a comment).
     fn stage_question(&mut self, question: String, answer: String) {
         // Same canonicalization as
@@ -10597,7 +10597,7 @@ impl App {
         true
     }
 
-    /// File-type-aware file open for the `~` (files)
+    /// File-type-aware file open for the `/` (files)
     /// mode's `SmartOpen` dispatch. Returns `Some((staged
     /// command, exit))` if the selected file's
     /// extension (lowercase, no leading `.`) maps to a
@@ -10619,7 +10619,7 @@ impl App {
     /// terminate the TUI (the parent shell then
     /// runs the staged command).
     fn smart_open_for_file(&mut self) -> Option<(String, bool)> {
-        // Re-gate on `~` mode so a
+        // Re-gate on `/` mode so a
         // stray caller can't stage
         // a `bat README.md` (etc.)
         // from a different mode.
@@ -13126,8 +13126,8 @@ fn prefix_selection_with_space(sel: String) -> String {
 /// the frequency stats accurate (so `Ctrl-S` next-
 /// probable-command suggestions stay useful) and lets
 /// the same command surface in future searches. Every
-/// other mode (`+`, `=`, `%`, `@`, `!`, `#`, `*`, `-`,
-/// `~`, `$`, `&`, `,`, `^`) stages a one-shot read (`bat
+/// other mode (`+`, `=`, `?`, `@`, `!`, `#`, `*`, `-`,
+/// `/`, `$`, `&`, `,`, `^`) stages a one-shot read (`bat
 /// README.md`, `note_search edit-note <id>`, `open
 /// <jira-url>`, etc.) that the user typically doesn't
 /// want cluttering the DB — the space prefix keeps the
@@ -14024,7 +14024,7 @@ fn run_loop(
                 // walks: spawns the background
                 // directory walk after
                 // `FILES_DEBOUNCE` of quiet typing
-                // in `~` mode. Without this the
+                // in `/` mode. Without this the
                 // walk would never fire (no other
                 // edit path arms the debounce).
                 app.files_maybe_autocall();
@@ -15898,7 +15898,7 @@ fn handle_describe_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> b
     false
 }
 
-/// Key handler for the general question overlay (prefixed with `%`).
+/// Key handler for the general question overlay (prefixed with `?`).
 ///
 /// Mirrors the describe overlay in shape (a piece of text + a scroll
 /// offset) but is driven by the user's question rather than by the

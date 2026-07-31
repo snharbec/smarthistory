@@ -1,6 +1,6 @@
-# Question mode (`%`)
+# Question mode (`?`)
 
-| Default prefix | `%` |
+| Default prefix | `?` |
 | --- | --- |
 | Configurable | `prefix.question=<char>` |
 
@@ -8,7 +8,7 @@ Question mode sends the body of the query to the configured ollama instance and 
 
 ## What it does
 
-- `%when was TCP invented`
+- `?when was TCP invented`
 - After 1 second of typing inactivity the request fires.
 - The model's reply is shown in a scrollable overlay (a `QuestionView`), not staged for execution. Press `Esc` (or the configured `Cancel` key) to close the overlay.
 
@@ -24,7 +24,7 @@ Same as LLM command mode: 1 second after the last keystroke. `Ctrl-C` / `Esc` ca
 
 ## Configuration
 
-Same as LLM command mode: requires `ollama.url` + `ollama.model`. Without both, `%` mode is a no-op.
+Same as LLM command mode: requires `ollama.url` + `ollama.model`. Without both, `?` mode is a no-op.
 
 ## Cross-references
 

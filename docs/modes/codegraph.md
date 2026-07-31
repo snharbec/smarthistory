@@ -63,6 +63,6 @@ The connection is opened `SQLITE_OPEN_READ_ONLY` + `query_only` and cached on th
 ## Cross-references
 
 - [Tags mode — the ctags-backed sibling, both fall back to CodeGraph when no `tags` file exists](tags.md)
-- [Files mode — `~` searches the file *names*; `&` searches the *symbols inside* the files](files.md)
+- [Files mode — `/` searches the file *names*; `&` searches the *symbols inside* the files](files.md)
 - [README — how to install the `.codegraph` index in your repo](../../README.md#installation)
 - [TECHNICAL — CodeGraph module implementation](../../TECHNICAL.md#codegraph-mode)

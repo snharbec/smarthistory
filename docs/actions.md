@@ -10,7 +10,7 @@ The canonical source is [`src/tui/bindings.rs`](../src/tui/bindings.rs) — the 
 | --- | --- |
 | **Action** | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 54 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`. |
 | **Key binding** | The mapping from a `KeySpec` (e.g. `C-c`, `F1`, `Up`) to an action. Multiple keys can map to the same action (`delete-word-backward` ships with both `C-w` and `M-Backspace`). The same key can't map to two actions — the first one in `ALL_ACTIONS` order wins (see [`KeyBindings::defaults`](../src/tui/bindings.rs)). |
-| **Mode** | The active prefix mode (history, output, `~`, `$`, `&`, etc. — see [`docs/modes/`](modes/README.md)). Most actions work in every mode; a few are mode-specific (`MarkTodoDone` is a no-op outside `!` mode, `JiraFieldComplete` only completes inside `-`, `CodegraphRelations` is meaningful only in `&` / `$`). |
+| **Mode** | The active prefix mode (history, output, `/`, `$`, `&`, etc. — see [`docs/modes/`](modes/README.md)). Most actions work in every mode; a few are mode-specific (`MarkTodoDone` is a no-op outside `!` mode, `JiraFieldComplete` only completes inside `-`, `CodegraphRelations` is meaningful only in `&` / `$`). |
 | **Overlay** | When an overlay is open (command palette, prefix picker, theme picker, completion menu, help, output view, describe view, add-entry dialog, note/todo compose dialog, delete-confirmation), it captures key routing until it closes; the global actions don't fire underneath it. |
 
 ## Config key syntax
@@ -85,12 +85,12 @@ The primary selection action. The behavior is mode-specific:
 - Directories mode (`#`) → stages `cd <abs-path>` (and optionally focuses an existing workspace)
 - Panes mode (`*`) → stages the per-pane or per-workspace focus command
 - JIRA (`-`) → stages `open "<browse-url>"` (or `xdg-open` on Linux)
-- Files (`~`) → stages `$EDITOR <abs-path>`
+- Files (`/`) → stages `$EDITOR <abs-path>`
 - Tags (`$`) → stages `$EDITOR +<LINE> <file>` (symbols from a `tags` file)
 - CodeGraph (`&`) → stages `$EDITOR +<LINE> <file>` (symbols from the `.codegraph` index)
 - ag (`,`) → stages `$EDITOR +<LINE> <file>` (matched lines)
 - LLM (`=`) → fires the LLM command-generation request
-- Question (`%`) → fires the LLM question request
+- Question (`?`) → fires the LLM question request
 
 Every staged selection is space-prefixed before exiting, **except in history mode** (no prefix), where the command is staged as-is so it's recorded in the smarthistory DB — replaying from history is a command the user wants to record (keeps frequency stats and `Ctrl-S` suggestions accurate). See [Privacy convention](modes/README.md#privacy-convention-space-prefix).
 
@@ -539,7 +539,7 @@ Context-aware "dive" key — a single binding that adapts to the active prefix m
 | `&` / `$` (codegraph-backed symbol) | opens the callers / callees picker (`CodegraphRelations`) for the **selected** row only — a picker overlay can't show N rows' relations at once, so marks are ignored here |
 | `-` (JIRA) | opens every **marked** issue's browse URL in the system browser **in the background** (or just the selected one when nothing is marked) — same as pressing Enter on a single row, but spawned detached so the TUI stays open |
 | `!` (Todo) | toggles the checkbox of every **marked** todo (or just the selected one when nothing is marked), reusing the shared `mark_todo_done_for_row` helper; reports an aggregate "Marked N of M todos done" when acting on more than one |
-| `~` (Files) | stages one chained command (`cmd1 ; cmd2 ; ...`) covering every **marked** file that has a configured `smart-open.<ext>=<cmd>` mapping (or just the selected file when nothing is marked) |
+| `/` (Files) | stages one chained command (`cmd1 ; cmd2 ; ...`) covering every **marked** file that has a configured `smart-open.<ext>=<cmd>` mapping (or just the selected file when nothing is marked) |
 | every other mode | falls through to `Run` (select row / open editor / fire LLM) — an ergonomic Enter replacement; acts on the selected row only, marks are not consulted |
 
 **Multi-select**: the JIRA, Todo, and Files branches act on every row marked via `Action::ToggleMark` (`C-x` by default) when at least one row is marked, falling back to just the currently selected row when nothing is marked. This is the general "act on marks, else the selection" contract shared by `App::smart_action_targets`. The overlay-opening codegraph/tags branch and the generic `Run` fallback are single-row only — see the source doc comment on `smart_action_targets` in `src/tui.rs` for why.

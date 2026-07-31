@@ -325,7 +325,7 @@ fn compute_display(root: &Path, path: &Path, name: &std::ffi::OsStr) -> String {
 /// **Why bounded:** the previous implementation used
 /// `read_to_string` which allocated the entire file into a
 /// `String` (after UTF-8 validation). For a 1 GB binary file
-/// in a `~` search that's matched, that's a 1 GB allocation
+/// in a `/` search that's matched, that's a 1 GB allocation
 /// on the walk thread. The bounded `read()` caps the
 /// allocation at 4 KiB and the binary check avoids
 /// `String::from_utf8_lossy` on megabytes of binary data.

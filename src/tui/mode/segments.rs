@@ -79,7 +79,7 @@ pub struct SegmentsRequest {
 /// segment) to make the very first keystroke after switching into
 /// the mode feel like it's not registering.
 /// Running it on a background thread, debounced the same way
-/// `,` (ag) / `-` (JIRA) / `~` (files) mode already are, decouples
+/// `,` (ag) / `-` (JIRA) / `/` (files) mode already are, decouples
 /// typing responsiveness from how long the search itself takes.
 pub struct SegmentsState {
     /// Debounce timer, armed on every keystroke in segments mode.

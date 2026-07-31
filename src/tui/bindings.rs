@@ -480,10 +480,10 @@ pub enum Action {
     /// the command palette) that
     /// lists every configured
     /// prefix mode — output `+`,
-    /// LLM `=`, question `%`,
+    /// LLM `=`, question `?`,
     /// notes `@`, todo `!`,
     /// directories `#`, panes `*`,
-    /// JIRA `-`, files `~`,
+    /// JIRA `-`, files `/`,
     /// tags `$`, ag `,`,
     /// plus a "no prefix"
     /// (history) entry at the
@@ -592,8 +592,8 @@ pub enum Action {
     /// Navigate to the previous (older) entry in the current
     /// mode's input history. Default `C-p` (readline /
     /// bash `previous-history`). Scoped to the active
-    /// prefix mode (`+`, `=`, `%`, `@`, `!`, `#`, `*`,
-    /// `~`, `$`, `&`, `,`, `-`, or plain no-prefix), so
+    /// prefix mode (`+`, `=`, `?`, `@`, `!`, `#`, `*`,
+    /// `/`, `$`, `&`, `,`, `-`, or plain no-prefix), so
     /// pressing it in `&` mode recalls past `&` queries
     /// only, not all-mode history. Readline-style
     /// semantics: pressing C-p from the live query saves
@@ -641,7 +641,7 @@ pub enum Action {
     /// [`Action::MarkTodoDone`], reusing the shared
     /// `App::mark_todo_done` helper so the behaviour is
     /// identical to `Ctrl-X` — `C-]` is just an ergonomic
-    /// alternative); in `~` (Files) mode it opens the selected
+    /// alternative); in `/` (Files) mode it opens the selected
     /// file with a per-extension shell command configured
     /// via `smart-open.<ext>=<cmd>` lines in the config
     /// file (with an optional `smart-open.default` fallback

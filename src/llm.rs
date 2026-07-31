@@ -167,7 +167,7 @@ pub trait LlmClient: Send + Sync {
 
     /// Answer a general question in at most four sentences
     /// of plain prose. Used by the TUI's question mode
-    /// (prefixed with `%`).
+    /// (prefixed with `?`).
     ///
     /// Default implementation calls
     /// [`build_question_prompt`] and forwards to
@@ -329,7 +329,7 @@ introductory text.\n\n{}",
 }
 
 /// The prompt template for the "general question"
-/// action (prefixed with `%`). The hard constraint is
+/// action (prefixed with `?`). The hard constraint is
 /// "maximum 4 sentences" so the response fits comfortably
 /// in a small overlay; the soft constraint is "plain prose,
 /// no markdown, no lists, no code blocks" so the user gets a

@@ -1,6 +1,6 @@
-# Files mode (`~`)
+# Files mode (`/`)
 
-| Default prefix | `~` |
+| Default prefix | `/` |
 | --- | --- |
 | Configurable | `prefix.files=<char>` |
 
@@ -8,10 +8,10 @@ Files mode lists every file under the current working directory (recursively wal
 
 ## What it does
 
-- `~` (empty) — every file under the cwd, newest first.
-- `~README` — every file whose name contains `README` (case-insensitive substring).
-- `~*.toml` — every `.toml` file. The `*` is a shell-style glob (matches any chars).
-- `~work/**/*.md` — every `.md` file under any `work/...` directory. Glob in a path segment restricts the walk.
+- `/` (empty) — every file under the cwd, newest first.
+- `/README` — every file whose name contains `README` (case-insensitive substring).
+- `/*.toml` — every `.toml` file. The `*` is a shell-style glob (matches any chars).
+- `/work/**/*.md` — every `.md` file under any `work/...` directory. Glob in a path segment restricts the walk.
 - The first text column is the basename; the second is the directory (in `~/x` shortened form for paths under `$HOME`); the third is the timestamp / size.
 
 ## Selecting a row
@@ -22,7 +22,7 @@ Files mode lists every file under the current working directory (recursively wal
 
 ## File-type-aware open (Smart open)
 
-`Ctrl-]` (the default `Action::SmartOpen` binding) adapts to the active mode. In `~` (files) mode it looks up each **marked** file's extension (lowercase, no leading `.`) in a per-extension command table — or, when nothing is marked, just the selected file's — and stages one command per matched file, chained with `; ` when there's more than one. The staged batch then exits so the parent shell runs it. Non-file rows (directories) and files with no mapping are silently skipped rather than aborting the whole batch; only when NOTHING in the batch has a mapping does the dispatch fall through to `Run` (open in `$EDITOR`).
+`Ctrl-]` (the default `Action::SmartOpen` binding) adapts to the active mode. In `/` (files) mode it looks up each **marked** file's extension (lowercase, no leading `.`) in a per-extension command table — or, when nothing is marked, just the selected file's — and stages one command per matched file, chained with `; ` when there's more than one. The staged batch then exits so the parent shell runs it. Non-file rows (directories) and files with no mapping are silently skipped rather than aborting the whole batch; only when NOTHING in the batch has a mapping does the dispatch fall through to `Run` (open in `$EDITOR`).
 
 This is the typical "smart-open" workflow: `Ctrl-]` on a `.md` file runs `leaf` (a markdown viewer), on a `.rs` file runs `bat` (a syntax-highlighted read), on a `.png` file runs `xdg-open` (open in the system viewer), etc. — without the user having to remember the per-extension command. The default `Enter` (open in `$EDITOR`) is preserved for files that don't have a mapping, and the user can rebind `key.smart-open=...` to anything.
 
@@ -81,11 +81,11 @@ The walk is debounced: 300ms after the last keystroke. The walk runs in a backgr
 
 ## Special tokens
 
-- `*<glob>` segments (anywhere in the path) restrict the walk to matching paths. Examples: `~*.rs`, `~work/**/*.toml`, `~**/Cargo.toml`.
-- Pure `~` (no body) returns everything.
+- `*<glob>` segments (anywhere in the path) restrict the walk to matching paths. Examples: `/*.rs`, `/work/**/*.toml`, `/**/Cargo.toml`.
+- Pure `/` (no body) returns everything.
 
 ## Cross-references
 
-- [Tags mode — `~` searches files; `$` searches symbols inside those files](tags.md)
+- [Tags mode — `/` searches files; `$` searches symbols inside those files](tags.md)
 - [CodeGraph mode — the same FTS5-backed source-code index `&` uses, with richer relationship data](codegraph.md)
 - [TECHNICAL — files-mode walk implementation](../../TECHNICAL.md#files-mode)

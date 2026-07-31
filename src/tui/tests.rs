@@ -19812,11 +19812,9 @@ fn help_lists_all_eleven_search_modes() {
     // plain: "" (no prefix,
     //        em-dash
     //        marker)
-    // regex: /
-    // fuzzy: ?
     // output: +
     // llm: =
-    // question: %
+    // question: ?
     // notes: @
     // todo: !
     // directories: #
@@ -19826,7 +19824,7 @@ fn help_lists_all_eleven_search_modes() {
         ("history", "\u{2014}"),
         ("output", "+"),
         ("LLM command", "="),
-        ("question", "%"),
+        ("question", "?"),
         ("notes", "@"),
         ("todo", "!"),
         ("directories", "#"),
@@ -21106,7 +21104,7 @@ fn smart_open_in_todo_mode_takes_mark_done_branch() {
 
 // ---- Files-mode SmartOpen (per-extension shell command) ----
 
-/// Helper: build a minimal `App` in `~` (files) mode
+/// Helper: build a minimal `App` in `/` (files) mode
 /// with one selected file row. The file's `directory`
 /// field holds the absolute path; the `mode` is
 /// `"file"`. The `merged_rows` slot is set so
@@ -21143,7 +21141,7 @@ fn files_test_app(path: &str) -> App {
 /// Files-mode SmartOpen with a configured per-
 /// extension command stages `<cmd> <quoted-path>`
 /// and exits so the parent shell runs it. The
-/// dispatch takes the `~` branch (not the `Run`
+/// dispatch takes the `/` branch (not the `Run`
 /// fallback) — `Enter` would stage
 /// `$EDITOR <path>`; `SmartOpen` stages the
 /// per-extension command instead.
@@ -21311,7 +21309,7 @@ fn smart_open_extensionless_file_falls_through_to_default() {
     );
 }
 
-/// A directory row in `~` mode is NOT a file — the
+/// A directory row in `/` mode is NOT a file — the
 /// `mode == "file"` guard rejects it and the
 /// dispatch falls through to `Run` (the user-
 /// defined default for a directory row, which

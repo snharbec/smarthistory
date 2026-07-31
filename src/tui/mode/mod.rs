@@ -52,7 +52,7 @@ pub enum ModeKind {
     /// `=` (default). LLM command generation. Body must be
     /// non-whitespace.
     Llm,
-    /// `%` (default). General LLM question. Body must be
+    /// `?` (default). General LLM question. Body must be
     /// non-whitespace.
     Question,
     /// `@` (default). Note search (uses the configured notes
@@ -65,7 +65,7 @@ pub enum ModeKind {
     /// `*` (default). Multiplexer panes / windows / sessions /
     /// hosts. Reads from the configured backend (tmux or herdr).
     Panes,
-    /// `~` (default). File browser rooted at the current directory.
+    /// `/` (default). File browser rooted at the current directory.
     Files,
     /// `$` (default). ctags / CodeGraph symbol search.
     Tags,
@@ -108,12 +108,12 @@ impl ModeKind {
             ModeKind::History => '\0',
             ModeKind::Output => '+',
             ModeKind::Llm => '=',
-            ModeKind::Question => '%',
+            ModeKind::Question => '?',
             ModeKind::Notes => '@',
             ModeKind::Todo => '!',
             ModeKind::Directories => '#',
             ModeKind::Panes => '*',
-            ModeKind::Files => '~',
+            ModeKind::Files => '/',
             ModeKind::Tags => '$',
             ModeKind::Ag => ',',
             ModeKind::Codegraph => '&',
@@ -364,7 +364,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Output => ("+".to_string(), format!(" output{} ", algo)),
         ModeKind::Llm => ("=".to_string(), " LLM ".to_string()),
         ModeKind::Notes => ("@".to_string(), format!(" notes{} ", algo)),
-        ModeKind::Question => ("%".to_string(), " ? ".to_string()),
+        ModeKind::Question => ("?".to_string(), " ? ".to_string()),
         ModeKind::Todo => ("!".to_string(), format!(" todo{} ", algo)),
         ModeKind::Directories => ("#".to_string(), format!(" directories{} ", algo)),
         ModeKind::Panes => ("*".to_string(), format!(" panes{} ", algo)),
@@ -373,7 +373,7 @@ pub(crate) fn input_prompt_title(
                 jql_last.map_or_else(|| " jira ".to_string(), |j| format!(" jira ({}) ", j));
             ("-".to_string(), jql_title)
         }
-        ModeKind::Files => ("~".to_string(), format!(" files{} ", algo)),
+        ModeKind::Files => ("/".to_string(), format!(" files{} ", algo)),
         ModeKind::Tags => ("$".to_string(), format!(" symbols{} ", algo)),
         ModeKind::Codegraph => ("&".to_string(), format!(" codegraph{} ", algo)),
         ModeKind::Ag => (",".to_string(), format!(" ag{} ", algo)),

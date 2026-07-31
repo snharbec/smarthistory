@@ -65,7 +65,7 @@ match standard workflow expectations. This project aims to provide:
   has nine prefix-only modes that switch data sources
   on a single keystroke: notes (`@`), todos (`!`),
   directories (`#`), panes (`*`), JIRA (`-`), files
-  (`~`), tags (`$`, with a CodeGraph fallback when no
+  (`/`), tags (`$`, with a CodeGraph fallback when no
   `TAGS` file is found), CodeGraph (`&`), and `ag`
   (`,`). See the per-mode docs in `docs/modes/` (one
   Markdown file per mode) for the full mechanics of each.
@@ -92,14 +92,14 @@ match standard workflow expectations. This project aims to provide:
   `Enter` reuses that preview without a second round-trip.
   Opt-in via `ollama.url` and `ollama.model` in the config file;
   see the TUI search syntax section for details.
-- **General question mode on `%...`:** when you prefix a query with
-  `%` and press `Enter`, a local ollama instance answers the
-  question (e.g. `%What is the capital of France?`) with a short
+- **General question mode on `?...`:** when you prefix a query with
+  `?` and press `Enter`, a local ollama instance answers the
+  question (e.g. `?What is the capital of France?`) with a short
   response (at most 4 sentences). The answer opens in a full-screen
   overlay; press `Esc` / `Enter` / `q` to close, `↑` / `↓` /
   `PageUp` / `PageDown` / `Home` / `End` to scroll. The question
   is saved to history with the answer stored as output (not as a
-  comment), so typing `%` later shows all previous questions and
+  comment), so typing `?` later shows all previous questions and
   selecting one re-displays its answer. Same `ollama.url` /
   `ollama.model` configuration as the `=...` mode.
 - **LLM "describe" on `Ctrl-K`:** when the cursor is on a history
@@ -234,10 +234,10 @@ Supported keys:
 | `theme.light=<slug>` | The built-in theme to use when the active color scheme is LIGHT. `<slug>` is one of the 73 built-in theme slugs (kebab-case, e.g. `gruvbox-light`, `catppuccin-latte`, `leuven`, `rose-pine`). Falls back to `theme.dark=` if unset, then to the legacy `theme=` line in the session file. The active scheme defaults to `Dark` and is toggled with `Action::ToggleColorScheme`, persisted in the session file's `colorscheme=` line (see "Per-scheme theme selection" below — there is no terminal auto-detection). The other scheme's value is preserved when the user picks a new theme from the in-TUI picker. | (no theme — manual `tuicolor.*` palette) |
 | `theme.dark=<slug>` | The built-in theme to use when the active color scheme is DARK (the historical default). Same slug set as `theme.light`. The other scheme's value is preserved when the user picks a new theme. | (no theme — manual `tuicolor.*` palette) |
 | `key.<action>=<spec>` | Remap a TUI keyboard shortcut. `<action>` is one of `cancel`, `cycle-mode`, `toggle-duplicate-filter`, `cycle-theme-next`, `cycle-theme-prev`, `theme-picker`, `increase-pane-height`, `decrease-pane-height`, `edit-comment`, `show-output`, `open-help`, `delete-selected`, `delete-matching`, `toggle-mark`, `clear-marks`, `bulk-delete-marked`, `clear-query`, `command-action`, `run`, `edit-start`, `edit-end`, `up`, `down`, `page-up`, `page-down`, `home`, `end`, `backspace`, `smart-open`, `codegraph-relations`, `previous-history`, `next-history`, `yank-selection`, `mark-todo-done`, `llm-describe`, `llm-correct`, `prefix-picker`, `download-jira-issue`, `download-jira-matching`, `compose-note-entry`, `add-entry`, `cycle-panes-filter`, `toggle-search-mode`, `show-label-help`. The full list with categories and default keys lives in `docs/actions.md`. `<spec>` is a key like `C-h` (Ctrl+H), `M-h` (Alt+H), `C-M-x` (Ctrl+Alt+X), `Esc`, `Enter`, `Up`, `F5`, `F11`, or a plain character (`g`, `/`, `?`, …). Multiple specs separated by `,` bind the same action to multiple keys. Use the sentinel `none` (also `off`, `disable`, `-`, `disabled`) to disable the action entirely so the key is never bound. | action's default |
-| `prefix.<mode>=<char>` | The prefix character for a given TUI mode. The full set: `prefix.notes` (default `@`), `prefix.todo` (`!`), `prefix.directories` (`#`), `prefix.panes` (`*`), `prefix.jira` (`-`), `prefix.files` (`~`), `prefix.tags` (`$`), `prefix.codegraph` (`&`), `prefix.ag` (`,`), `prefix.paperless` (`<`), `prefix.browser` (`^`). All other ASCII prefix chars are taken. | mode's default |
-| `files.ignore=<name1 name2 ...>` | Space-separated list of directory *basenames* to skip during the `~` mode walk. Hidden directories (basename starting with `.`) are always skipped. The built-in `DEFAULT_IGNORES` set is also honored (typical build / dependency directories like `node_modules`, `target`, `.git`, `__pycache__`). | (built-in `DEFAULT_IGNORES`) |
-| `smart-open.default=<cmd>` | The default command to stage when the `~` mode's `Ctrl-]` SmartOpen action fires on a file with no per-extension override. Use the literal `$FILE` placeholder to substitute the file path; the default `$EDITOR $FILE` works for most users. | `$EDITOR $FILE` |
-| `smart-open.<ext>=<cmd>` | Per-extension SmartOpen command. `<ext>` is the lowercase file extension (without the dot). Use `$FILE` for the file path. Selecting a `.pdf` row in `~` mode and pressing `Ctrl-]` runs the configured `smart-open.pdf=...` command; selecting a `.py` row and pressing `Ctrl-]` runs `smart-open.py=...`. The `smart-open.default` value is used when no per-extension entry matches. | inherits `smart-open.default` |
+| `prefix.<mode>=<char>` | The prefix character for a given TUI mode. The full set: `prefix.notes` (default `@`), `prefix.todo` (`!`), `prefix.directories` (`#`), `prefix.panes` (`*`), `prefix.jira` (`-`), `prefix.files` (`/`), `prefix.tags` (`$`), `prefix.codegraph` (`&`), `prefix.ag` (`,`), `prefix.paperless` (`<`), `prefix.browser` (`^`). All other ASCII prefix chars are taken. | mode's default |
+| `files.ignore=<name1 name2 ...>` | Space-separated list of directory *basenames* to skip during the `/` mode walk. Hidden directories (basename starting with `.`) are always skipped. The built-in `DEFAULT_IGNORES` set is also honored (typical build / dependency directories like `node_modules`, `target`, `.git`, `__pycache__`). | (built-in `DEFAULT_IGNORES`) |
+| `smart-open.default=<cmd>` | The default command to stage when the `/` mode's `Ctrl-]` SmartOpen action fires on a file with no per-extension override. Use the literal `$FILE` placeholder to substitute the file path; the default `$EDITOR $FILE` works for most users. | `$EDITOR $FILE` |
+| `smart-open.<ext>=<cmd>` | Per-extension SmartOpen command. `<ext>` is the lowercase file extension (without the dot). Use `$FILE` for the file path. Selecting a `.pdf` row in `/` mode and pressing `Ctrl-]` runs the configured `smart-open.pdf=...` command; selecting a `.py` row and pressing `Ctrl-]` runs `smart-open.py=...`. The `smart-open.default` value is used when no per-extension entry matches. | inherits `smart-open.default` |
 | `ollama.url=http://host:port` | URL of a local ollama instance used by the LLM command-generation mode (the `=...` query prefix in the TUI). Must be paired with `ollama.model`. | (feature disabled) |
 | `ollama.model=<name>` | ollama model name to use, e.g. `llama3.2`, `qwen2.5-coder`, `codellama`. Must be paired with `ollama.url`. The model must already be pulled (`ollama pull <name>`). | (feature disabled) |
 | `paperless.url=https://host` | Base URL of a self-hosted Paperless-ngx v3 instance, used as both the REST API base and the web-UI base for the details-page URL opened on `Enter` in `<` mode. Must be paired with `paperless.token`. | (feature disabled) |
@@ -458,14 +458,14 @@ to `ModeKind`, and add a `prefix.<name> = 'X'` line to
 | `browser.rs` | `^` | Chrome `Bookmarks`/`History` + Firefox `places.sqlite` + Safari `Bookmarks.plist`/`History.db` (via `crate::browser`) | Merges bookmarks + history, tagged `bookmark`/`history`; SQLite reads run against a temp snapshot copy of each locked db file. `Enter` opens the URL (same `open`/`xdg-open` staging as `jira.rs`), but the URL comes straight off the row — no id→URL lookup like `paperless.rs`/`jira.rs` need. |
 | `codegraph.rs` | `&` | `.codegraph/codegraph.db` FTS5 | The `$` (tags) mode's fallback when no `TAGS` file is found. |
 | `directories.rs` | `#` | SQL history + sessiondirs + multiplexer | Group-aware sort. |
-| `files.rs` | `~` | Local filesystem walk | Directories are filtered out (use `#` for directory navigation). |
+| `files.rs` | `/` | Local filesystem walk | Directories are filtered out (use `#` for directory navigation). |
 | `jira.rs` | `-` | JIRA REST v2 | The only mode with a `@`-prefix fragment syntax. |
 | `llm.rs` | `=` | Local `ollama` | The `llm_check` verifies `ollama.url` + `ollama.model` are set and the model is pulled. |
 | `notes.rs` | `@` | `note_search` SQLite DB | Has its own query syntax (Obsidian-style `#tag` / `[[link]]` / `[attr:value]`, plus smarthistory's `#tag!` / `[[link]]!` / `[attr:value]!` negation extension). |
 | `output.rs` | `+` | (not a fetch — the `+` prefix is an in-refresh post-filter over the SQL output column) | |
 | `paperless.rs` | `<` | Paperless-ngx v3 REST API | Body tokens: `#TAG` → tag filter, `@AUTHOR` → correspondent filter, bare word → title filter. Background-thread search mirrors `files.rs`'s debounce/cancellation pattern; `Enter` opens the document's details page in the browser (same `open`/`xdg-open` staging as `jira.rs`). |
 | `panes.rs` | `*` | Multiplexer (`tmux` / `herdr`) | Group-aware filter: searching for a pane command keeps the parent workspace header. |
-| `question.rs` | `%` | Local `ollama` | |
+| `question.rs` | `?` | Local `ollama` | |
 | `tags.rs` | `$` | ctags `TAGS` file or CodeGraph fallback | Lazy source-context loading (50 lines, cached per file). |
 | `todo.rs` | `!` | `note_search` SQLite DB | One row per open todo, not per note. Shares `notes.rs`'s query syntax, including `#tag!` / `[[link]]!` / `[attr:value]!` negation. |
 
@@ -872,10 +872,12 @@ smarthistory init  zsh
   straight to filtered history"). The `--prefix <char>` flag is the
   declarative form: pass `--prefix '*'` to start directly in the panes
   view, `--prefix '#'` for directories, `--prefix '@'` for notes,
-  `--prefix '!'` for todos, `--prefix '-'` for JIRA, `--prefix '~'`
+  `--prefix '!'` for todos, `--prefix '-'` for JIRA, `--prefix '/'`
   for files, `--prefix '='` for LLM command generation,
-  `--prefix '%'` for the question mode, `--prefix '/'` for regex
-  search, `--prefix '?'` for fuzzy, `--prefix '+'` for output search.
+  `--prefix '?'` for the question mode, `--prefix '+'` for output
+  search. (There is no separate "regex" / "fuzzy" prefix — the match
+  algorithm is cycled with `Ctrl-F` for whichever mode is active,
+  not selected by a leading character.)
   When `--prefix` is given, the persisted `session.query` is NOT
   restored — the user's intent takes final precedence. This makes
   `--prefix` useful for shell keybindings that jump directly into a
@@ -1326,13 +1328,13 @@ prefixes shown; rebindable in
 | Mode          | Prefix | What it does |
 | ------------- | ------ | ------------ |
 | LLM command   | `=`    | Send the body to ollama, generate a Bash command, stage it for execution. The new command is also written to the history table with the original description as the comment. |
-| Question      | `%`    | Send the body to ollama, get a short answer (4 sentences max) in a full-screen overlay. The question is saved to history with the answer as output. |
+| Question      | `?`    | Send the body to ollama, get a short answer (4 sentences max) in a full-screen overlay. The question is saved to history with the answer as output. |
 | Notes         | `@`    | Search the [note_search](https://github.com/snharbec/note_search) SQLite database. Results show the note's filename, title, and age (sorted newest-first). Selecting a note opens it in `$EDITOR`. Needs `notes.database` + `notes.dir` configured. The details pane shows the first 50 lines of the selected note, piped through `bat` for syntax highlighting. |
 | Todo          | `!`    | List open todos from the note_search database (one per line, not one per file). Selecting a todo opens `$EDITOR <file> +<line>` at the right line. The details pane shows the first 50 lines of the note containing the selected todo, with the todo line in context. |
 | Directories   | `#`    | List every directory in the global history (sorted by most-recent activity). Selecting a row stages `cd <path>` and exits the TUI. |
 | Panes         | `*`    | List every pane across every tmux / herdr session (or workspace, for herdr), excluding the pane the TUI is running in. Layout: one workspace / session header per group, panes indented underneath. Selecting a pane stages a focus command and exits. The details pane shows the last 50 visible lines of the selected herdr pane (from `herdr pane read <id>`; tmux backend shows "no preview"). |
 | JIRA          | `-`    | Search JIRA issues (self-hosted, REST v2). Selecting an issue opens its browse URL in the system browser (`Enter`). `Ctrl-M-s` (the `download-jira-issue` action) stages `note_search jira-issue <KEY>` so the issue is downloaded as a local markdown note. `download-jira-matching` (unbound by default) stages `note_search jira <JQL>` to download EVERY issue the current query matches, bypassing the `JIRA_MAX_RESULTS` cap by delegating pagination to `note_search`. Needs `JIRA_SERVER` + `JIRA_API_TOKEN` env vars (see the JIRA mode docs). The details pane shows a 3-line header (Status / Priority / Due / Assignee) plus the full issue description. |
-| Files         | `~`    | Walk the current directory and all subdirectories, listing every file (skipping directories — directory navigation is `#` mode's job). Selecting a file opens it in `$EDITOR` (or the configured per-extension command via `smart-open.<ext>=<cmd>`). The details pane shows the first 50 lines, piped through `bat`. Honors `files.ignore=` (space-separated basename patterns). |
+| Files         | `/`    | Walk the current directory and all subdirectories, listing every file (skipping directories — directory navigation is `#` mode's job). Selecting a file opens it in `$EDITOR` (or the configured per-extension command via `smart-open.<ext>=<cmd>`). The details pane shows the first 50 lines, piped through `bat`. Honors `files.ignore=` (space-separated basename patterns). |
 | Tags          | `$`    | List every symbol from a local ctags `tags` file. Selecting a row opens the source file in `$EDITOR` at the symbol's line. The details pane shows 50 lines of source context around the symbol, piped through `bat` for syntax highlighting. Falls back to CodeGraph (`&` mode's data source) when no `TAGS` file exists in the current directory or any ancestor. See the CodeGraph row for the back-end details. |
 | CodeGraph     | `&`    | Search symbols in the local `.codegraph/codegraph.db` FTS5 index. Selecting a row shows 50 lines of source context + a callers / callees overlay in the details pane; `Ctrl-R` opens the full callers / callees list as a navigable overlay. See `docs/modes/codegraph.md` for the full mechanics. |
 | ag            | `,`    | Search file contents with [`ag`](https://github.com/ggreer/the_silver_searcher). Results are streamed in as `ag` produces them, with matched-line previews highlighted in the TUI. The details pane shows the first 50 lines of context around the match. Requires `ag` on `$PATH`. |
@@ -1518,14 +1520,14 @@ green input border signals the LLM mode is active.
 
 ### General question mode (`%...`)
 
-Prefix a query with `%` followed by a natural-language question
+Prefix a query with `?` followed by a natural-language question
 and press `Enter` to ask a local ollama instance for a short
 answer (at most 4 sentences). The answer opens in a full-screen
 overlay; press `Esc` / `Enter` / `q` to close, `↑` / `↓` /
 `PageUp` / `PageDown` / `Home` / `End` to scroll.
 
 The question is saved to history with the answer stored as
-output (not as a comment). Typing just `%` (or `%` followed by
+output (not as a comment). Typing just `?` (or `?` followed by
 search terms) filters the list to show only previous questions,
 matching against both the question text and the stored answer.
 Selecting an old question row re-displays its answer in the
@@ -1557,7 +1559,7 @@ surfaces a "not configured" status message. The same
 `ollama.url` / `ollama.model` configuration as the `=...`
 command-generation mode applies.
 
-When the leading `%` is present the input border is tinted
+When the leading `?` is present the input border is tinted
 magenta (same as the LLM mode) and the status bar shows a
 `QUESTION` chip (red when ollama is not configured, magenta
 when it is).

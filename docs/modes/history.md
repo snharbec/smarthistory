@@ -50,7 +50,7 @@ Toggle with `Ctrl-F`. The default is `sub` (case-insensitive substring on `comma
 
 ## Privacy convention (history mode records, other modes don't)
 
-The TUI's space-prefix convention (see [`README.md`#privacy-convention](README.md#privacy-convention-space-prefix)) has a deliberate **exception for history mode**: staging a row from the history list runs the command *without* a leading space, so it IS recorded in the smarthistory DB. Recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches. Every other prefix mode (`+`, `=`, `%`, `@`, `!`, `#`, `*`, `-`, `~`, `$`, `&`, `,`, `^`) stages a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB, so those get the single-space prefix.
+The TUI's space-prefix convention (see [`README.md`#privacy-convention](README.md#privacy-convention-space-prefix)) has a deliberate **exception for history mode**: staging a row from the history list runs the command *without* a leading space, so it IS recorded in the smarthistory DB. Recording it keeps the frequency stats accurate (so `Ctrl-S` next-probable-command suggestions stay useful) and lets the same command surface in future searches. Every other prefix mode (`+`, `=`, `?`, `@`, `!`, `#`, `*`, `-`, `/`, `$`, `&`, `,`, `^`) stages a one-shot read (`bat README.md`, `note_search edit-note <id>`, `open <jira-url>`, etc.) that the user typically doesn't want cluttering the DB, so those get the single-space prefix.
 
 ## Cross-references
 

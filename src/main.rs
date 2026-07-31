@@ -879,6 +879,40 @@ pub fn validate_config() -> ConfigReport {
         }
     }
 
+    // --- Unknown prefix.* mode names ---
+    if let Some(ref p) = path
+        && p.is_file()
+        && let Ok(contents) = std::fs::read_to_string(p)
+    {
+        for raw in contents.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (k, _) = match line.split_once('=') {
+                Some(kv) => kv,
+                None => continue,
+            };
+            let k = k.trim();
+            if let Some(name) = k.strip_prefix("prefix.")
+                && !name.is_empty()
+                && !Config::KNOWN_PREFIX_NAMES.contains(&name.to_ascii_lowercase().as_str())
+            {
+                let hint = match name.to_ascii_lowercase().as_str() {
+                    "fuzzy" | "regex" => "fuzzy/regex aren't separate prefix modes — they're \
+                         match algorithms, toggled with Ctrl-F for whatever mode is active"
+                        .to_string(),
+                    _ => format!("did you mean one of {:?}?", Config::KNOWN_PREFIX_NAMES),
+                };
+                issues.push(ConfigIssue {
+                    level: ConfigIssueLevel::Error,
+                    category: "prefix".into(),
+                    message: format!("unknown prefix mode {:?}: {}", name, hint),
+                });
+            }
+        }
+    }
+
     // --- tmux pane output directory checks ---
     let dir = &cfg.tmux_pane_output_dir;
     if dir.as_os_str().is_empty() {
@@ -1012,7 +1046,7 @@ pub struct QueryPrefixes {
     pub output: char,
     /// Prefix for LLM command generation (default `=`).
     pub llm: char,
-    /// Prefix for general question mode (default `%`).
+    /// Prefix for general question mode (default `?`).
     pub question: char,
     /// Prefix for note search mode (default `@`).
     pub notes: char,
@@ -1061,7 +1095,7 @@ pub struct QueryPrefixes {
     /// `JIRA_API_TOKEN`, `JIRA_URL`, and `JIRA_PROJECT`
     /// environment variables.
     /// Prefix for the files-view mode (default
-    /// `~`). Lists every file in the current
+    /// `/`). Lists every file in the current
     /// directory and subdirectories, filtered by
     /// the typed pattern. Selecting a row opens
     /// the file in `$EDITOR`.
@@ -1128,9 +1162,7 @@ pub struct QueryPrefixes {
     /// backend by title (bare words), tag (`#TAG`), or
     /// correspondent/author (`@AUTHOR`). Requires
     /// `paperless.url` and `paperless.token` in the config
-    /// file. `%` was the natural first choice ("a search
-    /// question against an external source") but is already
-    /// the general-question ollama mode's default prefix.
+    /// file.
     pub paperless: char,
     /// Prefix for the browser bookmarks + history mode
     /// (default `^`). Reads bookmarks and visited-URL history
@@ -1150,12 +1182,12 @@ impl Default for QueryPrefixes {
         QueryPrefixes {
             output: '+',
             llm: '=',
-            question: '%',
+            question: '?',
             notes: '@',
             todo: '!',
             directories: '#',
             panes: '*',
-            files: '~',
+            files: '/',
             tags: '$',
             ag: ',',
             codegraph: '&',
@@ -1342,7 +1374,7 @@ pub struct Config {
     home_map: Vec<std::path::PathBuf>,
     /// Per-extension shell commands invoked by the
     /// [`Action::SmartOpen`] "dive" key (`Ctrl-]` by
-    /// default) when the active mode is `~` (files) and
+    /// default) when the active mode is `/` (files) and
     /// the selected row is a regular file. Configured
     /// via `smart-open.<ext>=<cmd>` lines in the
     /// config file, where `<ext>` is the file
@@ -1987,7 +2019,7 @@ impl Config {
                         Self::assign_jira_fragment(&mut self.jira_fragments, name, value);
                     } else if let Some(ext) = other.strip_prefix("smart-open.") {
                         // Per-extension shell command for the
-                        // `~` (files) mode's SmartOpen
+                        // `/` (files) mode's SmartOpen
                         // dispatch. The key is
                         // `smart-open.<ext>=<cmd>` (NOT
                         // `key.<action>=<spec>`) so the
@@ -2699,7 +2731,7 @@ impl Config {
     }
 
     /// Resolved LLM (ollama) configuration, if any. When
-    /// `None`, the `=` and `%` TUI modes are disabled.
+    /// `None`, the `=` and `?` TUI modes are disabled.
     pub fn llm(&self) -> Option<&llm::LlmConfig> {
         self.llm.as_ref()
     }
@@ -2796,7 +2828,7 @@ impl Config {
     }
 
     /// Per-extension shell commands invoked by
-    /// [`Action::SmartOpen`] in `~` (files) mode.
+    /// [`Action::SmartOpen`] in `/` (files) mode.
     /// Configured via `smart-open.<ext>=<cmd>`
     /// lines in the config file (see the
     /// [`Config`] doc for the matching / fallback
@@ -3007,6 +3039,24 @@ impl Config {
     /// Apply a single `prefix.<name>=<char>` override. The value
     /// must be a single character. Invalid values are silently
     /// ignored.
+    /// Canonical set of recognized `prefix.<name>` config keys,
+    /// including the `elements` back-compat alias for `segments`.
+    /// Used by `validate_config` to flag a typo'd or made-up
+    /// `prefix.<name>=` line (e.g. `prefix.fuzzy=`, `prefix.regex=`
+    /// — there is no such mode; fuzzy/regex are match *algorithms*,
+    /// toggled by `Ctrl-F` for whatever mode is active, not
+    /// separate prefix-triggered modes) the same way the
+    /// `key.<action>` check already flags an unknown action name.
+    /// Kept in sync with `assign_prefix`'s match arms below by
+    /// hand — same tradeoff `ALL_ACTIONS` avoids for `key.*`, but
+    /// prefix names change about as rarely as actions do, and a
+    /// shared table would mean `assign_prefix` looping over string
+    /// comparisons instead of a plain `match`.
+    const KNOWN_PREFIX_NAMES: &[&str] = &[
+        "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
+        "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
+    ];
+
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
         let trimmed = value.trim();
         if trimmed.is_empty() || trimmed.chars().count() != 1 {

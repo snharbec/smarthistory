@@ -54,7 +54,7 @@ sudo pacman -S the_silver_searcher
 
 ## Cross-references
 
-- [Tags mode — `,` searches file *contents*; `$` searches the *symbols*; `~` searches the file *names*](tags.md)
-- [Files mode — `~` walks the file system; `,` then searches each file's contents](files.md)
+- [Tags mode — `,` searches file *contents*; `$` searches the *symbols*; `/` searches the file *names*](tags.md)
+- [Files mode — `/` walks the file system; `,` then searches each file's contents](files.md)
 - [CodeGraph mode — for symbol-and-relationship navigation, prefer `&`](codegraph.md)
 - [TECHNICAL — ag-mode implementation](../../TECHNICAL.md#ag-mode)

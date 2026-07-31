@@ -59,7 +59,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [Notes (`@` mode)](#notes--mode)
   - [Todo (`!` mode)](#todo--mode)
   - [Tags (`$` mode)](#tags--mode)
-  - [Files (`~` mode)](#files--mode)
+  - [Files (`/` mode)](#files--mode)
   - [JIRA (`-` mode)](#jira--mode)
   - [LLM (`=` mode)](#llm--mode)
   - [Paperless (`<` mode)](#paperless--mode)
@@ -338,12 +338,12 @@ The first character the user types to enter a mode. The default keymap covers ev
 | --- | --- | --- | --- |
 | `prefix.output` | output search | `+` | searches captured output |
 | `prefix.llm` | LLM command generation | `=` | ask ollama to draft a command |
-| `prefix.question` | general question | `%` | one-off LLM chat |
+| `prefix.question` | general question | `?` | one-off LLM chat |
 | `prefix.notes` | note search | `@` | searches the notes database |
 | `prefix.todo` | todo search | `!` | markdown task-list scanner |
 | `prefix.directories` | directories | `#` | unique dirs from history |
 | `prefix.panes` | session panes | `*` | tmux / herdr panes |
-| `prefix.files` | files | `~` | file browser |
+| `prefix.files` | files | `/` | file browser |
 | `prefix.tags` | tags | `$` | ctags symbol search |
 | `prefix.ag` | ag content search | `,` | silver-searcher |
 | `prefix.codegraph` | codegraph | `&` | FTS5 symbol search |
@@ -549,7 +549,7 @@ The source-context preview (the 50-line window around a selected symbol) is load
 
 Full reference: **[docs/modes/tags.md](modes/tags.md)**.
 
-### Files (`~` mode)
+### Files (`/` mode)
 
 #### `files.ignore`
 
@@ -573,7 +573,7 @@ files.ignore=.venv .terraform .direnv .pytest_cache .mypy_cache
 | **Default** | — (falls through to the default `Run` action, which opens in `$EDITOR`) |
 | **Env override** | — |
 
-Per-extension shell command for the `~` (files) mode's `SmartOpen` dive (`Ctrl-]` by default). The selected file's absolute path is appended to the command (with POSIX single-quote escaping so spaces and shell metacharacters can't break the staged command), and the TUI exits so the parent shell runs it. The lookup is **case-insensitive**: `smart-open.MD=leaf` and `smart-open.md=leaf` are the same entry.
+Per-extension shell command for the `/` (files) mode's `SmartOpen` dive (`Ctrl-]` by default). The selected file's absolute path is appended to the command (with POSIX single-quote escaping so spaces and shell metacharacters can't break the staged command), and the TUI exits so the parent shell runs it. The lookup is **case-insensitive**: `smart-open.MD=leaf` and `smart-open.md=leaf` are the same entry.
 
 The reserved key `smart-open.default` is the fallback for any extension without an explicit mapping. Empty `<cmd>` values (e.g. `smart-open.rs=`) are silently dropped so a typo doesn't bind to an empty command.
 
@@ -634,7 +634,7 @@ Full reference: **[docs/modes/jira.md](modes/jira.md)**.
 
 ### LLM (`=` mode)
 
-The `=` (LLM command generation) and `%` (general question) modes require a running ollama instance. The configuration is **config-file only** (no env vars) and the feature is opt-in: if either `ollama.url` or `ollama.model` is missing, the LLM mode is disabled with a stderr warning.
+The `=` (LLM command generation) and `?` (general question) modes require a running ollama instance. The configuration is **config-file only** (no env vars) and the feature is opt-in: if either `ollama.url` or `ollama.model` is missing, the LLM mode is disabled with a stderr warning.
 
 | Key | Meaning |
 | --- | --- |
@@ -744,12 +744,12 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `key.<action>` | `KeySpec` | action's default key | [Key bindings](#key-bindings) |
 | `prefix.output` | char | `+` | [Query prefixes](#query-prefixes) |
 | `prefix.llm` | char | `=` | [Query prefixes](#query-prefixes) |
-| `prefix.question` | char | `%` | [Query prefixes](#query-prefixes) |
+| `prefix.question` | char | `?` | [Query prefixes](#query-prefixes) |
 | `prefix.notes` | char | `@` | [Query prefixes](#query-prefixes) |
 | `prefix.todo` | char | `!` | [Query prefixes](#query-prefixes) |
 | `prefix.directories` | char | `#` | [Query prefixes](#query-prefixes) |
 | `prefix.panes` | char | `*` | [Query prefixes](#query-prefixes) |
-| `prefix.files` | char | `~` | [Query prefixes](#query-prefixes) |
+| `prefix.files` | char | `/` | [Query prefixes](#query-prefixes) |
 | `prefix.tags` | char | `$` | [Query prefixes](#query-prefixes) |
 | `prefix.ag` | char | `,` | [Query prefixes](#query-prefixes) |
 | `prefix.codegraph` | char | `&` | [Query prefixes](#query-prefixes) |
@@ -776,9 +776,9 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `notes.database` | path | — (feature disabled) | [Notes (`@` mode)](#notes--mode) |
 | `notes.dir` | path | — (feature disabled) | [Notes (`@` mode)](#notes--mode) |
 | `todo.line_option` | template | `+$LINE` | [Todo (`!` mode)](#todo--mode) |
-| `files.ignore` | list | — (uses built-in) | [Files (`~` mode)](#files--mode) |
-| `smart-open.<ext>` | command | — (falls through to `Run`) | [Files (`~` mode)](#files--mode) |
-| `smart-open.default` | command | — | [Files (`~` mode)](#files--mode) |
+| `files.ignore` | list | — (uses built-in) | [Files (`/` mode)](#files--mode) |
+| `smart-open.<ext>` | command | — (falls through to `Run`) | [Files (`/` mode)](#files--mode) |
+| `smart-open.default` | command | — | [Files (`/` mode)](#files--mode) |
 | `jira.search.<name>` | JQL | — | [JIRA (`-` mode)](#jira--mode) |
 | `ollama.url` | URL | — (LLM disabled) | [LLM (`=` mode)](#llm--mode) |
 | `ollama.model` | model name | — (LLM disabled) | [LLM (`=` mode)](#llm--mode) |
@@ -812,7 +812,7 @@ The `check` command builds the same `App` as the TUI startup (so it reads the sa
 - **Notes (`@`)** / **Todos (`!`)**: `notes.database` is configured → the file exists → opens as sqlite → has the required tables (`markdown_data`, `todo_entries`) → a sample `search_notes` / `search_todos` round-trip succeeds → row count.
 - **Tags (`$`)**: a `tags`/`TAGS` file is discoverable (walk upward from cwd) → readable → parses (has `\x0c`-separated sections) → if no tags file, checks the CodeGraph fallback.
 - **CodeGraph (`&`)**: `.codegraph/codegraph.db` is discoverable → opens as sqlite → has `nodes` + `edges` tables + `nodes_fts` FTS5 virtual table → a trivial FTS5 search succeeds → row/edge counts.
-- **Files (`~`)**: cwd exists → `walk_dir` returns at least one entry (or the dir is genuinely empty → `Warning`).
+- **Files (`/`)**: cwd exists → `walk_dir` returns at least one entry (or the dir is genuinely empty → `Warning`).
 - **Ag (`,`)**: `ag` binary is on `$PATH` → `ag --version` succeeds.
 - **LLM (`=`)**: `ollama.url` + `ollama.model` are configured → ollama server is reachable (`GET /api/tags`) → the configured model is in the loaded-models list.
 - **JIRA (`-`)**: `JIRA_SERVER` + `JIRA_API_TOKEN` env vars are set → the server is reachable (`GET /rest/api/3/myself` with Bearer auth) → the `JIRA_PROJECT` (if set) exists.

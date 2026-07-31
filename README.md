@@ -22,7 +22,7 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Match-algorithm toggle** (`C-f`): cycle between SUBSTRING → FUZZY → REGEX for the current search. The algorithm applies to all prefix modes (history, directories, panes, notes, todos, files, output) except JIRA.
 - **Context-aware picker** (`Ctrl+R`): a full-screen TUI for searching, picking, and editing. Supports multiple *scopes* (`SESS` → `DIR` → `GLOBAL` → `STATS`), each narrowing the same underlying database to a different slice. The list shows a live "position/total" indicator in its title and a scrollbar once the list is taller than the visible window.
 - **Multi-select** (`Ctrl+X` to toggle a mark): mark several rows and delete them all at once (`key.bulk-delete-marked=...`, unbound by default, with confirmation) instead of deleting one at a time.
-- **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`%`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`~`), tags (`$`), CodeGraph (`&`), ag content search (`,`), note-segment search (`:`), similar-phrase search (`"`, ranks note segments by embedding similarity), and browser bookmarks + history (`^`, merged from Chrome/Firefox/Safari, tagged `bookmark`/`history`).
+- **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`?`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`/`), tags (`$`), CodeGraph (`&`), ag content search (`,`), note-segment search (`:`), similar-phrase search (`"`, ranks note segments by embedding similarity), and browser bookmarks + history (`^`, merged from Chrome/Firefox/Safari, tagged `bookmark`/`history`).
 - **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate natural-language into a runnable command (`=`), describe a command in plain prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
@@ -109,7 +109,7 @@ own config.
 | `Ctrl+O` | Open the captured-output view (scroll with `j`/`k`/`PgUp`/`PgDn`). |
 | `Ctrl+D` | Delete the selected entry (with confirmation). |
 | `Ctrl+X` | Toggle mark on the selected row (multi-select). Marked rows show a `[x]` prefix. |
-| `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `~`, else runs the selected row. In `-`/`!`/`~` mode, acts on every **marked** row when at least one is marked, not just the selected one. |
+| `Ctrl+]` | Smart open (context dive): callers/callees in `&`/`$`, JIRA in browser in `-`, mark todo done in `!`, per-extension file open in `/`, else runs the selected row. In `-`/`!`/`/` mode, acts on every **marked** row when at least one is marked, not just the selected one. |
 | `F2` | Open the multi-line note/todo compose overlay in `@`/`!` mode (`Enter` = newline, `Ctrl-S` = save). Complements the one-line `@new <text>` / `!@new <text>` quick-create. |
 | `Ctrl+R` | Open the callers / callees picker for the selected `&` / `$` symbol. |
 | `Ctrl+P` / `Ctrl+N` | Per-mode query history recall (readline `previous-history` / `next-history`). Scoped to the active prefix mode only. |
@@ -160,13 +160,13 @@ The first character of the query selects the prefix mode. Each mode answers a di
 | History | (none) | Search the shell history (default mode). |
 | Output | `+` | Search the captured output of each command. |
 | LLM command | `=` | Generate a Bash command from natural language. |
-| Question | `%` | Ask the LLM a short factual question. |
+| Question | `?` | Ask the LLM a short factual question. |
 | Notes | `@` | Search the note_search SQLite database. |
 | Todo | `!` | List open todos from the note_search database. |
 | Directories | `#` | List every directory in the global history. |
 | Panes | `*` | List all panes across all tmux sessions / herdr workspaces. |
 | JIRA | `-` | Search JIRA issues via REST API. Selecting an issue opens it in the browser (Enter); `Ctrl-M-s` downloads it as a local markdown note via `note_search jira-issue <KEY>`. |
-| Files | `~` | List every file in the current directory tree. |
+| Files | `/` | List every file in the current directory tree. |
 | Tags | `$` | List every symbol from the `tags` file. Selecting opens `$EDITOR +LINE file`. An optional `@lang` token (e.g. `@rust`) filters by file extension and pipes the preview through `bat` for syntax highlighting. |
 | CodeGraph | `&` | Search symbols in the local `.codegraph/codegraph.db` index (FTS5 over name / qualified name / docstring / signature). The selected row's preview shows source context plus a `── callers ──` / `── callees ──` overlay; `Ctrl-R` (or `Ctrl-]`, the Smart-open key) opens a navigable callers / callees picker. `@<lang>` filters by language. Falls back to CodeGraph when `$` mode can't find a `tags` file. |
 | ag | `,` | Search file contents with `ag` (The Silver Searcher). `*<glob>` tokens restrict file patterns; `@<lang>` filters by language. |
@@ -306,6 +306,6 @@ Settings live in `~/.config/smarthistory/config` (INI-style `key=value`). Lines 
 
 - The match algorithm does **not** apply to JIRA (`-` mode), which parses its own JQL syntax.
 - In notes (`@`) and todos (`!`) mode, the algorithm is accepted but the `note_search` library's own query parser takes precedence for the SQL-level filtering.
-- In directories (`#`), panes (`*`), and files (`~`) mode, the algorithm is fully applied — fuzzy search in directories, regex in panes, etc.
+- In directories (`#`), panes (`*`), and files (`/`) mode, the algorithm is fully applied — fuzzy search in directories, regex in panes, etc.
 
 For the full configuration reference, see [TECHNICAL.md](TECHNICAL.md).
