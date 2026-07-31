@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- New `^` prefix mode: browser bookmarks + history, merged from every
+  configured (or auto-detected) Chrome / Firefox / Safari profile. Each row
+  is tagged `bookmark` / `history` so typing that word narrows the list to
+  one source; `Enter` opens the URL in the system browser. Configure via
+  `browser.<id>.type=chrome|firefox|safari` + `browser.<id>.profile=<path>`;
+  see `docs/modes/browser.md`.
+
 ### Security
 
 - Harden shell command staging throughout the TUI by consistently using

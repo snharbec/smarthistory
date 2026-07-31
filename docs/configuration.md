@@ -63,6 +63,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [JIRA (`-` mode)](#jira--mode)
   - [LLM (`=` mode)](#llm--mode)
   - [Paperless (`<` mode)](#paperless--mode)
+  - [Browser (`^` mode)](#browser--mode)
 - [Environment variables](#environment-variables)
 - [All keys at a glance](#all-keys-at-a-glance)
 
@@ -350,6 +351,7 @@ The first character the user types to enter a mode. The default keymap covers ev
 | `prefix.segments` | segment search | `:` | note_search `segments` table (header-anchored sections); `prefix.elements=` still works as a back-compat alias |
 | `prefix.similar` | similar/phrase search | `"` | same `segments` table, ranked by embedding similarity to the typed phrase (requires a reachable Ollama instance) |
 | `prefix.paperless` | paperless document search | `<` | search a Paperless-ngx backend by title / tag / correspondent |
+| `prefix.browser` | browser bookmarks + history | `^` | merged Chrome / Firefox / Safari bookmarks + history, tagged `bookmark` / `history` |
 
 ```ini
 # Move JIRA off `-` (a frequently mistyped key) to backtick:
@@ -662,6 +664,27 @@ paperless.token=abcdef0123456789abcdef0123456789abcdef01
 
 Full reference: **[docs/modes/paperless.md](modes/paperless.md)**.
 
+### Browser (`^` mode)
+
+The `^` mode reads bookmarks + history directly from locally-installed browsers' own profile files — no config is required. Zero or more `browser.<id>.*` entries let you override which browsers / profiles are read; when none are set, Chrome, Firefox, and Safari are all auto-detected at their platform-default profile locations (only a browser that's actually installed is included).
+
+| Key | Meaning |
+| --- | --- |
+| `browser.<id>.type` | `chrome`, `firefox`, or `safari`. `<id>` is any numeric index — order doesn't matter. |
+| `browser.<id>.profile` | Optional path override: for Chrome, the directory directly containing `Bookmarks` / `History`; for Firefox, the directory directly containing `places.sqlite`; for Safari, the directory directly containing `Bookmarks.plist` / `History.db` (normally `~/Library/Safari` — Safari has no separate profile concept, so this is rarely worth overriding). Omit to use that browser's platform-default profile location. |
+
+```ini
+# Read a non-default Chrome profile ("Profile 2") instead of "Default":
+browser.1.type=chrome
+browser.1.profile=~/Library/Application Support/Google/Chrome/Profile 2
+
+# Add Firefox and Safari too (both using their auto-detected default profile):
+browser.2.type=firefox
+browser.3.type=safari
+```
+
+Full reference: **[docs/modes/browser.md](modes/browser.md)**.
+
 ---
 
 ## Environment variables
@@ -734,6 +757,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `prefix.segments` | char | `:` | [Query prefixes](#query-prefixes) |
 | `prefix.similar` | char | `"` | [Query prefixes](#query-prefixes) |
 | `prefix.paperless` | char | `<` | [Query prefixes](#query-prefixes) |
+| `prefix.browser` | char | `^` | [Query prefixes](#query-prefixes) |
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |
 | `homemap` | path prefix list | — | [Multiplexer integration](#multiplexer-integration) |
@@ -760,6 +784,8 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `ollama.model` | model name | — (LLM disabled) | [LLM (`=` mode)](#llm--mode) |
 | `paperless.url` | URL | — (paperless disabled) | [Paperless (`<` mode)](#paperless--mode) |
 | `paperless.token` | API token | — (paperless disabled) | [Paperless (`<` mode)](#paperless--mode) |
+| `browser.<id>.type` | `chrome` \| `firefox` \| `safari` | — (auto-detected) | [Browser (`^` mode)](#browser--mode) |
+| `browser.<id>.profile` | path | — (platform default) | [Browser (`^` mode)](#browser--mode) |
 
 ---
 
@@ -791,6 +817,7 @@ The `check` command builds the same `App` as the TUI startup (so it reads the sa
 - **LLM (`=`)**: `ollama.url` + `ollama.model` are configured → ollama server is reachable (`GET /api/tags`) → the configured model is in the loaded-models list.
 - **JIRA (`-`)**: `JIRA_SERVER` + `JIRA_API_TOKEN` env vars are set → the server is reachable (`GET /rest/api/3/myself` with Bearer auth) → the `JIRA_PROJECT` (if set) exists.
 - **Paperless (`<`)**: `paperless.url` + `paperless.token` are configured → the server is reachable and the token is accepted (`GET /api/documents/?page_size=1` with `Authorization: Token ...`).
+- **Browser (`^`)**: at least one `browser.<id>.*` entry (or an auto-detected Chrome/Firefox/Safari install) resolves → each source's primary file (`Bookmarks` / `places.sqlite` / `Bookmarks.plist`) actually opens. A missing profile is a per-source `Warning` (the other configured sources still work); a permission error (the common case: Safari on macOS without Full Disk Access — see `docs/modes/browser.md`) is a per-source `Error` with the fix spelled out.
 - **Directories (`#`)**: SQL history DB is open (with a `COUNT(DISTINCT directory)` round-trip) → multiplexer backend is configured → each `sessiondirs` entry exists on disk.
 - **Panes (`*`)**: the user is inside a multiplexer session (`$TMUX` or `$HERDR_PANE_ID` is set) → the backend's `snapshot_current_panes` returns at least one pane.
 

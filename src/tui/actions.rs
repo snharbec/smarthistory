@@ -214,6 +214,13 @@ impl App {
                 // in `stage_paperless_selection`.
                 self.stage_paperless_selection();
             }
+            crate::tui::mode::ModeKind::Browser => {
+                // `^...` queries are browser
+                // bookmarks/history requests. The
+                // open-in-browser flow lives
+                // in `stage_browser_selection`.
+                self.stage_browser_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for
@@ -1428,6 +1435,41 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Stage the browser (`^`) mode selection: open the selected
+    /// bookmark/history row's URL in the system browser. Unlike
+    /// `stage_jira_selection` / `stage_paperless_selection`, the
+    /// URL doesn't need to be reconstructed from a config + id —
+    /// the row already carries it verbatim in `comment` (see
+    /// `browser::browser_entry_to_row`), since the row was read
+    /// straight from the browser's own bookmarks/history file.
+    ///
+    /// Unlike those two modes (whose URL is either an API-returned
+    /// numeric id or a JIRA key, both effectively ASCII
+    /// identifiers), a browser history/bookmark URL is arbitrary
+    /// web content the user merely *visited* — a page designed to
+    /// plant a shell-metacharacter-laden URL in the user's history
+    /// is a realistic threat model a naive `"<url>"` double-quoted
+    /// splice wouldn't be safe against (double quotes still expand
+    /// `$(...)` / backticks). `shell_quote` applies the same
+    /// POSIX single-quote escaping used everywhere else in this
+    /// codebase that splices untrusted text into a staged command.
+    fn stage_browser_selection(&mut self) {
+        let url: String = match self.selected_row() {
+            Some(r) => r.comment.clone(),
+            None => return,
+        };
+        if url.is_empty() {
+            return;
+        }
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        self.selection = Some(format!("{} {}", opener, crate::util::shell_quote(&url)));
+        self.pick_mode = Some(PickMode::Run);
     }
 
     /// Stage the history (no-prefix) mode selection.

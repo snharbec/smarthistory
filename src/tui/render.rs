@@ -2281,6 +2281,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         qp.paperless.to_string(),
         "search a Paperless-ngx backend by title (bare words), tag (#TAG), or correspondent (@AUTHOR); Tab completes tag/correspondent names; needs paperless.url + paperless.token",
     );
+    mode_row(
+        &mut lines,
+        "browser",
+        qp.browser.to_string(),
+        "search browser bookmarks + history, merged from every configured/auto-detected Chrome, Firefox, or Safari profile; type `bookmark` or `history` to narrow to one source; Enter opens the URL",
+    );
 
     lines.push(Line::from(""));
 

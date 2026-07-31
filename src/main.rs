@@ -1,6 +1,7 @@
 #![allow(clippy::should_implement_trait)]
 #![allow(clippy::empty_line_after_doc_comments)]
 mod ag;
+mod browser;
 mod codegraph;
 mod files;
 mod highlight;
@@ -1131,6 +1132,17 @@ pub struct QueryPrefixes {
     /// question against an external source") but is already
     /// the general-question ollama mode's default prefix.
     pub paperless: char,
+    /// Prefix for the browser bookmarks + history mode
+    /// (default `^`). Reads bookmarks and visited-URL history
+    /// directly from locally-installed browsers' profile files
+    /// (Chrome, Firefox, Safari) and merges them into one list,
+    /// tagged `bookmark` / `history` so the user can narrow with
+    /// those words. Selecting a row opens the URL in the system
+    /// browser. Configured via zero or more `browser.<id>.type`
+    /// / `browser.<id>.profile` pairs in the config file;
+    /// auto-detects Chrome / Firefox / Safari at their platform-
+    /// default locations when none are configured.
+    pub browser: char,
 }
 
 impl Default for QueryPrefixes {
@@ -1151,6 +1163,7 @@ impl Default for QueryPrefixes {
             segments: ':',
             similar: '"',
             paperless: '<',
+            browser: '^',
         }
     }
 }
@@ -1467,6 +1480,26 @@ pub struct Config {
     /// without a config-file companion are
     /// auto-appended by `Config::load`.
     hosts: Vec<(usize, crate::tui::state::HostDef)>,
+    /// Browser sources for the `^`-prefix mode, parsed from
+    /// `browser.<id>.type = "chrome"|"firefox"` /
+    /// `browser.<id>.profile = "~/path"` config keys. `profile`
+    /// is optional per entry — when unset, [`crate::browser::
+    /// BrowserSource`] resolution falls back to that browser's
+    /// platform-default profile location. When this list is
+    /// empty (no `browser.*` keys at all), `browser::
+    /// resolve_configured` auto-detects installed browsers
+    /// instead — see that function's doc comment.
+    browsers: Vec<(usize, BrowserSourceRaw)>,
+}
+
+/// One `browser.<id>.*` config entry, before resolving the
+/// optional `profile` override into a `crate::browser::
+/// BrowserSource` (which requires a concrete path — see
+/// `Config::browser_sources`).
+#[derive(Debug, Clone, Default)]
+struct BrowserSourceRaw {
+    kind: Option<crate::browser::BrowserKind>,
+    profile: Option<String>,
 }
 
 /// User-customizable colors for the TUI. Defaults match the
@@ -1575,6 +1608,7 @@ impl Config {
             multiplexer: crate::multiplexer::MultiplexerKind::default(),
             sessions: Vec::new(),
             hosts: Vec::new(),
+            browsers: Vec::new(),
             // Empty by default — populated from
             // `smart-open.<ext>=<cmd>` lines in the
             // config file. See the field doc for the
@@ -2126,6 +2160,50 @@ impl Config {
                                             ..crate::tui::state::HostDef::default()
                                         },
                                     )),
+                                }
+                            }
+                        }
+                    } else if let Some(rest) = other.strip_prefix("browser.") {
+                        // Parse `browser.<id>.type = "chrome"|"firefox"`
+                        // and `browser.<id>.profile = "~/path"`. The
+                        // `<id>` is a numeric index; order doesn't
+                        // matter for this mode (unlike `host.<id>`,
+                        // which determines display order), but the
+                        // same `Vec<(usize, _)>` shape is reused for
+                        // consistency with `sessions` / `hosts`.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if let Some((id_str, field)) = rest.split_once('.')
+                            && let Ok(id) = id_str.parse::<usize>()
+                        {
+                            let pos = self.browsers.iter().position(|(i, _)| *i == id);
+                            let set = |b: &mut BrowserSourceRaw, field: &str, val: &str| match field
+                            {
+                                "type" => {
+                                    match crate::browser::BrowserKind::parse(val) {
+                                        Some(k) => b.kind = Some(k),
+                                        None => eprintln!(
+                                            "warning: browser.{}.type = {:?} is not a supported browser (chrome, firefox); ignoring",
+                                            id, val
+                                        ),
+                                    }
+                                }
+                                "profile" => b.profile = Some(val.to_string()),
+                                _ => {
+                                    eprintln!(
+                                        "warning: unknown browser field {:?} in browser.{}; ignoring",
+                                        field, id
+                                    );
+                                }
+                            };
+                            match pos {
+                                Some(idx) => {
+                                    let (_, b) = &mut self.browsers[idx];
+                                    set(b, field, unquoted);
+                                }
+                                None => {
+                                    let mut b = BrowserSourceRaw::default();
+                                    set(&mut b, field, unquoted);
+                                    self.browsers.push((id, b));
                                 }
                             }
                         }
@@ -2873,6 +2951,31 @@ impl Config {
         self.hosts.iter().map(|(_, def)| def.clone()).collect()
     }
 
+    /// Resolve the configured `browser.<id>.*` entries into
+    /// `crate::browser::BrowserSource`s. An entry without a
+    /// `type` is dropped (there's nothing to resolve); an entry
+    /// without a `profile` falls back to that browser kind's
+    /// platform-default profile location the same way an entry
+    /// wouldn't exist at all — see
+    /// `crate::browser::BrowserSource::autodetect`'s per-kind
+    /// default-path helpers. Returns an empty `Vec` when no
+    /// `browser.*` keys are set at all, which is the signal
+    /// `crate::browser::resolve_configured` uses to fall back to
+    /// full auto-detection instead of "configured, but empty".
+    pub fn browser_sources(&self) -> Vec<crate::browser::BrowserSource> {
+        self.browsers
+            .iter()
+            .filter_map(|(_, raw)| {
+                let kind = raw.kind?;
+                let profile = match raw.profile.as_deref() {
+                    Some(p) => std::path::PathBuf::from(crate::util::expand_home(p).into_owned()),
+                    None => crate::browser::default_profile_for(kind)?,
+                };
+                Some(crate::browser::BrowserSource { kind, profile })
+            })
+            .collect()
+    }
+
     /// Apply a single `tuicolor.<field>=<value>` override. Unknown
     /// fields are silently ignored so a typo doesn't break the rest
     /// of the config.
@@ -2931,6 +3034,7 @@ impl Config {
             "elements" => prefixes.segments = c,
             "similar" => prefixes.similar = c,
             "paperless" => prefixes.paperless = c,
+            "browser" => prefixes.browser = c,
             _ => {}
         }
     }

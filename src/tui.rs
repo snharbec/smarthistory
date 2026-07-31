@@ -1369,6 +1369,16 @@ pub(crate) struct App {
     /// Aggregated paperless-mode search state (debounce,
     /// in-flight request, cached rows). Mirrors `files_state`.
     paperless_state: crate::paperless::PaperlessState,
+    /// Aggregated browser-mode (`^`) search state (debounce,
+    /// in-flight request, cached rows). Mirrors `paperless_state`.
+    /// Unlike `paperless_config`, there's no config counterpart
+    /// stored on `App` — the configured/auto-detected browser
+    /// sources are resolved fresh at point of use via
+    /// `crate::browser::resolve_configured()`, the same
+    /// "no config threaded through `App::new`" convention
+    /// `crate::jira::JiraConfig::from_env()` uses (see
+    /// `crate::browser`'s module doc comment for why).
+    browser_state: crate::browser::BrowserState,
     /// User-customizable query prefix characters.
     query_prefixes: crate::QueryPrefixes,
     /// Path to the note_search database, if configured.
@@ -2166,7 +2176,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
     let Some(c) = query.chars().next() else {
         return MODE_NONE;
     };
-    let known: [char; 14] = [
+    let known: [char; 15] = [
         prefixes.output,
         prefixes.llm,
         prefixes.question,
@@ -2181,6 +2191,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
         prefixes.ag,
         prefixes.segments,
         prefixes.similar,
+        prefixes.browser,
     ];
     if known.contains(&c) {
         c
@@ -2508,6 +2519,19 @@ impl App {
     #[allow(dead_code)] // convention API, matching every other `<mode>_pattern` accessor
     fn paperless_pattern(&self) -> &str {
         crate::tui::mode::paperless::pattern(self)
+    }
+
+    /// Whether the query is a browser bookmarks/history request:
+    /// the query starts with the browser prefix (`^` by default).
+    fn is_browser_query(&self) -> bool {
+        crate::tui::mode::browser::matches(self)
+    }
+
+    /// The browser-mode search body, i.e. everything after the
+    /// leading `^` prefix. Empty string when not in browser mode.
+    #[allow(dead_code)] // convention API, matching every other `<mode>_pattern` accessor
+    fn browser_pattern(&self) -> &str {
+        crate::tui::mode::browser::pattern(self)
     }
 
     /// The todo search body, i.e. everything
@@ -3315,6 +3339,10 @@ impl App {
         // search debounce. `paperless_touch` is a
         // no-op outside `<` mode.
         self.paperless_touch();
+        // Same co-location for the browser-mode
+        // search debounce. `browser_touch` is a
+        // no-op outside `^` mode.
+        self.browser_touch();
     }
 
     /// Fire the per-mode search immediately on a
@@ -4645,6 +4673,11 @@ impl PrefixPicker {
                 label: "Paperless",
                 description: "search documents on a Paperless-ngx backend by title/tag/author",
             },
+            PrefixOption {
+                prefix: Some(prefixes.browser),
+                label: "Browser",
+                description: "search browser bookmarks + history (Chrome, Firefox, Safari); Enter opens the URL",
+            },
         ];
         // Pre-select the row
         // matching the current
@@ -5000,6 +5033,7 @@ impl App {
             llm_config,
             paperless_config,
             paperless_state: crate::paperless::PaperlessState::new(),
+            browser_state: crate::browser::BrowserState::new(),
             query_prefixes,
             notes_database,
             notes_dir,
@@ -5615,6 +5649,15 @@ impl App {
         if self.is_paperless_query() {
             return self.rows.clone();
         }
+        // Browser mode (`^`) rows are always sorted by visit /
+        // date-added timestamp, newest first — see
+        // `browser::spawn_fetch`. Same reasoning as paperless
+        // above: the Age/Frequency toggle and the labeled-row
+        // merge are command-history concepts that don't apply to
+        // a merged bookmarks/history list.
+        if self.is_browser_query() {
+            return self.rows.clone();
+        }
         // Directories / JIRA / files
         // modes are completely
         // different views that must NOT
@@ -5876,6 +5919,7 @@ impl App {
             crate::tui::mode::ModeKind::Segments => return crate::tui::mode::segments::fetch(self),
             crate::tui::mode::ModeKind::Similar => return crate::tui::mode::similar::fetch(self),
             crate::tui::mode::ModeKind::Paperless => return crate::tui::mode::paperless::fetch(self),
+            crate::tui::mode::ModeKind::Browser => return crate::tui::mode::browser::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6419,6 +6463,10 @@ impl App {
             self.select_for_run_impl();
             return;
         }
+        if self.is_browser_query() {
+            self.select_for_run_impl();
+            return;
+        }
         // Default: history mode.
         if let Some(row) = self.selected_row() {
             if row.mode == "llm" && !row.output.is_empty() {
@@ -6879,6 +6927,81 @@ impl App {
             Err(e) => {
                 self.set_status_message(e.to_string());
             }
+        }
+    }
+
+    // ---- Browser (`^`-prefix) bookmarks + history ----
+
+    /// Arm or clear the browser-mode search debounce. Called from
+    /// every keystroke path (co-located with `files_touch` /
+    /// `paperless_touch`). Re-arms the timer when the user is still
+    /// in browser mode; resets all pending state when they leave.
+    fn browser_touch(&mut self) {
+        if self.is_browser_query() {
+            self.browser_state.debounce_started = Some(std::time::Instant::now());
+            if let Some(request) = self.browser_state.request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            self.browser_state.in_flight = false;
+        } else {
+            self.browser_state.debounce_started = None;
+            self.browser_state.in_flight = false;
+            self.browser_state.request = None;
+            self.browser_state.last_pattern = None;
+        }
+    }
+
+    /// Check whether the browser-mode debounce has elapsed and, if
+    /// so, spawn a background read. Called from the run loop's idle
+    /// tick (same pattern as `paperless_maybe_autocall`). Returns
+    /// immediately when not in browser mode, when a read is already
+    /// in flight, or when the debounce window hasn't elapsed.
+    fn browser_maybe_autocall(&mut self) {
+        if !self.is_browser_query() {
+            return;
+        }
+        if self.browser_state.in_flight {
+            return;
+        }
+        let Some(started) = self.browser_state.debounce_started else {
+            return;
+        };
+        if started.elapsed() < crate::browser::BROWSER_DEBOUNCE {
+            return;
+        }
+        let pattern = crate::browser::BrowserState::current_pattern(
+            &self.query,
+            self.query_prefixes.browser,
+        );
+        if self.browser_state.has_results_for(&pattern) {
+            return;
+        }
+        self.browser_state.last_pattern = Some(pattern.clone());
+        self.browser_state.debounce_started = None;
+        self.browser_state.in_flight = true;
+        // Resolved fresh at point of use, not stored on `App` —
+        // see `browser_state`'s field doc comment.
+        let sources = crate::browser::resolve_configured();
+        self.browser_state.request = Some(crate::browser::spawn_fetch(sources, pattern));
+        self.set_status_message("Searching browser bookmarks/history…".to_string());
+    }
+
+    /// Process a browser-mode read result that arrived from the
+    /// background thread. Caches the rows in
+    /// `self.browser_state.rows` and refreshes the list. Stale
+    /// results (the pattern changed between spawn and delivery) are
+    /// discarded. Mirrors `process_files_result`.
+    fn process_browser_result(&mut self, request: crate::browser::BrowserRequest, rows: Vec<HistoryRow>) {
+        self.browser_state.in_flight = false;
+        self.browser_state.request = None;
+        let current = crate::browser::BrowserState::current_pattern(
+            &self.query,
+            self.query_prefixes.browser,
+        );
+        if current == request.pattern {
+            self.browser_state.rows = rows;
+            self.status_message = None;
+            self.refresh();
         }
     }
 
@@ -10736,6 +10859,7 @@ impl App {
                 p.files,
                 p.tags,
                 p.ag,
+                p.browser,
             ];
             known.contains(&c).then_some(c)
         });
@@ -13003,7 +13127,7 @@ fn prefix_selection_with_space(sel: String) -> String {
 /// probable-command suggestions stay useful) and lets
 /// the same command surface in future searches. Every
 /// other mode (`+`, `=`, `%`, `@`, `!`, `#`, `*`, `-`,
-/// `~`, `$`, `&`, `,`) stages a one-shot read (`bat
+/// `~`, `$`, `&`, `,`, `^`) stages a one-shot read (`bat
 /// README.md`, `note_search edit-note <id>`, `open
 /// <jira-url>`, etc.) that the user typically doesn't
 /// want cluttering the DB — the space prefix keeps the
@@ -13072,6 +13196,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.segments => Some(ModeKind::Segments),
             _ if c == query_prefixes.similar => Some(ModeKind::Similar),
             _ if c == query_prefixes.paperless => Some(ModeKind::Paperless),
+            _ if c == query_prefixes.browser => Some(ModeKind::Browser),
             _ => None,
         }
     });
@@ -13750,6 +13875,14 @@ fn run_loop(
                 app.process_paperless_result(request, result);
             }
 
+        // Check for browser-mode read result from
+        // background thread. Mirrors the files-mode poll above.
+        if let Some(request) = app.browser_state.request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+            && let Some(request) = app.browser_state.request.take() {
+                app.process_browser_result(request, result);
+            }
+
         // Check for ag-mode search result
         // from background thread. Mirrors the
         // files-mode poll above.
@@ -13915,6 +14048,11 @@ fn run_loop(
                 // search after `PAPERLESS_DEBOUNCE` of quiet
                 // typing in `<` mode.
                 app.paperless_maybe_autocall();
+                // Same debounce drive for browser-mode reads:
+                // spawns the background bookmarks/history read
+                // after `BROWSER_DEBOUNCE` of quiet typing in `^`
+                // mode.
+                app.browser_maybe_autocall();
                 continue;
             }
             Ok(true) => {}

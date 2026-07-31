@@ -91,6 +91,12 @@ pub enum ModeKind {
     /// Requires `paperless.url` + `paperless.token` in the config
     /// file.
     Paperless,
+    /// `^` (default). Browser bookmarks + history, merged into one
+    /// list from every configured (or auto-detected) Chrome /
+    /// Firefox profile. Each row's command text is prefixed with
+    /// the literal word `bookmark` or `history`. Selecting a row
+    /// opens the URL in the system browser.
+    Browser,
 }
 
 impl ModeKind {
@@ -115,6 +121,7 @@ impl ModeKind {
             ModeKind::Segments => ':',
             ModeKind::Similar => '"',
             ModeKind::Paperless => '<',
+            ModeKind::Browser => '^',
         }
     }
 
@@ -139,6 +146,7 @@ impl ModeKind {
             ModeKind::Segments => "segments",
             ModeKind::Similar => "similar",
             ModeKind::Paperless => "paperless",
+            ModeKind::Browser => "browser",
         }
     }
 
@@ -172,6 +180,7 @@ impl ModeKind {
             ModeKind::Segments => "Segments",
             ModeKind::Similar => "Similar",
             ModeKind::Paperless => "Paperless",
+            ModeKind::Browser => "Browser",
         }
     }
 
@@ -198,6 +207,7 @@ impl ModeKind {
             ModeKind::Segments => prefixes.segments,
             ModeKind::Similar => prefixes.similar,
             ModeKind::Paperless => prefixes.paperless,
+            ModeKind::Browser => prefixes.browser,
         }
     }
 
@@ -264,12 +274,15 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Similar
     } else if c == p.paperless {
         ModeKind::Paperless
+    } else if c == p.browser {
+        ModeKind::Browser
     } else {
         ModeKind::History
     }
 }
 
 pub mod ag;
+pub mod browser;
 pub mod codegraph;
 pub mod directories;
 pub mod segments;
@@ -331,6 +344,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Segments => Some(Theme::accent()),
         ModeKind::Similar => Some(Theme::accent()),
         ModeKind::Paperless => Some(Theme::info()),
+        ModeKind::Browser => Some(Theme::success()),
         ModeKind::History => None,
     }
 }
@@ -366,6 +380,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Segments => (":".to_string(), format!(" segments{} ", algo)),
         ModeKind::Similar => ("\"".to_string(), format!(" similar{} ", algo)),
         ModeKind::Paperless => ("<".to_string(), format!(" paperless{} ", algo)),
+        ModeKind::Browser => ("^".to_string(), format!(" browser{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -578,6 +593,7 @@ pub fn run_all_checks(
             ModeKind::Directories => crate::tui::mode::directories::check(app),
             ModeKind::Panes => crate::tui::mode::panes::check(app),
             ModeKind::Paperless => crate::tui::mode::paperless::check(app),
+            ModeKind::Browser => crate::tui::mode::browser::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -606,6 +622,7 @@ impl ModeKind {
             ModeKind::Directories,
             ModeKind::Panes,
             ModeKind::Paperless,
+            ModeKind::Browser,
         ]
     }
 }
@@ -640,6 +657,7 @@ mod tests {
             ModeKind::Segments,
             ModeKind::Similar,
             ModeKind::Paperless,
+            ModeKind::Browser,
         ] {
             let title = kind.list_title();
             assert!(!title.is_empty(), "{:?} returned empty title", kind);
@@ -699,6 +717,7 @@ mod tests {
             ModeKind::Codegraph,
             ModeKind::Jira,
             ModeKind::Paperless,
+            ModeKind::Browser,
         ];
         for kind in others {
             let title = kind.list_title();
@@ -734,6 +753,7 @@ mod tests {
             ModeKind::Tags,
             ModeKind::Jira,
             ModeKind::Paperless,
+            ModeKind::Browser,
         ];
         for kind in single_word_kinds {
             let title = kind.list_title();

@@ -19410,6 +19410,76 @@ fn select_for_run_in_paperless_mode_without_config_surfaces_status() {
     assert!(app.status_message.is_some());
 }
 
+/// Selecting a browser (`^`) row stages `open "<url>"` and exits,
+/// same as `select_for_run_in_jira_mode_stages_open_url` /
+/// `select_for_run_in_paperless_mode_stages_open_url` above. Unlike
+/// those two, the URL comes straight off the row's `comment` field
+/// (see `browser::browser_entry_to_row`) — no config-based id→URL
+/// reconstruction needed.
+#[test]
+fn select_for_run_in_browser_mode_stages_open_url() {
+    let mut app = directories_test_app(&[]);
+    app.browser_state.rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "bookmark Rust Lang".to_string(),
+        directory: "chrome".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "https://rust-lang.org".to_string(),
+        output: String::new(),
+        mode: "browser".to_string(),
+        source: "bookmark".to_string(),
+        ..Default::default()
+    });
+    app.query = String::from("^");
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some(
+            format!(
+                "{} https://rust-lang.org",
+                if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                }
+            )
+            .as_str()
+        ),
+        "got: {:?}",
+        app.selection
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// Selecting a browser row with no URL (empty `comment`) is a
+/// no-op — no broken `open ""` command staged.
+#[test]
+fn select_for_run_in_browser_mode_without_url_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.browser_state.rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "bookmark Broken".to_string(),
+        directory: "chrome".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "browser".to_string(),
+        source: "bookmark".to_string(),
+        ..Default::default()
+    });
+    app.query = String::from("^");
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(app.selection, None);
+}
+
 /// `<#inv<TAB>` expands to `<#invoice ` (unique tag match, same
 /// shape as `notes_tab_completion_tag_unique_match_expands_with_space`
 /// but the candidate source is `paperless_state.tag_names`, not a
@@ -20087,9 +20157,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_sixteen_entries() {
+fn prefix_picker_has_seventeen_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 16);
+    assert_eq!(picker.options.len(), 17);
 }
 
 #[test]
@@ -20184,7 +20254,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 15);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 16);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
