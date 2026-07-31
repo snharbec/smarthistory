@@ -27,6 +27,11 @@ _smarthistory_precmd() {
     # accept-line/send-break clears below; BUFFER is fresh here anyway,
     # but this costs nothing and closes the last edge case).
     _smarthistory_dropdown_clear
+    # A new prompt means a new command line — any Esc/Ctrl-K
+    # suppression from the line that just ended (however it ended:
+    # accepted, Ctrl-C aborted, or a bare empty Enter) must not carry
+    # over. See `_smarthistory_dropdown_suppressed`'s declaration.
+    _smarthistory_dropdown_suppressed=0
     # Skip empty command lines (e.g. bare Enter presses).
     [ -n "$_smarthistory_cmd" ] || return 0
     # Skip space-prefixed command lines. Zsh's
@@ -198,6 +203,14 @@ fi
 # convention) candidate commands for the current render.
 typeset -g _smarthistory_dropdown_visible=0
 typeset -g _smarthistory_dropdown_selected=0
+# Set to 1 by an explicit dismissal (Esc, Ctrl-K) so the menu stays
+# closed for the rest of this command line, even though the wrapped
+# editing widgets keep firing `_smarthistory_dropdown_render` on every
+# keystroke. Cleared back to 0 in `_smarthistory_precmd` — i.e. the
+# suppression lasts exactly "until a new command line", matching every
+# exit path (Enter, Ctrl-C abort, empty Enter) uniformly, since precmd
+# runs before the next prompt regardless of how the previous line ended.
+typeset -g _smarthistory_dropdown_suppressed=0
 # Whether the user has actually navigated the menu (Tab / Shift-Tab)
 # since it was last (re)painted with a new candidate set. Enter only
 # commits `_smarthistory_dropdown_selected` when this is 1 — with no
@@ -905,6 +918,11 @@ _smarthistory_dropdown_render() {
     local _sm_dropdown_xtrace_was=$options[xtrace]
     setopt NO_XTRACE
     [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return
+    # Suppressed by an explicit Esc/Ctrl-K dismissal earlier in this
+    # same command line — stay closed until `_smarthistory_precmd`
+    # resets the flag for the next prompt. See
+    # `_smarthistory_dropdown_suppressed`'s declaration above.
+    [[ $_smarthistory_dropdown_suppressed -eq 1 ]] && return
     # POSTDISPLAY always renders after the buffer's current end, so
     # the menu only makes sense with the cursor there — same
     # constraint zsh-autosuggestions' ghost text has, for the same
@@ -1072,13 +1090,18 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     }
     zle -N _smarthistory_dropdown_accept
     bindkey '^I' _smarthistory_dropdown_accept
-    # Esc dismisses the menu without touching BUFFER. Nothing was
-    # bound to bare Esc before this feature existed, so the "menu
-    # not visible" branch is a genuine no-op (preserves prior
-    # behavior exactly).
+    # Esc dismisses the menu without touching BUFFER, and keeps it
+    # closed for the rest of this command line (see
+    # `_smarthistory_dropdown_suppressed`). Nothing was bound to bare
+    # Esc before this feature existed, so the "menu not visible"
+    # branch is a genuine no-op (preserves prior behavior exactly) —
+    # in particular it must NOT set the suppression flag, or pressing
+    # Esc before the menu has even appeared would silently disable it
+    # for the whole line.
     _smarthistory_dropdown_dismiss() {
         if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
             _smarthistory_dropdown_clear
+            _smarthistory_dropdown_suppressed=1
         fi
     }
     zle -N _smarthistory_dropdown_dismiss
@@ -1150,6 +1173,26 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     }
     zle -N _smarthistory_dropdown_select_start
     bindkey '^A' _smarthistory_dropdown_select_start
+    # Ctrl-K: standard kill-line, plus close the dropdown menu first if
+    # it's open — and keep it closed for the rest of this command line
+    # (see `_smarthistory_dropdown_suppressed`). Nothing was bound to
+    # `^K` before this feature (zsh's emacs-mode default is
+    # `kill-line`; this dropdown code never touched it), so the
+    # fallthrough is `zle kill-line` unconditionally — same "call the
+    # currently-registered widget, not a hardcoded builtin" convention
+    # the other fallbacks use (see Ctrl-A/Ctrl-E/arrows above). Closing
+    # the menu here means every other dropdown-aware binding reverts
+    # to its plain zsh meaning on the very next keystroke, since they
+    # all branch on `_smarthistory_dropdown_visible`.
+    _smarthistory_dropdown_kill_line() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            _smarthistory_dropdown_clear
+            _smarthistory_dropdown_suppressed=1
+        fi
+        zle kill-line
+    }
+    zle -N _smarthistory_dropdown_kill_line
+    bindkey '^K' _smarthistory_dropdown_kill_line
     # Right arrow: select the highlighted candidate WITHOUT moving
     # the cursor — unlike Ctrl-E, CURSOR is left exactly where it was
     # (typically mid-word, right after whatever prefix the user had
