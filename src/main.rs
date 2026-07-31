@@ -1209,6 +1209,15 @@ pub struct QueryPrefixes {
     /// auto-detects Chrome / Firefox / Safari at their platform-
     /// default locations when none are configured.
     pub browser: char,
+    /// Prefix for the meta-prefix mode (default `'`). Not a search
+    /// mode itself — typing `'` then a partial mode name (e.g.
+    /// `'jir`) and pressing Tab expands to that mode's real prefix
+    /// character, discarding the typed `'<name>` text entirely. A
+    /// unique name match activates immediately; an ambiguous match
+    /// (including the bare `'` + Tab case) opens the same picker
+    /// overlay as `PickPrefix` (F1), pre-filtered to the matching
+    /// names. See `App::meta_tab_complete_at_cursor`.
+    pub meta: char,
 }
 
 impl Default for QueryPrefixes {
@@ -1230,6 +1239,7 @@ impl Default for QueryPrefixes {
             similar: '"',
             paperless: '<',
             browser: '^',
+            meta: '\'',
         }
     }
 }
@@ -3155,6 +3165,7 @@ impl Config {
     const KNOWN_PREFIX_NAMES: &[&str] = &[
         "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
         "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
+        "meta",
     ];
 
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
@@ -3185,6 +3196,7 @@ impl Config {
             "similar" => prefixes.similar = c,
             "paperless" => prefixes.paperless = c,
             "browser" => prefixes.browser = c,
+            "meta" => prefixes.meta = c,
             _ => {}
         }
     }

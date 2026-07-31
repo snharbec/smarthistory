@@ -2176,7 +2176,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
     let Some(c) = query.chars().next() else {
         return MODE_NONE;
     };
-    let known: [char; 15] = [
+    let known: [char; 16] = [
         prefixes.output,
         prefixes.llm,
         prefixes.question,
@@ -2192,6 +2192,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
         prefixes.segments,
         prefixes.similar,
         prefixes.browser,
+        prefixes.meta,
     ];
     if known.contains(&c) {
         c
@@ -2532,6 +2533,13 @@ impl App {
     #[allow(dead_code)] // convention API, matching every other `<mode>_pattern` accessor
     fn browser_pattern(&self) -> &str {
         crate::tui::mode::browser::pattern(self)
+    }
+
+    /// Whether the query is a meta-prefix-mode request: the query
+    /// starts with the meta prefix (`'` by default). Not a real
+    /// search mode — see `meta_tab_complete_at_cursor`.
+    fn is_meta_query(&self) -> bool {
+        self.query.starts_with(self.query_prefixes.meta)
     }
 
     /// The todo search body, i.e. everything
@@ -3237,6 +3245,9 @@ impl App {
                 || c == prefixes.codegraph
                 || c == prefixes.segments
                 || c == prefixes.similar
+                || c == prefixes.paperless
+                || c == prefixes.browser
+                || c == prefixes.meta
         });
         let body = if has_prefix {
             self.query.chars().skip(1).collect::<String>()
@@ -3246,6 +3257,28 @@ impl App {
         self.query = match new_prefix {
             Some(c) => format!("{}{}", c, body),
             None => body,
+        };
+        self.query_cursor = self.query.chars().count();
+        self.query_touched = true;
+        self.recompile_regex();
+        self.llm_touch();
+        self.refresh();
+        let label = match new_prefix {
+            Some(c) => format!("`{}`", c),
+            None => "history (no prefix)".to_string(),
+        };
+        self.set_status_message(format!("prefix: {}", label));
+    }
+
+    /// Activate a new prefix, discarding any existing query text
+    /// entirely (vs. `apply_prefix`, which preserves the body).
+    /// Used exclusively by the meta-prefix mode (`'` + Tab): the
+    /// typed `'<name>` text is meta-mode's *own* input, never a
+    /// search body the user wants carried into the target mode.
+    fn apply_prefix_activate_only(&mut self, new_prefix: Option<char>) {
+        self.query = match new_prefix {
+            Some(c) => c.to_string(),
+            None => String::new(),
         };
         self.query_cursor = self.query.chars().count();
         self.query_touched = true;
@@ -4487,6 +4520,16 @@ struct PrefixPicker {
     /// the user can never navigate past
     /// the last entry.
     selected: usize,
+    /// `true` when this picker was opened by the meta-prefix mode
+    /// (`'` + Tab, ambiguous match) rather than by `PickPrefix`
+    /// (F1). Read by `handle_prefix_picker_key`'s `Enter` arm to
+    /// decide whether committing should preserve the query body
+    /// (`App::apply_prefix`, the F1 behavior) or discard it and
+    /// activate just the bare prefix character
+    /// (`App::apply_prefix_activate_only`, the meta-mode behavior
+    /// — the typed `'<name>` text was never a body the user wanted
+    /// to search with).
+    activate_only: bool,
 }
 
 /// One row in the prefix picker. The
@@ -4502,6 +4545,14 @@ struct PrefixOption {
     /// the literal prefix char the
     /// user would type.
     prefix: Option<char>,
+    /// Canonical lowercase identifier for this mode, matching
+    /// `ModeKind::display_name()` exactly (e.g. `"jira"`, `"ag"`,
+    /// `"history"`). Used by the meta-prefix mode
+    /// (`PrefixPicker::new_filtered`) to match a user-typed partial
+    /// name against a mode — `label` can't be used for this since
+    /// it isn't reliably lowercase/single-word (e.g. `"LLM
+    /// command"`, `"ag search"`).
+    name: &'static str,
     /// Short human-readable label
     /// for the row, e.g.
     /// "Output", "LLM command",
@@ -4591,94 +4642,120 @@ impl PrefixPicker {
     /// (or the "no prefix" row if
     /// the leading char isn't one
     /// of the configured prefixes).
-    fn new(prefixes: &QueryPrefixes, current_prefix: Option<char>) -> Self {
-        let options = vec![
+    /// Build the full, unfiltered option list from the user's
+    /// configured `QueryPrefixes`, in `QueryPrefixes`
+    /// field-declaration order with a "no prefix" entry at the top.
+    /// Shared by `new` (F1, unfiltered) and `new_filtered`
+    /// (meta-prefix mode, name-filtered).
+    fn build_options(prefixes: &QueryPrefixes) -> Vec<PrefixOption> {
+        vec![
             PrefixOption {
                 prefix: None,
+                name: "history",
                 label: "History",
                 description: "search shell history (no prefix)",
             },
             PrefixOption {
                 prefix: Some(prefixes.output),
+                name: "output",
                 label: "Output",
                 description: "search captured command output",
             },
             PrefixOption {
                 prefix: Some(prefixes.llm),
+                name: "llm",
                 label: "LLM command",
                 description: "ask the LLM to generate a shell command",
             },
             PrefixOption {
                 prefix: Some(prefixes.question),
+                name: "question",
                 label: "Question",
                 description: "ask the LLM a short factual question",
             },
             PrefixOption {
                 prefix: Some(prefixes.notes),
+                name: "notes",
                 label: "Notes",
                 description: "search the note_search SQLite database",
             },
             PrefixOption {
                 prefix: Some(prefixes.todo),
+                name: "todo",
                 label: "Todos",
                 description: "list open markdown todo items",
             },
             PrefixOption {
                 prefix: Some(prefixes.directories),
+                name: "directories",
                 label: "Directories",
                 description: "list every directory in the global history",
             },
             PrefixOption {
                 prefix: Some(prefixes.panes),
+                name: "panes",
                 label: "Panes",
                 description: "list every pane across tmux / herdr sessions",
             },
             PrefixOption {
                 prefix: Some(prefixes.jira),
+                name: "jira",
                 label: "JIRA",
                 description: "search JIRA issues via the REST API",
             },
             PrefixOption {
                 prefix: Some(prefixes.files),
+                name: "files",
                 label: "Files",
                 description: "list every file under the current directory",
             },
             PrefixOption {
                 prefix: Some(prefixes.tags),
+                name: "tags",
                 label: "Tags",
                 description: "list every symbol in the local ctags `tags` file",
             },
             PrefixOption {
                 prefix: Some(prefixes.codegraph),
+                name: "codegraph",
                 label: "CodeGraph",
                 description: "search symbols in the local .codegraph index (callers/callees)",
             },
             PrefixOption {
                 prefix: Some(prefixes.ag),
+                name: "ag",
                 label: "ag search",
                 description: "search file contents with `ag` (The Silver Searcher)",
             },
             PrefixOption {
                 prefix: Some(prefixes.segments),
+                name: "segments",
                 label: "Segments",
                 description: "search note segments (header-anchored sections) individually",
             },
             PrefixOption {
                 prefix: Some(prefixes.similar),
+                name: "similar",
                 label: "Similar",
                 description: "rank note segments by similarity to a phrase (embedding search)",
             },
             PrefixOption {
                 prefix: Some(prefixes.paperless),
+                name: "paperless",
                 label: "Paperless",
                 description: "search documents on a Paperless-ngx backend by title/tag/author",
             },
             PrefixOption {
                 prefix: Some(prefixes.browser),
+                name: "browser",
                 label: "Browser",
                 description: "search browser bookmarks + history (Chrome, Firefox, Safari); Enter opens the URL",
             },
-        ];
+        ]
+    }
+
+    fn new(prefixes: &QueryPrefixes, current_prefix: Option<char>) -> Self {
+        let options = Self::build_options(prefixes);
         // Pre-select the row
         // matching the current
         // prefix. If the current
@@ -4693,7 +4770,24 @@ impl PrefixPicker {
         let selected = current_prefix
             .and_then(|c| options.iter().position(|o| o.prefix == Some(c)))
             .unwrap_or(0);
-        PrefixPicker { options, selected }
+        PrefixPicker { options, selected, activate_only: false }
+    }
+
+    /// Build a picker pre-filtered to entries whose `name` starts
+    /// with `name_filter` (case-insensitive) — the meta-prefix
+    /// mode's ambiguous-match case. An empty `name_filter` (the
+    /// bare `'` + Tab case) matches every entry. `selected` always
+    /// starts at 0 (there's no "current mode" concept mid-typing a
+    /// meta-prefix name). `activate_only` is set so
+    /// `handle_prefix_picker_key`'s `Enter` arm discards the typed
+    /// `'<name>` body instead of preserving it.
+    fn new_filtered(prefixes: &QueryPrefixes, name_filter: &str) -> Self {
+        let filter = name_filter.to_ascii_lowercase();
+        let options: Vec<PrefixOption> = Self::build_options(prefixes)
+            .into_iter()
+            .filter(|o| filter.is_empty() || o.name.starts_with(filter.as_str()))
+            .collect();
+        PrefixPicker { options, selected: 0, activate_only: true }
     }
 
     /// Highlighted entry, or `None` if the
@@ -8992,6 +9086,46 @@ impl App {
         self.refresh();
         if with_prefix.ends_with(' ') {
             self.set_status_message(format!("expanded {} `{}`", what, with_prefix.trim_end()));
+        }
+    }
+
+    /// Tab-completion for the meta-prefix mode: expand a partial
+    /// mode name typed after `'` into that mode's real prefix
+    /// character, discarding the typed `'<name>` text entirely (the
+    /// meta-prefix text is never a search body — see
+    /// `App::apply_prefix_activate_only`).
+    ///
+    /// Unlike `jira_field_complete_at_cursor` /
+    /// `paperless_tab_complete_at_cursor`, there's no word-boundary
+    /// walk: the meta-prefix query has no internal delimiters, so
+    /// the "word" is simply everything between the prefix char and
+    /// the cursor.
+    fn meta_tab_complete_at_cursor(&mut self) {
+        if !self.is_meta_query() {
+            return;
+        }
+        let prefix_len: usize = 1;
+        if self.query_cursor < prefix_len {
+            return;
+        }
+        let prefix_byte = char_to_byte_index(&self.query, prefix_len);
+        let cursor_byte = char_to_byte_index(&self.query, self.query_cursor);
+        let word = self.query[prefix_byte..cursor_byte].to_string();
+        let picker = PrefixPicker::new_filtered(&self.query_prefixes, &word);
+        match picker.options.len() {
+            0 => {
+                self.set_status_message(format!(
+                    "meta-prefix: no mode name starts with `{}`",
+                    word
+                ));
+            }
+            1 => {
+                let target = picker.options[0].prefix;
+                self.apply_prefix_activate_only(target);
+            }
+            _ => {
+                self.prefix_picker = Some(picker);
+            }
         }
     }
 
@@ -14850,10 +14984,12 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // names inside the notes
             // (`@`), todos (`!`),
             // segments (`:`), and
-            // similar (`"`) modes; and
-            // tag / correspondent names
-            // inside paperless (`<`)
-            // mode. The add-entry dialog
+            // similar (`"`) modes; tag /
+            // correspondent names inside
+            // paperless (`<`) mode; and
+            // mode-name expansion inside
+            // the meta-prefix mode
+            // (`'`). The add-entry dialog
             // handles its own Tab as
             // field-next INSIDE the
             // dialog, so the paths never
@@ -14868,8 +15004,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 app.notes_tab_complete_at_cursor();
             } else if app.is_paperless_query() {
                 app.paperless_tab_complete_at_cursor();
+            } else if app.is_meta_query() {
+                app.meta_tab_complete_at_cursor();
             }
-            // Outside all five
+            // Outside all six
             // modes, Tab is a
             // no-op.
             false
@@ -15477,8 +15615,13 @@ fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Enter => {
             if let Some(opt) = picker.selected().copied() {
+                let activate_only = picker.activate_only;
                 app.close_prefix_picker();
-                app.apply_prefix(opt.prefix);
+                if activate_only {
+                    app.apply_prefix_activate_only(opt.prefix);
+                } else {
+                    app.apply_prefix(opt.prefix);
+                }
             } else {
                 app.close_prefix_picker();
             }

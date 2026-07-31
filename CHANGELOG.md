@@ -20,6 +20,16 @@ All notable changes to this project will be documented in this file.
   a `*`-mode (panes) concern. The in-TUI "add session" (`F5`) / "add host"
   (`F6`) dialogs now write new entries to these dedicated files, creating
   them if they don't exist yet.
+- New `'` meta-prefix mode: type `'` then a partial mode name (e.g. `'jir`)
+  and press Tab to jump straight into that mode by name instead of
+  memorizing its single-character prefix. A unique match activates
+  immediately (query becomes just the target prefix, e.g. `-`); an
+  ambiguous match, or bare `'` + Tab, opens the same picker `F1`
+  (`PickPrefix`) uses, pre-filtered to the matching names. Configurable via
+  `prefix.meta=<char>` (default `'`). Also fixes a pre-existing bug where
+  `apply_prefix` (the `F1` picker's commit path) didn't recognize the
+  paperless (`<`) or browser (`^`) prefixes as strippable when switching
+  modes.
 
 ### Security
 

@@ -20194,6 +20194,121 @@ fn handle_prefix_picker_key_enter_applies_prefix() {
     assert_eq!(app.query, "-hello", "should apply JIRA prefix (-)");
 }
 
+/// Meta-prefix mode (`'`): a unique mode-name match activates
+/// immediately, replacing the whole query with just the target
+/// mode's prefix character (no picker opens).
+#[test]
+fn meta_tab_complete_unique_match_activates_directly() {
+    let mut app = global_test_app(&[("hello", 1)]);
+    app.query = "'jir".to_string();
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    assert_eq!(
+        app.query, "-",
+        "unique match should activate JIRA's prefix, discarding typed body"
+    );
+    assert!(app.prefix_picker.is_none(), "unique match should not open a picker");
+}
+
+/// An ambiguous partial name ("s" matches both "segments" and
+/// "similar") opens the picker pre-filtered to just those matches,
+/// marked `activate_only` so committing discards the body.
+#[test]
+fn meta_tab_complete_ambiguous_match_opens_filtered_picker() {
+    let mut app = global_test_app(&[("hello", 1)]);
+    app.query = "'s".to_string();
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    let picker = app
+        .prefix_picker
+        .as_ref()
+        .expect("ambiguous match should open a picker");
+    assert_eq!(picker.options.len(), 2, "expected exactly Segments and Similar");
+    assert!(picker.options.iter().all(|o| o.name == "segments" || o.name == "similar"));
+    assert!(picker.activate_only, "meta-opened picker must be activate_only");
+    assert_eq!(app.query, "'s", "query should be untouched until Enter commits");
+}
+
+/// The bare `'` + Tab case (nothing typed yet) opens the picker
+/// with every mode, matching "the key `'` alone with tab should
+/// present all prefix keys" from the feature request.
+#[test]
+fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
+    let mut app = global_test_app(&[("hello", 1)]);
+    app.query = "'".to_string();
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    let picker = app
+        .prefix_picker
+        .as_ref()
+        .expect("bare ' + Tab should open a picker");
+    assert_eq!(picker.options.len(), 17, "bare ' + Tab should show every mode");
+}
+
+/// A partial name matching nothing sets a status message and does
+/// NOT open a picker or touch the query.
+#[test]
+fn meta_tab_complete_zero_match_sets_status_and_does_not_open_picker() {
+    let mut app = global_test_app(&[("hello", 1)]);
+    app.query = "'zzz".to_string();
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    assert!(app.prefix_picker.is_none(), "zero matches should not open a picker");
+    assert_eq!(app.query, "'zzz", "query should be left untouched on zero match");
+}
+
+/// Regression guard: the meta-opened (`activate_only`) picker
+/// discards the query body on commit, while the F1-opened picker
+/// (on the exact same starting query) preserves it — the two
+/// commit paths must stay genuinely different.
+#[test]
+fn meta_opened_picker_enter_discards_body_vs_f1_picker_preserves_it() {
+    let mut app = global_test_app(&[("hello", 1)]);
+    app.query = "'s".to_string();
+    app.query_cursor = app.query.chars().count();
+    dispatch_action(&mut app, Action::JiraFieldComplete);
+    {
+        let picker = app.prefix_picker.as_mut().unwrap();
+        picker.selected = 0; // Segments (first of the two filtered entries)
+    }
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_prefix_picker_key(&mut app, enter);
+    assert_eq!(app.query, ":", "meta-opened picker should discard the typed body");
+
+    let mut app2 = global_test_app(&[("hello", 1)]);
+    app2.query = "'s".to_string();
+    app2.open_prefix_picker();
+    {
+        let picker = app2.prefix_picker.as_mut().unwrap();
+        assert!(!picker.activate_only, "F1 picker must not be activate_only");
+        picker.selected = 13; // Segments (index in the full, unfiltered list)
+    }
+    let enter2 = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_prefix_picker_key(&mut app2, enter2);
+    assert_eq!(
+        app2.query, ":s",
+        "F1 picker should preserve the body (only strip the old ' prefix)"
+    );
+}
+
+/// Bonus coverage for the `apply_prefix` `has_prefix` fix bundled
+/// with this feature: paperless (`<`) and browser (`^`) prefixes
+/// were previously NOT recognized as strippable, so switching mode
+/// via the F1 picker while in either of those modes glued the old
+/// prefix character into the new mode's body instead of stripping
+/// it.
+#[test]
+fn apply_prefix_strips_paperless_and_browser_prefix_when_switching() {
+    let mut app = global_test_app(&[("hello", 1)]);
+    app.query = "<doc".to_string();
+    app.apply_prefix(Some('@'));
+    assert_eq!(app.query, "@doc", "paperless prefix should be recognized and stripped");
+
+    app.query = "^bookmark".to_string();
+    app.apply_prefix(Some('@'));
+    assert_eq!(app.query, "@bookmark", "browser prefix should be recognized and stripped");
+}
+
 #[test]
 fn handle_prefix_picker_key_cancel_closes_without_change() {
     let mut app = global_test_app(&[("hello", 1)]);

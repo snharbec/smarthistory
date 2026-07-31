@@ -355,6 +355,7 @@ The first character the user types to enter a mode. The default keymap covers ev
 | `prefix.similar` | similar/phrase search | `"` | same `segments` table, ranked by embedding similarity to the typed phrase (requires a reachable Ollama instance) |
 | `prefix.paperless` | paperless document search | `<` | search a Paperless-ngx backend by title / tag / correspondent |
 | `prefix.browser` | browser bookmarks + history | `^` | merged Chrome / Firefox / Safari bookmarks + history, tagged `bookmark` / `history` |
+| `prefix.meta` | meta-prefix (mode picker) | `'` | not a search mode itself — type a partial mode name then Tab to expand/activate; see below |
 
 ```ini
 # Move JIRA off `-` (a frequently mistyped key) to backtick:
@@ -363,6 +364,16 @@ prefix.jira=`
 # Move the rarely-used question mode to a less crowded slot:
 prefix.question=?
 ```
+
+**Meta-prefix mode (`'`)**: type `'` then a partial mode name (e.g. `'jir`)
+and press `Tab`. A unique name match activates that mode immediately — the
+query becomes just the target mode's real prefix character (e.g. `-`),
+discarding the typed `'jir` text entirely. An ambiguous match (e.g. `'s`,
+matching both `segments` and `similar`) opens the same picker overlay as
+`PickPrefix` (`F1`), pre-filtered to just the matching names; the bare `'` +
+`Tab` (nothing typed yet) opens that same picker showing every mode. Mode
+names match `smarthistory tui`'s `--prefix`/config naming (`jira`, `notes`,
+`paperless`, `browser`, …), not the picker's display labels.
 
 See **[docs/modes/](modes/README.md)** for a full per-mode reference.
 
@@ -769,6 +780,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `prefix.similar` | char | `"` | [Query prefixes](#query-prefixes) |
 | `prefix.paperless` | char | `<` | [Query prefixes](#query-prefixes) |
 | `prefix.browser` | char | `^` | [Query prefixes](#query-prefixes) |
+| `prefix.meta` | char | `'` | [Query prefixes](#query-prefixes) |
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |
 | `homemap` | path prefix list | — | [Multiplexer integration](#multiplexer-integration) |

@@ -521,7 +521,7 @@ Download **every** JIRA issue matching the current query, not just the selected 
 
 Tab-completion for JQL field names inside the `-` mode. When the user has typed a token that matches the prefix of one or more JIRA field names (e.g. `lab<TAB>`), the token is expanded to the full field name (e.g. `labels=`). Multiple matches open the completion menu; the user picks from the candidates. Also handles `@`-prefixed alias / fragment completion (`@m<TAB>` → `@me`).
 
-Cross-mode: in `@` (Notes), `!` (Todo), `:` (Segments), and `"` (Similar) modes, the same key dispatches to tag / link completion. See [`docs/modes/jira.md`](modes/jira.md) for the full table.
+Cross-mode: in `@` (Notes), `!` (Todo), `:` (Segments), and `"` (Similar) modes, the same key dispatches to tag / link completion; in `<` (Paperless) mode, to tag / correspondent completion; in `'` (meta-prefix) mode, to mode-NAME completion — a unique match activates that mode directly (discarding the typed `'<name>` text), an ambiguous match (or bare `'`) opens the `PickPrefix` picker pre-filtered to the matching names. See [`docs/modes/jira.md`](modes/jira.md) and [`docs/modes/README.md#meta-prefix-mode--pick-a-mode-by-name`](modes/README.md#meta-prefix-mode--pick-a-mode-by-name) for the full tables.
 
 ### `SmartOpen`
 

@@ -57,6 +57,27 @@ The first character of the query decides the mode. Examples:
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 
+## Meta-prefix mode (`'`): pick a mode by name
+
+Remembering 17 single-character prefixes is hard. Type `'` (configurable via
+`prefix.meta=<char>`) then a partial mode name and press `Tab`:
+
+- **Unique match** (e.g. `'jir` → only "jira" matches): activates immediately
+  — the query becomes just that mode's real prefix character (`-`), and the
+  typed `'jir` text is discarded (it's never a search body).
+- **Ambiguous match** (e.g. `'s` → "segments" and "similar" both match):
+  opens the same picker overlay `F1` (`PickPrefix`) uses, pre-filtered to
+  just the matching names — arrow keys navigate, `Enter` activates.
+- **Bare `'` + Tab** (nothing typed yet): opens that same picker showing
+  every mode.
+- **No match**: a status message says so; nothing opens.
+
+This is NOT itself a `ModeKind`/search mode — it never produces a result
+list of its own, it only ever expands into activating a real mode. Names
+match the mode's canonical identifier (`jira`, `notes`, `paperless`,
+`browser`, …), the same names used in `prefix.<name>=<char>` config keys —
+not the picker's display labels (e.g. type `llm`, not "LLM command").
+
 ## Tokens shared across modes
 
 Some modes share a token language for narrowing the search. The implementations live in [`src/highlight.rs`](../src/highlight.rs) and [`src/jira.rs`](../src/jira.rs).
