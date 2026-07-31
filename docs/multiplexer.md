@@ -90,7 +90,7 @@ The `*` view lists every pane across every session / workspace as a tree (worksp
 
 ### `# hosts` block (inside `*` mode)
 
-A `# hosts` block at the bottom of the panes view. Each `host.<id>` from the config file (merged with `~/.ssh/config`) becomes a row; selecting a row either focuses an existing workspace already running that host's `ssh` connection, or creates a new workspace and bootstraps the `ssh` body into its first pane.
+A `# hosts` block at the bottom of the panes view. Each `host.<id>` from `~/.config/smarthistory/hosts` (or the main config file — see [`docs/configuration.md#hostid`](configuration.md#hostid)), merged with `~/.ssh/config`, becomes a row; selecting a row either focuses an existing workspace already running that host's `ssh` connection, or creates a new workspace and bootstraps the `ssh` body into its first pane.
 
 - **tmux**: matches a pane whose `#{pane_current_command}` starts with `ssh` and contains the host's `user@host`. If found, focuses that pane. Otherwise stages `tmux new-session -d -s <display-name>; tmux switch-client -t <display-name>; tmux send-keys <ssh-argv> Enter`.
 - **herdr**: matches a workspace whose `label` equals the host's display name. If found, focuses that workspace. Otherwise stages `herdr workspace create --label <display-name>` and `herdr pane send-text` to send the `ssh` body into the new workspace's first pane.

@@ -28,7 +28,7 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
 - **Output capture** for both tmux (`pipe-pane` log) and herdr (`herdr pane read`): captured output is searchable via the `+` prefix and viewable via `Ctrl+L`.
 - **Note/todo integration** with [note_search](https://github.com/snharbec/note_search): search notes (`@`), list open todos (`!`), and create new entries (`@new <text>` / `!@new <text>`) directly from the TUI.
-- **Named sessions** (config): define sessions directly in `~/.config/smarthistory/config` via `session.<id> = "name"` + `session.<id>.dir = "~/path"`. They appear in the panes (`*`) view under a `# Directories` header; selecting one creates/switches a workspace.
+- **Named sessions** (config): define sessions in `~/.config/smarthistory/sessions` (or the main config file) via `session.<id> = "name"` + `session.<id>.dir = "~/path"`. They appear in the panes (`*`) view under a `# Directories` header; selecting one creates/switches a workspace.
 - **Single Rust binary, no runtime dependencies.** No `fzf`, no `uuidgen`, no `/dev/urandom` access.
 
 ## Installation
@@ -212,10 +212,10 @@ multiplexer=herdr
 
 ### Named hosts (config + `~/.ssh/config` merge)
 
-Hosts are configured in `~/.config/smarthistory/config` with `host.<id>` keys. The first field (`host.<id>.host`) is the SSH config `Host` alias (also used as the connection target when no `.hostname` is set). Every other field is optional and inherits from the matching `~/.ssh/config` block when unset.
+Hosts are configured with `host.<id>` keys in `~/.config/smarthistory/hosts` (a dedicated file, read only by the TUI) — or in the main `~/.config/smarthistory/config` file, or split across both. The first field (`host.<id>.host`) is the SSH config `Host` alias (also used as the connection target when no `.hostname` is set). Every other field is optional and inherits from the matching `~/.ssh/config` block when unset.
 
 ```ini
-# ~/.config/smarthistory/config
+# ~/.config/smarthistory/hosts
 host.1 = "Proxmox"
 host.1.host = "pve-1"
 host.1.user = "root"

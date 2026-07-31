@@ -6,7 +6,9 @@ Every value `smarthistory` reads at startup, with the config-file key, default, 
 
 | Location | What |
 | --- | --- |
-| `~/.config/smarthistory/config` | The user config file (INI-style `key=value` lines; `#` starts a comment; `~` is expanded in path values). Read once at startup by `Config::load`. Missing file → built-in defaults. |
+| `~/.config/smarthistory/config` | The user config file (INI-style `key=value` lines; `#` starts a comment; `~` is expanded in path values). Read at startup by `Config::load`. Missing file → built-in defaults. |
+| `~/.config/smarthistory/hosts` | Optional: `host.<id>.*` entries, same syntax as in the main config file. Only read by the TUI (`Config::load_tui`) — see [`host.<id>`](#hostid). |
+| `~/.config/smarthistory/sessions` | Optional: `session.<id>.*` entries, same syntax as in the main config file. Only read by the TUI (`Config::load_tui`) — see [`session.<id>`](#sessionid). |
 | `~/.local/cache/smarthistory/` | Runtime cache: `query_history.json` (per-mode recall), `global_query_history.json` (cross-mode recall, `Ctrl+Shift+P`/`Ctrl+Shift+N`), `widget-debug.log` (TUI debug trace), `last_session.json` (the most recent session, for `smarthistory tui` resume). Not hand-edited. |
 | `~/.cache/tmux-history/` | Per-pane tmux output logs (set via `tmuxpaneoutputdir`). |
 | `~/.config/smarthistory/themes/` | Optional user theme directory (TOML files matching the built-in theme shape). |
@@ -15,7 +17,8 @@ Every value `smarthistory` reads at startup, with the config-file key, default, 
 
 1. Built-in defaults (`Config::default`).
 2. `~/.config/smarthistory/config` — each `key=value` line is parsed in order; later values override earlier ones.
-3. Environment variables (noted per-item below; they always win over the config file when set).
+3. **TUI only**: `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions`, folded in as if they were appended to the main config file (`Config::load_tui`; see [`session.<id>`](#sessionid) / [`host.<id>`](#hostid)). Every other CLI subcommand uses the plain `Config::load` and never reads these two files.
+4. Environment variables (noted per-item below; they always win over the config file when set).
 
 **Validation**
 
@@ -434,6 +437,7 @@ homemap=/Volumes/Backup
 | --- | --- |
 | **Type** | sub-keyed group (`<id>` is a non-negative integer) |
 | **Default** | — |
+| **File** | `~/.config/smarthistory/sessions` (or the main config file — see below) |
 | **Tilde expansion** | Yes (on `dir`) |
 | **Env override** | — |
 
@@ -447,6 +451,7 @@ A named session row in the `*` (panes) view. The `<id>` is the display order (1-
 | `session.<id>.startup_command` | accepted, not yet used | Reserved for future use |
 
 ```ini
+# ~/.config/smarthistory/sessions
 session.1="monorepo"
 session.1.dir=~/work/monorepo
 session.1.exec=claude
@@ -455,16 +460,19 @@ session.2="notes"
 session.2.dir=~/Documents/notes
 ```
 
+**File location**: `session.<id>` entries can live in their own dedicated `~/.config/smarthistory/sessions` file, in the main `~/.config/smarthistory/config` file, or split across both — they're folded together as if it were one file (later-defined `<id>` sub-keys for the same entry win, same as within a single file). This file (like `hosts`, below) is read **only by the TUI** (`smarthistory tui` / `smarthistory check`), not by the plain CLI subcommands (`search`, `add`, `capture-*`, …), since session/host data is exclusively a `*`-mode (panes) concern and those commands run on every shell prompt — keeping them off that hot path avoids two needless file reads per command. The in-TUI "add session" dialog (`F5` by default) always writes new entries to `~/.config/smarthistory/sessions`, creating the file (and the `~/.config/smarthistory/` directory) if it doesn't exist yet.
+
 ### `host.<id>`
 
 | | |
 | --- | --- |
 | **Type** | sub-keyed group (`<id>` is a non-negative integer) |
 | **Default** | — (auto-appended from `~/.ssh/config`) |
+| **File** | `~/.config/smarthistory/hosts` (or the main config file — see below) |
 | **Tilde expansion** | Yes (on `dir`, `identity`) |
 | **Env override** | — |
 
-An SSH host row in the `# hosts` block of the `*` (panes) view. The `<id>` is the display order; missing `<id>` sorts after the existing max. Hosts in `~/.ssh/config` are auto-appended (one per `Host` block) when the config file is loaded, so users only need explicit `host.<id>` entries for the fields `~/.ssh/config` doesn't already cover, or to override what the SSH config says.
+An SSH host row in the `# hosts` block of the `*` (panes) view. The `<id>` is the display order; missing `<id>` sorts after the existing max. Hosts in `~/.ssh/config` are auto-appended (one per `Host` block) when the config is loaded, so users only need explicit `host.<id>` entries for the fields `~/.ssh/config` doesn't already cover, or to override what the SSH config says.
 
 | Sub-key | Meaning |
 | --- | --- |
@@ -478,6 +486,7 @@ An SSH host row in the `# hosts` block of the `*` (panes) view. The `<id>` is th
 | `host.<id>.exec` | The command to run after `cd` (e.g. `tmux new-session -A -s main`) |
 
 ```ini
+# ~/.config/smarthistory/hosts
 host.1="prod-db"
 host.1.host=db1
 host.1.hostname=db1.internal.example.com
@@ -487,6 +496,8 @@ host.1.identity=~/.ssh/id_ed25519_prod
 host.1.dir=/srv/observability
 host.1.exec=tmux new-session -A -s observability
 ```
+
+**File location**: same split-or-combined rule as `session.<id>` above — `host.<id>` entries can live in `~/.config/smarthistory/hosts`, in the main config file, or both. The in-TUI "add host" dialog (`F6` by default) always writes new entries to `~/.config/smarthistory/hosts`.
 
 ---
 

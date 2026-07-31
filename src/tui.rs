@@ -12389,17 +12389,27 @@ impl App {
             return;
         }
         // Sanity-check the
-        // config file: it
+        // target file (`hosts`
+        // or `sessions`, in the
+        // same directory as the
+        // main config file): it
         // must be locatable,
         // otherwise we can't
         // write the new entry.
-        // The lookup is the
-        // same one
-        // `Config::load` uses.
-        if crate::config_path().is_none() {
+        // Both resolve to `None`
+        // under the exact same
+        // condition as
+        // `crate::config_path()`
+        // (HOME unset).
+        let target_locatable = match kind {
+            AddEntryKind::Session => crate::sessions_path(),
+            AddEntryKind::Host => crate::hosts_path(),
+        }
+        .is_some();
+        if !target_locatable {
             self.set_status_message(
-                "no config file found — set $XDG_CONFIG_HOME/smarthistory/config \
-                 or ~/.config/smarthistory/config"
+                "no config directory found — set $HOME so \
+                 ~/.config/smarthistory/ can be resolved"
                     .to_string(),
             );
             return;
@@ -12467,9 +12477,11 @@ impl App {
 
     /// Write the dialog's
     /// contents as a new
-    /// `session.<id>` or
-    /// `host.<id>` line in
-    /// `~/.config/smarthistory/config`.
+    /// `session.<id>` line in
+    /// `~/.config/smarthistory/sessions`
+    /// or a new `host.<id>`
+    /// line in
+    /// `~/.config/smarthistory/hosts`.
     /// On success, reloads
     /// the config and refreshes
     /// the panes view so the
@@ -12494,7 +12506,14 @@ impl App {
                 .ok_or_else(|| "no dialog open".to_string())?;
             (d.kind, d.fields.clone())
         };
-        let config_path = crate::config_path().ok_or_else(|| "no config file path".to_string())?;
+        // Sessions and hosts each live in their own dedicated file
+        // (not the main config file) — see `crate::sessions_path` /
+        // `crate::hosts_path`.
+        let target_path = match kind {
+            AddEntryKind::Session => crate::sessions_path(),
+            AddEntryKind::Host => crate::hosts_path(),
+        }
+        .ok_or_else(|| "no config directory path (HOME is not set)".to_string())?;
         // Build the
         // config-file lines.
         // Each non-empty
@@ -12523,11 +12542,20 @@ impl App {
             return Err("`Name` is required".to_string());
         }
         // Read the existing
-        // config so we can
-        // find the next
-        // available id.
-        let contents = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("failed to read {}: {}", config_path.display(), e,))?;
+        // sessions/hosts file so
+        // we can find the next
+        // available id. A
+        // missing file (the
+        // user's first session/
+        // host entry) is treated
+        // as empty content —
+        // `next_config_index`
+        // returns 1 for that.
+        let contents = match std::fs::read_to_string(&target_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("failed to read {}: {}", target_path.display(), e)),
+        };
         let prefix = match kind {
             AddEntryKind::Session => "session",
             AddEntryKind::Host => "host",
@@ -12542,8 +12570,7 @@ impl App {
         // required). Other
         // fields are skipped
         // when empty so the
-        // config file stays
-        // terse.
+        // file stays terse.
         let mut lines: Vec<String> = Vec::new();
         for field in &fields {
             let value = field.value.trim();
@@ -12559,24 +12586,40 @@ impl App {
             lines.push(line);
         }
         // Append to the
-        // config file. Use
-        // a trailing newline
+        // file. Use a
+        // trailing newline
         // if the file
         // doesn't end in
-        // one, and a blank
-        // line separator
-        // between existing
-        // content and the
-        // new block for
-        // readability.
+        // one (or is empty
+        // / newly created),
+        // and a blank line
+        // separator between
+        // existing content
+        // and the new block
+        // for readability.
         let mut new_contents = contents.clone();
-        if !new_contents.ends_with('\n') {
+        if !new_contents.is_empty() && !new_contents.ends_with('\n') {
             new_contents.push('\n');
         }
-        new_contents.push('\n');
+        if !new_contents.is_empty() {
+            new_contents.push('\n');
+        }
         for line in &lines {
             new_contents.push_str(line);
             new_contents.push('\n');
+        }
+        // Ensure the parent directory
+        // (`~/.config/smarthistory/`)
+        // exists — it already does in
+        // practice (the main config
+        // file lives there too), but a
+        // from-scratch install that has
+        // never written a config file
+        // yet would otherwise fail the
+        // write below with ENOENT.
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
         }
         // Atomic write:
         // write to a temp
@@ -12586,35 +12629,34 @@ impl App {
         // original. This
         // avoids leaving a
         // half-written
-        // config if the
+        // file if the
         // process is killed
         // mid-write.
-        let tmp_path = config_path.with_extension("tmp");
+        let tmp_path = target_path.with_extension("tmp");
         std::fs::write(&tmp_path, new_contents.as_bytes())
             .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e,))?;
-        std::fs::rename(&tmp_path, &config_path).map_err(|e| {
+        std::fs::rename(&tmp_path, &target_path).map_err(|e| {
             format!(
                 "failed to rename {} to {}: {}",
                 tmp_path.display(),
-                config_path.display(),
+                target_path.display(),
                 e,
             )
         })?;
         // Reload the config
         // and update the
         // in-memory session /
-        // host lists. The
-        // simplest path is
-        // to re-run
-        // `Config::load()` —
-        // the file is read
-        // once at startup,
-        // so this is the
-        // first time we
-        // refresh after a
-        // write. The reload
-        // also re-merges the
-        // SSH config for
+        // host lists. Uses
+        // `Config::load_tui`
+        // (not the plain
+        // `load()`) so both
+        // the `hosts` and
+        // `sessions` files are
+        // folded in, not just
+        // whichever one we
+        // just wrote to. The
+        // reload also re-merges
+        // the SSH config for
         // host entries, so
         // a user adding a
         // new host whose
@@ -12627,7 +12669,7 @@ impl App {
         // (Hostname, User,
         // etc.) on the very
         // next refresh.
-        let new_cfg = crate::Config::load();
+        let new_cfg = crate::Config::load_tui();
         self.sessions = new_cfg.sessions();
         self.hosts = new_cfg.hosts();
         self.host_defs = new_cfg.host_defs();
@@ -13161,7 +13203,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
     use crate::tui::mode::{CheckStatus, ModeKind};
 
     let conn = crate::init_db()?;
-    let app_cfg = Config::load();
+    let app_cfg = Config::load_tui();
     let bindings = app_cfg.key_bindings().clone();
     let query_prefixes = app_cfg.query_prefixes().clone();
     let notes_database = app_cfg.notes_database().map(|p| p.to_path_buf());
@@ -13327,7 +13369,7 @@ pub fn run_tui_to_stdout(
             initial_mode
         )
     })?;
-    let app_cfg = Config::load();
+    let app_cfg = Config::load_tui();
     let bindings = app_cfg.key_bindings().clone();
     let query_prefixes = app_cfg.query_prefixes().clone();
     let notes_database = app_cfg.notes_database().map(|p| p.to_path_buf());

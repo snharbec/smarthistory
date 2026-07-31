@@ -636,6 +636,40 @@ pub fn config_path() -> Option<std::path::PathBuf> {
     )
 }
 
+/// Resolve the path to the optional `~/.config/smarthistory/hosts`
+/// file — `host.<id>.*` entries can live here instead of (or in
+/// addition to) the main config file. Only read by
+/// [`Config::load_tui`], not the plain [`Config::load`] every CLI
+/// subcommand uses: host/session data is exclusively a TUI (`*`
+/// panes mode) concern, so keeping it out of `load()` avoids two
+/// extra file-existence checks on the hot path the shell hook fires
+/// on every prompt (`smarthistory add` / `search` / `capture-*`).
+/// Returns `None` only when `$HOME` is unset, same as
+/// [`config_path`].
+pub fn hosts_path() -> Option<std::path::PathBuf> {
+    let home = env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("smarthistory")
+            .join("hosts"),
+    )
+}
+
+/// Resolve the path to the optional `~/.config/smarthistory/sessions`
+/// file — `session.<id>.*` entries can live here instead of (or in
+/// addition to) the main config file. Same "TUI-only, not the CLI
+/// hot path" rationale as [`hosts_path`].
+pub fn sessions_path() -> Option<std::path::PathBuf> {
+    let home = env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("smarthistory")
+            .join("sessions"),
+    )
+}
+
 /// Expand a leading `~` or `~/<rest>` in a path to the user's home
 /// directory. Other occurrences of `~` are left untouched.
 fn expand_tilde(path: &str) -> std::path::PathBuf {
@@ -1672,17 +1706,56 @@ impl Config {
         {
             cfg.parse(&contents);
         }
-        // Environment variables override config file values.
+        cfg.apply_env_overrides();
+        cfg
+    }
+
+    /// Like [`Config::load`], but additionally folds
+    /// `~/.config/smarthistory/hosts` and `~/.config/smarthistory/
+    /// sessions` in as if their content were appended to the main
+    /// config file — see [`Config::parse_multi`] for why this has
+    /// to be one combined parse rather than three separate calls to
+    /// `parse()`. Either file may be absent (a missing file
+    /// contributes an empty string, same as the main config file
+    /// being absent).
+    ///
+    /// Only the TUI startup path (`run_tui_to_stdout` /
+    /// `run_tui_check`) calls this — every other CLI subcommand
+    /// uses the plain `load()`, since `session.<id>` / `host.<id>`
+    /// data is exclusively a `*`-mode (panes) concern and those
+    /// commands have no reason to pay for two extra file reads on
+    /// every shell prompt.
+    pub fn load_tui() -> Self {
+        let mut cfg = Config::default();
+        let main_contents = config_path()
+            .and_then(|p| std::fs::read_to_string(&p).ok())
+            .unwrap_or_default();
+        let hosts_contents = hosts_path()
+            .and_then(|p| std::fs::read_to_string(&p).ok())
+            .unwrap_or_default();
+        let sessions_contents = sessions_path()
+            .and_then(|p| std::fs::read_to_string(&p).ok())
+            .unwrap_or_default();
+        cfg.parse_multi(&[&main_contents, &hosts_contents, &sessions_contents]);
+        cfg.apply_env_overrides();
+        cfg
+    }
+
+    /// Environment-variable overrides shared by [`Config::load`]
+    /// and [`Config::load_tui`]. Env vars always win over the
+    /// config file when set (same precedence as `NOTE_SEARCH_*` /
+    /// `JIRA_*` elsewhere in this app).
+    fn apply_env_overrides(&mut self) {
         if let Ok(db) = env::var("NOTE_SEARCH_DATABASE") {
             let path = std::path::PathBuf::from(&db);
             if path.exists() && path.is_file() {
-                cfg.notes_database = Some(path);
+                self.notes_database = Some(path);
             }
         }
         if let Ok(dir) = env::var("NOTE_SEARCH_DIR") {
             let path = std::path::PathBuf::from(&dir);
             if path.exists() && path.is_dir() {
-                cfg.notes_dir = Some(path);
+                self.notes_dir = Some(path);
             }
         }
         // `SMARTHISTORY_MULTIPLEXER`
@@ -1701,7 +1774,7 @@ impl Config {
         // directory switching.
         if let Ok(raw) = env::var("SMARTHISTORY_MULTIPLEXER") {
             match crate::multiplexer::MultiplexerKind::parse(&raw) {
-                Some(kind) => cfg.multiplexer = kind,
+                Some(kind) => self.multiplexer = kind,
                 None => eprintln!(
                     "smarthistory: ignoring invalid \
                      SMARTHISTORY_MULTIPLEXER={:?} \
@@ -1710,12 +1783,37 @@ impl Config {
                 ),
             }
         }
-        cfg
     }
 
     /// Parse INI-style lines into the config. Unknown keys are
-    /// ignored.
+    /// ignored. Thin wrapper around [`Config::parse_multi`] for the
+    /// common single-source case (the main config file, and every
+    /// existing test).
     fn parse(&mut self, contents: &str) {
+        self.parse_multi(&[contents]);
+    }
+
+    /// Parse INI-style lines from multiple sources into the config,
+    /// as if they were concatenated into one file — later sources
+    /// win for any key set more than once, matching the "later
+    /// line wins" rule that already applies within a single file.
+    /// Finalization (the `ollama.*` / `paperless.*` pairing
+    /// validation, the `~/.ssh/config` merge into `self.hosts`, and
+    /// applying the collected `key.*` entries) runs exactly ONCE,
+    /// after every source has been read — not per-source. This
+    /// matters concretely for the SSH-config merge: it both fills
+    /// in gaps on existing `host.<id>` entries AND auto-appends a
+    /// synthetic entry for any SSH `Host` block with no matching
+    /// explicit entry. Running it after only a partial host list
+    /// (e.g. before the `hosts` file has contributed its entries)
+    /// would auto-append a synthetic entry for an alias the `hosts`
+    /// file was ABOUT to define explicitly, producing a duplicate
+    /// row in the `*`-mode panes view.
+    ///
+    /// Used by [`Config::load_tui`] to fold `~/.config/smarthistory/
+    /// hosts` and `~/.config/smarthistory/sessions` into the main
+    /// config file's content as if they were one file.
+    fn parse_multi(&mut self, contents_list: &[&str]) {
         // Side map for `key.<action>=<spec>` entries. They are
         // collected on the fly here and applied to the binding
         // table once the whole file has been read so a typo early
@@ -1733,6 +1831,7 @@ impl Config {
         // above.
         let mut paperless_url = String::new();
         let mut paperless_token = String::new();
+        for contents in contents_list {
         for raw_line in contents.lines() {
             let line = raw_line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -2242,6 +2341,7 @@ impl Config {
                     }
                 }
             }
+        }
         }
         // The LLM block above collected zero or more ollama.*
         // entries. We finalize the LlmConfig here, after the
@@ -6499,5 +6599,99 @@ tmuxpaneoutputdir=~/custom-tmux
         assert!(cfg.theme_dark.is_none());
         assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Light).is_none());
         assert!(cfg.theme_for(crate::tui::theme::ColorScheme::Dark).is_none());
+    }
+
+    /// `session.<id>` entries defined in a SEPARATE source (the
+    /// `sessions` file, in production) must show up exactly like
+    /// entries defined inline in the main config file — this is
+    /// the whole point of `parse_multi` treating multiple sources
+    /// as if they were one concatenated file.
+    #[test]
+    fn parse_multi_merges_sessions_from_a_separate_source() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["duplicatefilter=off\n", "session.1 = \"Foo\"\nsession.1.dir = \"~/foo\"\n"]);
+        let sessions = cfg.sessions();
+        assert_eq!(sessions.len(), 1, "got: {:?}", sessions);
+        assert_eq!(sessions[0].command, "Foo");
+    }
+
+    /// Same as above, but for `host.<id>` entries and a `hosts`
+    /// file source.
+    ///
+    /// Doesn't assert an exact row count: `Config::parse` also
+    /// merges the machine's real `~/.ssh/config` into `self.hosts`
+    /// (auto-appending a synthetic entry per SSH `Host` block with
+    /// no matching `host.<id>`), so a dev machine with its own SSH
+    /// config produces extra rows here — that's real, correct
+    /// behavior, not something this test should fight. Assert only
+    /// that the entry from OUR source is present among whatever
+    /// else got merged in.
+    #[test]
+    fn parse_multi_merges_hosts_from_a_separate_source() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["", "host.1 = \"Proxmox\"\nhost.1.host = \"pve-1\"\n", ""]);
+        let hosts = cfg.hosts();
+        assert!(
+            hosts.iter().any(|r| r.command == "Proxmox"),
+            "got: {:?}",
+            hosts
+        );
+        assert!(
+            cfg.host_defs().iter().any(|h| h.host == "pve-1"),
+            "got: {:?}",
+            cfg.host_defs()
+        );
+    }
+
+    /// The three-source shape `load_tui` actually uses (main
+    /// config, hosts file, sessions file) merges all three kinds
+    /// of content in one pass, matching what a real split-file
+    /// setup looks like. Same "don't fight the real SSH-config
+    /// merge" caveat as `parse_multi_merges_hosts_from_a_separate_source`.
+    #[test]
+    fn parse_multi_merges_main_hosts_and_sessions_sources() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "prefix.jira=`\n",
+            "host.1 = \"Proxmox\"\nhost.1.host = \"pve-1\"\n",
+            "session.1 = \"Foo\"\n",
+        ]);
+        assert!(cfg.hosts().iter().any(|r| r.command == "Proxmox"));
+        assert_eq!(cfg.sessions().len(), 1);
+        assert_eq!(cfg.query_prefixes().jira, '`');
+    }
+
+    /// Regression guard for the bug `parse_multi` exists to avoid:
+    /// finalization (applying the collected `key.*` overrides) must
+    /// run exactly ONCE, after every source has contributed its
+    /// lines — not once per source. Before this fix, a naive
+    /// "call `parse()` once per file" approach would have applied
+    /// `key_bindings_from_config` a second time with an EMPTY map
+    /// (the `sessions` file has no `key.*` lines), silently
+    /// resetting every key binding from the main config back to
+    /// its default.
+    #[test]
+    fn parse_multi_key_bindings_survive_a_second_source_with_no_key_lines() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["key.cancel=C-x\n", "session.1 = \"Foo\"\n"]);
+        let bindings = cfg.key_bindings();
+        let (_, specs) = bindings
+            .iter()
+            .find(|(action, _)| *action == crate::tui::bindings::Action::Cancel)
+            .expect("Cancel action should have bindings");
+        assert!(
+            specs.iter().any(|s| crate::tui::format_key_spec(*s) == "C-x"),
+            "got: {:?}",
+            specs.iter().map(|s| crate::tui::format_key_spec(*s)).collect::<Vec<_>>()
+        );
+    }
+
+    /// "Later source wins" applies across sources the same way it
+    /// already applies across lines within one file.
+    #[test]
+    fn parse_multi_later_source_wins_for_the_same_key() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["duplicatefilter=on\n", "duplicatefilter=off\n"]);
+        assert!(!cfg.duplicate_filter);
     }
 }

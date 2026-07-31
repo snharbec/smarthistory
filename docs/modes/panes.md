@@ -32,8 +32,8 @@ The intuition: a pane that *transiently* runs `nvim` shouldn't orphan its worksp
 
 Below the live multiplexer workspaces, `*` mode appends two more groups built from your config, each with its own `# `-prefixed header row and indented children, same tree shape as a live workspace:
 
-- **Directories** — the `session.N` quick-launch entries from `~/.config/smarthistory/config` (e.g. `session.1 = "⛩️ Home"`, `session.1.dir = "~/"`). Displayed as `# Directories` — despite the `session.N` config key name, these are directory shortcuts, not multiplexer sessions, so the group is labeled for what it actually is rather than the config syntax that defines it.
-- **Hosts** — the `host.N` entries (SSH connections). Displayed as `# hosts`.
+- **Directories** — the `session.N` quick-launch entries from `~/.config/smarthistory/sessions` (or the main config file — see [`docs/configuration.md#sessionid`](../configuration.md#sessionid)), e.g. `session.1 = "⛩️ Home"`, `session.1.dir = "~/"`. Displayed as `# Directories` — despite the `session.N` config key name, these are directory shortcuts, not multiplexer sessions, so the group is labeled for what it actually is rather than the config syntax that defines it.
+- **Hosts** — the `host.N` entries (SSH connections) from `~/.config/smarthistory/hosts` (or the main config file). Displayed as `# hosts`.
 
 These groups use the *same* group-aware filter as live workspaces: the header stays visible (with every sibling entry) as long as any row in the group matches, not just the one(s) that do. Searching `*Home` shows the `Directories` header and every configured directory entry, with `Home` pre-selected — not just the `Home` row with its header stripped away.
 

@@ -12,6 +12,14 @@ All notable changes to this project will be documented in this file.
   one source; `Enter` opens the URL in the system browser. Configure via
   `browser.<id>.type=chrome|firefox|safari` + `browser.<id>.profile=<path>`;
   see `docs/modes/browser.md`.
+- `session.<id>` and `host.<id>` entries can now live in their own dedicated
+  `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions` files
+  instead of (or split across, alongside) the main config file. Both are
+  read only by the TUI (`Config::load_tui`), not the plain CLI subcommands
+  (`search`, `add`, `capture-*`, …), since session/host data is exclusively
+  a `*`-mode (panes) concern. The in-TUI "add session" (`F5`) / "add host"
+  (`F6`) dialogs now write new entries to these dedicated files, creating
+  them if they don't exist yet.
 
 ### Security
 
