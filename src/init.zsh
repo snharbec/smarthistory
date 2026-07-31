@@ -177,8 +177,8 @@ typeset -g _smarthistory_rprompt_save="$RPROMPT"
 # ANSI cursor math — `POSTDISPLAY` isn't limited to one line, and
 # zle's own redisplay engine handles redraw-diffing and off-screen
 # scroll-safety for it. See docs/dropdown-completion.md for the full
-# design rationale (why POSTDISPLAY, why no color in v1, why no
-# debounce).
+# design rationale (why POSTDISPLAY, why the strip-ANSI width math,
+# why no debounce).
 typeset -g _smarthistory_dropdown_enabled="0"
 typeset -g _smarthistory_dropdown_limit=6
 typeset -g _smarthistory_dropdown_minchars=1
@@ -190,6 +190,9 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     [[ "$_smarthistory_dropdown_minchars_raw" == <-> ]] && _smarthistory_dropdown_minchars=$_smarthistory_dropdown_minchars_raw
     unset _smarthistory_dropdown_limit_raw _smarthistory_dropdown_minchars_raw
 fi
+# (Palette init runs further down, after
+# `_smarthistory_color_to_hlspec` is defined — see the comment block
+# marked "Resolved TUI palette" near `_smarthistory_strip_ansi`.)
 # Whether the menu is currently drawn, the 0-based highlighted row,
 # and the raw (still `\n`/`\r`-escaped, per the CLI's one-line-per-row
 # convention) candidate commands for the current render.
@@ -203,20 +206,364 @@ typeset -g _smarthistory_dropdown_selected=0
 # buffer. See `_smarthistory_reset_and_accept`.
 typeset -g _smarthistory_dropdown_chosen=0
 typeset -ga _smarthistory_dropdown_candidates
+# `_smarthistory_dropdown_meta[i]` holds the trimmed `diff` (age,
+# e.g. "5m", "2h", "3d") string for `_smarthistory_dropdown_candidates[i]`
+# — the two arrays are built in lockstep by `_smarthistory_dropdown_render`
+# and are always the same length. Only `_smarthistory_dropdown_paint`
+# ever reads this array (to draw the right-aligned "last called"
+# column). The commit/accept widgets (`_smarthistory_dropdown_commit`,
+# `_smarthistory_reset_and_accept`, `_smarthistory_dropdown_run_first`)
+# must keep reading ONLY `_smarthistory_dropdown_candidates` — that
+# array holds bare command text and nothing else, so it can be
+# unescaped straight into BUFFER without stripping anything back out.
+typeset -ga _smarthistory_dropdown_meta
 
 # Clear the menu (if any) and mark it not visible. Safe to call
 # unconditionally (e.g. from precmd) even when nothing is showing.
 _smarthistory_dropdown_clear() {
     [[ -n "$POSTDISPLAY" ]] && POSTDISPLAY=""
+    # Also drop any `region_highlight` entries the box paint left
+    # behind for the POSTDISPLAY region (offsets >= $#BUFFER).
+    # Entries below that offset belong to $BUFFER itself (e.g. a
+    # syntax-highlighting plugin's own region_highlight use) and
+    # must be left untouched — see `_smarthistory_dropdown_hl_prune`.
+    _smarthistory_dropdown_hl_prune
     _smarthistory_dropdown_visible=0
     _smarthistory_dropdown_chosen=0
 }
+
+# Remove every `region_highlight` entry whose start offset falls
+# in the POSTDISPLAY region (>= $#BUFFER) — i.e. every entry the
+# box paint itself added — while leaving any entry that starts
+# inside $BUFFER untouched. `region_highlight` is a shared zle
+# array (zsh-syntax-highlighting and similar plugins also write to
+# it for the command-buffer text), so this widget must never blank
+# the whole array — only ever prune its own tail.
+_smarthistory_dropdown_hl_prune() {
+    (( ${#region_highlight} == 0 )) && return
+    local base=$#BUFFER
+    # `_entry` (the loop variable) and `_parts` are declared once,
+    # before the loop, and only ever plain-assigned inside it — a
+    # bare `local` re-declaration inside a loop body makes zsh
+    # print the existing binding (`varname=value`) to stdout on
+    # every iteration, which would leak into the user's terminal.
+    local -a _kept _parts
+    local _entry
+    for _entry in "${region_highlight[@]}"; do
+        _parts=(${=_entry})
+        (( _parts[1] < base )) && _kept+=("$_entry")
+    done
+    region_highlight=("${_kept[@]}")
+}
+
+# Convert a CSS color name, 16-color terminal name, or `#rrggbb` /
+# `0xrrggbb` hex string into a zle `region_highlight` foreground
+# spec (`fg=<index>` or `fg=#rrggbb`). Used by the palette-init
+# block above to turn `smarthistory config get palette`'s
+# `key=value` lines into specs the box-drawing paint appends to
+# `region_highlight`.
+#
+# IMPORTANT: this deliberately does NOT return raw ANSI SGR bytes
+# (`\x1b[36m` etc). `POSTDISPLAY` is plain buffer text as far as
+# zle's redisplay engine is concerned — it does not interpret
+# embedded escape sequences, it shows the literal ESC byte as
+# `^[` (its usual "unprintable control character" rendering).
+# The only way to color text in `BUFFER`/`POSTDISPLAY` is zle's
+# own `region_highlight` array, whose offsets are measured across
+# `$BUFFER` followed directly by `$POSTDISPLAY` (see zshzle(1)).
+# That's why the box paint below builds `region_highlight` entries
+# instead of splicing SGR codes into the string.
+#
+# Recognized inputs (case-insensitive):
+#   * The 8 standard ANSI names: black / red / green / yellow /
+#     blue / magenta / cyan / white
+#   * The 8 bright variants: gray (alias for grey), darkgray,
+#     lightred, lightgreen, lightyellow, lightblue, lightmagenta,
+#     lightcyan
+#   * `#rrggbb` and `0xrrggbb` hex (truecolor, `fg=#rrggbb`)
+#   * `reset` → empty (no highlight spec needed; region_highlight
+#     entries are scoped by start/end, not by an explicit reset)
+# Anything else (a typo, an unknown CSS name, a malformed hex)
+# returns the empty string so the caller falls through to its
+# default — a fail-soft policy that matches the rest of init.zsh
+# (a bad palette must not break the dropdown).
+#
+# Truecolor output is `fg=#rrggbb`, zle's truecolor extension to
+# the `region_highlight` / `zle_highlight` spec syntax (zsh
+# 5.8+), supported by every modern terminal (kitty, alacritty,
+# wezterm, iTerm2, gnome-terminal, …). 256-color fallback is
+# intentionally not emitted — a terminal that can read `#rrggbb`
+# from the user via the config file can also read it back as
+# truecolor.
+_smarthistory_color_to_hlspec() {
+    local raw=${1:l}  # lowercase, mirrors the Rust resolve_color behavior
+    # Strip leading whitespace.
+    raw=${raw## }
+    raw=${raw%% }
+    case "$raw" in
+        # Standard ANSI foreground indices (0-7), matching SGR 30-37.
+        black)   print -n -- "fg=0" ;;
+        red)     print -n -- "fg=1" ;;
+        green)   print -n -- "fg=2" ;;
+        yellow)  print -n -- "fg=3" ;;
+        blue)    print -n -- "fg=4" ;;
+        magenta) print -n -- "fg=5" ;;
+        cyan)    print -n -- "fg=6" ;;
+        white)   print -n -- "fg=7" ;;
+        # Bright variants (indices 8-15, matching SGR 90-97;
+        # `gray` is the alias for the default "no bold" gray,
+        # `darkgray` is the explicit version — same index, kept
+        # as separate names so a user reading the source can map
+        # `tuicolor.dim=gray` to the palette index without
+        # surprise).
+        gray|darkgray|darkgrey) print -n -- "fg=8" ;;
+        lightred)     print -n -- "fg=9" ;;
+        lightgreen)   print -n -- "fg=10" ;;
+        lightyellow)  print -n -- "fg=11" ;;
+        lightblue)    print -n -- "fg=12" ;;
+        lightmagenta) print -n -- "fg=13" ;;
+        lightcyan)    print -n -- "fg=14" ;;
+        # `reset` needs no spec of its own under region_highlight
+        # (kept here for symmetry with the Rust `color_to_css`
+        # round-trip — not currently emitted by the widget).
+        reset) print -n -- "" ;;
+        # Truecolor hex: `#rrggbb` and `0xrrggbb`. The two forms
+        # differ by 2 chars (`#` vs `0x`), so a fixed offset is
+        # cleaner than re-globbing.
+        '#'*|0x*)
+            local hex
+            if [[ "$raw" == '#'* ]]; then
+                hex=${raw[2,-1]}
+            else
+                hex=${raw[3,-1]}
+            fi
+            # 6-char hex exactly — anything else is malformed
+            # and we fall through to the empty string.
+            if [[ "$hex" == [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] ]]; then
+                print -n -- "fg=#${hex}"
+            else
+                # Malformed hex — fail soft.
+                print -n -- ""
+            fi
+            ;;
+        # Unknown name — fail soft.
+        *) print -n -- "" ;;
+    esac
+}
+
+# Strip ANSI CSI / SGR escape sequences from a string and return the
+# visible-character length (i.e. the number of columns the string
+# actually occupies on screen). Used by the width math in
+# `_smarthistory_dropdown_paint` so embedded SGR codes (once the CLI
+# starts emitting them — see the `search --ansi=full` flag) don't
+# desync the box's `─` border, the row right-pad, and the
+# `interior_max` truncation. The implementation recognises the common
+# SGR form (`ESC [ … m`) and skips the parameter + final byte; other
+# CSI families (cursor movement, erase-in-line, …) are ignored too
+# because we only ever embed SGR codes — but the parser is forgiving
+# in case the CLI ever emits a stray `\x1b[K` or similar.
+#
+# Uses zsh's `EXTENDED_GLOB` (enabled per-call via `setopt
+# LOCAL_OPTIONS`) because the bare-glob form of `${var//PAT/REPL}`
+# treats `[0-9;?]` as a glob character class, then chokes on the
+# unquoted `?` (or — worse — silently matches too much) once you
+# add a `*` or `#` after it. Under EXTENDED_GLOB the `#` is the
+# "zero-or-more of preceding" quantifier (the analog of regex
+# `*`), so `[0-9;?]#[a-zA-Z]` means "one char from {digit, ;, ?},
+# repeated zero or more times, then one alpha" — which is exactly
+# what an SGR parameter string looks like (`1m`, `38;5;208m`, `0m`).
+# `LOCAL_OPTIONS` confines the option to the function so a parent
+# shell that has `NO_EXTENDED_GLOB` set isn't affected.
+#
+# The visible length is returned via the `REPLY` parameter (the
+# standard zsh convention for "this function's output is in
+# `REPLY`") rather than printed to stdout. The earlier
+# implementation used `print -n -- $#stripped` which works fine in
+# `local x=$(…)` contexts but is fragile: a single missed capture
+# (a stray context, an interactive session with the function called
+# outside a command substitution, a debug hook that intercepts
+# stdout, etc.) leaks the digit string into the terminal as
+# visible noise. The widget was suffering from exactly that bug —
+# the user typed `g` and saw `row_visible=5` and `row='  [g]'`
+# printed as text alongside the box. Using `REPLY` makes the
+# function a pure parameter-mutator, so it can't possibly leak.
+_smarthistory_strip_ansi() {
+    setopt LOCAL_OPTIONS EXTENDED_GLOB
+    local stripped=${1//$'\x1b'\[[0-9;?]#[a-zA-Z]/}
+    REPLY=$#stripped
+}
+
+# ---- Resolved TUI palette (one-shot at init) ----
+#
+# Read the same `tuicolor.*` block the TUI uses to draw its chrome
+# — with the active theme's overrides applied — so the dropdown
+# box borders and selection gutter match the user's actual TUI
+# theme (e.g. a `theme.dark=gruvbox` user sees orange borders,
+# not the hardcoded defaults). One `smarthistory config get
+# palette` call per shell startup; the user can `exec zsh` (or
+# restart the terminal) to pick up theme changes from the TUI
+# after a `Ctrl-N` theme cycle, same as every other cached
+# setting in this file. Per-keystroke palette re-reads would add
+# a subprocess to every typed character when the dropdown is
+# visible — not worth it.
+#
+# The values land in two `region_highlight` spec strings:
+#   _smarthistory_dropdown_hl_accent   — box corners, top/bottom border, unselected-row gutter
+#   _smarthistory_dropdown_hl_select   — selected-row gutter
+# (no trailing "reset" string is needed — region_highlight entries
+# are scoped by explicit start/end offsets, so there's nothing to
+# bleed into the next region the way a raw SGR code can.)
+# Defaults (accent=cyan, selection=blue) match the TUI's
+# built-in palette, so a first-run install (no config file) gets
+# a colored dropdown out of the box. Any unparseable value from
+# the CLI is silently replaced with the default — same
+# fail-soft policy the rest of this file uses.
+#
+# This block runs at init.zsh *source* time (after the
+# dropdown-enabled gating block above and after both helpers,
+# `_smarthistory_color_to_hlspec` and `_smarthistory_strip_ansi`,
+# are defined). When the dropdown is disabled, none of this
+# matters — the specs are set but never consulted by any paint
+# call (the dropdown widget is registered in the `if` block
+# above).
+typeset -g _smarthistory_dropdown_hl_accent="fg=6"  # cyan fallback
+typeset -g _smarthistory_dropdown_hl_select="fg=4"  # blue fallback
+
+# Detect whether the terminal advertises color support at all.
+# `region_highlight` entries are converted to real terminal escape
+# sequences by zle's own redisplay engine (not by us), so this is
+# no longer a defense against raw ESC bytes leaking out as literal
+# text — that failure mode is exactly what moving to
+# `region_highlight` (see `_smarthistory_color_to_hlspec` above)
+# fixes. This check just avoids asking zle to color a genuinely
+# colorless terminal, so the widget falls back to plain Unicode
+# box characters there.
+#
+# Detection is best-effort: we check the standard curses/terminfo
+# `colors` capability (a small number = no color) AND look for
+# the `RGB` terminfo capability (which 24-bit-color terminals
+# advertise). The `COLORTERM=truecolor` env var is a strong
+# positive signal too. Any one of these being true is enough to
+# trust that the terminal can render color; otherwise we disable
+# coloring entirely.
+#
+# `tput` is a loadable zsh module via `zmodload zsh/terminfo`,
+# but the binary isn't guaranteed to be on $PATH inside a
+# non-interactive `smarthistory init zsh` source — so the
+# checks are wrapped in `(( $+commands[tput] ))` guards and
+# fall through to the conservative answer (no color) when the
+# binary is missing.
+typeset -g _smarthistory_dropdown_color_ok=0
+if [[ -n "$COLORTERM" && "$COLORTERM" == *"color"* ]]; then
+    _smarthistory_dropdown_color_ok=1
+elif (( $+commands[tput] )); then
+    # `tput colors` returns the number of colors the terminal
+    # advertises. Anything >= 8 means basic ANSI color works.
+    # For 24-bit color we additionally check `tput RGB`, which
+    # returns the RGB strings if supported.
+    local _tput_colors
+    _tput_colors=$(tput colors 2>/dev/null)
+    if [[ -n "$_tput_colors" && "$_tput_colors" -ge 8 ]]; then
+        # `tput RGB` returns a non-empty string iff the
+        # terminal supports 24-bit color via the standard
+        # SGR form. False negatives are possible on
+        # terminals that support truecolor but don't expose
+        # it through terminfo; the COLORTERM check above
+        # catches those.
+        if tput RGB 2>/dev/null | grep -q .; then
+            _smarthistory_dropdown_color_ok=1
+        else
+            # 8/16-color terminal without explicit truecolor
+            # support. Still safe to ask zle for basic ANSI
+            # colors — accept it.
+            _smarthistory_dropdown_color_ok=1
+        fi
+    fi
+fi
+# If color isn't OK, blank out the highlight specs so the paint
+# function appends no `region_highlight` entries at all (the plain
+# Unicode box chars are still drawn, just without color).
+if (( _smarthistory_dropdown_color_ok == 0 )); then
+    _smarthistory_dropdown_hl_accent=""
+    _smarthistory_dropdown_hl_select=""
+fi
+if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
+    # Disable `xtrace` for the palette-init block too — see
+    # `_smarthistory_dropdown_paint` for the rationale. The
+    # `smarthistory config get palette` subprocess call, the
+    # `_smarthistory_dropdown_palette_raw` capture, and the
+    # loop body below would otherwise dump a wall of trace
+    # noise into the user's terminal at shell startup. Same
+    # save/restore dance as the paint function — restoring on
+    # the way out so a user with `set -x` enabled in their
+    # .zshrc keeps it enabled after init.
+    local _sm_dropdown_xtrace_was=$options[xtrace]
+    setopt NO_XTRACE
+    _smarthistory_dropdown_palette_raw=$(smarthistory config get palette 2>/dev/null)
+    # The CLI emits one `key=value` line per `tuicolor.*` slot. A
+    # failure (binary missing, corrupt config, permission denied)
+    # leaves `_palette_raw` empty; we then skip the loop and the
+    # defaults above stand. No `setopt ERR_EXIT` here — a bad
+    # palette read must not break the rest of init.zsh.
+    if [[ -n "$_smarthistory_dropdown_palette_raw" ]]; then
+        local _smarthistory_dropdown_palette_key _smarthistory_dropdown_palette_value
+        while IFS='=' read -r _smarthistory_dropdown_palette_key _smarthistory_dropdown_palette_value; do
+            # Strip stray whitespace from each side; the CLI
+            # doesn't emit spaces, but a hand-edited session file
+            # or a future formatting change could.
+            _smarthistory_dropdown_palette_key=${_smarthistory_dropdown_palette_key// /}
+            _smarthistory_dropdown_palette_value=${_smarthistory_dropdown_palette_value## }
+            _smarthistory_dropdown_palette_value=${_smarthistory_dropdown_palette_value%% }
+            case "$_smarthistory_dropdown_palette_key" in
+                accent)
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_accent=$_hlspec
+                    unset _hlspec
+                    ;;
+                selection)
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_select=$_hlspec
+                    unset _hlspec
+                    ;;
+                # All other slots (bg, fg, success, warning, …)
+                # are currently unused by the dropdown widget —
+                # the paint function only needs accent +
+                # selection. Reading them anyway keeps the call
+                # site identical to the TUI's palette resolution;
+                # a future widget addition (e.g. an error-colored
+                # ✗ glyph) just needs a new case arm.
+                *) ;;
+            esac
+        done <<< "$_smarthistory_dropdown_palette_raw"
+        unset _smarthistory_dropdown_palette_key _smarthistory_dropdown_palette_value
+    fi
+    unset _smarthistory_dropdown_palette_raw
+    [[ "$_sm_dropdown_xtrace_was" == "on" ]] && setopt XTRACE
+    unset _sm_dropdown_xtrace_was
+fi
 
 # Redraw POSTDISPLAY from the current `_smarthistory_dropdown_candidates`
 # / `_smarthistory_dropdown_selected` state, WITHOUT re-querying the DB
 # (used by Up/Down to move the selection, and after any state change
 # that doesn't change the candidate set).
 _smarthistory_dropdown_paint() {
+    # Disable `xtrace` for the duration of the paint call. The
+    # widget's per-row `local row_visible=$(…)` and similar
+    # assignments would otherwise be traced as
+    # `+func:line> local row_visible=N` (and the
+    # `local -a _hl _parts` style too) every time the user typed — a wall of debug
+    # noise that's especially bad inside a live zle widget
+    # where the trace bytes overwrite POSTDISPLAY and break
+    # the box layout entirely. The user almost certainly has
+    # `set -x` enabled in their interactive session for
+    # unrelated debugging; the widget has to coexist with
+    # that. We unconditionally turn the option off and
+    # restore the previous value on return — `LOCAL_OPTIONS`
+    # alone wouldn't help here because that option only
+    # scopes *changes* made inside the function, not the
+    # *inherited* xtrace state.
+    local _sm_dropdown_xtrace_was=$options[xtrace]
+    setopt NO_XTRACE
     local -a rows
     local raw c marker row i=0
     # Leave margin for the box border (`│ ` / ` │` on each side, 4
@@ -229,6 +576,33 @@ _smarthistory_dropdown_paint() {
     # of the existing headroom) accounts for the box's own top/bottom
     # border rows.
     local max_rows=$(( LINES > 8 ? LINES - 6 : 2 ))
+    # Reserve room for the right-aligned "last called" age column
+    # (`_smarthistory_dropdown_meta`, e.g. "5m"/"2h"/"3d") BEFORE
+    # truncating any command text — the age must never be pushed off
+    # the box, the command truncates first. Computed here, ahead of
+    # the candidate loop below, because `age_width` doesn't depend on
+    # (possibly truncated) command text at all, so it can shrink the
+    # command truncation budget (`interior_cmd_max`) for the very
+    # same pass that builds `rows[]`. `age_width` stays 0 — and
+    # `interior_cmd_max` collapses to plain `interior_max`, i.e.
+    # today's exact behavior, no age column drawn at all — whenever
+    # every candidate's age came back empty (the render function's
+    # defensive fallback for a line it couldn't parse).
+    local age_width=0 age_visible age_val
+    local -i _sm_age_i=0
+    for age_val in "${_smarthistory_dropdown_meta[@]}"; do
+        (( _sm_age_i >= max_rows )) && break
+        _smarthistory_strip_ansi "$age_val"
+        age_visible=$REPLY
+        (( age_visible > age_width )) && age_width=$age_visible
+        _sm_age_i=$((_sm_age_i+1))
+    done
+    local -r age_gap=2
+    local interior_cmd_max=$interior_max
+    if (( age_width > 0 )); then
+        interior_cmd_max=$(( interior_max - age_gap - age_width ))
+        (( interior_cmd_max < 4 )) && interior_cmd_max=4
+    fi
     for raw in "${_smarthistory_dropdown_candidates[@]}"; do
         (( i >= max_rows )) && break
         c=$(_smarthistory_unescape "$raw")
@@ -243,58 +617,293 @@ _smarthistory_dropdown_paint() {
             marker="  "
         fi
         row="${marker}${c}"
-        if (( ${#row} > interior_max )); then
-            row="${row[1,$((interior_max-1))]}…"
+        # `smarthistory search` is called with `--ansi=off` (see the
+        # args comment in `_smarthistory_dropdown_render`), so `row`
+        # never actually carries embedded SGR codes today — the
+        # strip is kept anyway as a defensive no-op so the width
+        # math can't silently desync the box border if that ever
+        # changes.
+        _smarthistory_strip_ansi "$row"
+        local row_visible=$REPLY
+        if (( row_visible > interior_cmd_max )); then
+            row="${row[1,$((interior_cmd_max-1))]}…"
         fi
         rows+=("$row")
         i=$((i+1))
     done
     if (( ${#rows} == 0 )); then
         POSTDISPLAY=""
+        _smarthistory_dropdown_hl_prune
         return
     fi
     # Box width = the widest row actually produced this render (not
     # the full interior_max budget) — every row pads to this exact
     # width so the right border lines up, and the box visibly shrinks
     # when the candidate set does, same as the un-boxed layout did.
-    # `─`/`│`/`╭╮╰╯` are plain printable Unicode characters, not ANSI
-    # escape codes — POSTDISPLAY's width math (and zle's own
-    # redraw-diffing) handles them like any other text, unlike color
-    # SGR codes, which is why this part carries no open safety
-    # question the way color does.
-    local width=0
+    #
+    # Width is measured on the SGR-stripped row (a defensive no-op
+    # today — `--ansi=off` means `row` never actually carries escape
+    # codes, see the comment on the per-row `_smarthistory_strip_ansi`
+    # call above) so the `─` border can't be desynced if that ever
+    # changes.
+    # `width` is computed as the maximum visible row width; the
+    # display loop below reads it once per row. We deliberately
+    # re-use the existing `row_visible` parameter (declared in
+    # the per-row loop above) instead of re-declaring it via
+    # `local width=0 row_visible` — re-declaring an existing
+    # local parameter in zsh emits a `varname=oldvalue` line
+    # to stdout as a side effect of the declaration itself,
+    # which leaks `row_visible=N` debug text into the user's
+    # terminal on every keystroke. Same reason we don't use a
+    # separate `local` for the second-loop variable below.
+    local cmd_width=0
     for row in "${rows[@]}"; do
-        (( ${#row} > width )) && width=${#row}
+        _smarthistory_strip_ansi "$row"
+        row_visible=$REPLY
+        (( row_visible > cmd_width )) && cmd_width=$row_visible
     done
+    # Total interior width = the command column plus (when there IS
+    # an age column to draw) a fixed gap and the age column itself —
+    # everything below this point (`hr`, the borders, the per-row
+    # pad) reads `width` exactly like before the age column existed.
+    local width=$(( age_width > 0 ? cmd_width + age_gap + age_width : cmd_width ))
     # `${(l:width::─:)}` pads an empty string to `width` columns using
     # `─` as the fill character — i.e. `width` dashes, built by zsh's
     # own padding expansion rather than a manual loop.
     local hr="${(l:width::─:)}"
-    local out=$'\n'"╭─${hr}─╮"
-    # No color is available (POSTDISPLAY doesn't interpret ANSI SGR
-    # codes — see the module doc comment), so the selected row is set
-    # apart with a thicker `┃` side border instead of the plain `│`
-    # every other row gets — still just plain printable Unicode
-    # characters, same safety as the box itself.
-    local side
+    # Build `out` as PLAIN TEXT — no embedded escape codes. POSTDISPLAY
+    # is inert buffer text as far as zle's redisplay engine is
+    # concerned; it does not interpret escape sequences spliced into
+    # it, it shows the literal ESC byte as `^[` the same way it would
+    # show any other unprintable control character typed at the
+    # prompt. Splicing `\x1b[38;2;…m` into POSTDISPLAY (the previous
+    # implementation) is exactly why colors showed up as literal
+    # `^[[38;2;…m` text instead of an actual accent color.
+    #
+    # Coloring is applied afterwards via zle's `region_highlight`
+    # array, whose offsets are measured across `$BUFFER` followed
+    # directly by `$POSTDISPLAY` (zshzle(1)). `_hl` collects one
+    # "start end spec" triple per colored span with offsets relative
+    # to the start of `out` — they get shifted by `$#BUFFER` in the
+    # splice step below, once `out` is finished and about to become
+    # POSTDISPLAY.
+    #
+    # Layout (spec is the empty string, and so no `_hl` entry is
+    # recorded, when the terminal color-capability check failed —
+    # see `_smarthistory_dropdown_color_ok` above):
+    #   top border         → `_smarthistory_dropdown_hl_accent`
+    #   bottom border      → `_smarthistory_dropdown_hl_accent`
+    #   unselected gutter   → `_smarthistory_dropdown_hl_accent`
+    #   selected gutter     → `_smarthistory_dropdown_hl_select`
+    #   right-side border   → always `_smarthistory_dropdown_hl_accent`,
+    #                          regardless of row selection — only the
+    #                          left gutter's glyph (`┃` vs `│`) and
+    #                          color signal the selected row.
+    #   selected row's text → `bold` (unconditional — bold isn't a
+    #                          color, so it isn't gated by
+    #                          `_smarthistory_dropdown_color_ok`),
+    #                          covering the age column too when one
+    #                          is drawn.
+    #   age column (unselected rows) → `_smarthistory_dropdown_hl_accent`
+    #                          — same spec as the borders, so no new
+    #                          palette variable or config key for it.
+    #
+    # All the loop-driver / scratch locals below (`_hl_start`,
+    # `_entry`, `_parts`, `gutter_spec`, `gutter_text`) are declared
+    # once, here, before any loop, and only ever plain-assigned
+    # inside one — a bare `local` re-declaration inside a loop body
+    # makes zsh print the existing binding (`varname=value`) to
+    # stdout on every iteration, which would leak into the user's
+    # terminal (same fix already applied to `row_visible` / `row` /
+    # `side` above).
+    local -a _hl _parts
+    local _hl_start _entry gutter_spec gutter_text
+    local row_start bold_start bold_end row_end
+    local age_text age_field age_start is_selected
+    # `--prefix` search (see the args comment above) guarantees every
+    # candidate's command text starts with the exact bytes of
+    # `$LBUFFER` — that's the span this widget bolds to recreate the
+    # "matched prefix" emphasis `--ansi=full` used to (unreliably)
+    # provide. `marker_len` is the fixed width of the `"❯ "` /
+    # `"  "` marker prepended to every row in the candidate-building
+    # loop above — the bold span starts right after it.
+    local matchlen=$#LBUFFER
+    local -r marker_len=2
+    local out=$'\n'
+    if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
+        _hl_start=$#out
+        out+="╭─${hr}─╮"
+        _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_accent")
+    else
+        out+="╭─${hr}─╮"
+    fi
+    # The per-row pad must be computed against the *visible* width,
+    # not the byte length. `row` doesn't carry embedded SGR codes
+    # today (`--ansi=off`), but the pad is still built from
+    # `row_visible` rather than `${#row}` as a defensive measure —
+    # see the per-row `_smarthistory_strip_ansi` comment above. Build
+    # the pad by hand: `width - row_visible` spaces appended to the
+    # raw row (the matched-prefix / selected-row emphasis is applied
+    # afterwards via `region_highlight`, not embedded in `row`
+    # itself, so it can never desync this math).
+    local side pad
     for (( i = 0; i < ${#rows}; i++ )); do
-        if (( _smarthistory_dropdown_chosen == 1 && i == _smarthistory_dropdown_selected )); then
+        (( is_selected = _smarthistory_dropdown_chosen == 1 && i == _smarthistory_dropdown_selected ))
+        if (( is_selected )); then
             side="┃"
+            gutter_text="┃ "
+            gutter_spec=$_smarthistory_dropdown_hl_select
         else
             side="│"
+            gutter_text="│ "
+            gutter_spec=$_smarthistory_dropdown_hl_accent
         fi
-        # `${(r:width:: :)row}` left-justifies `row` and pads it with
-        # spaces on the right to exactly `width` columns.
-        out+=$'\n'"${side} ${(r:width:: :)rows[$((i+1))]} ${side}"
+        row=${rows[$((i+1))]}
+        _smarthistory_strip_ansi "$row"
+        row_visible=$REPLY
+        # Right-justify this row's age into a fixed `age_width`
+        # column (e.g. "5m" and "10m" both occupy the same 3
+        # columns) — empty when no age column is being drawn at all
+        # this render (`age_width == 0`).
+        age_text=${_smarthistory_dropdown_meta[$((i+1))]}
+        if (( age_width > 0 )); then
+            age_field="${(l:age_width:: :)age_text}"
+        else
+            age_field=""
+        fi
+        # Pad fills up to `cmd_width` ONLY (so every row's command
+        # column left-aligns to the same width) — NOT the overall
+        # `width`, which also includes the age gap/column. The fixed
+        # `age_gap` separator is emitted unconditionally right before
+        # the age field below, regardless of how much (if any) pad
+        # this particular row needed; folding the gap into `pad`
+        # (an earlier version of this code did) meant the gap
+        # silently vanished for the widest row (whichever row's
+        # `pad` computed to 0), leaving its age column one gap short
+        # of every other row's.
+        pad=$(( cmd_width - row_visible ))
+        # `(l:0:: :)` is the empty-pad guard — `${(l:-1:: :)}` is a
+        # zsh error. Clamp to 0 so the negative case (the row was
+        # already truncated to `interior_cmd_max - 1` cols) is harmless.
+        (( pad < 0 )) && pad=0
+        out+=$'\n'
+        if [[ -n "$gutter_spec" ]]; then
+            _hl_start=$#out
+            out+="$gutter_text"
+            _hl+=("$_hl_start $#out $gutter_spec")
+        else
+            out+="$gutter_text"
+        fi
+        if (( is_selected )); then
+            # Bold span opens here; closes AFTER the age column below
+            # so the whole selected row — command AND age — reads as
+            # highlighted, not just the command part.
+            _hl_start=$#out
+            out+="$row"
+        else
+            row_start=$#out
+            out+="$row"
+            if (( matchlen > 0 )); then
+                row_end=$#out
+                bold_start=$(( row_start + marker_len ))
+                bold_end=$(( bold_start + matchlen ))
+                (( bold_end > row_end )) && bold_end=$row_end
+                (( bold_start < bold_end )) && _hl+=("$bold_start $bold_end bold")
+            fi
+        fi
+        (( pad > 0 )) && out+="${(l:pad:: :)}"
+        if (( age_width > 0 )); then
+            # The `age_gap`-wide separator is fixed and unconditional
+            # (unlike `pad` above, which can be 0) — it's what
+            # actually reserves the gap `width` accounts for.
+            out+="${(l:age_gap:: :)}"
+            if (( is_selected )); then
+                out+="$age_field"
+            else
+                age_start=$#out
+                out+="$age_field"
+                [[ -n "$_smarthistory_dropdown_hl_accent" ]] && _hl+=("$age_start $#out $_smarthistory_dropdown_hl_accent")
+            fi
+        fi
+        # Close the selected-row bold span (opened above, right
+        # before the command text) now that the age column — if any
+        # — has been appended too. A no-op duplicate-avoidance: this
+        # is the ONLY bold span selected rows get, unlike unselected
+        # rows' separate matched-prefix span above.
+        (( is_selected )) && _hl+=("$_hl_start $#out bold")
+        # The right border is `" ${side}"` (space THEN the bar) to
+        # mirror the left gutter's `"${gutter_text}"` (bar THEN
+        # space) — both sides need exactly one padding column between
+        # the border and the content for the box to be exactly
+        # `width + 4` wide (2 border chars + 1 padding column each
+        # side), matching the top/bottom border's `╭─<hr>─╮` math.
+        # The previous `"${side} "` (bar THEN space, with nothing
+        # padding the left side of the bar) put the padding column
+        # *outside* the box instead of inside it, making every
+        # content row exactly one column narrower than the border —
+        # invisible on a live terminal (trailing spaces still occupy
+        # a cell) but visible as soon as trailing whitespace is
+        # trimmed (e.g. copy-pasting the box out of the terminal).
+        #
+        # The right-side border always carries the accent spec
+        # (never the selection spec) — matches the pre-region_highlight
+        # behavior, where only the left gutter differed by selection.
+        if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
+            _hl_start=$#out
+            out+=" ${side}"
+            _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_accent")
+        else
+            out+=" ${side}"
+        fi
     done
-    out+=$'\n'"╰─${hr}─╯"
+    out+=$'\n'
+    if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
+        _hl_start=$#out
+        out+="╰─${hr}─╯"
+        _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_accent")
+    else
+        out+="╰─${hr}─╯"
+    fi
+    # Splice the collected spans into `region_highlight`, shifted by
+    # `$#BUFFER` (POSTDISPLAY starts right after BUFFER — see
+    # zshzle(1) on region_highlight offsets). Prune this widget's
+    # own previous entries first so repainting doesn't accumulate
+    # stale spans; entries belonging to $BUFFER itself (e.g. a
+    # syntax-highlighting plugin's own region_highlight use) are
+    # never touched — see `_smarthistory_dropdown_hl_prune`.
+    _smarthistory_dropdown_hl_prune
+    if (( ${#_hl} > 0 )); then
+        local base=$#BUFFER
+        for _entry in "${_hl[@]}"; do
+            _parts=(${=_entry})
+            region_highlight+=("$((base + _parts[1])) $((base + _parts[2])) ${_parts[3]}")
+        done
+    fi
     POSTDISPLAY="$out"
+    # Restore the xtrace state the user's shell had when we
+    # entered the function — see the comment block at the
+    # top of the function for why we turn it off in the first
+    # place. Without the restore, the widget would silently
+    # *disable* xtrace for the rest of the user's session
+    # after the first paint, which is a worse failure mode
+    # than the original leak.
+    [[ "$_sm_dropdown_xtrace_was" == "on" ]] && setopt XTRACE
+    unset _sm_dropdown_xtrace_was
 }
 
 # Re-query smarthistory for the current LBUFFER and redraw. Called
 # after every keystroke (via the wrapped self-insert/delete/paste
 # widgets below) when the dropdown is enabled.
 _smarthistory_dropdown_render() {
+    # See `_smarthistory_dropdown_paint` for why we disable
+    # `xtrace` here too — the render function calls paint, and
+    # the assignments in this function (the `args` array, the
+    # `raw` capture, the `_smarthistory_dropdown_candidates`
+    # assignment) would otherwise be traced as debug noise on
+    # every keystroke when the user has `set -x` enabled.
+    # Same save/restore dance as the paint function.
+    local _sm_dropdown_xtrace_was=$options[xtrace]
+    setopt NO_XTRACE
     [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return
     # POSTDISPLAY always renders after the buffer's current end, so
     # the menu only makes sense with the cursor there — same
@@ -321,7 +930,31 @@ _smarthistory_dropdown_render() {
     # inside the URL), which is surprising for a live as-you-type
     # completion (unlike Up/Down's keypress-triggered walk, which
     # keeps the broader substring match).
-    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --no-highlight --prefix)
+    #
+    # `--ansi=off`: the widget always pipes the search call into a
+    # `$()`-style capture, which is never a TTY — so `--ansi=full`
+    # (and `--ansi=bold`) never actually produce styled SGR output
+    # here, they fall back to bracket-wrapped text (`[ls]`) for
+    # pipe-safety. Those literal `[`/`]` characters aren't part of
+    # the history at all; they were the CLI's non-TTY highlight
+    # fallback leaking into what the user sees. `--ansi=off` gives
+    # plain, unmodified command text instead. The matched-prefix
+    # emphasis `--ansi=full` was trying to provide over a real TTY
+    # is recreated properly in `_smarthistory_dropdown_paint` via a
+    # `region_highlight` `bold` span over the first `$#LBUFFER`
+    # characters of each row — the same mechanism already used to
+    # color the box chrome and bold the selected row.
+    #
+    # `--fields diff,command`: `diff` (the "last called" age column,
+    # e.g. "5m"/"2h"/"3d") drawn by `_smarthistory_dropdown_paint`.
+    # `diff` MUST come first: the CLI joins fields with exactly two
+    # spaces and left-pads `diff` for column alignment, but never
+    # inserts padding *between* cells — so the first run of 2+
+    # spaces in a line is unambiguously the diff/command boundary,
+    # even in the rare case the command itself contains a run of 2+
+    # spaces later in the line (we only ever split on the FIRST
+    # such run).
+    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,command --ansi=off --prefix)
     case "$_smarthistory_mode" in
         sess)   args+=(--session) ;;
         dir)    args+=(--directory "$PWD") ;;
@@ -329,12 +962,43 @@ _smarthistory_dropdown_render() {
     esac
     local raw
     raw=$(smarthistory search "${args[@]}" 2>/dev/null)
-    _smarthistory_dropdown_candidates=("${(f)raw}")
+    local -a _sm_dropdown_lines
+    _sm_dropdown_lines=("${(f)raw}")
     # `${(f)raw}` on an empty string yields one empty element, not
     # zero — drop it so "no matches" is correctly detected below.
-    if (( ${#_smarthistory_dropdown_candidates} == 1 )) && [[ -z "${_smarthistory_dropdown_candidates[1]}" ]]; then
-        _smarthistory_dropdown_candidates=()
+    if (( ${#_sm_dropdown_lines} == 1 )) && [[ -z "${_sm_dropdown_lines[1]}" ]]; then
+        _sm_dropdown_lines=()
     fi
+    # Split each "<diff>  <command>" line and dedup by COMMAND ONLY,
+    # keeping the first (newest, since `search` returns newest-first)
+    # occurrence — the same command run N times has N different ages,
+    # so deduping on the whole line (the old `${(u)...}` one-liner)
+    # would stop deduping once the age column was added, reintroducing
+    # the duplicate-rows bug this widget already fixed once. The kept
+    # occurrence's age is exactly the correct "last called" value for
+    # that command. `_smarthistory_dropdown_candidates` ends up with
+    # its original contract unchanged (bare command text only), so no
+    # other function (commit/accept widgets, etc.) needs to change.
+    _smarthistory_dropdown_candidates=()
+    _smarthistory_dropdown_meta=()
+    local -A _sm_dropdown_seen
+    local _sm_dropdown_line _sm_dropdown_diff _sm_dropdown_cmd
+    for _sm_dropdown_line in "${_sm_dropdown_lines[@]}"; do
+        if [[ "$_sm_dropdown_line" =~ '^[[:space:]]*([^[:space:]]*)[[:space:]]{2,}(.*)$' ]]; then
+            _sm_dropdown_diff=$match[1]
+            _sm_dropdown_cmd=$match[2]
+        else
+            # Defensive fallback (e.g. a row with no diff/space run) —
+            # treat the whole line as the command with no age, same
+            # as this widget's behavior before the age column existed.
+            _sm_dropdown_diff=""
+            _sm_dropdown_cmd=$_sm_dropdown_line
+        fi
+        (( ${+_sm_dropdown_seen[$_sm_dropdown_cmd]} )) && continue
+        _sm_dropdown_seen[$_sm_dropdown_cmd]=1
+        _smarthistory_dropdown_candidates+=("$_sm_dropdown_cmd")
+        _smarthistory_dropdown_meta+=("$_sm_dropdown_diff")
+    done
     if (( ${#_smarthistory_dropdown_candidates} == 0 )); then
         _smarthistory_dropdown_clear
         return
@@ -348,6 +1012,8 @@ _smarthistory_dropdown_render() {
         _smarthistory_dropdown_selected=0
     fi
     _smarthistory_dropdown_paint
+    [[ "$_sm_dropdown_xtrace_was" == "on" ]] && setopt XTRACE
+    unset _sm_dropdown_xtrace_was
 }
 
 # Wrap (not replace) a keystroke-handling widget so whatever was
@@ -514,6 +1180,27 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         zle backward-char
     }
     zle -N _smarthistory_dropdown_select_start_arrow
+    # Ctrl-Space: run the FIRST candidate (index 0) immediately,
+    # regardless of whatever row Tab/Down navigation may have
+    # highlighted — a "just run the top match" shortcut that skips
+    # navigating there first. Mirrors `_smarthistory_reset_and_accept`
+    # (Enter, defined further down): commit the candidate into
+    # BUFFER, reset the cached dropdown/history state, then run it
+    # via `zle .accept-line`. Most terminals send NUL (`^@`) for
+    # Ctrl-Space, which is unbound in vanilla zsh, so the no-menu
+    # case is a genuine no-op — there's no prior behavior to
+    # preserve.
+    _smarthistory_dropdown_run_first() {
+        if [[ $_smarthistory_dropdown_visible -eq 1 && ${#_smarthistory_dropdown_candidates} -gt 0 ]]; then
+            local raw=${_smarthistory_dropdown_candidates[1]}
+            BUFFER=$(_smarthistory_unescape "$raw")
+            CURSOR=${#BUFFER}
+            _smarthistory_reset_state
+            zle .accept-line
+        fi
+    }
+    zle -N _smarthistory_dropdown_run_first
+    bindkey '^@' _smarthistory_dropdown_run_first
 fi
 
 _smarthistory_reset_state() {
@@ -668,15 +1355,22 @@ _smarthistory_unescape() {
 
 
 _smarthistory_up_history() {
-    # When the live dropdown is showing, Up/Down move the highlighted
-    # row instead of walking the (separate, keypress-only) Up/Down
-    # history cache below — pure index arithmetic against the
-    # already-fetched candidate array, no subprocess call. Everything
-    # below this branch is completely unchanged from before the
-    # dropdown feature existed.
+    # When the live dropdown is showing, Up works exactly like
+    # Shift-Tab (`_smarthistory_dropdown_accept_prev`, bound to
+    # `^[[Z` above) instead of walking the (separate, keypress-only)
+    # Up/Down history cache below — calling the same function
+    # guarantees identical behavior, including the "first press just
+    # highlights the current row without moving" rule
+    # (`_smarthistory_dropdown_chosen` gating) that a hand-rolled
+    # index decrement here previously got wrong: it always moved the
+    # index AND never set `_smarthistory_dropdown_chosen=1`, so the
+    # very first Up/Down press silently skipped a row and painted
+    # with no visible highlight at all (the paint function only
+    # marks a row when `chosen == 1`). Everything below this branch
+    # is completely unchanged from before the dropdown feature
+    # existed.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
-        _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
-        _smarthistory_dropdown_paint
+        _smarthistory_dropdown_accept_prev
         return
     fi
     # Always use smarthistory, even with an empty LBUFFER (an empty
@@ -720,11 +1414,12 @@ _smarthistory_up_history() {
     _smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
 }
 _smarthistory_down_history() {
-    # Same dropdown-navigation branch as `_smarthistory_up_history`
-    # above — see its comment for the rationale.
+    # Down works exactly like Tab (`_smarthistory_dropdown_accept`,
+    # bound to `^I` above) when the dropdown is showing — see
+    # `_smarthistory_up_history` above for why this calls the same
+    # function rather than re-deriving the index arithmetic.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
-        _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
-        _smarthistory_dropdown_paint
+        _smarthistory_dropdown_accept
         return
     fi
     # Down walks the match list in the *opposite* direction of Up

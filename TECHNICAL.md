@@ -791,9 +791,9 @@ start, `Down` clears the buffer.
 ```
 smarthistory add <command> --exit-code <status>
 smarthistory search [QUERY] [--directory <dir>] [--session] [--exit-code OK|ERROR]
-                     [--fields f1,f2,...] [--limit N] [--no-highlight]
+                     [--fields f1,f2,...] [--limit N] [--no-highlight] [--ansi off|bold|full]
 smarthistory select [QUERY] [--directory <dir>] [--session] [--exit-code OK|ERROR]
-                     [--fields f1,f2,...] [--limit N] [--no-highlight]
+                     [--fields f1,f2,...] [--limit N] [--no-highlight] [--ansi off|bold|full]
 smarthistory list  [--fields f1,f2,...] [--table]
 smarthistory clean [QUERY] [--directory <dir>] [--session] [--exit-code OK|ERROR]
                      [--force]
@@ -813,7 +813,49 @@ smarthistory init  zsh
 - `--limit N` caps the number of returned rows; `0` means no limit.
 - `--no-highlight` disables the bracket / ANSI-bold marker around the
   search substring. Used internally by the line-editor widget; rarely
-  needed from the CLI.
+  needed from the CLI. Equivalent to `--ansi=off`.
+- `--ansi off|bold|full` controls how the matched substring is
+  decorated in the `command` field. Default `bold` (preserves the
+  historical behavior: `\x1b[1m…\x1b[0m` on a TTY, `[…]` on a pipe).
+  `off` is the no-decoration mode. `full` is the opt-in: the matched
+  prefix is bolded and the *rest* of the command is dimmed
+  (`\x1b[2m…\x1b[0m\x1b[1m<match>\x1b[0m\x1b[2m<suffix>\x1b[0m` on a
+  TTY), so a wall of candidate commands reads as a highlighted key +
+  dimmed context. On a non-TTY the `full` mode falls back to the
+  `bold`-style `[…]` brackets for downstream pipe-safety. When both
+  `--no-highlight` and `--ansi=off` are passed, the explicit
+  `--ansi` value wins.
+
+  The zsh line-editor dropdown widget (`init.zsh →
+  _smarthistory_dropdown_render`) captures `search` output via a
+  `$()`-style command substitution, which is never a TTY — so
+  passing `--ansi=full`/`bold` there would only ever produce the
+  bracket-wrapped fallback text, not real styling, and those
+  literal `[`/`]` characters would show up in the dropdown as if
+  they were part of the history. The widget passes `--ansi=off`
+  instead and recreates the matched-prefix emphasis itself via
+  zle's `region_highlight` (a `bold` span over the first `$#LBUFFER`
+  characters of each row), plus a `--fields diff,command` request
+  so each row can show a right-aligned "last called" age column
+  (`5m`/`2h`/`3d`, the same `diff` derived field described above).
+  `_smarthistory_strip_ansi` is kept as a defensive no-op in case
+  `--ansi` is ever re-enabled there, so embedded SGR codes couldn't
+  desync the box's `─` border or the per-row right-pad.
+- `smarthistory config get palette` prints the *resolved* TUI
+  palette as a flat `key=value` block, one line per `tuicolor.*`
+  slot (`accent`, `selection`, `bg`, `fg`, …, 14 slots total).
+  The resolution is the same chain the TUI uses at startup: a
+  user-set `tuicolor.<field>=` wins, otherwise the active
+  built-in theme's `<field>` slot is consulted, otherwise the
+  built-in default. Values are CSS color names (`red`, `cyan`,
+  `lightblue`, …) or `#rrggbb` hex strings, in the same format
+  the user writes in the config file under `tuicolor.<field>=`.
+  Used internally by the zsh dropdown widget at init time so
+  the box borders and selection gutter match the user's TUI
+  theme (a `theme.dark=gruvbox` user sees orange borders, a
+  `theme.dark=doom-one` user sees doom-one coral). Read once per
+  shell startup; re-`exec zsh` (or restart the terminal) to
+  pick up TUI theme changes.
 - `clean` is destructive: it builds the same `WHERE` clause as `search`
   and runs a `DELETE`. By default it prompts `Delete N entries? [y/N]`.
   Pass `--force` to skip the prompt. With no matches the prompt is

@@ -12,7 +12,7 @@ mod ssh_config;
 mod tui;
 mod util;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -22,6 +22,41 @@ use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// Controls how `smarthistory search` / `select` decorate the
+/// matched substring on the `command` field with ANSI / bracket
+/// markers. The default (`bold`) preserves the historical behavior;
+/// `full` is the new opt-in that wraps the *rest* of the line in
+/// dim, leaving only the matched prefix at full brightness — the
+/// styling the line-editor dropdown widget needs to render an
+/// at-a-glance history list. `off` is the no-decoration mode the
+/// dropdown uses when the user has explicitly disabled styling
+/// (it still inserts the literal command, with no markers, into
+/// the zsh buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub(crate) enum AnsiMode {
+    /// No markers at all, even when stdout is a TTY. Used
+    /// internally by the zsh dropdown widget when the user
+    /// has explicitly opted out of styling, so a chosen
+    /// command is inserted verbatim.
+    Off,
+    /// Wrap the matched prefix in `\x1b[1m...\x1b[0m` on a TTY
+    /// (the historical default) and `[...]` on a pipe so
+    /// downstream consumers (grep, awk, …) still see the
+    /// match without ANSI noise.
+    #[default]
+    Bold,
+    /// Like `bold`, but on a TTY also dim the *rest* of the
+    /// command so only the matched substring stands out. The
+    /// full emitted form is
+    /// `\x1b[2m<prefix-before>\x1b[0m\x1b[1m<match>\x1b[0m\x1b[2m<suffix>\x1b[0m`,
+    /// with a single reset at end of line so a downstream
+    /// consumer (e.g. a less-able pager) doesn't bleed dim
+    /// state into the next prompt. On a non-TTY the
+    /// `bold`-style `[<match>]` is used instead, for the
+    /// same pipe-safety reason.
+    Full,
+}
 
 /// Process start instant, captured on first use. Mixed into UUID generation so
 /// distinct invocations of the binary produce distinct IDs even when the wall
@@ -171,6 +206,19 @@ enum Commands {
         /// somewhere inside the URL).
         #[arg(long)]
         prefix: bool,
+        /// How to decorate the matched substring in the `command`
+        /// field. Default `bold` (preserves historical behavior);
+        /// `full` additionally dims the *rest* of the line so the
+        /// match stands out — the styling the zsh dropdown widget
+        /// reads. `off` is equivalent to `--no-highlight` and is
+        /// kept as a separate flag so callers can opt into a
+        /// three-way choice (off / bold / full) without two
+        /// overlapping booleans. When both `--no-highlight` and
+        /// `--ansi=off` are given, the explicit `--ansi` value
+        /// wins; `--no-highlight` maps to `AnsiMode::Off`
+        /// internally.
+        #[arg(long, value_enum, default_value_t = AnsiMode::Bold)]
+        ansi: AnsiMode,
     },
     /// Search history and print matching rows, like `search` but
     /// with a 1000-row default limit.
@@ -203,6 +251,10 @@ enum Commands {
         /// substring in the `command` field.
         #[arg(long)]
         no_highlight: bool,
+        /// How to decorate the matched substring in the `command`
+        /// field. See `search --ansi` for the three values.
+        #[arg(long, value_enum, default_value_t = AnsiMode::Bold)]
+        ansi: AnsiMode,
     },
     /// Launch the full-screen TUI picker.
     Tui {
@@ -492,7 +544,8 @@ enum ConfigAction {
     /// Used by the zsh precmd hook to discover the tmux pane output
     /// directory.
     Get {
-        /// One of: `tmuxpaneoutputdir`, `ignorecapture`, `capturelines`.
+        /// One of: `tmuxpaneoutputdir`, `ignorecapture`, `capturelines`,
+        /// `palette`.
         key: String,
     },
     /// Validate the config file, printing a human-readable report.
@@ -2392,6 +2445,158 @@ impl Config {
         }
     }
 
+    /// Resolved palette as a flat `key=value` block, ready to
+    /// feed to the line-editor dropdown widget (and to any
+    /// other consumer that wants "what the TUI is *actually*
+    /// rendering right now", as opposed to the user's raw
+    /// config-file input).
+    ///
+    /// The resolution is the same one `tui::theme::install_palette`
+    /// uses at TUI startup:
+    ///   1. If the user set `tuicolor.<field>=`, that value wins.
+    ///   2. Otherwise, look up `<field>` in the active built-in
+    ///      theme's `ratatui_themes::ThemePalette` (the theme
+    ///      chosen by `theme.<scheme>=<slug>` for `scheme`).
+    ///   3. Otherwise, fall back to the built-in default.
+    ///
+    /// The `scheme` argument selects which config-slot is
+    /// consulted: `theme.dark=<slug>` is honored when `scheme`
+    /// is `Dark`; `theme.light=<slug>` for `Light`. The two
+    /// slots fall back to each other (a user who only set
+    /// `theme.dark=dracula` gets dracula on both schemes),
+    /// matching `theme_for()`.
+    ///
+    /// Each entry is `(field_name, css_value)` — the value is
+    /// a CSS color name (`red`, `cyan`, …), a 16-color name
+    /// (`lightblue`, …), or a `#rrggbb` hex string. The format
+    /// mirrors what the user would write in the config file
+    /// under `tuicolor.<field>=…`, so the widget can re-use
+    /// the same `resolve_color`-style parser as the CLI side.
+    /// See `docs/dropdown-completion.md` for the contract.
+    pub fn resolved_palette(
+        &self,
+        scheme: crate::tui::theme::ColorScheme,
+    ) -> Vec<(&'static str, String)> {
+        use crate::tui::theme::SelectedTheme;
+        let theme = match self.theme_for(scheme) {
+            Some(slug) => SelectedTheme::from_slug(slug),
+            None => SelectedTheme::None,
+        };
+        // Built-in palette for the active theme, used as the
+        // fallback for every field the user didn't explicitly
+        // override. `None` when no theme is selected — the
+        // built-in defaults kick in via the manual-only path.
+        let builtin = match theme {
+            SelectedTheme::Builtin(b) => Some(b.palette()),
+            SelectedTheme::None => None,
+        };
+        let mut out: Vec<(&'static str, String)> = Vec::with_capacity(14);
+        let cfg_theme = &self.theme;
+        // Helper: emit `<key>=<value>` with the user's
+        // `tuicolor.<key>=` value when set, else the built-in
+        // theme's CSS conversion, else the default CSS name.
+        let mut push = |key: &'static str,
+                        user: &str,
+                        fallback_builtin: Option<ratatui::style::Color>,
+                        default: &'static str| {
+            let value = if !user.is_empty() {
+                user.to_string()
+            } else if let Some(c) = fallback_builtin {
+                crate::tui::theme::color_to_css(c)
+            } else {
+                default.to_string()
+            };
+            out.push((key, value));
+        };
+        // Mirrors `install_palette`'s field-by-field resolution.
+        // The `muted` slot on `ThemePalette` maps to `tuicolor.dim`,
+        // and the `accent` slot maps to `tuicolor.highlight` (the
+        // TUI uses the theme's accent as the highlight fallback
+        // when `tuicolor.highlight=` isn't set — see
+        // `install_palette`).
+        push("bg", &cfg_theme.bg, builtin.map(|p| p.bg), "black");
+        push("fg", &cfg_theme.fg, builtin.map(|p| p.fg), "white");
+        push(
+            "accent",
+            &cfg_theme.accent,
+            builtin.map(|p| p.accent),
+            "cyan",
+        );
+        push(
+            "success",
+            &cfg_theme.success,
+            builtin.map(|p| p.success),
+            "green",
+        );
+        push(
+            "error",
+            &cfg_theme.error,
+            builtin.map(|p| p.error),
+            "red",
+        );
+        push(
+            "warning",
+            &cfg_theme.warning,
+            builtin.map(|p| p.warning),
+            "yellow",
+        );
+        push(
+            "dim",
+            &cfg_theme.dim,
+            builtin.map(|p| p.muted),
+            "gray",
+        );
+        push(
+            "highlight",
+            &cfg_theme.highlight,
+            builtin.map(|p| p.accent),
+            "cyan",
+        );
+        push(
+            "info",
+            &cfg_theme.info,
+            builtin.map(|p| p.info),
+            "blue",
+        );
+        push(
+            "selection",
+            &cfg_theme.selection,
+            builtin.map(|p| p.selection),
+            "blue",
+        );
+        push(
+            "badgefg",
+            &cfg_theme.badge_fg,
+            builtin.map(|p| p.bg),
+            "black",
+        );
+        push(
+            "listbg",
+            &cfg_theme.list_bg,
+            builtin.map(|p| p.bg),
+            "black",
+        );
+        push(
+            "detailsbg",
+            &cfg_theme.details_bg,
+            builtin.map(|p| p.bg),
+            "black",
+        );
+        push(
+            "inputbg",
+            &cfg_theme.input_bg,
+            builtin.map(|p| p.bg),
+            "black",
+        );
+        push(
+            "statusbg",
+            &cfg_theme.status_bg,
+            builtin.map(|p| p.bg),
+            "black",
+        );
+        out
+    }
+
     /// True if the user explicitly set `tuicolor.bg=`. Used by the
     /// TUI to decide whether the manual value should override a
     /// built-in theme's `bg`.
@@ -3110,14 +3315,54 @@ fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/// Build the highlight markers. Bracket markers are always used; ANSI bold
-/// is added on top when stdout is a TTY.
-fn highlight_markers() -> (&'static str, &'static str) {
-    if stdout_is_tty() {
-        ("\x1b[1m", "\x1b[0m") // bold on, reset
-    } else {
-        ("[", "]")
+/// Build the open/close markers for the matched prefix in
+/// `AnsiMode::Bold` (the historical default) and `AnsiMode::Off`.
+/// `AnsiMode::Full` is handled by the dedicated `highlight_full`
+/// path below because it needs to wrap the *whole* cell, not just
+/// the matched prefix, so the simple `open…close` shape doesn't
+/// fit — hence the `("", "")` return for `Full` on a TTY (a
+/// signal to the caller to take the `Full` branch).
+fn decoration(ansi: AnsiMode) -> (&'static str, &'static str) {
+    match (ansi, stdout_is_tty()) {
+        (AnsiMode::Off, _) => ("", ""),
+        (AnsiMode::Bold, true) => ("\x1b[1m", "\x1b[0m"), // bold on, reset
+        (AnsiMode::Bold, false) => ("[", "]"),            // pipe-safe markers
+        (AnsiMode::Full, false) => ("[", "]"),             // same as Bold on a pipe
+        (AnsiMode::Full, true) => ("", ""),                // see highlight_full
     }
+}
+
+/// `Full` mode wraps the entire cell in dim SGR, with the matched
+/// prefix upgraded to bold. Returns
+/// `<dim-open><prefix-before><reset><bold-open><match><reset><dim-open><suffix>`
+/// where each SGR pair uses the standard escape codes. The trailing
+/// reset is omitted because the caller (`project_row`) emits a
+/// trailing reset anyway, and double-resetting is harmless. `needle`
+/// is the user-typed query; empty needle means no match, so the
+/// whole cell is plain (same as the `Bold` path with empty needle).
+fn highlight_full(cell: &str, needle: &str) -> String {
+    const DIM_OPEN: &str = "\x1b[2m";
+    const DIM_CLOSE: &str = "\x1b[0m";
+    const BOLD_OPEN: &str = "\x1b[1m";
+    const BOLD_CLOSE: &str = "\x1b[0m";
+
+    if needle.is_empty() {
+        return cell.to_string();
+    }
+    let mut out = String::with_capacity(cell.len() + DIM_OPEN.len() * 2 + BOLD_OPEN.len() * 2);
+    out.push_str(DIM_OPEN);
+    let mut rest = cell;
+    while let Some(pos) = rest.find(needle) {
+        out.push_str(&rest[..pos]);
+        out.push_str(DIM_CLOSE);
+        out.push_str(BOLD_OPEN);
+        out.push_str(needle);
+        out.push_str(BOLD_CLOSE);
+        out.push_str(DIM_OPEN);
+        rest = &rest[pos + needle.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn project_row(
@@ -3125,13 +3370,9 @@ fn project_row(
     fields: &[String],
     derived: &[String],
     query: Option<&str>,
-    no_highlight: bool,
+    ansi: AnsiMode,
 ) -> Vec<String> {
-    let (open, close) = if no_highlight {
-        ("", "")
-    } else {
-        highlight_markers()
-    };
+    let (open, close) = decoration(ansi);
     let mut out = Vec::with_capacity(fields.len());
     for f in fields {
         if derived.contains(f) {
@@ -3168,14 +3409,36 @@ fn project_row(
             // Other fields (directory, base, etc.) won't contain it because
             // the SQL WHERE filters on `command LIKE ?`.
             if f == "command" {
-                if !no_highlight {
-                    if let Some(q) = query {
-                        out.push(highlight(&cell, q, open, close));
-                    } else {
-                        out.push(cell);
+                match (ansi, stdout_is_tty()) {
+                    (AnsiMode::Off, _) => out.push(cell),
+                    (AnsiMode::Full, true) => {
+                        // Dim the whole cell, bold the matched prefix.
+                        // `query` is `None` for a scope-only search
+                        // (no user-typed filter); in that case there's
+                        // nothing to highlight, so emit the plain cell.
+                        if let Some(q) = query {
+                            out.push(highlight_full(&cell, q));
+                        } else {
+                            out.push(cell);
+                        }
                     }
-                } else {
-                    out.push(cell);
+                    (AnsiMode::Full, false) | (AnsiMode::Bold, _) => {
+                        // Bold mode on a TTY/pipe, or Full on a pipe
+                        // (falls back to the bold-wrapping marker
+                        // pair for downstream pipe-safety — the zsh
+                        // widget always invokes the CLI from a pipe,
+                        // so it never sees Full's dim+bold split
+                        // either way).
+                        if !open.is_empty() {
+                            if let Some(q) = query {
+                                out.push(highlight(&cell, q, open, close));
+                            } else {
+                                out.push(cell);
+                            }
+                        } else {
+                            out.push(cell);
+                        }
+                    }
                 }
             } else {
                 out.push(cell);
@@ -3807,7 +4070,15 @@ fn main() -> anyhow::Result<()> {
             limit,
             no_highlight,
             prefix,
+            ansi,
         } => {
+            // `--no-highlight` is the legacy way to disable styling
+            // entirely; treat it as `AnsiMode::Off` so the two flags
+            // compose cleanly. When both `--no-highlight` and
+            // `--ansi=off` are given, the explicit `--ansi` value
+            // wins (clap parses them independently and we just
+            // forward `ansi` here, so this is the natural fallthrough).
+            let ansi = if no_highlight { AnsiMode::Off } else { ansi };
             let selected_fields = fields.unwrap_or_else(|| vec!["command".to_string()]);
             let (raw_fields, derived) = split_fields(&selected_fields);
             let qualified_fields: Vec<String> =
@@ -3870,7 +4141,7 @@ fn main() -> anyhow::Result<()> {
                     &selected_fields,
                     &derived,
                     query_ref,
-                    no_highlight,
+                    ansi,
                 ));
             }
             for out in pad_rows(&out_rows, &selected_fields) {
@@ -3885,7 +4156,11 @@ fn main() -> anyhow::Result<()> {
             fields,
             limit,
             no_highlight,
+            ansi,
         } => {
+            // Same `--no-highlight` / `--ansi` composition as the
+            // `Search` arm above.
+            let ansi = if no_highlight { AnsiMode::Off } else { ansi };
             let selected_fields = fields.unwrap_or_else(|| vec!["command".to_string()]);
             let (raw_fields, derived) = split_fields(&selected_fields);
             let qualified_fields: Vec<String> =
@@ -3934,7 +4209,7 @@ fn main() -> anyhow::Result<()> {
                     &selected_fields,
                     &derived,
                     query_ref,
-                    no_highlight,
+                    ansi,
                 ));
             }
             for out in pad_rows(&out_rows, &selected_fields) {
@@ -4102,7 +4377,7 @@ fn main() -> anyhow::Result<()> {
                     &selected_fields,
                     &derived,
                     None,
-                    false,
+                    AnsiMode::Bold,
                 ));
             }
             let out_rows = pad_rows(&out_rows, &selected_fields);
@@ -4340,6 +4615,23 @@ fn main() -> anyhow::Result<()> {
                     }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
+                    // Resolved palette as a flat `key=value` block,
+                    // one entry per `tuicolor.<field>` slot. The
+                    // widget reads this once at init time and
+                    // converts each value to an ANSI SGR sequence
+                    // (CSS name / 16-color name / `#rrggbb` hex).
+                    // Same shape as the `tuicolor.<field>=…` lines
+                    // the user writes in the config file, so the
+                    // widget's parser doesn't need a second
+                    // format. `scheme` defaults to `Dark` to match
+                    // the TUI's default active scheme.
+                    "palette" => {
+                        for (key, value) in cfg.resolved_palette(
+                            crate::tui::theme::ColorScheme::Dark,
+                        ) {
+                            println!("{key}={value}");
+                        }
+                    }
                     other => anyhow::bail!("unknown config key: {other}"),
                 }
             }
@@ -5804,7 +6096,10 @@ tmuxpaneoutputdir=~/custom-tmux
             "for i in 1 2 3\ndo echo $i\ndone".to_string(),
         )];
         let fields = vec!["command".to_string()];
-        let out = project_row(&row_data, &fields, &[], None, true);
+        // `AnsiMode::Off` matches the old `no_highlight=true`
+        // behavior — the test only cares about escape-encoding, not
+        // SGR markup.
+        let out = project_row(&row_data, &fields, &[], None, AnsiMode::Off);
         assert_eq!(out.len(), 1);
         assert!(
             !out[0].contains('\n'),
@@ -5820,7 +6115,7 @@ tmuxpaneoutputdir=~/custom-tmux
         // from captured command output).
         let row_data = vec![("output".to_string(), "line1\nline2".to_string())];
         let fields = vec!["output".to_string()];
-        let out = project_row(&row_data, &fields, &[], None, true);
+        let out = project_row(&row_data, &fields, &[], None, AnsiMode::Off);
         assert_eq!(out.len(), 1);
         assert!(
             !out[0].contains('\n'),
@@ -5828,6 +6123,154 @@ tmuxpaneoutputdir=~/custom-tmux
             out[0]
         );
         assert_eq!(out[0], "line1\\nline2");
+    }
+
+    #[test]
+    fn project_row_ansi_off_emits_plain_cell() {
+        // `AnsiMode::Off` must emit the cell with no decoration at
+        // all — the legacy `no_highlight=true` behavior, plus the
+        // explicit `--ansi=off` form.
+        let row_data = vec![(
+            "command".to_string(),
+            "git status".to_string(),
+        )];
+        let fields = vec!["command".to_string()];
+        let out = project_row(
+            &row_data,
+            &fields,
+            &[],
+            Some("git"),
+            AnsiMode::Off,
+        );
+        assert_eq!(out, vec!["git status".to_string()]);
+    }
+
+    /// `Config::resolved_palette` falls back to the built-in
+    /// defaults when no theme is selected and the user hasn't
+    /// set any `tuicolor.*` overrides — the case the widget hits
+    /// on a first-run install before the user has touched the
+    /// config file.
+    #[test]
+    fn resolved_palette_defaults_when_no_theme() {
+        use crate::tui::theme::ColorScheme;
+        let cfg = Config::default();
+        let p = cfg.resolved_palette(ColorScheme::Dark);
+        // `accent` defaults to "cyan" per `TuiTheme::default()`;
+        // no theme is selected, so the manual-config defaults
+        // are the source of truth.
+        let accent = p.iter().find(|(k, _)| *k == "accent").unwrap();
+        assert_eq!(accent.1, "cyan");
+        // `bg` defaults to "black"; `fg` to "white"; `selection`
+        // to "blue". The exact slot set is intentionally stable
+        // (the widget's parser depends on these names).
+        assert_eq!(
+            p.iter().find(|(k, _)| *k == "bg").unwrap().1,
+            "black"
+        );
+        assert_eq!(
+            p.iter().find(|(k, _)| *k == "fg").unwrap().1,
+            "white"
+        );
+        assert_eq!(
+            p.iter().find(|(k, _)| *k == "selection").unwrap().1,
+            "blue"
+        );
+    }
+
+    /// `tuicolor.<field>=` overrides win over the active theme's
+    /// built-in default — the user always has the final say.
+    #[test]
+    fn resolved_palette_user_override_wins_over_theme() {
+        use crate::tui::theme::ColorScheme;
+        let mut cfg = Config::default();
+        // Pick a built-in theme. Without an override, its
+        // accent would be the theme's own accent (e.g.
+        // Doom One's #ff0000-ish red). With the override,
+        // `cyan` must win.
+        cfg.parse("theme.dark=doom-one\ntuicolor.accent=cyan\n");
+        let p = cfg.resolved_palette(ColorScheme::Dark);
+        let accent = p.iter().find(|(k, _)| *k == "accent").unwrap();
+        assert_eq!(
+            accent.1, "cyan",
+            "user `tuicolor.accent=cyan` must override the active theme"
+        );
+    }
+
+    /// The resolution must produce all 14 `tuicolor.*` slots the
+    /// widget parses, so a future widget addition can't silently
+    /// get an empty SGR code by looking up an unknown key.
+    #[test]
+    fn resolved_palette_emits_all_14_slots() {
+        use crate::tui::theme::ColorScheme;
+        let cfg = Config::default();
+        let p = cfg.resolved_palette(ColorScheme::Dark);
+        let names: Vec<&str> = p.iter().map(|(k, _)| *k).collect();
+        for required in [
+            "bg", "fg", "accent", "success", "error", "warning", "dim",
+            "highlight", "info", "selection", "badgefg", "listbg",
+            "detailsbg", "inputbg", "statusbg",
+        ] {
+            assert!(
+                names.contains(&required),
+                "resolved_palette missing required slot `{required}`; \
+                 widget would render with an empty SGR code"
+            );
+        }
+    }
+
+    /// `color_to_css` is the round-trip partner of
+    /// `resolve_color`: a `Rgb(r, g, b)` from a built-in theme
+    /// must come back as `#rrggbb`, and every standard ANSI
+    /// variant must come back as the CSS name the user would
+    /// have typed in `tuicolor.<field>=`.
+    #[test]
+    fn color_to_css_round_trips() {
+        use crate::tui::theme::color_to_css;
+        use ratatui::style::Color;
+        assert_eq!(color_to_css(Color::Black), "black");
+        assert_eq!(color_to_css(Color::LightRed), "lightred");
+        assert_eq!(
+            color_to_css(Color::Rgb(0xab, 0xcd, 0xef)),
+            "#abcdef"
+        );
+        // `Color::Reset` round-trips to the literal "reset"
+        // string (the widget's parser treats it as a no-op).
+        assert_eq!(color_to_css(Color::Reset), "reset");
+    }
+
+    #[test]
+    fn highlight_full_wraps_in_dim_and_bolds_match() {
+        // The dedicated `Full`-mode helper wraps the whole cell in
+        // dim, with the matched prefix upgraded to bold. The exact
+        // emitted sequence is
+        //   \x1b[2m  \x1b[0m\x1b[1mg\x1b[0m\x1b[2mit status\x1b[0m
+        // for a needle of "g" in a cell of "  git status" — the dim
+        // opens before the prefix-before, resets for the bold, then
+        // re-opens dim for the suffix. The trailing dim-open has no
+        // matching close; that's intentional, the caller (`project_row`)
+        // emits a reset at end of line.
+        let got = highlight_full("  git status", "g");
+        assert_eq!(got, "\x1b[2m  \x1b[0m\x1b[1mg\x1b[0m\x1b[2mit status");
+    }
+
+    #[test]
+    fn highlight_full_empty_needle_emits_plain() {
+        // An empty needle means there's nothing to highlight, so the
+        // cell is emitted as-is — same contract as the legacy
+        // `highlight()` helper.
+        assert_eq!(highlight_full("git status", ""), "git status");
+    }
+
+    #[test]
+    fn highlight_full_multiple_occurrences_each_get_bold() {
+        // Every match is bold-wrapped; the dim open is repeated for
+        // each non-match segment so the cell is fully dim except for
+        // the bolded matches.
+        let got = highlight_full("foo bar foo", "foo");
+        assert_eq!(
+            got,
+            "\x1b[2m\x1b[0m\x1b[1mfoo\x1b[0m\x1b[2m bar \x1b[0m\x1b[1mfoo\x1b[0m\x1b[2m"
+        );
     }
 
     /// `Config::theme_for` returns the user-configured

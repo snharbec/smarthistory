@@ -660,6 +660,44 @@ fn resolve_color(s: &str) -> Color {
     }
 }
 
+/// Inverse of `resolve_color`: convert a `ratatui::style::Color`
+/// back into a CSS-color-name or `#rrggbb` string. Used by
+/// `Config::resolved_palette` so the line-editor dropdown
+/// widget can render with the same palette the TUI is using
+/// without re-implementing the resolution logic.
+///
+/// Output shape mirrors `resolve_color`'s accepted input:
+/// 16-color names for the standard ANSI variants (`black`,
+/// `lightred`, …), `#rrggbb` for `Rgb(r, g, b)`, and the
+/// literal `"reset"` for `Color::Reset`. Indexed colors fall
+/// back to `white` — `ratatui::themes` only emits `Rgb` and
+/// the 16 standard variants from its palette, so this branch
+/// is unreachable in practice, but a safe fallback keeps the
+/// widget from silently emitting an empty SGR code.
+pub(crate) fn color_to_css(c: Color) -> String {
+    match c {
+        Color::Black => "black".to_string(),
+        Color::Red => "red".to_string(),
+        Color::Green => "green".to_string(),
+        Color::Yellow => "yellow".to_string(),
+        Color::Blue => "blue".to_string(),
+        Color::Magenta => "magenta".to_string(),
+        Color::Cyan => "cyan".to_string(),
+        Color::Gray => "gray".to_string(),
+        Color::DarkGray => "darkgray".to_string(),
+        Color::LightRed => "lightred".to_string(),
+        Color::LightGreen => "lightgreen".to_string(),
+        Color::LightYellow => "lightyellow".to_string(),
+        Color::LightBlue => "lightblue".to_string(),
+        Color::LightMagenta => "lightmagenta".to_string(),
+        Color::LightCyan => "lightcyan".to_string(),
+        Color::White => "white".to_string(),
+        Color::Reset => "reset".to_string(),
+        Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        Color::Indexed(_) => "white".to_string(),
+    }
+}
+
 /// Filter by exit status. Cycled with Ctrl+S in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // `label` kept for future use (e.g. larger displays)
