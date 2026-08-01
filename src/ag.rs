@@ -91,6 +91,28 @@ impl Default for AgState {
     }
 }
 
+impl crate::debounce::Cancellable for AgRequest {
+    fn cancelled_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancelled
+    }
+}
+
+impl crate::debounce::Debounced for AgState {
+    type Request = AgRequest;
+    fn debounce_started(&mut self) -> &mut Option<std::time::Instant> {
+        &mut self.debounce_started
+    }
+    fn last_pattern(&mut self) -> &mut Option<String> {
+        &mut self.last_pattern
+    }
+    fn in_flight(&mut self) -> &mut bool {
+        &mut self.in_flight
+    }
+    fn request(&mut self) -> &mut Option<AgRequest> {
+        &mut self.request
+    }
+}
+
 /// Spawn a background thread that runs `ag`, parses the
 /// output, and sends the result rows back.
 ///

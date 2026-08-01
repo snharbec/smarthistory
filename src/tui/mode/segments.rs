@@ -141,6 +141,28 @@ impl Default for SegmentsState {
     }
 }
 
+impl crate::debounce::Cancellable for SegmentsRequest {
+    fn cancelled_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancelled
+    }
+}
+
+impl crate::debounce::Debounced for SegmentsState {
+    type Request = SegmentsRequest;
+    fn debounce_started(&mut self) -> &mut Option<std::time::Instant> {
+        &mut self.debounce_started
+    }
+    fn last_pattern(&mut self) -> &mut Option<String> {
+        &mut self.last_pattern
+    }
+    fn in_flight(&mut self) -> &mut bool {
+        &mut self.in_flight
+    }
+    fn request(&mut self) -> &mut Option<SegmentsRequest> {
+        &mut self.request
+    }
+}
+
 /// Spawn a background thread that runs the `note_search` segment
 /// query and sends the mapped `HistoryRow`s (or an error message)
 /// back over the channel. Mirrors `crate::ag::spawn_ag_search`.

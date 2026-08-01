@@ -707,6 +707,28 @@ impl BrowserState {
     }
 }
 
+impl crate::debounce::Cancellable for BrowserRequest {
+    fn cancelled_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancelled
+    }
+}
+
+impl crate::debounce::Debounced for BrowserState {
+    type Request = BrowserRequest;
+    fn debounce_started(&mut self) -> &mut Option<std::time::Instant> {
+        &mut self.debounce_started
+    }
+    fn last_pattern(&mut self) -> &mut Option<String> {
+        &mut self.last_pattern
+    }
+    fn in_flight(&mut self) -> &mut bool {
+        &mut self.in_flight
+    }
+    fn request(&mut self) -> &mut Option<BrowserRequest> {
+        &mut self.request
+    }
+}
+
 impl Default for BrowserState {
     fn default() -> Self {
         Self::new()

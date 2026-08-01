@@ -3,6 +3,7 @@
 mod ag;
 mod browser;
 mod codegraph;
+mod debounce;
 mod files;
 mod highlight;
 mod jira;
@@ -1241,6 +1242,40 @@ impl Default for QueryPrefixes {
             browser: '^',
             meta: '\'',
         }
+    }
+}
+
+impl QueryPrefixes {
+    /// Every prefix character currently assigned, in no particular
+    /// order. Single source of truth for "is this character one of
+    /// the known prefixes" — three call sites in `src/tui.rs`
+    /// (`query_mode_char`'s dispatch, `apply_prefix`'s
+    /// strip-old-prefix check, and `open_prefix_picker`'s row
+    /// preselection) used to each maintain their own hand-written
+    /// list of fields, and drifted out of sync with each other
+    /// (missing `paperless` in two of the three) as fields were
+    /// added over time. Add a new prefix field here too when one is
+    /// added to the struct.
+    pub(crate) fn all_chars(&self) -> [char; 17] {
+        [
+            self.output,
+            self.llm,
+            self.question,
+            self.notes,
+            self.todo,
+            self.directories,
+            self.panes,
+            self.files,
+            self.tags,
+            self.ag,
+            self.codegraph,
+            self.jira,
+            self.segments,
+            self.similar,
+            self.paperless,
+            self.browser,
+            self.meta,
+        ]
     }
 }
 

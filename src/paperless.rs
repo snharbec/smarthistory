@@ -587,6 +587,28 @@ impl Default for PaperlessState {
     }
 }
 
+impl crate::debounce::Cancellable for PaperlessRequest {
+    fn cancelled_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancelled
+    }
+}
+
+impl crate::debounce::Debounced for PaperlessState {
+    type Request = PaperlessRequest;
+    fn debounce_started(&mut self) -> &mut Option<std::time::Instant> {
+        &mut self.debounce_started
+    }
+    fn last_pattern(&mut self) -> &mut Option<String> {
+        &mut self.last_pattern
+    }
+    fn in_flight(&mut self) -> &mut bool {
+        &mut self.in_flight
+    }
+    fn request(&mut self) -> &mut Option<PaperlessRequest> {
+        &mut self.request
+    }
+}
+
 /// Spawn a background thread that runs `client.search(...)` for
 /// `pattern` and sends the result over the returned request's
 /// channel. Used by `App::paperless_maybe_autocall`.

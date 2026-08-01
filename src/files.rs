@@ -196,6 +196,28 @@ impl Default for FilesState {
     }
 }
 
+impl crate::debounce::Cancellable for FilesRequest {
+    fn cancelled_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancelled
+    }
+}
+
+impl crate::debounce::Debounced for FilesState {
+    type Request = FilesRequest;
+    fn debounce_started(&mut self) -> &mut Option<std::time::Instant> {
+        &mut self.debounce_started
+    }
+    fn last_pattern(&mut self) -> &mut Option<String> {
+        &mut self.last_pattern
+    }
+    fn in_flight(&mut self) -> &mut bool {
+        &mut self.in_flight
+    }
+    fn request(&mut self) -> &mut Option<FilesRequest> {
+        &mut self.request
+    }
+}
+
 /// Recursively walk a directory, adding matching files and
 /// directories to `rows`. Hidden entries (names starting with
 /// `.`) and `ignore.contains(...)` matches are skipped at the

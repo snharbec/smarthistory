@@ -2201,25 +2201,7 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
     let Some(c) = query.chars().next() else {
         return MODE_NONE;
     };
-    let known: [char; 16] = [
-        prefixes.output,
-        prefixes.llm,
-        prefixes.question,
-        prefixes.notes,
-        prefixes.todo,
-        prefixes.directories,
-        prefixes.panes,
-        prefixes.jira,
-        prefixes.files,
-        prefixes.tags,
-        prefixes.codegraph,
-        prefixes.ag,
-        prefixes.segments,
-        prefixes.similar,
-        prefixes.browser,
-        prefixes.meta,
-    ];
-    if known.contains(&c) {
+    if prefixes.all_chars().contains(&c) {
         c
     } else {
         MODE_NONE
@@ -3254,26 +3236,7 @@ impl App {
         // prefix char, drop it; otherwise the
         // entire query IS the body.
         let first = self.query.chars().next();
-        let has_prefix = first.is_some_and(|c| {
-            let prefixes = &self.query_prefixes;
-            c == prefixes.output
-                || c == prefixes.llm
-                || c == prefixes.question
-                || c == prefixes.notes
-                || c == prefixes.todo
-                || c == prefixes.directories
-                || c == prefixes.panes
-                || c == prefixes.jira
-                || c == prefixes.files
-                || c == prefixes.tags
-                || c == prefixes.ag
-                || c == prefixes.codegraph
-                || c == prefixes.segments
-                || c == prefixes.similar
-                || c == prefixes.paperless
-                || c == prefixes.browser
-                || c == prefixes.meta
-        });
+        let has_prefix = first.is_some_and(|c| self.query_prefixes.all_chars().contains(&c));
         let body = if has_prefix {
             self.query.chars().skip(1).collect::<String>()
         } else {
@@ -6859,23 +6822,8 @@ impl App {
     /// files mode; resets all pending
     /// state when the user leaves.
     fn files_touch(&mut self) {
-        if self.is_files_query() {
-            self.files_state.debounce_started = Some(std::time::Instant::now());
-            // If there's an in-flight walk,
-            // cancel it — the pattern has
-            // changed. The cached rows
-            // stay visible until the new
-            // walk completes.
-            if let Some(request) = self.files_state.request.take() {
-                request.cancelled.store(true, Ordering::Relaxed);
-            }
-            self.files_state.in_flight = false;
-        } else {
-            self.files_state.debounce_started = None;
-            self.files_state.in_flight = false;
-            self.files_state.request = None;
-            self.files_state.last_pattern = None;
-        }
+        let active = self.is_files_query();
+        crate::debounce::touch(&mut self.files_state, active);
     }
 
     /// Check whether the files-mode
@@ -6893,13 +6841,7 @@ impl App {
         if !self.is_files_query() {
             return;
         }
-        if self.files_state.in_flight {
-            return;
-        }
-        let Some(started) = self.files_state.debounce_started else {
-            return;
-        };
-        if started.elapsed() < crate::files::FILES_DEBOUNCE {
+        if !crate::debounce::debounce_elapsed(&mut self.files_state, crate::files::FILES_DEBOUNCE) {
             return;
         }
         let pattern =
@@ -6963,18 +6905,8 @@ impl App {
     /// et al.). Re-arms the timer when the user is still in
     /// paperless mode; resets all pending state when they leave.
     fn paperless_touch(&mut self) {
-        if self.is_paperless_query() {
-            self.paperless_state.debounce_started = Some(std::time::Instant::now());
-            if let Some(request) = self.paperless_state.request.take() {
-                request.cancelled.store(true, Ordering::Relaxed);
-            }
-            self.paperless_state.in_flight = false;
-        } else {
-            self.paperless_state.debounce_started = None;
-            self.paperless_state.in_flight = false;
-            self.paperless_state.request = None;
-            self.paperless_state.last_pattern = None;
-        }
+        let active = self.is_paperless_query();
+        crate::debounce::touch(&mut self.paperless_state, active);
     }
 
     /// Check whether the paperless-mode debounce has elapsed
@@ -6987,13 +6919,10 @@ impl App {
         if !self.is_paperless_query() {
             return;
         }
-        if self.paperless_state.in_flight {
-            return;
-        }
-        let Some(started) = self.paperless_state.debounce_started else {
-            return;
-        };
-        if started.elapsed() < crate::paperless::PAPERLESS_DEBOUNCE {
+        if !crate::debounce::debounce_elapsed(
+            &mut self.paperless_state,
+            crate::paperless::PAPERLESS_DEBOUNCE,
+        ) {
             return;
         }
         let pattern = crate::paperless::PaperlessState::current_pattern(
@@ -7057,18 +6986,8 @@ impl App {
     /// `paperless_touch`). Re-arms the timer when the user is still
     /// in browser mode; resets all pending state when they leave.
     fn browser_touch(&mut self) {
-        if self.is_browser_query() {
-            self.browser_state.debounce_started = Some(std::time::Instant::now());
-            if let Some(request) = self.browser_state.request.take() {
-                request.cancelled.store(true, Ordering::Relaxed);
-            }
-            self.browser_state.in_flight = false;
-        } else {
-            self.browser_state.debounce_started = None;
-            self.browser_state.in_flight = false;
-            self.browser_state.request = None;
-            self.browser_state.last_pattern = None;
-        }
+        let active = self.is_browser_query();
+        crate::debounce::touch(&mut self.browser_state, active);
     }
 
     /// Check whether the browser-mode debounce has elapsed and, if
@@ -7080,13 +6999,8 @@ impl App {
         if !self.is_browser_query() {
             return;
         }
-        if self.browser_state.in_flight {
-            return;
-        }
-        let Some(started) = self.browser_state.debounce_started else {
-            return;
-        };
-        if started.elapsed() < crate::browser::BROWSER_DEBOUNCE {
+        if !crate::debounce::debounce_elapsed(&mut self.browser_state, crate::browser::BROWSER_DEBOUNCE)
+        {
             return;
         }
         let pattern = crate::browser::BrowserState::current_pattern(
@@ -7137,18 +7051,8 @@ impl App {
 
     /// Arm the ag-mode debounce. Mirrors `files_touch`.
     fn ag_touch(&mut self) {
-        if self.is_ag_query() {
-            self.ag_state.debounce_started = Some(std::time::Instant::now());
-            if let Some(request) = self.ag_state.request.take() {
-                request.cancelled.store(true, Ordering::Relaxed);
-            }
-            self.ag_state.in_flight = false;
-        } else {
-            self.ag_state.debounce_started = None;
-            self.ag_state.in_flight = false;
-            self.ag_state.request = None;
-            self.ag_state.last_pattern = None;
-        }
+        let active = self.is_ag_query();
+        crate::debounce::touch(&mut self.ag_state, active);
     }
 
     /// Check whether the ag-mode debounce has elapsed
@@ -7157,13 +7061,7 @@ impl App {
         if !self.is_ag_query() {
             return;
         }
-        if self.ag_state.in_flight {
-            return;
-        }
-        let Some(started) = self.ag_state.debounce_started else {
-            return;
-        };
-        if started.elapsed() < crate::ag::AG_DEBOUNCE {
+        if !crate::debounce::debounce_elapsed(&mut self.ag_state, crate::ag::AG_DEBOUNCE) {
             return;
         }
         let pattern = crate::ag::AgState::current_pattern(&self.query, self.query_prefixes.ag);
@@ -7197,18 +7095,8 @@ impl App {
 
     /// Arm the segments-mode debounce. Mirrors `ag_touch`.
     fn segments_touch(&mut self) {
-        if self.is_segments_query() {
-            self.segments_state.debounce_started = Some(std::time::Instant::now());
-            if let Some(request) = self.segments_state.request.take() {
-                request.cancelled.store(true, Ordering::Relaxed);
-            }
-            self.segments_state.in_flight = false;
-        } else {
-            self.segments_state.debounce_started = None;
-            self.segments_state.in_flight = false;
-            self.segments_state.request = None;
-            self.segments_state.last_pattern = None;
-        }
+        let active = self.is_segments_query();
+        crate::debounce::touch(&mut self.segments_state, active);
     }
 
     /// Check whether the segments-mode debounce has elapsed and
@@ -7217,13 +7105,10 @@ impl App {
         if !self.is_segments_query() {
             return;
         }
-        if self.segments_state.in_flight {
-            return;
-        }
-        let Some(started) = self.segments_state.debounce_started else {
-            return;
-        };
-        if started.elapsed() < crate::tui::mode::segments::SEGMENTS_DEBOUNCE {
+        if !crate::debounce::debounce_elapsed(
+            &mut self.segments_state,
+            crate::tui::mode::segments::SEGMENTS_DEBOUNCE,
+        ) {
             return;
         }
         let Some(ref db_path) = self.notes_database else {
@@ -7293,18 +7178,8 @@ impl App {
 
     /// Arm the similar-mode debounce. Mirrors `segments_touch`.
     fn similar_touch(&mut self) {
-        if self.is_similar_query() {
-            self.similar_state.debounce_started = Some(std::time::Instant::now());
-            if let Some(request) = self.similar_state.request.take() {
-                request.cancelled.store(true, Ordering::Relaxed);
-            }
-            self.similar_state.in_flight = false;
-        } else {
-            self.similar_state.debounce_started = None;
-            self.similar_state.in_flight = false;
-            self.similar_state.request = None;
-            self.similar_state.last_pattern = None;
-        }
+        let active = self.is_similar_query();
+        crate::debounce::touch(&mut self.similar_state, active);
     }
 
     /// Check whether the similar-mode debounce has elapsed and
@@ -7314,13 +7189,10 @@ impl App {
         if !self.is_similar_query() {
             return;
         }
-        if self.similar_state.in_flight {
-            return;
-        }
-        let Some(started) = self.similar_state.debounce_started else {
-            return;
-        };
-        if started.elapsed() < crate::tui::mode::similar::SIMILAR_DEBOUNCE {
+        if !crate::debounce::debounce_elapsed(
+            &mut self.similar_state,
+            crate::tui::mode::similar::SIMILAR_DEBOUNCE,
+        ) {
             return;
         }
         let Some(ref db_path) = self.notes_database else {
@@ -11030,24 +10902,8 @@ impl App {
 
     fn open_prefix_picker(&mut self) {
         let first = self.query.chars().next();
-        let current = first.and_then(|c| {
-            let p = &self.query_prefixes;
-            let known = [
-                p.output,
-                p.llm,
-                p.question,
-                p.notes,
-                p.todo,
-                p.directories,
-                p.panes,
-                p.jira,
-                p.files,
-                p.tags,
-                p.ag,
-                p.browser,
-            ];
-            known.contains(&c).then_some(c)
-        });
+        let current =
+            first.and_then(|c| self.query_prefixes.all_chars().contains(&c).then_some(c));
         self.prefix_picker = Some(PrefixPicker::new(&self.query_prefixes, current));
     }
 
