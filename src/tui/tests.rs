@@ -6039,8 +6039,6 @@ fn smart_open_jira_opens_all_marked_issues() {
     // Guard the JIRA env vars like `select_for_run_in_jira_mode_stages_open_url`
     // does — `open_jira_in_background` reads `JiraConfig::from_env()`
     // directly, independent of any injected test client.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev_server = std::env::var("JIRA_SERVER").ok();
     let prev_token = std::env::var("JIRA_API_TOKEN").ok();
@@ -19219,8 +19217,6 @@ fn download_jira_matching_stages_command() {
     // a developer's real shell env would change the
     // expected string. Guarded by ENV_LOCK so we don't
     // race other tests mutating the same var.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev_project = std::env::var("JIRA_PROJECT").ok();
     // SAFETY: single-threaded within the ENV_LOCK guard.
@@ -19306,8 +19302,6 @@ fn select_for_run_in_jira_mode_stages_open_url() {
     // (The run is synchronous in the test path; no
     // background thread reads these, so the window
     // is just this function's body.)
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = lock_or_recover(&ENV_LOCK);
     let prev_server = std::env::var("JIRA_SERVER").ok();
     let prev_token = std::env::var("JIRA_API_TOKEN").ok();
@@ -19612,8 +19606,6 @@ fn jira_not_configured_surfaces_status() {
     // these; under parallel execution we'd otherwise
     // race). Guarded by ENV_LOCK so we don't clobber
     // the other test's window.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = lock_or_recover(&ENV_LOCK);
     let prev_server = std::env::var("JIRA_SERVER").ok();
     let prev_token = std::env::var("JIRA_API_TOKEN").ok();
@@ -20601,8 +20593,6 @@ fn smart_open_in_history_mode_falls_through_to_run() {
 /// stage a selection (Run would have) and did NOT exit.
 #[test]
 fn smart_open_in_jira_mode_does_not_stage_or_exit() {
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = lock_or_recover(&ENV_LOCK);
     // Explicitly clear the JIRA env vars so `from_env()` returns
     // None → the background opener surfaces a "not configured"
@@ -22750,6 +22740,14 @@ fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
         directory: "user@host-a".to_string(),
         ..Default::default()
     }];
+    // Populate `app.session_panes` directly rather than relying on
+    // `panes::fetch`'s call to `refresh_session_panes`, which bails out
+    // early unless `$TMUX_PANE`/`$HERDR_PANE_ID` is set (or the `herdr`
+    // binary is on `PATH`) — true on a developer machine running inside
+    // a real multiplexer pane, but never true on CI, where the snapshot
+    // would silently stay empty and every assertion on its contents
+    // would fail.
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
     // Single fetch →
     // snapshot (2
     // workspaces + 2
@@ -23040,6 +23038,10 @@ fn panes_select_initial_row_selects_pane_with_workspace_scope_and_content_query(
         ("w34:p1", "w34", "NoteSearch", "/tmp/notes", "claude", false),
         ("w34:p2", "w34", "NoteSearch", "/tmp/notes", "zsh", false),
     ]);
+    // See `panes_fetch_composes_sessions_and_hosts_with_snapshot` for why
+    // this is needed: `refresh_session_panes` bails out early without a
+    // real `$TMUX_PANE`/`$HERDR_PANE_ID`, which CI has neither of.
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
     app.query = "*note claude".to_string();
     app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
     app.merged_rows = app.rows.clone();
@@ -23077,6 +23079,10 @@ fn panes_select_initial_row_workspace_scope_does_not_leak_into_other_workspace()
         ("w34:p2", "w34", "NoteSearch", "/tmp/notes", "zsh", false),
         ("w9:p1", "w9", "SmartHistory", "/tmp/sh", "claude", false),
     ]);
+    // See `panes_fetch_composes_sessions_and_hosts_with_snapshot` for why
+    // this is needed: `refresh_session_panes` bails out early without a
+    // real `$TMUX_PANE`/`$HERDR_PANE_ID`, which CI has neither of.
+    crate::tui::mode::panes::refresh_session_panes_impl(&mut app, "DOES_NOT_EXIST");
     app.query = "*note claude".to_string();
     app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
     app.merged_rows = app.rows.clone();
@@ -23865,8 +23871,6 @@ fn note_create_prefill_jira_row_link_or_bare_key_depending_on_config() {
     // Guard the JIRA env vars like `smart_open_jira_opens_all_marked_issues`
     // does — `note_create_prefill_from_selection` reads
     // `JiraConfig::from_env()` directly.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev_server = std::env::var("JIRA_SERVER").ok();
     let prev_token = std::env::var("JIRA_API_TOKEN").ok();
