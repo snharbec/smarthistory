@@ -40,6 +40,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
 - [History list & filtering](#history-list--filtering)
   - [`duplicatefilter`](#duplicatefilter)
   - [`initialmode`](#initialmode)
+  - [`zsh.mode`](#zshmode)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -180,6 +181,20 @@ The `SESS` and `DIR` scopes require a running tmux session with `TMUX_PANE` set;
 
 ```ini
 initialmode=SESS
+```
+
+### `zsh.mode`
+
+| | |
+| --- | --- |
+| **Type** | `sess` \| `dir` \| `global` |
+| **Default** | `sess` |
+| **Env override** | — |
+
+The zsh Up/Down history-walk widget's search scope (`_smarthistory_mode` in `init.zsh`) a brand-new shell starts on: `sess` (current `$SMART_HISTORY_SESSION` only), `dir` (current working directory only), or `global` (no scope filter). This is unrelated to [`initialmode`](#initialmode) above, which controls `smarthistory tui`'s own starting scope — `zsh.mode` controls the readline-level widgets instead. `Ctrl-g` (`_smarthistory_cycle_mode`) still cycles `sess` → `dir` → `global` → `sess` at runtime regardless of this setting; it only picks the starting point for a new shell, not the cycle order.
+
+```ini
+zsh.mode=global
 ```
 
 ---
@@ -745,6 +760,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `capturelines.<cmd>` | `ALL` \| int | — | [Capture & output](#capture--output) |
 | `duplicatefilter` | `on` \| `off` | `on` | [History list & filtering](#history-list--filtering) |
 | `initialmode` | enum | `SESS` | [History list & filtering](#history-list--filtering) |
+| `zsh.mode` | `sess` \| `dir` \| `global` | `sess` | [History list & filtering](#history-list--filtering) |
 | `dropdown.enabled` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |

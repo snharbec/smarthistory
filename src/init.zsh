@@ -159,8 +159,16 @@ _smarthistory_query_key=""
 _smarthistory_last_match=""
 # Search scope: "sess" = current $SMART_HISTORY_SESSION only,
 # "dir" = current working directory only, "global" = no scope filter.
-# Cycled with Ctrl-g.
-_smarthistory_mode="sess"
+# Cycled with Ctrl-g. The starting value for a brand-new shell is
+# configurable via `zsh.mode=sess|dir|global` in
+# ~/.config/smarthistory/config (defaults to "sess", the historical
+# hardcoded value); this only picks what a new shell starts on —
+# Ctrl-g still cycles sess -> dir -> global -> sess regardless.
+_smarthistory_mode=$(smarthistory config get zsh.mode 2>/dev/null)
+case "$_smarthistory_mode" in
+    sess|dir|global) ;;
+    *) _smarthistory_mode="sess" ;;
+esac
 
 # Save the user's original RPROMPT (if any) at init time so we can
 # append our mode indicator without clobbering their customization.

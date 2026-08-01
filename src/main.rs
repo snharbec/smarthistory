@@ -1051,6 +1051,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(f, "  dropdown.limit = {}", cfg.dropdown_limit);
     let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
+    let _ = writeln!(f, "  zsh.mode = {}", cfg.zsh_default_mode);
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
     use crate::tui::bindings::ALL_ACTIONS;
@@ -1371,6 +1372,17 @@ pub struct Config {
     /// a huge, low-signal candidate list on an empty or 1-char
     /// buffer. Set via `dropdown.minchars=<N>`.
     dropdown_min_chars: usize,
+    /// The zsh widgets' search scope at shell-init time — one of
+    /// `sess` (current `$SMART_HISTORY_SESSION` only), `dir`
+    /// (current working directory only), or `global` (no scope
+    /// filter). Read by `init.zsh` via `smarthistory config get
+    /// zsh.mode` and assigned to `_smarthistory_mode`, the same
+    /// variable `Ctrl-g` (`_smarthistory_cycle_mode`) cycles
+    /// through at runtime — this only changes what a brand-new
+    /// shell starts on, not the cycle order. Default `sess`,
+    /// matching the historical hardcoded starting value. Set via
+    /// `zsh.mode=sess|dir|global`.
+    zsh_default_mode: String,
     /// Path to the note_search SQLite database. When set, the `@`
     /// prefix searches notes instead of shell history.
     /// Can also be set via the NOTE_SEARCH_DATABASE env var.
@@ -1689,6 +1701,7 @@ impl Config {
             dropdown_enabled: false,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
+            zsh_default_mode: "sess".to_string(),
             notes_database: None,
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
@@ -1913,6 +1926,13 @@ impl Config {
                     Ok(n) if n > 0 => self.dropdown_limit = n,
                     _ => eprintln!(
                         "warning: dropdown.limit={:?} is not a positive integer; keeping the previous value",
+                        value
+                    ),
+                },
+                "zsh.mode" => match value.trim() {
+                    "sess" | "dir" | "global" => self.zsh_default_mode = value.trim().to_string(),
+                    _ => eprintln!(
+                        "warning: zsh.mode={:?} is not one of sess/dir/global; keeping the previous value",
                         value
                     ),
                 },
@@ -4916,6 +4936,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
+                    "zsh.mode" => println!("{}", cfg.zsh_default_mode),
                     // Resolved palette as a flat `key=value` block,
                     // one entry per `tuicolor.<field>` slot. The
                     // widget reads this once at init time and
