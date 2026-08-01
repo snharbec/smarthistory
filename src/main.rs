@@ -5023,12 +5023,18 @@ fn main() -> anyhow::Result<()> {
                     // Same shape as the `tuicolor.<field>=…` lines
                     // the user writes in the config file, so the
                     // widget's parser doesn't need a second
-                    // format. `scheme` defaults to `Dark` to match
-                    // the TUI's default active scheme.
+                    // format. `scheme` is whatever the user's last
+                    // TUI session actually had active
+                    // (`TuiSession::persisted_scheme`, the
+                    // `colorscheme=` line in the session file,
+                    // toggled via `Action::ToggleColorScheme`),
+                    // falling back to `ColorScheme::default()`
+                    // (`Dark`) when there's no session file yet or
+                    // it has no scheme recorded.
                     "palette" => {
-                        for (key, value) in cfg.resolved_palette(
-                            crate::tui::theme::ColorScheme::Dark,
-                        ) {
+                        let scheme = crate::tui::TuiSession::persisted_scheme()
+                            .unwrap_or_default();
+                        for (key, value) in cfg.resolved_palette(scheme) {
                             println!("{key}={value}");
                         }
                     }
