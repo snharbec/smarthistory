@@ -203,6 +203,20 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     [[ "$_smarthistory_dropdown_minchars_raw" == <-> ]] && _smarthistory_dropdown_minchars=$_smarthistory_dropdown_minchars_raw
     unset _smarthistory_dropdown_limit_raw _smarthistory_dropdown_minchars_raw
 fi
+# Optional per-candidate syntax highlighting inside the dropdown box
+# (`dropdown.highlight=on`): lexical token coloring via `bat`, plus a
+# self-checked green/red for the first word's alias/function/
+# builtin/command validity (`bat` alone can't tell a valid command
+# from a typo — see `_smarthistory_command_validity_hlspec` below).
+# Silently stays off if `bat` isn't on `$PATH`, even when the config
+# says on — same soft-dependency convention as the rest of this app
+# (surfaced via `smarthistory check`, not a startup warning).
+typeset -g _smarthistory_dropdown_highlight_enabled="0"
+if [[ "$_smarthistory_dropdown_enabled" = "1" \
+    && "$(smarthistory config get dropdown.highlight 2>/dev/null)" == "on" \
+    && -n "$(command -v bat 2>/dev/null)" ]]; then
+    _smarthistory_dropdown_highlight_enabled="1"
+fi
 # Comment-expansion: type a comment's text at the start of the
 # command line, then a space, and it expands to the most recently
 # used command carrying that exact comment (`smarthistory add ...
@@ -248,6 +262,15 @@ typeset -ga _smarthistory_dropdown_candidates
 # array holds bare command text and nothing else, so it can be
 # unescaped straight into BUFFER without stripping anything back out.
 typeset -ga _smarthistory_dropdown_meta
+# `_smarthistory_dropdown_hl_spans[i]` holds the optional
+# `dropdown.highlight` syntax-color spans for
+# `_smarthistory_dropdown_candidates[i]`, as newline-joined
+# `"start end fg=#rrggbb"` entries (see `_smarthistory_ansi_to_spans`)
+# — empty string when highlighting is off or this row's `bat` output
+# didn't round-trip to the exact candidate text. Built in lockstep
+# with the two arrays above by `_smarthistory_dropdown_render`, read
+# only by `_smarthistory_dropdown_paint`.
+typeset -ga _smarthistory_dropdown_hl_spans
 
 # Clear the menu (if any) and mark it not visible. Safe to call
 # unconditionally (e.g. from precmd) even when nothing is showing.
@@ -424,6 +447,110 @@ _smarthistory_strip_ansi() {
     REPLY=$#stripped
 }
 
+# Parse one `bat --color=always`-highlighted line into plain text plus
+# `region_highlight`-shaped color spans, for the optional
+# `dropdown.highlight` feature. `bat` wraps each token as
+# `ESC[38;2;R;G;Bm<text>ESC[0m` (24-bit truecolor foreground, no
+# nesting observed in practice) — this walks the string, opening a
+# span on a `38;2;R;G;B` code and closing it on the next escape of any
+# kind (a `0` reset in the common case; any other SGR code the user's
+# `bat` theme might emit, e.g. bold, closes it too rather than being
+# tracked — a deliberate v1 simplification: worst case a token loses
+# its color, nothing corrupts).
+#
+# `$1` is the ANSI-colored line. `$2` is the NAME of an array
+# variable in the caller's scope to fill with `"start end fg=#rrggbb"`
+# spans (0-based character offsets into the PLAIN text, matching
+# `region_highlight`'s own convention and `_smarthistory_dropdown_paint`'s
+# `_hl` array) — same indirect-array-by-name convention
+# `_smarthistory_register_hook` uses elsewhere in this file. The
+# plain (ANSI-stripped) text is returned via `REPLY`, standard
+# convention for this file — and must come out byte-identical to what
+# `_smarthistory_strip_ansi` would produce from the same input, since
+# that plain text is what actually gets drawn.
+_smarthistory_ansi_to_spans() {
+    local remaining=$1
+    local out_array_name=$2
+    local out="" span_color="" code pre rest
+    local -i span_open=0 span_start=0
+    local -a spans=() rgb
+    while [[ -n "$remaining" ]]; do
+        if [[ "$remaining" == *$'\x1b'* ]]; then
+            # Everything up to (not including) the next ESC byte is
+            # plain text — the same anchored-glob-strip style
+            # `_smarthistory_strip_ansi` above already uses for this
+            # exact family of pattern, rather than `=~`/backreference
+            # matching (POSIX ERE's handling of a backslash before a
+            # metacharacter like `[` is unspecified — that's what
+            # broke an earlier regex-based version of this function).
+            pre="${remaining%%$'\x1b'*}"
+            out+="$pre"
+            rest="${remaining[$#pre+1,-1]}"  # from the ESC byte onward
+            if [[ "$rest" == $'\x1b'\[*m* ]]; then
+                rest="${rest#$'\x1b'\[}"
+                code="${rest%%m*}"
+                remaining="${rest#${code}m}"
+                if [[ "$code" == 38\;2\;[0-9]*\;[0-9]*\;[0-9]* ]]; then
+                    rgb=(${(s:;:)code})
+                    if (( span_open )); then
+                        (( $#out > span_start )) && spans+=("$span_start $#out $span_color")
+                    fi
+                    span_color=$(printf 'fg=#%02x%02x%02x' "$rgb[3]" "$rgb[4]" "$rgb[5]")
+                    span_start=$#out
+                    span_open=1
+                else
+                    if (( span_open )); then
+                        (( $#out > span_start )) && spans+=("$span_start $#out $span_color")
+                        span_open=0
+                    fi
+                fi
+            else
+                # A lone ESC not followed by a well-formed `...m`
+                # SGR sequence — shouldn't happen with `bat`'s
+                # output, but treat the byte as plain text rather
+                # than looping forever on it.
+                out+=$'\x1b'
+                remaining="${rest[2,-1]}"
+            fi
+        else
+            out+="$remaining"
+            remaining=""
+        fi
+    done
+    if (( span_open )); then
+        (( $#out > span_start )) && spans+=("$span_start $#out $span_color")
+    fi
+    REPLY="$out"
+    eval "${out_array_name}=(\"\${spans[@]}\")"
+}
+
+# Resolve a candidate's first word to `_smarthistory_dropdown_hl_success`
+# (an alias, function, builtin, a command on `$PATH`, or a common zsh
+# reserved word — `if`/`for`/`while`/`case`/`{`/`sudo`/… — that a
+# lexical-only highlighter like `bat` has no way to validate) or
+# `_smarthistory_dropdown_hl_error` (nothing resolves — most likely a
+# typo). Same lookups `zsh-patina`'s own (private,
+# `_zsh_patina_resolve_callable`) validity check uses, plus the
+# reserved-word allowance it doesn't bother with. Result via `REPLY`.
+_smarthistory_command_validity_hlspec() {
+    local word=$1
+    case "$word" in
+        if|then|else|elif|fi|for|while|until|do|done|case|esac|select|\
+        function|time|coproc|repeat|'{'|'}'|'('|')'|sudo|env|command|exec|\
+        builtin|noglob|nocorrect)
+            REPLY=$_smarthistory_dropdown_hl_success
+            return
+            ;;
+    esac
+    if (( ${+aliases[(e)$word]} )) || (( ${+galiases[(e)$word]} )) \
+        || (( ${+functions[(e)$word]} )) || (( ${+builtins[(e)$word]} )) \
+        || (( ${+commands[(e)$word]} )) || whence -p -- "$word" >/dev/null 2>&1; then
+        REPLY=$_smarthistory_dropdown_hl_success
+    else
+        REPLY=$_smarthistory_dropdown_hl_error
+    fi
+}
+
 # ---- Resolved TUI palette (one-shot at init) ----
 #
 # Read the same `tuicolor.*` block the TUI uses to draw its chrome
@@ -459,6 +586,22 @@ _smarthistory_strip_ansi() {
 # above).
 typeset -g _smarthistory_dropdown_hl_accent="fg=6"  # cyan fallback
 typeset -g _smarthistory_dropdown_hl_select="fg=4"  # blue fallback
+# Used by the optional `dropdown.highlight` syntax-highlighting
+# feature (see `_smarthistory_command_validity_hlspec` below) to mark
+# a candidate's first word as a resolvable command (green) or not
+# (red) — same green/red convention as `tuicolor.success`/
+# `tuicolor.error` elsewhere in the app.
+typeset -g _smarthistory_dropdown_hl_success="fg=2"  # green fallback
+typeset -g _smarthistory_dropdown_hl_error="fg=1"    # red fallback
+# `bat --theme` argument for the `dropdown.highlight` feature —
+# "dark" or "light", matching `bg`'s perceived brightness the exact
+# way `highlight_with_bat`'s `bat_theme_arg()` does (Rust side, used
+# for the `$`/`&`/`,` preview panes and `smart-open.default=bat`), so
+# the dropdown's syntax colors read correctly against the same
+# background the rest of the app already assumes. Defaults to "dark"
+# — same "matches the TUI's default active scheme" convention as
+# `smarthistory config get palette`'s own scheme default.
+typeset -g _smarthistory_dropdown_bat_theme="dark"
 
 # Detect whether the terminal advertises color support at all.
 # `region_highlight` entries are converted to real terminal escape
@@ -517,6 +660,8 @@ fi
 if (( _smarthistory_dropdown_color_ok == 0 )); then
     _smarthistory_dropdown_hl_accent=""
     _smarthistory_dropdown_hl_select=""
+    _smarthistory_dropdown_hl_success=""
+    _smarthistory_dropdown_hl_error=""
 fi
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # Disable `xtrace` for the palette-init block too — see
@@ -556,13 +701,52 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                     [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_select=$_hlspec
                     unset _hlspec
                     ;;
-                # All other slots (bg, fg, success, warning, …)
-                # are currently unused by the dropdown widget —
-                # the paint function only needs accent +
-                # selection. Reading them anyway keeps the call
-                # site identical to the TUI's palette resolution;
-                # a future widget addition (e.g. an error-colored
-                # ✗ glyph) just needs a new case arm.
+                success)
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_success=$_hlspec
+                    unset _hlspec
+                    ;;
+                error)
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_error=$_hlspec
+                    unset _hlspec
+                    ;;
+                bg)
+                    # `resolved_palette` emits `bg` as `#rrggbb` when
+                    # a built-in theme is active, but falls back to
+                    # the hardcoded `Palette::builtin()` default
+                    # (currently the named color `black`) when no
+                    # theme is selected — handle both forms, same as
+                    # `_smarthistory_color_to_hlspec` does for the
+                    # other palette slots. Named form is checked
+                    # against the exact same "light" name list
+                    # `is_color_light` uses on the Rust side (White,
+                    # the six Light* colors, and Gray); hex form uses
+                    # the same ITU-R BT.601 perceived-brightness
+                    # formula, light when > 127.
+                    case "${_smarthistory_dropdown_palette_value:l}" in
+                        '#'[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])
+                            local _sm_bg_hex=${_smarthistory_dropdown_palette_value#'#'}
+                            local -i _sm_bg_r=16#${_sm_bg_hex[1,2]}
+                            local -i _sm_bg_g=16#${_sm_bg_hex[3,4]}
+                            local -i _sm_bg_b=16#${_sm_bg_hex[5,6]}
+                            local -i _sm_bg_brightness=$(( (_sm_bg_r * 299 + _sm_bg_g * 587 + _sm_bg_b * 114) / 1000 ))
+                            (( _sm_bg_brightness > 127 )) && _smarthistory_dropdown_bat_theme="light" || _smarthistory_dropdown_bat_theme="dark"
+                            unset _sm_bg_hex _sm_bg_r _sm_bg_g _sm_bg_b _sm_bg_brightness
+                            ;;
+                        white|lightred|lightgreen|lightyellow|lightblue|lightmagenta|lightcyan|gray|grey)
+                            _smarthistory_dropdown_bat_theme="light"
+                            ;;
+                        *)
+                            _smarthistory_dropdown_bat_theme="dark"
+                            ;;
+                    esac
+                    ;;
+                # All other slots (fg, warning, …) are currently
+                # unused by the dropdown widget. Reading them anyway
+                # keeps the call site identical to the TUI's palette
+                # resolution; a future widget addition just needs a
+                # new case arm.
                 *) ;;
             esac
         done <<< "$_smarthistory_dropdown_palette_raw"
@@ -747,7 +931,8 @@ _smarthistory_dropdown_paint() {
     # stdout on every iteration, which would leak into the user's
     # terminal (same fix already applied to `row_visible` / `row` /
     # `side` above).
-    local -a _hl _parts
+    local -a _hl _parts _sm_row_hl_entries
+    local _sm_word _sm_hl_entry _sm_hl_parts hl_base
     local _hl_start _entry gutter_spec gutter_text
     local row_start bold_start bold_end row_end
     local age_text age_field age_start is_selected
@@ -792,6 +977,30 @@ _smarthistory_dropdown_paint() {
         row=${rows[$((i+1))]}
         _smarthistory_strip_ansi "$row"
         row_visible=$REPLY
+        # Precompute this row's `dropdown.highlight` token-color spans
+        # (if any). Guard: `row` minus its marker must equal the RAW
+        # candidate text the spans were computed against, byte for
+        # byte — a single check that covers both ways the drawn text
+        # can diverge from that raw text: `_smarthistory_unescape`
+        # (multi-line commands) and truncation (the "…" ellipsis).
+        # Either one invalidates the spans' offsets, so highlighting
+        # is skipped for this row rather than risk drawing colors
+        # against text they don't describe.
+        _sm_row_hl_entries=()
+        if [[ "$_smarthistory_dropdown_highlight_enabled" = "1" \
+            && "${row[$((marker_len+1)),-1]}" == "${_smarthistory_dropdown_candidates[$((i+1))]}" ]]; then
+            [[ -n "${_smarthistory_dropdown_hl_spans[$((i+1))]:-}" ]] \
+                && _sm_row_hl_entries=("${(f)_smarthistory_dropdown_hl_spans[$((i+1))]}")
+            # First-word command-validity span, appended LAST so it
+            # takes priority over `bat`'s purely lexical color for
+            # that same range (region_highlight applies same-attribute
+            # overlaps in array order — later wins).
+            _sm_word=${_smarthistory_dropdown_candidates[$((i+1))]%%[[:space:]]*}
+            if [[ -n "$_sm_word" ]]; then
+                _smarthistory_command_validity_hlspec "$_sm_word"
+                [[ -n "$REPLY" ]] && _sm_row_hl_entries+=("0 $#_sm_word $REPLY")
+            fi
+        fi
         # Right-justify this row's age into a fixed `age_width`
         # column (e.g. "5m" and "10m" both occupy the same 3
         # columns) — empty when no age column is being drawn at all
@@ -830,6 +1039,7 @@ _smarthistory_dropdown_paint() {
             # so the whole selected row — command AND age — reads as
             # highlighted, not just the command part.
             _hl_start=$#out
+            row_start=$#out
             out+="$row"
         else
             row_start=$#out
@@ -841,6 +1051,19 @@ _smarthistory_dropdown_paint() {
                 (( bold_end > row_end )) && bold_end=$row_end
                 (( bold_start < bold_end )) && _hl+=("$bold_start $bold_end bold")
             fi
+        fi
+        # Splice in this row's `dropdown.highlight` spans (token
+        # colors + the first-word validity span, see above) — offset
+        # past the marker, same for selected and unselected rows.
+        # Independent `region_highlight` attribute from the `bold`
+        # spans above (color vs. weight), so they combine rather than
+        # conflict, on both the matched-prefix and the selected row.
+        if (( ${#_sm_row_hl_entries} > 0 )); then
+            hl_base=$(( row_start + marker_len ))
+            for _sm_hl_entry in "${_sm_row_hl_entries[@]}"; do
+                _sm_hl_parts=(${=_sm_hl_entry})
+                _hl+=("$(( hl_base + _sm_hl_parts[1] )) $(( hl_base + _sm_hl_parts[2] )) ${_sm_hl_parts[3]}")
+            done
         fi
         (( pad > 0 )) && out+="${(l:pad:: :)}"
         if (( age_width > 0 )); then
@@ -1038,6 +1261,37 @@ _smarthistory_dropdown_render() {
     if (( ${#_smarthistory_dropdown_candidates} == 0 )); then
         _smarthistory_dropdown_clear
         return
+    fi
+    # Optional per-candidate syntax highlighting (`dropdown.highlight=on`):
+    # ALL candidates go through a single `bat` call (one line per
+    # candidate on stdin) rather than one call per row — keeps this
+    # to one extra subprocess per keystroke, matching the cost of the
+    # `smarthistory search` call above, instead of scaling with
+    # `dropdown.limit`.
+    _smarthistory_dropdown_hl_spans=()
+    if [[ "$_smarthistory_dropdown_highlight_enabled" = "1" ]]; then
+        local _sm_hl_raw _sm_hl_line _sm_hl_i
+        local -a _sm_hl_lines _sm_hl_row_spans
+        _sm_hl_raw=$(printf '%s\n' "${_smarthistory_dropdown_candidates[@]}" \
+            | bat --language=bash --color=always --plain --theme "$_smarthistory_dropdown_bat_theme" \
+                  --paging=never --tabs=0 2>/dev/null)
+        _sm_hl_lines=("${(f)_sm_hl_raw}")
+        for (( _sm_hl_i = 1; _sm_hl_i <= ${#_smarthistory_dropdown_candidates}; _sm_hl_i++ )); do
+            _sm_hl_line=${_sm_hl_lines[$_sm_hl_i]:-}
+            _sm_hl_row_spans=()
+            if [[ -n "$_sm_hl_line" ]]; then
+                _smarthistory_ansi_to_spans "$_sm_hl_line" _sm_hl_row_spans
+                # `bat` must not have altered the text (reflowed,
+                # trimmed, ...) — if it doesn't match byte-for-byte,
+                # skip highlighting this row rather than risk
+                # splicing spans against text they don't describe.
+                if [[ "$REPLY" != "${_smarthistory_dropdown_candidates[$_sm_hl_i]}" ]]; then
+                    _sm_hl_row_spans=()
+                fi
+            fi
+            _smarthistory_dropdown_hl_spans+=("${(F)_sm_hl_row_spans}")
+        done
+        unset _sm_hl_raw _sm_hl_line _sm_hl_i _sm_hl_lines _sm_hl_row_spans
     fi
     _smarthistory_dropdown_visible=1
     # A fresh candidate set from a new keystroke always starts

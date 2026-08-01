@@ -45,6 +45,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
   - [`dropdown.minchars`](#dropdownminchars)
+  - [`dropdown.highlight`](#dropdownhighlight)
 - [Comment expansion](#comment-expansion)
   - [`commentexpand.enabled`](#commentexpandenabled)
 - [Theme](#theme)
@@ -245,6 +246,27 @@ Minimum number of typed characters (with the cursor at end-of-buffer) before the
 
 ```ini
 dropdown.minchars=2
+```
+
+### `dropdown.highlight`
+
+| | |
+| --- | --- |
+| **Type** | `on` \| `off` |
+| **Default** | `off` |
+| **Env override** | — |
+
+Syntax-highlight each dropdown candidate instead of plain text: lexical token coloring (strings, flags, operators, …) via [`bat`](https://github.com/sharkdp/bat) — the same `bat --plain --color=always --theme <light|dark>` invocation this app's `highlight_with_bat` already uses for the `$` tags-mode preview and the `smart-open.default` fallback — plus a self-checked green/red for the first word, since `bat`'s highlighting is purely lexical and can't tell a valid command from a typo. The check mirrors what a real shell highlighter looks at: aliases, functions, builtins, `$PATH` commands, and common reserved words (`if`, `for`, `sudo`, …) are green; anything else is red.
+
+The `--theme` choice matches the resolved `tuicolor.bg`'s perceived brightness (the same ITU-R BT.601 formula `highlight_with_bat`'s Rust-side theme detection uses), read once at shell-init time from `smarthistory config get palette` — so dropdown colors read correctly against the same light/dark background the rest of the app already assumes, not `bat`'s own default theme. The palette itself is resolved using whichever scheme (light/dark) your last TUI session actually had active (`Action::ToggleColorScheme`, persisted in the session file) — with `theme.dark`/`theme.light` both configured, toggling in the TUI and opening a new shell changes the dropdown's colors too.
+
+This does **not** reuse `zsh-patina` (a separately-installed live command-line highlighter some users run) even if it's installed — `zsh-patina` exposes no stable API for this: its `tokenize` subcommand is an explicit debug tool that can't resolve aliases/functions/builtins, and its real highlighting only happens through an undocumented, version-fragile daemon socket protocol. `bat`'s ANSI output is a stable, standard format instead, at the cost of not exactly matching a `zsh-patina` theme.
+
+Off by default: it adds one `bat` subprocess call per dropdown render (all candidates batched into a single call, not one per row), on top of the `smarthistory search` call every keystroke already makes. Silently stays off — no error, no startup warning — when `bat` isn't on `$PATH`, even if this is `on`.
+
+```ini
+dropdown.enabled=on
+dropdown.highlight=on
 ```
 
 ---
@@ -794,6 +816,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `dropdown.enabled` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |
+| `dropdown.highlight` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `commentexpand.enabled` | `on` \| `off` | `off` | [Comment expansion](#comment-expansion) |
 | `tuicolor.bg` | color | theme's `bg` | [Theme](#theme) |
 | `tuicolor.fg` | color | theme's `fg` | [Theme](#theme) |

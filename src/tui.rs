@@ -260,6 +260,22 @@ impl TuiSession {
         Self::load()
     }
 
+    /// The persisted `colorscheme=` from the last TUI session,
+    /// parsed to a `ColorScheme` — `None` when the session file is
+    /// missing, has no `colorscheme=` line, or the value doesn't
+    /// parse (same "no preference" cases `scheme` itself models).
+    /// Used by `smarthistory config get palette` (the CLI's
+    /// otherwise-static palette resolution) so a caller outside the
+    /// TUI process — e.g. the zsh dropdown's `dropdown.highlight`
+    /// `bat --theme` choice — reflects the scheme the user actually
+    /// last had active, not a hardcoded default.
+    pub(crate) fn persisted_scheme() -> Option<crate::tui::theme::ColorScheme> {
+        Self::load()
+            .scheme
+            .as_deref()
+            .and_then(crate::tui::theme::ColorScheme::parse)
+    }
+
     /// Load a session from an explicit path. Used by the
     /// test suite with a temp file (the real `load()`
     /// uses the user's `~/.cache/smarthistory/session`
