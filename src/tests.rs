@@ -226,6 +226,62 @@
         );
     }
 
+    /// `resolve_comment` (backing `smarthistory expand`, the zsh
+    /// comment-expansion widget) must pick the most recently run
+    /// command when two different commands share the exact same
+    /// comment text.
+    #[test]
+    fn resolve_comment_picks_most_recent_when_comment_is_shared() {
+        let conn = search_test_db();
+        conn.execute_batch(
+            "INSERT INTO command_comments (command, comment) VALUES
+             ('ls -la', 'deploy'),
+             ('cargo build --release', 'deploy');",
+        )
+        .unwrap();
+        // `search_test_db` gives 'ls -la' timestamp 1 and
+        // 'cargo build --release' timestamp 3 — the newer one.
+        assert_eq!(
+            resolve_comment(&conn, "deploy").unwrap(),
+            Some("cargo build --release".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_comment_matches_case_insensitively() {
+        let conn = search_test_db();
+        conn.execute(
+            "INSERT INTO command_comments (command, comment) VALUES ('ls -la', 'Deploy')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_comment(&conn, "deploy").unwrap(),
+            Some("ls -la".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_comment_no_match_returns_none() {
+        let conn = search_test_db();
+        assert_eq!(resolve_comment(&conn, "nope").unwrap(), None);
+    }
+
+    /// A comment that is only a substring of the typed word (or vice
+    /// versa) must NOT match — `resolve_comment` is exact-match only,
+    /// unlike the substring search `build_search_where_clause` does.
+    #[test]
+    fn resolve_comment_does_not_substring_match() {
+        let conn = search_test_db();
+        conn.execute(
+            "INSERT INTO command_comments (command, comment) VALUES ('ls -la', 'deploy')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(resolve_comment(&conn, "deploy-prod").unwrap(), None);
+        assert_eq!(resolve_comment(&conn, "dep").unwrap(), None);
+    }
+
     /// Build the minimal schema `import_history_rows` needs
     /// (`history` with its dedup index, plus the two side tables).
     fn import_test_db() -> Connection {

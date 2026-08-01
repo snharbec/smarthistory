@@ -45,6 +45,8 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
   - [`dropdown.minchars`](#dropdownminchars)
+- [Comment expansion](#comment-expansion)
+  - [`commentexpand.enabled`](#commentexpandenabled)
 - [Theme](#theme)
   - [`tuicolor.*`](#tuicolor)
 - [Key bindings](#key-bindings)
@@ -244,6 +246,34 @@ Minimum number of typed characters (with the cursor at end-of-buffer) before the
 ```ini
 dropdown.minchars=2
 ```
+
+---
+
+## Comment expansion
+
+### `commentexpand.enabled`
+
+| | |
+| --- | --- |
+| **Type** | `on` \| `off` |
+| **Default** | `off` |
+| **Env override** | — |
+
+Whether the zsh comment-expansion widget is active. When on, typing a comment's text (as set via `smarthistory add ... --comment "..."`) at the very start of the command line, then a space, replaces it with the most recently used command carrying that exact comment — the same UX as zsh-abbr/fish abbreviations, sourced from smarthistory's own comment data. Matching is exact and case-insensitive against `command_comments.comment` (not a substring match, and not scoped to the command text), so a comment shared by multiple commands always resolves to whichever was run most recently. Off by default, same opt-in reasoning as `dropdown.enabled` above: it hooks keystroke widgets, a bigger behavior change than the prefix-triggered modes.
+
+```ini
+commentexpand.enabled=on
+```
+
+```sh
+smarthistory add "docker compose up -d" --exit-code 0 --comment deploy
+# then in a fresh shell, typing "deploy" + space expands to:
+# docker compose up -d
+```
+
+**Which widget the space bar actually triggers.** Plain zsh binds the space key to `self-insert`, but many setups (including stock oh-my-zsh, via `lib/key-bindings.zsh`) rebind it to `magic-space` instead (zsh's built-in history-bang expansion, e.g. `!!` + space). `init.zsh` hooks both `self-insert`/`self-insert-unmeta` and `magic-space`, so the feature works either way — no setup needed beyond `commentexpand.enabled=on`.
+
+**Re-sourcing `init.zsh` is safe.** Every keystroke widget this feature (and `dropdown.enabled`) touches goes through one dispatcher per widget, backed by a growable, dedup'd hook list — re-running `eval "$(smarthistory init zsh)"` in an already-initialized shell (e.g. after editing the config) only appends to that list, it never re-wraps a widget. A brand-new shell is still the simplest way to pick up config or binary changes.
 
 ---
 
@@ -764,6 +794,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `dropdown.enabled` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |
+| `commentexpand.enabled` | `on` \| `off` | `off` | [Comment expansion](#comment-expansion) |
 | `tuicolor.bg` | color | theme's `bg` | [Theme](#theme) |
 | `tuicolor.fg` | color | theme's `fg` | [Theme](#theme) |
 | `tuicolor.accent` | color | theme's `accent` | [Theme](#theme) |
