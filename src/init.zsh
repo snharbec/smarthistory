@@ -1052,45 +1052,69 @@ _smarthistory_dropdown_render() {
     unset _sm_dropdown_xtrace_was
 }
 
-# Wrap (not replace) a keystroke-handling widget so whatever was
-# bound before still runs, then call a post-hook function after it.
-# `.widget` is only valid as an argument TO `zle` (to call a builtin
-# bypassing overrides), not as a `zle -N` target directly — a plain
-# `zle -N $orig .$widget` fails with "No such shell function". The
-# fix (the exact pattern zsh-autosuggestions uses in src/bind.zsh):
-# define a tiny wrapper function whose body does the dot-call, then
-# register THAT function as the widget.
+# Register `hookfn` to run after `widget`'s real handler, without
+# ever nesting a second smarthistory-owned wrapper function around an
+# existing one. `.widget` is only valid as an argument TO `zle` (to
+# call a builtin bypassing overrides), not as a `zle -N` target
+# directly — a plain `zle -N $orig .$widget` fails with "No such
+# shell function". The fix (the same dot-call trick
+# zsh-autosuggestions uses in src/bind.zsh): define a tiny dispatcher
+# function whose body does the dot-call, then register THAT function
+# as the widget — but unlike a naive per-feature wrap-the-current-
+# widget approach, there is only ever ONE dispatcher per widget, fed
+# by a growable list of hook function names, so re-sourcing this
+# file (or having multiple smarthistory features hook the same
+# widget, e.g. both `dropdown` and `commentexpand` on `self-insert`)
+# never creates a second layer.
 #
-# `tag` namespaces the generated `orig`/wrap function names per
-# feature (e.g. `dropdown`, `commentexpand`) so two features can each
-# wrap the same widget (e.g. `self-insert`) independently: the second
-# feature to install sees the first feature's wrapper as an ordinary
-# `user:*` widget and wraps *that*, chaining both post-hooks. Only a
-# re-source of init.zsh re-wrapping the SAME feature+widget pair is a
-# no-op (the `user:${wrapname}` case below).
-_smarthistory_wrap_widget() {
-    local tag=$1 widget=$2 posthook=$3
-    local orig="_smarthistory_${tag}_orig_${widget}"
-    local wrapname="_smarthistory_${tag}_wrap_${widget}"
-    case ${widgets[$widget]:-} in
-        user:${wrapname}) return ;;  # already wrapped (re-sourced init.zsh)
-        builtin)
-            eval "${orig}() { zle .${widget} }"
-            zle -N $orig $orig
-            ;;
-        user:*)
-            zle -N $orig ${widgets[$widget]#user:}
-            ;;
-        *) return ;;
-    esac
-    eval "${wrapname}() { zle $orig -- \"\$@\"; ${posthook}; }"
-    zle -N $widget $wrapname
+# This matters because zsh resolves a `zle`-invoked function by NAME
+# at call time, not by a snapshotted reference. An earlier version of
+# this file wrapped each feature's own wrapper around whatever was
+# currently bound, using a fixed per-feature function name. That's
+# safe for a single feature re-sourced alone, but with two features
+# each wrapping the OTHER's wrapper, a second `eval "$(smarthistory
+# init zsh)"` in the same shell would redefine both wrapper functions
+# in place while each one's body still referenced the other's name —
+# producing a two-function call cycle and a hard "maximum nested
+# function level reached" crash on the very next keystroke. A single
+# dispatcher that only ever wraps the pristine original widget once,
+# plus an idempotent (dedup by name) hook list appended to on every
+# source, has no such cycle to form.
+_smarthistory_register_hook() {
+    local widget=$1 hookfn=$2
+    local safe=${widget//-/_}
+    local dispatch="_smarthistory_dispatch_${safe}"
+    local orig="_smarthistory_orig_${safe}"
+    local hooks_name="_smarthistory_hooks_${safe}"
+    typeset -g $hooks_name
+    if [[ "${widgets[$widget]:-}" != "user:${dispatch}" ]]; then
+        case ${widgets[$widget]:-} in
+            builtin)
+                eval "${orig}() { zle .${widget} }"
+                zle -N $orig $orig
+                ;;
+            user:*)
+                zle -N $orig ${widgets[$widget]#user:}
+                ;;
+            *) return ;;
+        esac
+        eval "${dispatch}() {
+            zle ${orig} -- \"\$@\"
+            local _sm_hook
+            for _sm_hook in \${(s: :)${hooks_name}}; do
+                \$_sm_hook
+            done
+        }"
+        zle -N $widget $dispatch
+    fi
+    local current="${(P)hooks_name}"
+    [[ " $current " == *" $hookfn "* ]] || eval "${hooks_name}=\"\${${hooks_name}} ${hookfn}\""
 }
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
         backward-delete-char delete-char backward-kill-word \
         kill-whole-line bracketed-paste; do
-        _smarthistory_wrap_widget dropdown $_smarthistory_dropdown_w _smarthistory_dropdown_render
+        _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
     unset _smarthistory_dropdown_w
     # Tab cycles the highlighted candidate forward (same wraparound
@@ -1283,8 +1307,16 @@ fi
 # below would fail.
 _smarthistory_commentexpand_check() {
     [[ "$_smarthistory_commentexpand_enabled" = "1" ]] || return
-    [[ "$KEYS" == " " ]] || return
     [[ $CURSOR -eq $#BUFFER ]] || return
+    # Checking `LBUFFER` for a trailing space (rather than requiring
+    # `$KEYS` to be exactly one space) is what makes this robust to
+    # typeahead batching: when a slow keystroke handler (e.g. the
+    # dropdown feature's synchronous `smarthistory search` call on
+    # every character) can't keep up with fast typing, the terminal
+    # may deliver several buffered characters to a single
+    # `self-insert` invocation, so `$KEYS` won't be a lone space even
+    # though the buffer now genuinely ends in one.
+    [[ "$LBUFFER" == *' ' ]] || return
     local word=${LBUFFER%' '}
     [[ -n "$word" && "$word" != *[[:space:]]* ]] || return
     local resolved
@@ -1297,8 +1329,18 @@ _smarthistory_commentexpand_check() {
     (( ${+functions[_smarthistory_dropdown_clear]} )) && _smarthistory_dropdown_clear
 }
 if [[ "$_smarthistory_commentexpand_enabled" = "1" ]]; then
-    for _smarthistory_ce_w in self-insert self-insert-unmeta; do
-        _smarthistory_wrap_widget commentexpand $_smarthistory_ce_w _smarthistory_commentexpand_check
+    # `magic-space` (not `self-insert`) is what a plain space
+    # keypress actually invokes when it's bound the way oh-my-zsh's
+    # `lib/key-bindings.zsh` (and plenty of plain .zshrc setups) bind
+    # it — `bindkey ' ' magic-space` is the well-known zsh default for
+    # history-bang expansion (e.g. `!!ls` + space). A hook only on
+    # `self-insert`/`self-insert-unmeta` would then never fire for the
+    # one keystroke this feature cares about, so `magic-space` is
+    # wrapped here too — harmless to wrap unconditionally even when
+    # space is left on plain `self-insert`, since only one of the two
+    # widgets is ever actually bound to the space key at a time.
+    for _smarthistory_ce_w in self-insert self-insert-unmeta magic-space; do
+        _smarthistory_register_hook $_smarthistory_ce_w _smarthistory_commentexpand_check
     done
     unset _smarthistory_ce_w
 fi
