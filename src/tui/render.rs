@@ -516,7 +516,7 @@ fn draw_note_create(
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" New note (Title + Content) — Ctrl-S save ")
+        .title(" New note (Title + Content) — Ctrl-S save, Ctrl-O save+edit ")
         .title_style(Theme::accent())
         .border_style(Theme::accent())
         .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
@@ -661,7 +661,7 @@ fn draw_note_create(
             cancel_keys
         };
         let footer = format!(
-            " Ctrl-S save · Tab next field · C-d/C-7/C-n notes · {} cancel ",
+            " Ctrl-S save · Ctrl-O save+edit · Tab next field · C-d/C-7/C-n notes · {} cancel ",
             cancel_hint
         );
         f.render_widget(
@@ -2211,7 +2211,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         binding_for(Action::CreateNote),
-        "open the two-field create-note dialog (Title + Content with `@` / `#` completion; Ctrl-S saves to the daily note's Yournal section)",
+        "open the two-field create-note dialog (Title + Content with `@` / `#` completion; Ctrl-S saves to the daily note's Yournal section, Ctrl-O saves then opens the note in $EDITOR)",
     );
     mode_row(
         &mut lines,

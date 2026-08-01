@@ -675,6 +675,23 @@ fn truncate_for_status(s: &str, max: usize) -> String {
 /// of a panic. We always return a valid `String::char_indices`
 /// offset, which the standard library accepts as a `usize`
 /// byte index.
+/// Path of today's daily note, computed with the exact same formula
+/// `note_search_core::commands::create_note::create_note` uses
+/// internally: `notes_dir/daily/<year>/<month-abbrev>/<date>.md`
+/// (e.g. `notes_dir/daily/2026/Aug/2026-08-01.md`). Used by
+/// `App::note_create_submit_and_edit` to know which file to open
+/// without shelling out to `note_search` first — see that method's
+/// doc comment for why duplicating just the path formula (not the
+/// file I/O) is the deliberate choice here.
+fn daily_note_path(notes_dir: &std::path::Path) -> PathBuf {
+    let now = chrono::Local::now();
+    notes_dir
+        .join("daily")
+        .join(now.format("%Y").to_string())
+        .join(now.format("%b").to_string())
+        .join(format!("{}.md", now.format("%Y-%m-%d")))
+}
+
 fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
     s.char_indices()
         .nth(char_idx)
@@ -8815,26 +8832,34 @@ impl App {
     }
 
     /// Submit the dialog.
-    fn note_create_submit(&mut self) -> bool {
+    /// Shared prep for both `note_create_submit` and
+    /// `note_create_submit_and_edit`: validates the dialog isn't
+    /// empty and `notes.database` / `notes.dir` are configured, then
+    /// builds the level-3 heading body (`### Heading\n[time::
+    /// HH:MM]\ncontent`) both submit paths stage into `note_search
+    /// create-note`. Returns `None` (after surfacing a status
+    /// message) on any validation failure — callers should return
+    /// `false` in that case, same as before this was split out.
+    fn note_create_build_body(&mut self) -> Option<String> {
         let Some(ref dialog) = self.note_create else {
-            return false;
+            return None;
         };
         if dialog.title.trim().is_empty() && dialog.content.trim().is_empty() {
             self.set_status_message("Nothing to save — both fields are empty".to_string());
-            return false;
+            return None;
         }
         let Some(ref _db_path) = self.notes_database else {
             self.set_status_message(
                 "notes.database not configured; set it to use the create-note dialog".to_string(),
             );
-            return false;
+            return None;
         };
         let Some(ref _notes_dir) = self.notes_dir else {
             self.set_status_message(
                 "notes_dir not configured; set `notes.dir` to the parent of your daily/ folder"
                     .to_string(),
             );
-            return false;
+            return None;
         };
         let combined = format!(
             "{}\n{}",
@@ -8861,15 +8886,61 @@ impl App {
         }
         let now = chrono::Local::now();
         let time_str = now.format("%H:%M").to_string();
-        let body = format!(
+        Some(format!(
             "### {}\n[time:: {}]\n{}",
             heading,
             time_str,
             dialog.content.trim()
-        );
+        ))
+    }
+
+    fn note_create_submit(&mut self) -> bool {
+        let Some(body) = self.note_create_build_body() else {
+            return false;
+        };
         let staged = format!(
             "note_search create-note {} --type daily",
             crate::util::shell_quote(&body)
+        );
+        self.selection = Some(staged);
+        self.pick_mode = Some(PickMode::Run);
+        self.note_create = None;
+        true
+    }
+
+    /// Same as `note_create_submit`, but chains a `$EDITOR <path>`
+    /// onto the staged command so the freshly-created (or
+    /// freshly-appended-to) daily note opens right after saving —
+    /// bound to `Ctrl-O` in the create-note dialog.
+    ///
+    /// The target path is computed here with the exact same formula
+    /// `note_search_core::commands::create_note::create_note` uses
+    /// internally (`notes_dir/daily/<year>/<month-abbrev>/<date>.md`)
+    /// rather than calling that function directly — this keeps the
+    /// actual write going through the staged `note_search` CLI
+    /// invocation (so it's still recorded in smarthistory's own
+    /// history like every other staged action, `note_create_submit`
+    /// included), and only duplicates the *path* formula, not the
+    /// file I/O. `note_type` is hardcoded to `"daily"` on both sides
+    /// (the library function itself rejects anything else), so this
+    /// has no other convention to drift out of sync with.
+    fn note_create_submit_and_edit(&mut self) -> bool {
+        let Some(body) = self.note_create_build_body() else {
+            return false;
+        };
+        // `note_create_build_body` already validated `notes_dir` is
+        // `Some` (one of its failure paths returns `None` otherwise).
+        let notes_dir = self.notes_dir.clone().expect("validated by note_create_build_body");
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "vi".to_string());
+        let note_path = daily_note_path(&notes_dir);
+        let staged = format!(
+            "note_search create-note {} --type daily && {} {}",
+            crate::util::shell_quote(&body),
+            editor,
+            crate::util::shell_quote(&note_path.to_string_lossy())
         );
         self.selection = Some(staged);
         self.pick_mode = Some(PickMode::Run);
@@ -13345,6 +13416,13 @@ fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('s') => {
                 return app.note_create_submit();
+            }
+            KeyCode::Char('o') => {
+                // Save, then open the daily note in $EDITOR —
+                // `note_create_submit`'s sibling for "I want to keep
+                // working on this note past what fits in the
+                // dialog" instead of just filing it away.
+                return app.note_create_submit_and_edit();
             }
             KeyCode::Char('u') => {
                 app.note_create_clear();
