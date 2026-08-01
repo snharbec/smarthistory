@@ -685,6 +685,17 @@ This is purely additive: the existing single-line `@new <text>` / `!@new <text>`
 
 Open the two-field `create-note` dialog: a single-line **Title** and a multi-line **Content**, `Tab` toggling between them. `Ctrl-S` saves and exits — stages `note_search create-note <text> --type daily` (title + links/tags extracted into a `### Heading` line, content as the body) the same way `ComposeNoteEntry` above stages its own command. `Esc` cancels; `Ctrl-U` clears the active field; `Ctrl-W` deletes one word backward.
 
+**Pre-filled from the selected row** — the dialog opens with Title/Content seeded from whatever row was selected when the action fired (blank if nothing was selected), so the note captures what you were just looking at:
+
+| Selected row | Title | Content |
+| --- | --- | --- |
+| Question (`%`/`?` mode) | the question text | the LLM's stored answer |
+| Note (`@` mode) | *(blank)* | `[[wiki-link]]` to the note (filename, `.md` stripped) |
+| JIRA (`-` mode) | *(blank)* | `[KEY](browse-url)`; falls back to the bare key if JIRA isn't configured |
+| Everything else (plain history rows and every other mode) | *(blank)* | the command text wrapped in a fenced ` ```bash ` block |
+
+The user can edit or clear either field before saving; nothing is auto-committed.
+
 Also launchable standalone via `smarthistory tui --create-note`, which implies `--exec` (runs the staged command itself instead of just printing it) so it works from a bare shell invocation, a herdr keybinding, or a shell alias without needing `eval "$(...)"`.
 
 **Inline link/tag completion** — in either field, `Tab` on a word starting with one of these prefixes opens a completion menu:

@@ -30,6 +30,12 @@ All notable changes to this project will be documented in this file.
   `apply_prefix` (the `F1` picker's commit path) didn't recognize the
   paperless (`<`) or browser (`^`) prefixes as strippable when switching
   modes.
+- `CreateNote` (the Title + Content dialog) now pre-fills from the row that
+  was selected when the action fired: a question row splits into Title
+  (the question) + Content (the LLM's answer); a note row inserts a
+  `[[wiki-link]]`; a JIRA row inserts a markdown link to the issue's browse
+  URL (bare key if JIRA isn't configured); every other row (plain history,
+  or any other mode) wraps the command text in a fenced ` ```bash ` block.
 
 ### Security
 

@@ -23769,6 +23769,154 @@ fn note_create_dialog_opens_and_field_toggles() {
     assert!(!app.is_note_create_open());
 }
 
+/// A question-mode row (`mode == "question"`) pre-fills Title with
+/// the question text (leading `?` prefix stripped) and Content with
+/// the LLM's stored answer.
+#[test]
+fn note_create_prefill_question_row_splits_title_and_content() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows.insert(
+        0,
+        crate::tui::state::HistoryRow {
+            id: 1,
+            command: "?what is rust".to_string(),
+            output: "Rust is a systems programming language.".to_string(),
+            mode: "question".to_string(),
+            ..Default::default()
+        },
+    );
+    app.list_state.select(Some(0));
+    app.open_note_create_dialog();
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.title, "what is rust");
+    assert_eq!(d.content, "Rust is a systems programming language.");
+}
+
+/// A note row (`mode == "note"`) pre-fills Content with a
+/// `[[wiki-link]]` to the note — the `.md` extension stripped, same
+/// form `note_search`'s own link completion uses.
+#[test]
+fn note_create_prefill_note_row_inserts_wiki_link() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows.insert(
+        0,
+        crate::tui::state::HistoryRow {
+            id: 1,
+            command: "my-note.md".to_string(),
+            mode: "note".to_string(),
+            ..Default::default()
+        },
+    );
+    app.list_state.select(Some(0));
+    app.open_note_create_dialog();
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.title, "");
+    assert_eq!(d.content, "[[my-note]]");
+}
+
+/// A JIRA row (`mode == "jira"`) pre-fills Content with a standard
+/// markdown link to the issue's browse URL when JIRA is configured,
+/// and falls back to the bare key (no link) when it isn't — both
+/// cases in one test (rather than two separate `#[test]` fns each
+/// mutating the same process-global env vars) so they can't race
+/// against each other under `cargo test`'s default parallelism; a
+/// per-function `static` mutex only guards re-entrancy of that ONE
+/// function, not concurrent env mutation by a sibling test.
+#[test]
+fn note_create_prefill_jira_row_link_or_bare_key_depending_on_config() {
+    // Guard the JIRA env vars like `smart_open_jira_opens_all_marked_issues`
+    // does — `note_create_prefill_from_selection` reads
+    // `JiraConfig::from_env()` directly.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_server = std::env::var("JIRA_SERVER").ok();
+    let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+    let prev_url = std::env::var("JIRA_URL").ok();
+
+    let restore = |name: &str, prev: Option<String>| unsafe {
+        match prev {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    };
+
+    let row = || crate::tui::state::HistoryRow {
+        id: 1,
+        command: "PROJ-123".to_string(),
+        mode: "jira".to_string(),
+        ..Default::default()
+    };
+
+    // Configured: standard markdown link to the browse URL.
+    // SAFETY: single-threaded within the ENV_LOCK guard.
+    unsafe {
+        std::env::set_var("JIRA_SERVER", "https://jira.example.com");
+        std::env::set_var("JIRA_API_TOKEN", "tok");
+        std::env::set_var("JIRA_URL", "https://jira.example.com");
+    }
+    let mut app = directories_test_app(&[]);
+    app.merged_rows.insert(0, row());
+    app.list_state.select(Some(0));
+    app.open_note_create_dialog();
+    let configured_content = app.note_create.as_ref().unwrap().content.clone();
+
+    // Unconfigured: bare key, no link.
+    // SAFETY: single-threaded within the ENV_LOCK guard.
+    unsafe {
+        std::env::remove_var("JIRA_SERVER");
+        std::env::remove_var("JIRA_API_TOKEN");
+    }
+    let mut app2 = directories_test_app(&[]);
+    app2.merged_rows.insert(0, row());
+    app2.list_state.select(Some(0));
+    app2.open_note_create_dialog();
+    let unconfigured_content = app2.note_create.as_ref().unwrap().content.clone();
+
+    // Restore before asserting so a panic doesn't leak the env to
+    // other tests.
+    restore("JIRA_SERVER", prev_server);
+    restore("JIRA_API_TOKEN", prev_token);
+    restore("JIRA_URL", prev_url);
+
+    assert_eq!(
+        configured_content,
+        "[PROJ-123](https://jira.example.com/browse/PROJ-123)"
+    );
+    assert_eq!(unconfigured_content, "PROJ-123");
+}
+
+/// A plain history row (default `mode == "command"`) pre-fills
+/// Content with the command wrapped in a fenced ```bash block.
+#[test]
+fn note_create_prefill_history_row_wraps_in_bash_fence() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows.insert(
+        0,
+        crate::tui::state::HistoryRow {
+            id: 1,
+            command: "git status".to_string(),
+            mode: "command".to_string(),
+            ..Default::default()
+        },
+    );
+    app.list_state.select(Some(0));
+    app.open_note_create_dialog();
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.content, "```bash\ngit status\n```");
+}
+
+/// No selection at all (empty list) still opens a blank dialog —
+/// the pre-existing behavior, unchanged.
+#[test]
+fn note_create_prefill_no_selection_leaves_dialog_blank() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    let d = app.note_create.as_ref().unwrap();
+    assert!(d.title.is_empty());
+    assert!(d.content.is_empty());
+}
+
 #[test]
 fn note_create_push_char_rejects_newline_in_title() {
     // The Title field is

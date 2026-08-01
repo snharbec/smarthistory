@@ -11729,20 +11729,83 @@ impl App {
         if self.note_create.is_some() {
             return;
         }
+        let (title, content) = self.note_create_prefill_from_selection();
+        let title_cursor = title.chars().count();
+        let content_cursor = content.chars().count();
         self.note_create = Some(crate::tui::state::NoteCreateDialog {
-            title: String::new(),
-            title_cursor: 0,
-            content: String::new(),
-            content_cursor: 0,
+            title,
+            title_cursor,
+            content,
+            content_cursor,
             // Default the user to the
             // Title field on first
             // open — the Title is the
             // "what is this note"
             // field, the natural
-            // starting point.
+            // starting point. Cursors
+            // above are placed at the
+            // END of any prefilled
+            // text so typing appends
+            // rather than overwriting.
             active_field: crate::tui::state::NoteCreateField::Title,
             completion: None,
         });
+    }
+
+    /// Pre-fill the create-note dialog's Title/Content from the
+    /// currently selected row, so `Ctrl-I` (create-note) captures
+    /// whatever the user was just looking at instead of starting
+    /// from a blank dialog. Returns `(String::new(), String::new())`
+    /// when nothing is selected.
+    ///
+    /// - **Question row** (`row.mode == "question"`): title = the
+    ///   question text, with the leading question-prefix char
+    ///   stripped (`stage_question` stores the row's `command` as
+    ///   `<prefix><description>`); content = the LLM's stored
+    ///   answer (`row.output`).
+    /// - **Note row** (`row.mode == "note"`): content = a
+    ///   `[[wiki-link]]` to the note — filename with the `.md`
+    ///   extension stripped, the same link form `note_search`'s own
+    ///   tag/link completion uses (`crate::jira::notes_link_matches`)
+    ///   — so it round-trips through `extract_links_and_tags` into
+    ///   the note's heading exactly like a user-typed `[[link]]`
+    ///   would.
+    /// - **JIRA row** (`row.mode == "jira"`): content = a standard
+    ///   markdown link `[KEY](browse-url)` to the issue. Falls back
+    ///   to the bare key (no link) when JIRA isn't configured — see
+    ///   `crate::jira::JiraConfig::from_env`.
+    /// - **Everything else** (plain history rows and every other
+    ///   mode — todo/segments/similar/paperless/browser/files/tags/
+    ///   codegraph/ag/directories/panes/llm): content = the row's
+    ///   command text wrapped in a fenced ```bash block.
+    fn note_create_prefill_from_selection(&self) -> (String, String) {
+        let Some(row) = self.selected_row() else {
+            return (String::new(), String::new());
+        };
+        match row.mode.as_str() {
+            "question" => {
+                let prefix = self.query_prefixes.question;
+                let title = row
+                    .command
+                    .strip_prefix(prefix)
+                    .unwrap_or(&row.command)
+                    .to_string();
+                (title, row.output.clone())
+            }
+            "note" => {
+                let name = row.command.strip_suffix(".md").unwrap_or(&row.command);
+                (String::new(), format!("[[{}]]", name))
+            }
+            "jira" => {
+                let key = row.command.clone();
+                let content = match crate::jira::JiraConfig::from_env() {
+                    Some(cfg) => format!("[{}]({})", key, cfg.browse_url(&key)),
+                    None => key,
+                };
+                (String::new(), content)
+            }
+            _ => (String::new(), format!("```bash\n{}\n```", row.command)),
+        }
     }
 
     /// Insert `c` at the cursor in the compose buffer. Unlike
