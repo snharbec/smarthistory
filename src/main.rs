@@ -1064,6 +1064,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
     let _ = writeln!(
         f,
+        "  dropdown.highlight = {}",
+        if cfg.dropdown_highlight { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        f,
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
@@ -1388,6 +1393,15 @@ pub struct Config {
     /// a huge, low-signal candidate list on an empty or 1-char
     /// buffer. Set via `dropdown.minchars=<N>`.
     dropdown_min_chars: usize,
+    /// Whether the dropdown widget syntax-highlights each candidate
+    /// (via `bat`, plus a self-checked green/red for the first
+    /// word's alias/function/builtin/command validity) instead of
+    /// plain text. Default `false`: it adds a `bat` subprocess call
+    /// per dropdown render, on top of the `smarthistory search` call
+    /// every keystroke already does. Silently stays off if `bat`
+    /// isn't on `$PATH`, even when this is `true`. Set via
+    /// `dropdown.highlight=on|off`.
+    dropdown_highlight: bool,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -1724,6 +1738,7 @@ impl Config {
             dropdown_enabled: false,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
+            dropdown_highlight: false,
             commentexpand_enabled: false,
             zsh_default_mode: "sess".to_string(),
             notes_database: None,
@@ -1969,6 +1984,9 @@ impl Config {
                 },
                 "commentexpand.enabled" => {
                     self.commentexpand_enabled = crate::util::parse_bool(value, false);
+                }
+                "dropdown.highlight" => {
+                    self.dropdown_highlight = crate::util::parse_bool(value, false);
                 }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
@@ -4990,6 +5008,9 @@ fn main() -> anyhow::Result<()> {
                     }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
+                    "dropdown.highlight" => {
+                        println!("{}", if cfg.dropdown_highlight { "on" } else { "off" })
+                    }
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })
                     }
