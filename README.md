@@ -33,6 +33,10 @@ Smart History replaces the shell's native history with a single SQLite database 
 
 ## Installation
 
+Prebuilt binaries (macOS arm64/x86_64, Linux x86_64) are attached to each [release](../../releases) — download the archive for your platform, extract it, and put the `smarthistory` binary on your `PATH`.
+
+To build from source instead:
+
 ```bash
 # Clone and build
 git clone <repo-url> smarthistory
