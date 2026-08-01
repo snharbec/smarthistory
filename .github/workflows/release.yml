@@ -1,0 +1,79 @@
+name: Release
+
+# Triggered by pushing a tag like `v1.2.0`. Builds a release binary
+# natively on macOS (Apple Silicon + Intel) and Linux (x86_64) --
+# native runners, not cross-compilation, since `reqwest`'s
+# `native-tls` feature links the target platform's own OpenSSL/
+# Secure Transport and is painful to cross-compile for. Each build
+# runs the test suite first, then packages and uploads the binary as
+# a release asset.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Run tests
+        run: cargo test --verbose --target ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/${{ matrix.target }}/release/smarthistory
+          strip "$bin"
+          staging="smarthistory-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "$bin" "$staging/"
+          cp README.md LICENSE "$staging/" 2>/dev/null || true
+          archive="${staging}.tar.gz"
+          tar -czf "$archive" "$staging"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$archive" > "${archive}.sha256"
+          else
+            sha256sum "$archive" > "${archive}.sha256"
+          fi
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
