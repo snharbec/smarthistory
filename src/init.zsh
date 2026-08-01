@@ -593,6 +593,15 @@ typeset -g _smarthistory_dropdown_hl_select="fg=4"  # blue fallback
 # `tuicolor.error` elsewhere in the app.
 typeset -g _smarthistory_dropdown_hl_success="fg=2"  # green fallback
 typeset -g _smarthistory_dropdown_hl_error="fg=1"    # red fallback
+# `bat --theme` argument for the `dropdown.highlight` feature —
+# "dark" or "light", matching `bg`'s perceived brightness the exact
+# way `highlight_with_bat`'s `bat_theme_arg()` does (Rust side, used
+# for the `$`/`&`/`,` preview panes and `smart-open.default=bat`), so
+# the dropdown's syntax colors read correctly against the same
+# background the rest of the app already assumes. Defaults to "dark"
+# — same "matches the TUI's default active scheme" convention as
+# `smarthistory config get palette`'s own scheme default.
+typeset -g _smarthistory_dropdown_bat_theme="dark"
 
 # Detect whether the terminal advertises color support at all.
 # `region_highlight` entries are converted to real terminal escape
@@ -702,11 +711,42 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                     [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_error=$_hlspec
                     unset _hlspec
                     ;;
-                # All other slots (bg, fg, warning, …) are
-                # currently unused by the dropdown widget. Reading
-                # them anyway keeps the call site identical to the
-                # TUI's palette resolution; a future widget addition
-                # just needs a new case arm.
+                bg)
+                    # `resolved_palette` emits `bg` as `#rrggbb` when
+                    # a built-in theme is active, but falls back to
+                    # the hardcoded `Palette::builtin()` default
+                    # (currently the named color `black`) when no
+                    # theme is selected — handle both forms, same as
+                    # `_smarthistory_color_to_hlspec` does for the
+                    # other palette slots. Named form is checked
+                    # against the exact same "light" name list
+                    # `is_color_light` uses on the Rust side (White,
+                    # the six Light* colors, and Gray); hex form uses
+                    # the same ITU-R BT.601 perceived-brightness
+                    # formula, light when > 127.
+                    case "${_smarthistory_dropdown_palette_value:l}" in
+                        '#'[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])
+                            local _sm_bg_hex=${_smarthistory_dropdown_palette_value#'#'}
+                            local -i _sm_bg_r=16#${_sm_bg_hex[1,2]}
+                            local -i _sm_bg_g=16#${_sm_bg_hex[3,4]}
+                            local -i _sm_bg_b=16#${_sm_bg_hex[5,6]}
+                            local -i _sm_bg_brightness=$(( (_sm_bg_r * 299 + _sm_bg_g * 587 + _sm_bg_b * 114) / 1000 ))
+                            (( _sm_bg_brightness > 127 )) && _smarthistory_dropdown_bat_theme="light" || _smarthistory_dropdown_bat_theme="dark"
+                            unset _sm_bg_hex _sm_bg_r _sm_bg_g _sm_bg_b _sm_bg_brightness
+                            ;;
+                        white|lightred|lightgreen|lightyellow|lightblue|lightmagenta|lightcyan|gray|grey)
+                            _smarthistory_dropdown_bat_theme="light"
+                            ;;
+                        *)
+                            _smarthistory_dropdown_bat_theme="dark"
+                            ;;
+                    esac
+                    ;;
+                # All other slots (fg, warning, …) are currently
+                # unused by the dropdown widget. Reading them anyway
+                # keeps the call site identical to the TUI's palette
+                # resolution; a future widget addition just needs a
+                # new case arm.
                 *) ;;
             esac
         done <<< "$_smarthistory_dropdown_palette_raw"
@@ -1233,7 +1273,8 @@ _smarthistory_dropdown_render() {
         local _sm_hl_raw _sm_hl_line _sm_hl_i
         local -a _sm_hl_lines _sm_hl_row_spans
         _sm_hl_raw=$(printf '%s\n' "${_smarthistory_dropdown_candidates[@]}" \
-            | bat --language=bash --color=always --plain --paging=never --tabs=0 2>/dev/null)
+            | bat --language=bash --color=always --plain --theme "$_smarthistory_dropdown_bat_theme" \
+                  --paging=never --tabs=0 2>/dev/null)
         _sm_hl_lines=("${(f)_sm_hl_raw}")
         for (( _sm_hl_i = 1; _sm_hl_i <= ${#_smarthistory_dropdown_candidates}; _sm_hl_i++ )); do
             _sm_hl_line=${_sm_hl_lines[$_sm_hl_i]:-}
