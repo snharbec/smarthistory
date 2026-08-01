@@ -222,6 +222,17 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = AnsiMode::Bold)]
         ansi: AnsiMode,
     },
+    /// Resolve a comment to its most recently used command.
+    ///
+    /// Used by the zsh comment-expansion widget: `text` is matched
+    /// exactly (case-insensitively) against `command_comments.comment`;
+    /// if multiple commands share that exact comment, the one most
+    /// recently run wins. Prints the bare command with no formatting,
+    /// or nothing if there's no match.
+    Expand {
+        /// The comment text to resolve.
+        text: String,
+    },
     /// Search history and print matching rows, like `search` but
     /// with a 1000-row default limit.
     ///
@@ -1051,6 +1062,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(f, "  dropdown.limit = {}", cfg.dropdown_limit);
     let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
+    let _ = writeln!(
+        f,
+        "  commentexpand.enabled = {}",
+        if cfg.commentexpand_enabled { "on" } else { "off" }
+    );
     let _ = writeln!(f, "  zsh.mode = {}", cfg.zsh_default_mode);
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
@@ -1372,6 +1388,13 @@ pub struct Config {
     /// a huge, low-signal candidate list on an empty or 1-char
     /// buffer. Set via `dropdown.minchars=<N>`.
     dropdown_min_chars: usize,
+    /// Whether the space-triggered comment-expansion zsh widget
+    /// (typing a comment's text at the start of the line, then a
+    /// space, expands it to the most recently used command carrying
+    /// that comment) is enabled. Default `false`, opt-in like
+    /// `dropdown.enabled` above. Set via
+    /// `commentexpand.enabled=on|off`.
+    commentexpand_enabled: bool,
     /// The zsh widgets' search scope at shell-init time — one of
     /// `sess` (current `$SMART_HISTORY_SESSION` only), `dir`
     /// (current working directory only), or `global` (no scope
@@ -1701,6 +1724,7 @@ impl Config {
             dropdown_enabled: false,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
+            commentexpand_enabled: false,
             zsh_default_mode: "sess".to_string(),
             notes_database: None,
             notes_dir: None,
@@ -1943,6 +1967,9 @@ impl Config {
                         value
                     ),
                 },
+                "commentexpand.enabled" => {
+                    self.commentexpand_enabled = crate::util::parse_bool(value, false);
+                }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
                     if matches!(
@@ -4126,6 +4153,28 @@ fn build_search_where_clause(
     (format!("{}{}", prefix, extra), params)
 }
 
+/// Resolve a comment to the most recently used command that carries
+/// it, for the zsh comment-expansion widget (`smarthistory expand`).
+/// Matches `command_comments.comment` exactly (case-insensitively,
+/// matching the case-insensitivity `LIKE` already gives substring
+/// search elsewhere in this file) rather than as a substring — unlike
+/// `build_search_where_clause`, which is deliberately substring-based
+/// and matches command-or-comment together, this needs an unambiguous
+/// single answer for a specific typed word.
+fn resolve_comment(conn: &Connection, text: &str) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT h.command FROM history h \
+         JOIN command_comments c ON h.command = c.command \
+         WHERE c.comment = ?1 COLLATE NOCASE \
+         ORDER BY h.timestamp DESC LIMIT 1",
+        params![text],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
+}
+
 /// Upsert every row of an imported `HistoryExport` into `history`
 /// (plus its `command_comments` / `history_output` side tables),
 /// returning `(imported, updated)` counts. Extracted from
@@ -4380,6 +4429,11 @@ fn main() -> anyhow::Result<()> {
                      ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
                     params![command, c],
                 )?;
+            }
+        }
+        Commands::Expand { text } => {
+            if let Some(command) = resolve_comment(&conn, &text)? {
+                println!("{}", command);
             }
         }
         Commands::Search {
@@ -4936,6 +4990,9 @@ fn main() -> anyhow::Result<()> {
                     }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
+                    "commentexpand.enabled" => {
+                        println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })
+                    }
                     "zsh.mode" => println!("{}", cfg.zsh_default_mode),
                     // Resolved palette as a flat `key=value` block,
                     // one entry per `tuicolor.<field>` slot. The

@@ -203,6 +203,16 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     [[ "$_smarthistory_dropdown_minchars_raw" == <-> ]] && _smarthistory_dropdown_minchars=$_smarthistory_dropdown_minchars_raw
     unset _smarthistory_dropdown_limit_raw _smarthistory_dropdown_minchars_raw
 fi
+# Comment-expansion: type a comment's text at the start of the
+# command line, then a space, and it expands to the most recently
+# used command carrying that exact comment (`smarthistory add ...
+# --comment ...`) — the same UX as zsh-abbr/fish abbreviations. Off
+# by default like `dropdown.enabled` above. Enable with
+# `commentexpand.enabled=on` in ~/.config/smarthistory/config.
+typeset -g _smarthistory_commentexpand_enabled="0"
+if [[ "$(smarthistory config get commentexpand.enabled 2>/dev/null)" == "on" ]]; then
+    _smarthistory_commentexpand_enabled="1"
+fi
 # (Palette init runs further down, after
 # `_smarthistory_color_to_hlspec` is defined — see the comment block
 # marked "Resolved TUI palette" near `_smarthistory_strip_ansi`.)
@@ -1043,18 +1053,27 @@ _smarthistory_dropdown_render() {
 }
 
 # Wrap (not replace) a keystroke-handling widget so whatever was
-# bound before still runs, then re-render the dropdown after it.
+# bound before still runs, then call a post-hook function after it.
 # `.widget` is only valid as an argument TO `zle` (to call a builtin
 # bypassing overrides), not as a `zle -N` target directly — a plain
 # `zle -N $orig .$widget` fails with "No such shell function". The
 # fix (the exact pattern zsh-autosuggestions uses in src/bind.zsh):
 # define a tiny wrapper function whose body does the dot-call, then
 # register THAT function as the widget.
-_smarthistory_dropdown_bind_widget() {
-    local widget=$1
-    local orig="_smarthistory_dropdown_orig_${widget}"
+#
+# `tag` namespaces the generated `orig`/wrap function names per
+# feature (e.g. `dropdown`, `commentexpand`) so two features can each
+# wrap the same widget (e.g. `self-insert`) independently: the second
+# feature to install sees the first feature's wrapper as an ordinary
+# `user:*` widget and wraps *that*, chaining both post-hooks. Only a
+# re-source of init.zsh re-wrapping the SAME feature+widget pair is a
+# no-op (the `user:${wrapname}` case below).
+_smarthistory_wrap_widget() {
+    local tag=$1 widget=$2 posthook=$3
+    local orig="_smarthistory_${tag}_orig_${widget}"
+    local wrapname="_smarthistory_${tag}_wrap_${widget}"
     case ${widgets[$widget]:-} in
-        user:_smarthistory_dropdown_wrap_*) return ;;  # already wrapped (re-sourced init.zsh)
+        user:${wrapname}) return ;;  # already wrapped (re-sourced init.zsh)
         builtin)
             eval "${orig}() { zle .${widget} }"
             zle -N $orig $orig
@@ -1064,14 +1083,14 @@ _smarthistory_dropdown_bind_widget() {
             ;;
         *) return ;;
     esac
-    eval "_smarthistory_dropdown_wrap_${widget}() { zle $orig -- \"\$@\"; _smarthistory_dropdown_render; }"
-    zle -N $widget _smarthistory_dropdown_wrap_${widget}
+    eval "${wrapname}() { zle $orig -- \"\$@\"; ${posthook}; }"
+    zle -N $widget $wrapname
 }
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
         backward-delete-char delete-char backward-kill-word \
         kill-whole-line bracketed-paste; do
-        _smarthistory_dropdown_bind_widget $_smarthistory_dropdown_w
+        _smarthistory_wrap_widget dropdown $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
     unset _smarthistory_dropdown_w
     # Tab cycles the highlighted candidate forward (same wraparound
@@ -1252,6 +1271,36 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     }
     zle -N _smarthistory_dropdown_run_first
     bindkey '^@' _smarthistory_dropdown_run_first
+fi
+# Post-hook for the comment-expansion widget below: runs after the
+# real self-insert, so `LBUFFER` already includes the just-typed
+# character. Only fires on a literal space keystroke, with the
+# cursor at the end of the buffer, and only when everything typed so
+# far on the line (i.e. `word`, the buffer with the trailing space
+# stripped) contains no other whitespace — that's what enforces
+# "written to the *begin* of the command line": if an earlier space
+# had already been typed, `word` would contain it too, and the guard
+# below would fail.
+_smarthistory_commentexpand_check() {
+    [[ "$_smarthistory_commentexpand_enabled" = "1" ]] || return
+    [[ "$KEYS" == " " ]] || return
+    [[ $CURSOR -eq $#BUFFER ]] || return
+    local word=${LBUFFER%' '}
+    [[ -n "$word" && "$word" != *[[:space:]]* ]] || return
+    local resolved
+    resolved=$(smarthistory expand "$word" 2>/dev/null)
+    [[ -n "$resolved" ]] || return
+    BUFFER="${resolved} "
+    CURSOR=$#BUFFER
+    # Clear any stale dropdown suggestion the buffer replacement left
+    # behind — a no-op when the dropdown feature isn't enabled.
+    (( ${+functions[_smarthistory_dropdown_clear]} )) && _smarthistory_dropdown_clear
+}
+if [[ "$_smarthistory_commentexpand_enabled" = "1" ]]; then
+    for _smarthistory_ce_w in self-insert self-insert-unmeta; do
+        _smarthistory_wrap_widget commentexpand $_smarthistory_ce_w _smarthistory_commentexpand_check
+    done
+    unset _smarthistory_ce_w
 fi
 
 _smarthistory_reset_state() {
