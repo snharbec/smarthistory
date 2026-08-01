@@ -6073,6 +6073,13 @@ fn smart_open_jira_opens_all_marked_issues() {
     app.marked_ids.insert(mark_key(&rows[0]));
     app.marked_ids.insert(mark_key(&rows[1]));
 
+    // Inject a fake opener so this test records the would-be
+    // `open`/`xdg-open` calls instead of actually spawning them —
+    // without this, `open_jira_in_background` launches the real
+    // system browser on every test run.
+    let opener = std::sync::Arc::new(FakeUrlOpener::default());
+    app.set_url_opener(opener.clone());
+
     app.open_jira_in_background();
 
     // Restore before asserting so a panic doesn't leak the env
@@ -6101,6 +6108,17 @@ fn smart_open_jira_opens_all_marked_issues() {
         msg.contains("PROJ-1") && msg.contains("PROJ-2"),
         "expected both issue keys named in the status message; got: {:?}",
         msg
+    );
+
+    // Confirm no real process was ever spawned — both issues were
+    // routed through the fake opener instead.
+    let opened = opener.opened.lock().unwrap();
+    assert_eq!(opened.len(), 2, "expected exactly 2 recorded opens, got: {:?}", opened);
+    assert!(
+        opened.iter().any(|(_, url)| url.contains("PROJ-1"))
+            && opened.iter().any(|(_, url)| url.contains("PROJ-2")),
+        "expected both issue URLs to be recorded; got: {:?}",
+        opened
     );
 }
 
@@ -15518,6 +15536,26 @@ impl crate::jira::JiraClient for FakeJira {
             .unwrap()
             .push((key.to_string(), body.to_string()));
         Ok(())
+    }
+}
+
+/// Fake `UrlOpener`: records `(opener_cmd, url)` pairs instead of
+/// spawning a real child process. Used by tests that exercise
+/// `open_jira_in_background` — without injecting this, that
+/// function spawns the real `open` (macOS) / `xdg-open` (Linux)
+/// binary, which would actually launch the system's default
+/// browser every time `cargo test` runs.
+#[derive(Default)]
+struct FakeUrlOpener {
+    opened: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl UrlOpener for FakeUrlOpener {
+    fn open(&self, opener_cmd: &str, url: &str) {
+        self.opened
+            .lock()
+            .unwrap()
+            .push((opener_cmd.to_string(), url.to_string()));
     }
 }
 

@@ -87,7 +87,19 @@ pub fn format_diff(epoch: i64) -> String {
     }
 
     // Calendar-month diff first, since it's non-uniform in seconds.
-    let months = (now.year() - then.year()) * 12 + (now.month() as i32 - then.month() as i32);
+    // A raw `year*12 + month` difference overcounts by one whenever
+    // `now`'s day-of-month hasn't yet reached `then`'s: e.g. Aug 1
+    // minus Jul 27 (5 days ago) gives month=8 - month=7 = 1, even
+    // though a full calendar month hasn't actually elapsed. Subtract
+    // 1 in that case — the same "hasn't had its monthiversary yet"
+    // adjustment used for age-in-years calculations — so a small
+    // gap that merely crosses a month boundary still falls through
+    // to the day/hour/minute/second ladder below instead of being
+    // misreported as "1M".
+    let mut months = (now.year() - then.year()) * 12 + (now.month() as i32 - then.month() as i32);
+    if now.day() < then.day() {
+        months -= 1;
+    }
     if months > 0 {
         return format!("{}M", months);
     }

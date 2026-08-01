@@ -1120,6 +1120,23 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 // `key.<action>=<key-spec>`, e.g. `key.help=C-h`.
 // (The enum itself lives in `bindings::Action`.)
 
+/// Test-injection seam for [`App::open_jira_in_background`]'s real
+/// child-process spawn. Production code has no implementor:
+/// `App::url_opener` stays `None`, and the function falls through
+/// to spawning the real `open` / `xdg-open` binary exactly as
+/// before this seam existed. Tests inject a recording stub via
+/// `set_url_opener` (`#[cfg(test)]`, see `src/tui/tests.rs`) so
+/// `cargo test` never actually launches a browser — mirrors
+/// `crate::jira::JiraClient`'s "injectable fake, `None` by default"
+/// convention.
+trait UrlOpener: Send + Sync {
+    /// `opener_cmd` is the binary name (`"open"` on macOS,
+    /// `"xdg-open"` elsewhere); `url` is the browse URL. A real
+    /// implementor would spawn `opener_cmd url`; the test stub just
+    /// records the call.
+    fn open(&self, opener_cmd: &str, url: &str);
+}
+
 pub(crate) struct App {
     conn: Connection,
     mode: Mode,
@@ -1747,6 +1764,14 @@ pub(crate) struct App {
     /// `None` so the real background-thread + `RestJiraClient`
     /// path runs.
     jira_client: Option<std::sync::Arc<dyn crate::jira::JiraClient>>,
+    /// Injectable URL opener for tests (a fake). When `Some`,
+    /// `open_jira_in_background` calls this synchronously instead
+    /// of spawning a real `open` / `xdg-open` child process — same
+    /// "test seam, `None` in production" convention as
+    /// `jira_client` above. Without this, a test exercising
+    /// `open_jira_in_background` would actually launch the
+    /// system's default browser every time `cargo test` runs.
+    url_opener: Option<std::sync::Arc<dyn UrlOpener>>,
     /// User-defined JQL fragments loaded from the
     /// config file's `jira.search.<name>=...` entries.
     /// The build_jql parser looks up `@<name>` tokens
@@ -5213,6 +5238,7 @@ impl App {
             jira_idle_started: None,
             jira_last_jql: None,
             jira_client: None,
+            url_opener: None,
             jira_fragments,
             jira_undefined_fragments: Vec::new(),
             jira_last_undefined_message: None,
@@ -7759,6 +7785,15 @@ impl App {
     #[cfg(test)]
     fn set_jira_client(&mut self, client: std::sync::Arc<dyn crate::jira::JiraClient>) {
         self.jira_client = Some(client);
+    }
+
+    /// Install a URL opener for tests (a fake). When set,
+    /// `open_jira_in_background` records the would-be `open` /
+    /// `xdg-open` invocation through this instead of spawning the
+    /// real binary — see `UrlOpener`'s doc comment.
+    #[cfg(test)]
+    fn set_url_opener(&mut self, opener: std::sync::Arc<dyn UrlOpener>) {
+        self.url_opener = Some(opener);
     }
 
     /// Stage an external editor invocation as the next "selection".
@@ -10315,6 +10350,13 @@ impl App {
     /// detached child process so the TUI stays open. Used by the
     /// [`Action::SmartOpen`] dive key in `-` (JIRA) mode.
     ///
+    /// [`UrlOpener`]: the test-injection seam for this function's
+    /// real-process spawn. `App::url_opener` defaults to `None` in
+    /// production, in which case the real `open` / `xdg-open` binary
+    /// is spawned exactly as before; tests inject a recording stub
+    /// via `set_url_opener` (see `src/tui/tests.rs`) so `cargo test`
+    /// never actually launches a browser.
+    ///
     /// The opener is `open` on macOS and `xdg-open` on other
     /// Unixes (matching `select_for_run_impl`). The process is
     /// spawned on a short-lived thread that calls `.status()`
@@ -10350,6 +10392,7 @@ impl App {
         // rather than passed as multiple args to a single
         // invocation): `xdg-open` on Linux only reliably opens
         // one URL per call, so looping is the portable choice.
+        let injected_opener = self.url_opener.clone();
         let mut opened_keys: Vec<String> = Vec::new();
         for row in &targets {
             let key = row.command.trim().to_string();
@@ -10357,13 +10400,21 @@ impl App {
                 continue;
             }
             let url = cfg.browse_url(&key);
-            let opener = opener.to_string();
-            // Spawn a thread that runs the opener and reaps the
-            // child. The TUI thread never blocks on the browser
-            // launch.
-            std::thread::spawn(move || {
-                let _ = std::process::Command::new(&opener).arg(&url).status();
-            });
+            match injected_opener.as_ref() {
+                // Test seam: record the call synchronously instead
+                // of touching the real process table. See
+                // `UrlOpener`'s doc comment.
+                Some(injected) => injected.open(opener, &url),
+                // Production: spawn a thread that runs the real
+                // opener and reaps the child. The TUI thread never
+                // blocks on the browser launch.
+                None => {
+                    let opener = opener.to_string();
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new(&opener).arg(&url).status();
+                    });
+                }
+            }
             opened_keys.push(key);
         }
         if opened_keys.is_empty() {
