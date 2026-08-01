@@ -1371,6 +1371,33 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
     unset _smarthistory_dropdown_w
+    # Extend `LBUFFER` to the longest prefix common to every current
+    # `_smarthistory_dropdown_candidates` entry — readline's classic
+    # "expand to longest unambiguous completion". Pairwise-reduces a
+    # running prefix string against each candidate in turn; the
+    # candidate lists here are tiny (`dropdown.limit`, default 6) so
+    # there's no need for anything cleverer. Returns success (and
+    # updates `BUFFER`/`CURSOR`) only when that prefix is strictly
+    # longer than the current buffer — i.e. there's actually more
+    # unambiguous text to add. With exactly one candidate this always
+    # succeeds and expands to the whole thing (the `--prefix` search
+    # that built the candidate list already guarantees `LBUFFER` is a
+    # prefix of it). Failure means every candidate already diverges
+    # at the very next character — nothing to expand.
+    _smarthistory_dropdown_expand_common_prefix() {
+        local lcp=${_smarthistory_dropdown_candidates[1]}
+        local cand
+        for cand in "${_smarthistory_dropdown_candidates[@]:1}"; do
+            while [[ -n "$lcp" && "$cand" != "$lcp"* ]]; do
+                lcp=${lcp[1,-2]}
+            done
+            [[ -z "$lcp" ]] && break
+        done
+        (( $#lcp > $#LBUFFER )) || return 1
+        BUFFER=$lcp
+        CURSOR=$#BUFFER
+        return 0
+    }
     # Tab cycles the highlighted candidate forward (same wraparound
     # math as Down) WITHOUT touching BUFFER or closing the menu —
     # only Enter (see `_smarthistory_reset_and_accept` below) commits
@@ -1378,8 +1405,32 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # completion widget when no menu is showing (zsh's documented
     # default Tab binding in emacs mode, preserved explicitly since
     # we're taking over `^I`).
+    #
+    # On a fresh (not-yet-cycled) candidate set, the FIRST Tab press
+    # instead tries `_smarthistory_dropdown_expand_common_prefix`
+    # first — if it can extend the buffer, re-render against that
+    # longer `LBUFFER` (the same `smarthistory search` round-trip
+    # every keystroke already does, naturally narrowing/refreshing
+    # the candidate list) and jump straight to "chosen" so the VERY
+    # NEXT Tab cycles instead of trying to expand again, which would
+    # be a no-op once `LBUFFER` already sits at the common prefix.
+    # When there's nothing to expand, falls through to the unchanged
+    # "highlight row 0" behavior below. `Down` (`_smarthistory_down_history`)
+    # calls this same widget when the dropdown is open, so it picks
+    # up the same expand-then-cycle behavior — consistent with that
+    # widget's existing "Down works exactly like Tab" design, not a
+    # new inconsistency.
     _smarthistory_dropdown_accept() {
         if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+            if (( _smarthistory_dropdown_chosen == 0 )) \
+                && _smarthistory_dropdown_expand_common_prefix; then
+                _smarthistory_dropdown_render
+                if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+                    _smarthistory_dropdown_chosen=1
+                    _smarthistory_dropdown_paint
+                fi
+                return
+            fi
             # Tab always advances the selection, even from the
             # unchosen default (index 0) — so a lone-candidate menu
             # still lets Tab "choose" it in place rather than needing
