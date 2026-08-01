@@ -24271,6 +24271,65 @@ fn note_create_submit_formats_markdown_block() {
     assert!(!app.is_note_create_open());
 }
 
+#[test]
+fn note_create_submit_and_edit_empty_both_fields_surfaces_message() {
+    // Same validation as `note_create_submit` — `note_create_build_body`
+    // is shared between the two, so one guard test here is enough to
+    // confirm `submit_and_edit` actually goes through it rather than
+    // skipping validation.
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    let committed = app.note_create_submit_and_edit();
+    assert!(!committed, "empty dialog must not commit");
+    assert!(app.note_create.is_some(), "empty dialog stays open");
+}
+
+#[test]
+fn note_create_submit_and_edit_stages_create_then_editor() {
+    // `Ctrl-O` must stage BOTH steps: the same `note_search
+    // create-note ...` command `Ctrl-S` stages, chained with `&&` into
+    // `$EDITOR <path-to-todays-daily-note>` so the note opens right
+    // after saving.
+    let mut app = directories_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp/fake-notes.sql"));
+    app.notes_dir = Some(std::path::PathBuf::from("/tmp/fake-notes"));
+    app.open_note_create_dialog();
+    for c in "Quick thought".chars() {
+        app.note_create_push_char(c);
+    }
+    let committed = app.note_create_submit_and_edit();
+    assert!(
+        committed,
+        "submit_and_edit must succeed when notes.database/notes.dir are configured"
+    );
+    let staged = app.selection.as_deref().unwrap();
+    assert!(
+        staged.starts_with("note_search create-note "),
+        "staged command should start with the create-note call; got: {staged}"
+    );
+    let body = shell_quote_decode(&extract_single_quoted_arg(staged));
+    assert!(
+        body.starts_with("### Quick thought"),
+        "body should contain the typed heading; got: {body}"
+    );
+    let editor = std::env::var("EDITOR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "vi".to_string());
+    let expected_path = daily_note_path(std::path::Path::new("/tmp/fake-notes"));
+    let expected_tail = format!(
+        "&& {} {}",
+        editor,
+        crate::util::shell_quote(&expected_path.to_string_lossy())
+    );
+    assert!(
+        staged.ends_with(&expected_tail),
+        "staged command should chain `&& $EDITOR <daily-note-path>`; got: {staged}, expected tail: {expected_tail}"
+    );
+    // The dialog closes on commit, same as `note_create_submit`.
+    assert!(!app.is_note_create_open());
+}
+
 /// The completion menu's
 /// `Enter` handler
 /// replaces the prefix

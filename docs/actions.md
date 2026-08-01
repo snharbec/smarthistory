@@ -683,7 +683,7 @@ This is purely additive: the existing single-line `@new <text>` / `!@new <text>`
 | Default key | none (open it via the command palette, `Ctrl-Q`, or bind `key.create-note=<spec>`) |
 | Category | tools |
 
-Open the two-field `create-note` dialog: a single-line **Title** and a multi-line **Content**, `Tab` toggling between them. `Ctrl-S` saves and exits — stages `note_search create-note <text> --type daily` (title + links/tags extracted into a `### Heading` line, content as the body) the same way `ComposeNoteEntry` above stages its own command. `Esc` cancels; `Ctrl-U` clears the active field; `Ctrl-W` deletes one word backward.
+Open the two-field `create-note` dialog: a single-line **Title** and a multi-line **Content**, `Tab` toggling between them. `Ctrl-S` saves and exits — stages `note_search create-note <text> --type daily` (title + links/tags extracted into a `### Heading` line, content as the body) the same way `ComposeNoteEntry` above stages its own command. `Ctrl-O` does the same save, then chains `$EDITOR <path>` onto the staged command so the daily note opens right after — for when the dialog isn't enough room and you want to keep writing. The target path is computed independently (`notes_dir/daily/<year>/<month-abbrev>/<date>.md`, the same convention `note_search`'s `create-note` uses internally) rather than asked back from the CLI, since it doesn't report one. `Esc` cancels; `Ctrl-U` clears the active field; `Ctrl-W` deletes one word backward.
 
 **Pre-filled from the selected row** — the dialog opens with Title/Content seeded from whatever row was selected when the action fired (blank if nothing was selected), so the note captures what you were just looking at:
 
