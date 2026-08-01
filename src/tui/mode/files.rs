@@ -192,3 +192,103 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
             row.output = highlighted;
         }
 }
+
+impl App {
+    /// Whether the query is a files-view request:
+    /// the query starts with the files prefix (`/` by
+    /// default). The body (everything after `/`) is a
+    /// substring filter matched against each file's
+    /// path (relative to cwd).
+    pub(crate) fn is_files_query(&self) -> bool {
+        matches(self)
+    }
+
+    /// Arm or clear the files-mode
+    /// walk debounce. Called from
+    /// `llm_touch` on every keystroke
+    /// (same co-location pattern as
+    /// `jira_touch`). Re-arms the
+    /// timer when the user is still in
+    /// files mode; resets all pending
+    /// state when the user leaves.
+    pub(crate) fn files_touch(&mut self) {
+        let active = self.is_files_query();
+        crate::debounce::touch(&mut self.files_state, active);
+    }
+
+    /// Check whether the files-mode
+    /// debounce has elapsed and, if so,
+    /// spawn a background directory walk.
+    /// Called from the run-loop's idle
+    /// tick (same pattern as
+    /// `llm_maybe_autocall` and
+    /// `jira_maybe_autocall`). Returns
+    /// immediately when not in files
+    /// mode, when a walk is already in
+    /// flight, or when the debounce
+    /// window hasn't elapsed.
+    pub(crate) fn files_maybe_autocall(&mut self) {
+        if !self.is_files_query() {
+            return;
+        }
+        if !crate::debounce::debounce_elapsed(&mut self.files_state, crate::files::FILES_DEBOUNCE) {
+            return;
+        }
+        let pattern =
+            crate::files::FilesState::current_pattern(&self.query, self.query_prefixes.files);
+        // Skip if we already have results for this pattern.
+        if self.files_state.has_results_for(&pattern) {
+            return;
+        }
+        // First entry into files mode:
+        // arm the debounce so the walk
+        // fires on the next tick even
+        // if the user never types
+        // another character.
+        self.files_state.last_pattern = Some(pattern.clone());
+        self.spawn_files_walk(pattern);
+    }
+
+    /// Spawn a background thread that
+    /// walks the current directory tree,
+    /// filters by `pattern`, and sends
+    /// the result back over an mpsc
+    /// channel. The run loop polls the
+    /// receiver and calls
+    /// `process_files_result` when the
+    /// result arrives.
+    pub(crate) fn spawn_files_walk(&mut self, pattern: String) {
+        let ignore = crate::files::IgnoreSet::new(&self.files_ignores);
+        let request = crate::files::spawn_walk(pattern.clone(), ignore);
+        self.files_state.in_flight = true;
+        self.files_state.request = Some(request);
+        self.set_status_message("Searching files…".to_string());
+    }
+
+    /// Process a files-mode walk result
+    /// that arrived from the background
+    /// thread. Caches the rows in
+    /// `self.files_state.rows` and
+    /// refreshes the list. Stale results
+    /// (the pattern changed between spawn
+    /// and delivery) are discarded.
+    pub(crate) fn process_files_result(
+        &mut self,
+        request: crate::files::FilesRequest,
+        rows: Vec<HistoryRow>,
+    ) {
+        self.files_state.in_flight = false;
+        self.files_state.request = None;
+        // Only accept if this result
+        // matches the current pattern
+        // (the user may have typed
+        // more characters while the
+        // walk was running).
+        let current =
+            crate::files::FilesState::current_pattern(&self.query, self.query_prefixes.files);
+        if current == request.pattern {
+            self.files_state.rows = rows;
+            self.refresh();
+        }
+    }
+}

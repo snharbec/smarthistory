@@ -128,3 +128,59 @@ pub(crate) fn pattern(app: &App) -> &str {
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     Ok(app.ag_state.rows.clone())
 }
+
+impl App {
+    /// Whether the query is an ag content-search request:
+    /// the query starts with the ag prefix (`,` by
+    /// default). The body is split into search terms
+    /// and file-pattern globs (tokens containing `*`).
+    pub(crate) fn is_ag_query(&self) -> bool {
+        matches(self)
+    }
+
+    /// Arm the ag-mode debounce. Mirrors the other
+    /// debounced-fetch modes' `*_touch` (see
+    /// `crate::debounce`).
+    pub(crate) fn ag_touch(&mut self) {
+        let active = self.is_ag_query();
+        crate::debounce::touch(&mut self.ag_state, active);
+    }
+
+    /// Check whether the ag-mode debounce has elapsed
+    /// and spawn a background search if so.
+    pub(crate) fn ag_maybe_autocall(&mut self) {
+        if !self.is_ag_query() {
+            return;
+        }
+        if !crate::debounce::debounce_elapsed(&mut self.ag_state, crate::ag::AG_DEBOUNCE) {
+            return;
+        }
+        let pattern = crate::ag::AgState::current_pattern(&self.query, self.query_prefixes.ag);
+        if self.ag_state.has_results_for(&pattern) {
+            return;
+        }
+        self.ag_state.last_pattern = Some(pattern.clone());
+        self.spawn_ag_search(pattern);
+    }
+
+    /// Spawn a background thread that runs `ag` and
+    /// parses the results.
+    pub(crate) fn spawn_ag_search(&mut self, pattern: String) {
+        let request = crate::ag::spawn_ag_search(pattern);
+        self.ag_state.in_flight = true;
+        self.ag_state.request = Some(request);
+        self.set_status_message("Searching with ag…".to_string());
+    }
+
+    /// Process an ag-mode search result from the
+    /// background thread.
+    pub(crate) fn process_ag_result(&mut self, request: crate::ag::AgRequest, rows: Vec<HistoryRow>) {
+        self.ag_state.in_flight = false;
+        self.ag_state.request = None;
+        let current = crate::ag::AgState::current_pattern(&self.query, self.query_prefixes.ag);
+        if current == request.pattern {
+            self.ag_state.rows = rows;
+            self.refresh();
+        }
+    }
+}

@@ -62,7 +62,7 @@ pub(crate) fn check(app: &App) -> CheckReport {
     //    `tags` / `TAGS` file. The
     //    `find_tags_file` helper does the
     //    walking.
-    let tags_path = crate::tui::find_tags_file();
+    let tags_path = find_tags_file();
     if tags_path.is_file() {
         // Tags file found. Verify readability
         // and parse sanity.
@@ -231,7 +231,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // unchanged — the user gets symbol navigation
     // via CodeGraph data with the `$` UX they
     // already know.
-    let tags_path = crate::tui::find_tags_file();
+    let tags_path = find_tags_file();
     if !tags_path.is_file() {
         return fetch_via_codegraph(app);
     }
@@ -559,4 +559,54 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         let half = crate::tui::SOURCE_CONTEXT_LINES / 2;
         row.preview_scroll = half.saturating_sub(2) as u16;
     }
+}
+
+impl App {
+    /// Whether the query is a tags-search request:
+    /// the query starts with the tags prefix (`$` by
+    /// default). The body is matched against the
+    /// symbol names AND the source-line text from the
+    /// `tags` file in the current directory.
+    pub(crate) fn is_tags_query(&self) -> bool {
+        matches(self)
+    }
+
+    /// The tags-search body, i.e. everything after the
+    /// leading `$` prefix. Empty string when not in
+    /// tags mode.
+    pub(crate) fn tags_pattern(&self) -> &str {
+        pattern(self)
+    }
+}
+
+/// Find a `tags` file by walking upward from the
+/// current directory. Returns the first `tags` file
+/// found (closest to the cwd), or a path pointing
+/// to `tags` in the current directory if none is
+/// found (the `read_to_string` call in `fetch_tags`
+/// will then fail with a file-not-found error and
+/// return an empty list — the historical behavior).
+///
+/// Walk: cwd → parent → parent → … until either a
+/// `tags` file is found or we reach the filesystem
+/// root (a directory whose parent is itself).
+fn find_tags_file() -> std::path::PathBuf {
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    loop {
+        let lower = dir.join("tags");
+        if lower.is_file() {
+            return lower;
+        }
+        let upper = dir.join("TAGS");
+        if upper.is_file() {
+            return upper;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => {
+                dir = parent.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    std::path::PathBuf::from("tags")
 }

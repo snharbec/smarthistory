@@ -1623,3 +1623,51 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         }
     }
 }
+
+impl App {
+/// Whether the query is a session-panes request:
+    /// the query starts with the panes prefix (`*` by
+    /// default). The body (everything after `*`) is a
+    /// substring filter matched against each pane's
+    /// current command and cwd.
+    pub(crate) fn is_panes_query(&self) -> bool {
+        crate::tui::mode::panes::matches(self)
+    }
+
+    /// Toggle the `*`-mode panes filter.
+    /// If `target` is already active,
+    /// resets to `All` (toggle off).
+    /// Otherwise sets the filter to
+    /// `target`. After changing the
+    /// filter, refreshes the list so
+    /// the rows update immediately.
+    ///
+    /// No-op (with a status message)
+    /// when not in panes (`*`) mode —
+    /// the filter only applies to the
+    /// panes view, so firing it
+    /// elsewhere would surprise the
+    /// user.
+    pub(crate) fn toggle_panes_filter(&mut self, target: PanesFilter) {
+        if !self.is_panes_query() {
+            self.set_status_message(
+                "PanES filter is only available in panes mode (type `*`)".to_string(),
+            );
+            return;
+        }
+        if self.panes_filter == target {
+            // Same key pressed again — reset.
+            self.panes_filter = PanesFilter::All;
+            self.set_status_message("panes filter: all".to_string());
+        } else {
+            self.panes_filter = target;
+            self.set_status_message(format!("panes filter: {}", target.label().to_lowercase(),));
+        }
+        // Reset the selection to the
+        // first row so the cursor
+        // doesn't land on a row
+        // that's now filtered out.
+        self.list_state.select(Some(0));
+        self.refresh();
+    }
+}

@@ -629,3 +629,88 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         row.preview_scroll = half.saturating_sub(2) as u16;
     }
 }
+
+impl App {
+    /// Whether the query is a segment-search request: the
+    /// query starts with the segments prefix (`:` by default).
+    /// Finer-grained than `is_notes_query` — searches header-
+    /// bounded sections (see this module's doc comment) rather
+    /// than whole files.
+    pub(crate) fn is_segments_query(&self) -> bool {
+        matches(self)
+    }
+
+    /// Arm the segments-mode debounce. Mirrors `ag_touch`.
+    pub(crate) fn segments_touch(&mut self) {
+        let active = self.is_segments_query();
+        crate::debounce::touch(&mut self.segments_state, active);
+    }
+
+    /// Check whether the segments-mode debounce has elapsed and
+    /// spawn a background search if so. Mirrors `ag_maybe_autocall`.
+    pub(crate) fn segments_maybe_autocall(&mut self) {
+        if !self.is_segments_query() {
+            return;
+        }
+        if !crate::debounce::debounce_elapsed(&mut self.segments_state, SEGMENTS_DEBOUNCE) {
+            return;
+        }
+        let Some(ref db_path) = self.notes_database else {
+            self.set_status_message("Segments mode: notes.database is not configured".to_string());
+            self.segments_state.debounce_started = None;
+            return;
+        };
+        let pattern = SegmentsState::current_pattern(&self.query, self.query_prefixes.segments);
+        if self.segments_state.has_results_for(&pattern) {
+            return;
+        }
+        self.segments_state.last_pattern = Some(pattern.clone());
+        let db_path = db_path.clone();
+        let notes_dir = self.notes_dir.clone();
+        self.spawn_segments_search(db_path, notes_dir, pattern);
+    }
+
+    /// Spawn a background thread that runs the segments query.
+    /// Mirrors `spawn_ag_search`.
+    pub(crate) fn spawn_segments_search(
+        &mut self,
+        db_path: std::path::PathBuf,
+        notes_dir: Option<std::path::PathBuf>,
+        pattern: String,
+    ) {
+        let request = spawn_segments_search(db_path, notes_dir, pattern);
+        self.segments_state.in_flight = true;
+        self.segments_state.request = Some(request);
+    }
+
+    /// Process an segments-mode search result from the
+    /// background thread. Unlike `process_ag_result`, the
+    /// channel carries a `Result` — an invalid query (unbalanced
+    /// parens, etc.) or a search failure surfaces as a status
+    /// message, same UX the old synchronous `fetch()` had.
+    pub(crate) fn process_segments_result(
+        &mut self,
+        request: SegmentsRequest,
+        result: Result<Vec<HistoryRow>, String>,
+    ) {
+        self.segments_state.in_flight = false;
+        self.segments_state.request = None;
+        let current = SegmentsState::current_pattern(&self.query, self.query_prefixes.segments);
+        if current != request.pattern {
+            // Stale result — the user has typed something else
+            // since this search was fired. Discard silently; a
+            // fresh search for the current pattern is already
+            // debounced/in flight.
+            return;
+        }
+        match result {
+            Ok(rows) => {
+                self.segments_state.rows = rows;
+                self.refresh();
+            }
+            Err(e) => {
+                self.set_status_message(format!("Segments mode: {}", e));
+            }
+        }
+    }
+}

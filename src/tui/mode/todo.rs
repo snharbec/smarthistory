@@ -264,7 +264,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // todos tagged `urgent` that also
     // contain `older`.
     let raw_pattern = pattern(app).trim();
-    let (pattern, filter) = crate::tui::parse_notes_query(raw_pattern);
+    let (pattern, filter) = crate::tui::mode::notes::parse_notes_query(raw_pattern);
     // `#tag!` / `[[link]]!` negation tokens are stripped BEFORE
     // `parse_query` sees the pattern — it has no negation
     // primitive and would either error on the trailing `!` or fold
@@ -543,4 +543,370 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         && row.output != highlighted {
             row.output = highlighted;
         }
+}
+
+impl App {
+    /// True if the current query is a todo search
+    /// request (prefixed with the configured todo
+    /// prefix, default `!`). The todo mode scans
+    /// every file in the configured notes
+    /// directory for lines that look like todo
+    /// items (markdown task-list checkboxes:
+    /// `- [ ] text` / `- [x] text`) and lists each
+    /// match as its own row in the TUI.
+    pub(crate) fn is_todo_query(&self) -> bool {
+        crate::tui::mode::todo::matches(self)
+    }
+
+
+
+    /// Mark the currently-selected todo
+    /// entry as done by toggling the
+    /// checkbox marker on its line in
+    /// the source file from `[ ]` to
+    /// `[x]`, then refresh the todo
+    /// list. The action is intended to
+    /// be invoked only from the todo
+    /// search mode (the dispatcher
+    /// already gates on
+    /// `is_todo_query`); the helper
+    /// itself also re-checks the mode
+    /// so a stray test or future caller
+    /// can't trigger a file write from
+    /// outside todo mode.
+    ///
+    /// The selected row's `id` is
+    /// synthetic: `id = -(line_number)`
+    /// where `line_number` is the
+    /// 1-based line in the note file
+    /// that contains the todo. The
+    /// row's `comment` field is the
+    /// filename (relative to
+    /// `notes.dir`).
+    ///
+    /// On success the todo list is
+    /// re-fetched so the toggled row
+    /// disappears (the underlying
+    /// query filters `open: true`).
+    /// On any error (no selection,
+    /// missing file, the line no
+    /// longer matches a todo
+    /// checkbox, write failure) a
+    /// status message is surfaced and
+    /// the list is left untouched.
+    pub(crate) fn mark_todo_done(&mut self) {
+        // Re-gate here so a stray
+        // caller can't write to a
+        // file from outside todo mode.
+        // The dispatcher already gates
+        // on this, but the helper
+        // defends against future
+        // refactors that might call it
+        // from a different code path.
+        if !self.is_todo_query() {
+            self.set_status_message(
+                "Mark-todo-done is only available in todo search (type `!`)".to_string(),
+            );
+            return;
+        }
+        let targets = self.smart_action_targets();
+        let Some((first, rest)) = targets.split_first() else {
+            self.set_status_message("No todo selected".to_string());
+            return;
+        };
+        if rest.is_empty() {
+            // Single target: preserve `mark_todo_done_for_row`'s
+            // own precise status message (e.g. "Marked done:
+            // file:line", or a specific failure reason) rather
+            // than overwriting it with a generic aggregate count.
+            self.mark_todo_done_for_row(first);
+            return;
+        }
+        // Multiple marked todos: run each (captured line numbers
+        // stay valid across the loop's per-row `refresh()` calls
+        // — toggling a checkbox doesn't add/remove lines, so
+        // other rows' line numbers don't shift), then report an
+        // aggregate count. Marks are left as-is afterward (the
+        // rows still exist, just closed — unlike bulk delete,
+        // there's no reason to force the user to re-mark them
+        // for a follow-up action).
+        let mut done = 0usize;
+        let total = targets.len();
+        for row in &targets {
+            if self.mark_todo_done_for_row(row) {
+                done += 1;
+            }
+        }
+        self.set_status_message(format!("Marked {} of {} todos done", done, total));
+    }
+
+    /// Returns `true` on full success (file written AND, when
+    /// notes.database is configured, the DB re-sync succeeded)
+    /// so `mark_todo_done`'s multi-target loop can count
+    /// successes for its aggregate status message; `false` on
+    /// every early-exit / failure branch. Each branch still sets
+    /// its own precise `status_message` — the bool is purely for
+    /// the caller's tally, not a replacement for that messaging.
+    ///
+    /// Core implementation of
+    /// `mark_todo_done`, factored out
+    /// so tests can drive it with a
+    /// hand-crafted `HistoryRow`
+    /// (the indentation test in
+    /// particular needs a row whose
+    /// line content the library
+    /// wouldn't normally index,
+    /// since the library's
+    /// `TODO_REGEX` is `^`-anchored
+    /// and skips indented
+    /// checkboxes).
+    pub(crate) fn mark_todo_done_for_row(&mut self, row: &HistoryRow) -> bool {
+        // `id = -(line_number)` is the
+        // synthetic-id contract from
+        // `fetch_todos`. A row that
+        // somehow has a non-negative id
+        // (a real history row mixed in
+        // — shouldn't happen in todo
+        // mode, but defensively) is
+        // rejected.
+        let line_number: usize = match row.id {
+            i if i < 0 => (i.unsigned_abs() as usize).max(1),
+            _ => {
+                self.set_status_message("Selected row is not a todo entry".to_string());
+                return false;
+            }
+        };
+        if row.comment.is_empty() {
+            self.set_status_message("Selected todo has no source filename".to_string());
+            return false;
+        }
+        let Some(ref notes_dir) = self.notes_dir else {
+            self.set_status_message("Cannot mark done: notes.dir is not configured".to_string());
+            return false;
+        };
+        let path = notes_dir.join(&row.comment);
+        // Read the file. We use the
+        // same error mapping as the
+        // note-preview reader for
+        // consistency with the rest of
+        // the notes subsystem.
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status_message(format!("Cannot read {}: {}", row.comment, e));
+                return false;
+            }
+        };
+        // Locate the targeted line.
+        // The note_search indexer uses
+        // 1-based line numbers, so we
+        // index into a `lines()` iterator
+        // by skipping the first
+        // `line_number - 1` lines.
+        let mut new_lines: Vec<String> = Vec::new();
+        let mut toggled = false;
+        for (i, line) in contents.lines().enumerate() {
+            let n = i + 1; // 1-based
+            if n == line_number {
+                // The line at this
+                // position should still
+                // look like an open todo
+                // checkbox. We tolerate
+                // leading whitespace
+                // (indented list items) and
+                // both `-` and `*` bullets
+                // (even though the
+                // library's parser only
+                // recognises `-`, the
+                // user may have written
+                // `* [ ]` by hand and
+                // toggling it should
+                // still work).
+                let trimmed_start = line
+                    .trim_start()
+                    .trim_start_matches(['-', '*'])
+                    .trim_start();
+                if !trimmed_start.starts_with("[ ]") {
+                    self.set_status_message(format!(
+                        "Line {} of {} is no longer an open todo: {:?}",
+                        line_number, row.comment, line
+                    ));
+                    return false;
+                }
+                // Replace the first
+                // occurrence of `[ ]` on
+                // this line with `[x]`.
+                // We anchor on the
+                // prefix-only match so we
+                // don't accidentally
+                // toggle a `[ ]` inside
+                // the todo text (rare,
+                // but possible — e.g.
+                // "see [ ] in checklist").
+                // The first `[ ]` on a
+                // markdown-checkbox line
+                // is always the checkbox
+                // marker.
+                let prefix_len = line.len() - trimmed_start.len();
+                // Walk past the bullet
+                // character(s) so we
+                // match the checkbox
+                // bracket that follows
+                // the bullet, not any
+                // bracketed text inside
+                // the todo content.
+                let rest = &line[prefix_len..];
+                let bullet_skip: usize = rest
+                    .chars()
+                    .take_while(|c| matches!(c, '-' | '*'))
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let after_bullet = prefix_len + bullet_skip;
+                let ws_skip: usize = line[after_bullet..]
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let bracket_at = after_bullet + ws_skip;
+                // Defensive: bail out if
+                // the bracket isn't where
+                // we expect it. The
+                // prefix check above
+                // already guaranteed
+                // `[ ]` is at the
+                // trimmed-start, so this
+                // is purely belt-and-
+                // braces.
+                if !line[bracket_at..].starts_with("[ ]") {
+                    self.set_status_message(format!(
+                        "Cannot locate checkbox bracket on line {} of {}",
+                        line_number, row.comment
+                    ));
+                    return false;
+                }
+                let mut new_line = String::with_capacity(line.len());
+                new_line.push_str(&line[..bracket_at]);
+                new_line.push_str("[x]");
+                new_line.push_str(&line[bracket_at + 3..]);
+                new_lines.push(new_line);
+                toggled = true;
+            } else {
+                new_lines.push(line.to_string());
+            }
+        }
+        if !toggled {
+            // Shouldn't happen: we
+            // iterated over every line
+            // and only mark `toggled`
+            // when `n == line_number`. If
+            // we exit the loop without
+            // toggling, the file has
+            // fewer lines than the
+            // indexer saw.
+            self.set_status_message(format!(
+                "Line {} not found in {} (file shorter than expected)",
+                line_number, row.comment
+            ));
+            return false;
+        }
+        // Preserve the file's trailing
+        // newline convention. `lines()`
+        // drops the trailing `\n` if
+        // any, so we re-attach it when
+        // the original ended with one.
+        let mut out = new_lines.join("\n");
+        if contents.ends_with('\n') {
+            out.push('\n');
+        }
+        if let Err(e) = std::fs::write(&path, out) {
+            self.set_status_message(format!("Cannot write {}: {}", row.comment, e));
+            return false;
+        }
+        // Refresh the in-memory
+        // `todo_entries` database
+        // after the file toggle. We
+        // delegate to the
+        // `note_search` library's
+        // `update_files_in_db`
+        // function: it re-parses the
+        // modified file, upserts the
+        // `markdown_data` row, and
+        // replaces the
+        // `todo_entries` rows for
+        // that file. After the
+        // update, the toggled todo
+        // has `closed = 1` in the
+        // database, and the next
+        // `refresh()` (which queries
+        // with `open: true`) will
+        // exclude it from the list.
+        //
+        // We open a fresh `Connection`
+        // per call rather than
+        // keeping one open on `App`,
+        // because the existing
+        // `DatabaseService::search_todos`
+        // already opens its own
+        // connection per query and
+        // the action is invoked
+        // rarely (the user has to
+        // press `Ctrl+X` to trigger
+        // it). Opening a new
+        // connection is cheaper than
+        // the file write we just
+        // did.
+        //
+        // The DB update is best-effort:
+        // if the library can't open
+        // the DB or write to it, the
+        // status message reflects
+        // the failure but the file
+        // is already correct on
+        // disk — the user can always
+        // run their external indexer
+        // to recover. We don't roll
+        // back the file write
+        // because the user's intent
+        // was clearly "mark this
+        // done on disk"; reverting
+        // would be worse than a
+        // temporarily-stale DB.
+        let notes_dir_for_db = self.notes_dir.clone();
+        let notes_db_for_db = self.notes_database.clone();
+        let filename_for_db = row.comment.clone();
+        if let (Some(dir), Some(db)) = (notes_dir_for_db.as_ref(), notes_db_for_db.as_ref()) {
+            use rusqlite::Connection;
+            match Connection::open(db) {
+                Ok(conn) => {
+                    if let Err(e) = note_search::update_files_in_db(&[filename_for_db], dir, &conn)
+                    {
+                        self.set_status_message(format!(
+                            "Marked done on disk, but DB refresh failed: {}",
+                            e
+                        ));
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    self.set_status_message(format!(
+                        "Marked done on disk, but DB open failed: {}",
+                        e
+                    ));
+                    return false;
+                }
+            }
+        }
+        self.set_status_message(format!("Marked done: {}:{}", row.comment, line_number));
+        // Re-fetch so the toggled row
+        // disappears from the list.
+        // The library's
+        // `todo_entries` row for
+        // this todo now has
+        // `closed = 1`, so the
+        // `open: true` filter in the
+        // underlying SQL excludes
+        // it.
+        self.refresh();
+        true
+    }
 }

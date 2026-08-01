@@ -13,8 +13,13 @@
 //! it.
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
-use crate::tui::App;
+use crate::tui::{
+    Action, App, CodeGraphRelationsPicker, CodegraphRelationEntry, CodegraphRelationSection,
+    PickMode,
+};
+use crate::tui::bindings::action_for_key;
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Whether the query is a CodeGraph symbol-search
 /// request: the query starts with the codegraph
 /// prefix (`&` by default). The body is matched
@@ -379,4 +384,208 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         let half = crate::tui::SOURCE_CONTEXT_LINES / 2;
         row.preview_scroll = half.saturating_sub(2) as u16;
     }
+}
+
+impl App {
+    /// Whether the query is a CodeGraph symbol-search
+    /// request: the query starts with the codegraph
+    /// prefix (`&` by default). The body is matched
+    /// against symbol names in the local
+    /// `.codegraph/codegraph.db` index via FTS5.
+    pub(crate) fn is_codegraph_query(&self) -> bool {
+        crate::tui::mode::codegraph::matches(self)
+    }
+
+    /// Whether the CodeGraph relations picker overlay is currently open.
+    pub(crate) fn is_codegraph_relations_picker_open(&self) -> bool {
+        self.codegraph_relations_picker.is_some()
+    }
+
+    /// Open the CodeGraph callers/callees picker for the currently
+    /// selected `&` / `$` (codegraph-backed) row. The picker lists
+    /// the symbol's callers (who calls it) followed by its callees
+    /// (what it calls) as one navigable list with section headers;
+    /// Enter on a relation opens its source file in `$EDITOR` at
+    /// `start_line` (mirroring the main list's selection), Esc
+    /// closes the overlay.
+    ///
+    /// Only rows carrying a `codegraph_node_id` can open the
+    /// picker — i.e. `&`-mode rows and `$`-mode rows produced by
+    /// the CodeGraph fallback when no `TAGS` file exists. A
+    /// regular tags row (from a real `tags` file) or any non-
+    /// tags/codegraph row surfaces a status message instead of
+    /// opening the picker, so the key is a clean no-op (rather
+    /// than a confusing empty overlay) outside the supported modes.
+    pub(crate) fn open_codegraph_relations(&mut self) {
+        // Need a selected row. Copy the fields we need out of the row
+        // so the immutable borrow of `self` (via `selected_row`) is
+        // released before we assign `self.codegraph_client` below —
+        // holding the row borrow across the lazy client-open would
+        // clash with the `&mut self` needed to populate it.
+        let (node_id, symbol) = match self.selected_row() {
+            None => {
+                self.set_status_message("No row selected".to_string());
+                return;
+            }
+            Some(row) => {
+                // Only meaningful for codegraph /
+                // tags(codegraph-fallback) rows.
+                if row.mode != "codegraph" && row.mode != "tags" {
+                    self.set_status_message(
+                        "Callers/callees are available only in & / $ codegraph mode"
+                            .to_string(),
+                    );
+                    return;
+                }
+                if row.codegraph_node_id.is_empty() {
+                    // A `$` row from a real `tags` file has no
+                    // CodeGraph node id — there's no `edges` row
+                    // to query.
+                    self.set_status_message(
+                        "No CodeGraph node for this row (tags file has no codegraph id)"
+                            .to_string(),
+                    );
+                    return;
+                }
+                let sym = if row.command.is_empty() {
+                    "(symbol)".to_string()
+                } else {
+                    row.command.clone()
+                };
+                (row.codegraph_node_id.clone(), sym)
+            }
+        };
+        // Ensure the read-only client is open (the `&` mode opens
+        // it lazily; the `$` fallback does too).
+        if self.codegraph_client.is_none() {
+            self.codegraph_client = crate::codegraph::CodeGraphClient::open();
+        }
+        let Some(client) = self.codegraph_client.as_ref() else {
+            self.set_status_message("No .codegraph/index found".to_string());
+            return;
+        };
+        let repo_root = client.repo_root().to_path_buf();
+        let callers = client.callers(&node_id, 50);
+        let callees = client.callees(&node_id, 50);
+        if callers.is_empty() && callees.is_empty() {
+            self.set_status_message("No callers or callees recorded for this symbol".to_string());
+            return;
+        }
+        let entries: Vec<CodegraphRelationEntry> = callers
+            .iter()
+            .map(|n| CodegraphRelationEntry {
+                section: CodegraphRelationSection::Caller,
+                node: n.clone(),
+            })
+            .chain(callees.iter().map(|n| CodegraphRelationEntry {
+                section: CodegraphRelationSection::Callee,
+                node: n.clone(),
+            }))
+            .collect();
+        self.codegraph_relations_picker = Some(CodeGraphRelationsPicker {
+            entries,
+            selected: 0,
+            symbol,
+            // stash repo_root on the picker? it's used by Enter to
+            // resolve the relation's relative file_path to an
+            // absolute editor-openable path.
+            repo_root,
+        });
+    }
+
+    pub(crate) fn close_codegraph_relations_picker(&mut self) {
+        self.codegraph_relations_picker = None;
+    }
+}
+
+/// Key handler for the CodeGraph relations picker. Up/Down (and
+/// `Ctrl-N`/`Ctrl-P`) move the selection past section headers;
+/// `PageUp`/`PageDown`/`Home`/`End` jump; Enter opens the
+/// highlighted relation's source file in `$EDITOR +LINE path`
+/// and exits the TUI (mirroring the main list's tags/codegraph
+/// selection); the user's `Cancel` binding (Esc / Ctrl-C)
+/// dismisses the picker without opening anything.
+pub(crate) fn handle_codegraph_relations_picker_key(app: &mut App, key: KeyEvent) -> bool {
+    // Dismiss on the user's `Cancel` binding.
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+        app.close_codegraph_relations_picker();
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_codegraph_relations_picker();
+        return true;
+    }
+
+    // Movement keys only need the index; do them with a short
+    // mutable borrow of the picker.
+    let n = match app.codegraph_relations_picker.as_ref() {
+        Some(p) => p.entries.len(),
+        None => return false,
+    };
+    let move_delta = match key.code {
+        // Plain arrow keys have no modifiers, so the guard must
+        // NOT apply to them — splitting the arm keeps `Up`/`Down`
+        // (the primary navigation) working while `Ctrl-P`/`Ctrl-N`
+        // stay a separate guarded arm. (Combining them as
+        // `KeyCode::Up | KeyCode::Char('p') if CONTROL` would make
+        // the guard apply to the whole or-pattern, swallowing plain
+        // `Up`.)
+        KeyCode::Up => Some(-1isize),
+        KeyCode::Down => Some(1isize),
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(-1isize),
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(1isize),
+        KeyCode::PageUp => Some(-5isize),
+        KeyCode::PageDown => Some(5isize),
+        KeyCode::Home => {
+            if let Some(p) = app.codegraph_relations_picker.as_mut() {
+                p.selected = 0;
+            }
+            return false;
+        }
+        KeyCode::End => {
+            if let Some(p) = app.codegraph_relations_picker.as_mut() {
+                p.selected = n.saturating_sub(1);
+            }
+            return false;
+        }
+        _ => None,
+    };
+    if let Some(delta) = move_delta {
+        if let Some(p) = app.codegraph_relations_picker.as_mut() {
+            let next = (p.selected as isize + delta).clamp(0, n.saturating_sub(1) as isize) as usize;
+            p.selected = next;
+        }
+        return false;
+    }
+
+    // Enter: open the highlighted relation's source file. Copy
+    // the fields out of the picker (so the borrow is released
+    // before we stage the selection), close the picker, and stage
+    // `$EDITOR +LINE path` exactly like selecting a codegraph row
+    // in the main list. Returning `true` exits the TUI so the
+    // parent shell runs the editor command.
+    if key.code == KeyCode::Enter {
+        let picked = app
+            .codegraph_relations_picker
+            .as_ref()
+            .and_then(|p| p.selected().map(|e| (e.node.clone(), p.repo_root.clone())));
+        if let Some((node, repo_root)) = picked {
+            app.close_codegraph_relations_picker();
+            let editor = std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "vi".to_string());
+            let abs = node.abs_path(&repo_root);
+            let quoted = crate::util::shell_quote(&abs.to_string_lossy());
+            app.selection = Some(format!("{} +{} {}", editor, node.start_line, quoted));
+            app.pick_mode = Some(PickMode::Run);
+            return true;
+        }
+        // Nothing selected (empty list — shouldn't happen since
+        // the opener guards against it); just close.
+        app.close_codegraph_relations_picker();
+        return false;
+    }
+    false
 }

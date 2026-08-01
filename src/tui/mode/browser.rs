@@ -111,3 +111,73 @@ pub(crate) fn check(_app: &App) -> CheckReport {
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     Ok(app.browser_state.rows.clone())
 }
+
+impl App {
+    /// Whether the query is a browser bookmarks/history request:
+    /// the query starts with the browser prefix (`^` by default).
+    pub(crate) fn is_browser_query(&self) -> bool {
+        matches(self)
+    }
+
+    /// Arm or clear the browser-mode search debounce. Called from
+    /// every keystroke path (co-located with `files_touch` /
+    /// `paperless_touch`). Re-arms the timer when the user is still
+    /// in browser mode; resets all pending state when they leave.
+    pub(crate) fn browser_touch(&mut self) {
+        let active = self.is_browser_query();
+        crate::debounce::touch(&mut self.browser_state, active);
+    }
+
+    /// Check whether the browser-mode debounce has elapsed and, if
+    /// so, spawn a background read. Called from the run loop's idle
+    /// tick (same pattern as `paperless_maybe_autocall`). Returns
+    /// immediately when not in browser mode, when a read is already
+    /// in flight, or when the debounce window hasn't elapsed.
+    pub(crate) fn browser_maybe_autocall(&mut self) {
+        if !self.is_browser_query() {
+            return;
+        }
+        if !crate::debounce::debounce_elapsed(&mut self.browser_state, crate::browser::BROWSER_DEBOUNCE)
+        {
+            return;
+        }
+        let pattern = crate::browser::BrowserState::current_pattern(
+            &self.query,
+            self.query_prefixes.browser,
+        );
+        if self.browser_state.has_results_for(&pattern) {
+            return;
+        }
+        self.browser_state.last_pattern = Some(pattern.clone());
+        self.browser_state.debounce_started = None;
+        self.browser_state.in_flight = true;
+        // Resolved fresh at point of use, not stored on `App` —
+        // see `browser_state`'s field doc comment.
+        let sources = crate::browser::resolve_configured();
+        self.browser_state.request = Some(crate::browser::spawn_fetch(sources, pattern));
+        self.set_status_message("Searching browser bookmarks/history…".to_string());
+    }
+
+    /// Process a browser-mode read result that arrived from the
+    /// background thread. Caches the rows in
+    /// `self.browser_state.rows` and refreshes the list. Stale
+    /// results (the pattern changed between spawn and delivery) are
+    /// discarded. Mirrors `process_files_result`.
+    pub(crate) fn process_browser_result(
+        &mut self,
+        request: crate::browser::BrowserRequest,
+        rows: Vec<HistoryRow>,
+    ) {
+        self.browser_state.in_flight = false;
+        self.browser_state.request = None;
+        let current = crate::browser::BrowserState::current_pattern(
+            &self.query,
+            self.query_prefixes.browser,
+        );
+        if current == request.pattern {
+            self.browser_state.rows = rows;
+            self.status_message = None;
+            self.refresh();
+        }
+    }
+}

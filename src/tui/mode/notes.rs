@@ -7,7 +7,7 @@
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
-use crate::tui::NotesDateFilter;
+use crate::tui::{CompletionKind, NotesDateFilter, char_to_byte_index};
 use anyhow::Result;
 
 /// True if the current query is a note search request
@@ -215,7 +215,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // aliases); the filter is applied
     // post-query in this method against the
     // `updated` timestamp on each result.
-    let (pattern, filter) = crate::tui::parse_notes_query(raw_pattern);
+    let (pattern, filter) = parse_notes_query(raw_pattern);
     // Record the resolved filter on `self` so
     // the mode-strip chip renderer (and any
     // future helper) can see what's active.
@@ -552,4 +552,481 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         && row.output != highlighted {
             row.output = highlighted;
         }
+}
+
+/// Parse a notes-mode query body and extract the
+/// date-filter alias.
+///
+/// Returns `(clean_pattern, filter)`:
+/// - `clean_pattern` is the query body with any
+///   `@today` / `@week` / `@month` / `@year`
+///   aliases removed (and surrounding whitespace
+///   collapsed). The cleaned pattern is what we
+///   pass to `note_search.search_notes_by_query`.
+/// - `filter` is the resolved filter; the latest
+///   alias in the query wins (i.e. `@today @week`
+///   ends up as `Today` because `@week` is
+///   encountered second; multiple aliases is an
+///   edge case — the user typically uses just
+///   one).
+///
+/// The aliases are recognised only as
+/// whole-word tokens (whitespace-separated).
+/// This avoids false positives like
+/// `@todayfile.md` (no alias inside) or
+/// `email@today` (no alias inside). The
+/// match is case-insensitive (`@Today`,
+/// `@TODAY`, `@today` all work).
+pub(crate) fn parse_notes_query(pattern: &str) -> (String, NotesDateFilter) {
+    let mut filter = NotesDateFilter::All;
+    let mut cleaned_tokens: Vec<String> = Vec::new();
+    for token in pattern.split_whitespace() {
+        // Date-alias path. The user types
+        // `@today` (or `today`); both
+        // should be recognised as the
+        // date alias. We strip a leading
+        // `@` so the alias is matched on
+        // the bare keyword. Date aliases
+        // are extracted as a filter
+        // rather than passed through to
+        // the search query (the
+        // `note_search` library doesn't
+        // know about them — we apply the
+        // cutoff post-query in
+        // `fetch_notes`).
+        let candidate = token.strip_prefix('@').unwrap_or(token);
+        match candidate.to_ascii_lowercase().as_str() {
+            "today" => {
+                filter = NotesDateFilter::Today;
+                continue;
+            }
+            "week" => {
+                filter = NotesDateFilter::Week;
+                continue;
+            }
+            "month" => {
+                filter = NotesDateFilter::Month;
+                continue;
+            }
+            "year" => {
+                filter = NotesDateFilter::Year;
+                continue;
+            }
+            _ => {}
+        }
+        // `#TAG` — search for notes
+        // tagged `TAG`. The
+        // `note_search` query parser
+        // already handles `#tagname`
+        // syntax, so we pass the token
+        // through unchanged. This lets
+        // the user combine tag and text
+        // search: `#feature rust` finds
+        // notes tagged `feature` that
+        // also mention `rust`.
+        if let Some(tag) = token.strip_prefix('#') {
+            if !tag.is_empty() {
+                cleaned_tokens.push(format!("#{}", tag));
+            }
+            continue;
+        }
+        // `@LINK` — search for notes
+        // that have a link to `LINK`.
+        // The `note_search` query parser
+        // uses `[[linkname]]` (wiki-link
+        // syntax) for link search, so
+        // we convert the user's `@LINK`
+        // shorthand to `[[LINK]]`. The
+        // link name preserves the
+        // user's original casing
+        // (link targets are
+        // case-sensitive in Obsidian).
+        if let Some(link) = token.strip_prefix('@') {
+            if !link.is_empty() {
+                cleaned_tokens.push(format!("[[{}]]", link));
+            }
+            continue;
+        }
+        // Plain text: push the token
+        // verbatim. We no longer strip
+        // `@` here because the date-
+        // alias path above already
+        // consumed the four known
+        // aliases; any remaining `@foo`
+        // is the user's intent for
+        // `@foo` (e.g. searching for
+        // the literal word `@foo` in
+        // note text).
+        cleaned_tokens.push(token.to_string());
+    }
+    (cleaned_tokens.join(" "), filter)
+}
+
+impl App {
+    /// True if the current query is a note search request
+    /// (prefixed with the configured notes prefix, default `@`).
+    pub(crate) fn is_notes_query(&self) -> bool {
+        crate::tui::mode::notes::matches(self)
+    }
+
+    /// The note search body, i.e. everything after the
+    /// leading notes prefix.
+    pub(crate) fn notes_pattern(&self) -> &str {
+        crate::tui::mode::notes::pattern(self)
+    }
+
+    /// Tab-completion for notes (`@`) and todos (`!`)
+    /// modes. The completion targets are tags (the
+    /// `#TAG` token), wiki-link targets (the `@LINK`
+    /// token), and `[attr:value]` / `[attr]`
+    /// attribute keys/values. All completion lists
+    /// come from the `note_search` database via
+    /// `note_search::commands::metadata::get_unique_values`
+    /// / `get_all_attributes`.
+    ///
+    /// Behaviour:
+    /// - `#feat<TAB>` → `#feature ` (unique tag
+    ///   match, trailing space)
+    /// - `#f<TAB>` → `#feature` (LCP when multiple
+    ///   tags share the prefix)
+    /// - `@Neo<TAB>` → `@NeovimNote ` (unique link
+    ///   match)
+    /// - `@xyz<TAB>` → no-op + status message (no
+    ///   match)
+    /// - `[assig<TAB>` → `[assignee:` (unique
+    ///   attribute-key match, trailing `:` so the
+    ///   cursor is ready for the value)
+    /// - `[assignee:sa<TAB>` → `[assignee:sarah `
+    ///   (unique attribute-value match for the
+    ///   `assignee` key, trailing space; the closing
+    ///   `]` is left for the user to type)
+    /// - Outside notes/todos mode, or when the word
+    ///   before the cursor doesn't start with `#`,
+    ///   `@`, or `[`, the function is a no-op so the
+    ///   `Tab` key doesn't interfere with any other
+    ///   mode.
+    pub(crate) fn notes_tab_complete_at_cursor(&mut self) {
+        // Active in notes (`@`), todos (`!`), segments (`:`), and
+        // similar (`"`) mode — all four share the same
+        // `notes.database` tag/link namespace, so the completion
+        // source is identical. The four prefixes are each a
+        // single char (the `query_prefixes.notes` / `.todo` /
+        // `.segments` / `.similar` fields).
+        let prefix_len: usize = 1;
+        if self.query_cursor < prefix_len {
+            return;
+        }
+        // Check the query's leading char.
+        // The first char after the
+        // prefix must be `#` (tag) or
+        // `@` (link) for the completion
+        // to be meaningful; otherwise
+        // the user is just typing plain
+        // text and Tab should not
+        // interfere.
+        let first = self
+            .query
+            .chars()
+            .next()
+            .expect("query_cursor >= 1 implies non-empty");
+        if first != self.query_prefixes.notes
+            && first != self.query_prefixes.todo
+            && first != self.query_prefixes.segments
+            && first != self.query_prefixes.similar
+        {
+            return;
+        }
+        // `[attr:value]` / `[attr]` completion: the cursor
+        // may be sitting inside an unmatched `[` anywhere in
+        // the query, targeting either the key (no `:` yet)
+        // or the value (after a `:`) half of the token. This
+        // is handled entirely separately from the `#`/`@`
+        // word-boundary walk below, which can't span the `:`.
+        // Checked (and, on a hit, returns) before that walk
+        // so `[[link]]` typing — rejected inside the bracket
+        // scan itself — still falls through unchanged.
+        if let Some(ctx) = self.attr_completion_context_at_cursor(prefix_len) {
+            self.attr_tab_complete(ctx);
+            return;
+        }
+        // Walk left from the cursor
+        // (character indices), stopping
+        // at the first character that
+        // is NOT alphanumeric or
+        // underscore. Same walk as
+        // JIRA field completion, but
+        // applied to the notes/todos
+        // body (after the single-char
+        // prefix).
+        let mut start_char = self.query_cursor;
+        while start_char > prefix_len {
+            let prev = start_char - 1;
+            let ch = self.query[char_to_byte_index(&self.query, prev)
+                ..char_to_byte_index(&self.query, start_char)]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                start_char = prev;
+            } else {
+                break;
+            }
+        }
+        // After the walk, `start_char`
+        // points to the first
+        // alphanumeric character of
+        // the word. If the character
+        // immediately before is `#`
+        // (tag prefix) or `@` (link
+        // prefix), include it in the
+        // word by decrementing
+        // `start_char`. This handles
+        // `#feat` and `@Neo` where the
+        // walk would otherwise stop
+        // before the prefix char.
+        if start_char > prefix_len {
+            let prev_char_byte = char_to_byte_index(&self.query, start_char - 1);
+            let curr_char_byte = char_to_byte_index(&self.query, start_char);
+            let prev_ch = self.query[prev_char_byte..curr_char_byte]
+                .chars()
+                .next()
+                .expect("non-empty slice between char indices");
+            if prev_ch == '#' || prev_ch == '@' {
+                start_char -= 1;
+            }
+        }
+        let start_byte = char_to_byte_index(&self.query, start_char);
+        let cursor_byte = char_to_byte_index(&self.query, self.query_cursor);
+        let word = &self.query[start_byte..cursor_byte];
+        if word.is_empty() {
+            self.set_status_message(
+                "notes-tab-complete: no tag or link name to expand".to_string(),
+            );
+            return;
+        }
+        // Determine whether the word
+        // is a tag (starts with `#`)
+        // or a link (starts with `@`).
+        // The prefix char of the word
+        // is the char at
+        // `start_char` in the query
+        // (or one position back if the
+        // word is just `#` or `@`
+        // with no alphanumeric
+        // characters).
+        let first_char_of_word = self.query[char_to_byte_index(&self.query, start_char)
+            ..char_to_byte_index(&self.query, start_char + 1)]
+            .chars()
+            .next()
+            .expect("start_char < cursor_byte");
+        let Some(db_path) = self.notes_database.clone() else {
+            // No notes database
+            // configured; the
+            // completion is a
+            // no-op. The user
+            // needs `notes.database`
+            // in their config
+            // for tag/link
+            // completion to work.
+            self.set_status_message(
+                "notes-tab-complete: notes.database is not configured".to_string(),
+            );
+            return;
+        };
+        let (name_prefix, completion, kind) = match first_char_of_word {
+            '#' => {
+                // Tag completion: strip
+                // the leading `#` and
+                // query the DB for tags
+                // starting with the
+                // remainder. The
+                // completion result from
+                // `notes_tag_complete` is
+                // the bare tag name
+                // (e.g. `"feature "`); we
+                // prepend `#` so the
+                // replacement includes
+                // the tag prefix.
+                let name = &word[1..];
+                // Check for multiple
+                // matches first. If
+                // the tag completion
+                // is ambiguous, open
+                // the completion menu
+                // so the user can
+                // pick from the
+                // candidates rather
+                // than just extending
+                // to the LCP.
+                let matches = crate::jira::notes_tag_matches(&db_path, name);
+                if matches.len() >= 2 {
+                    // Open the
+                    // completion
+                    // menu. The
+                    // user
+                    // picks a
+                    // candidate
+                    // and the
+                    // menu
+                    // applies
+                    // it with
+                    // a
+                    // leading
+                    // `#` and
+                    // a
+                    // trailing
+                    // space.
+                    self.open_completion_menu(
+                        matches,
+                        start_byte,
+                        cursor_byte,
+                        start_char,
+                        CompletionKind::NotesTag,
+                    );
+                    return;
+                }
+                let result = crate::jira::notes_tag_complete(&db_path, name);
+                let result = match result {
+                    Some(r) => r,
+                    None => {
+                        self.set_status_message(format!(
+                            "notes-tab-complete: no tag starts with `#{}`",
+                            name
+                        ));
+                        return;
+                    }
+                };
+                // Prepend `#` to the
+                // completion so the
+                // replacement includes
+                // the tag prefix.
+                let mut with_hash = String::from("#");
+                with_hash.push_str(&result);
+                (name.to_string(), with_hash, "tag")
+            }
+            '@' => {
+                // Link completion: strip
+                // the leading `@` and
+                // query the DB for links
+                // starting with the
+                // remainder. The
+                // completion result from
+                // `notes_link_complete`
+                // is the full `[[...]]`
+                // expansion (e.g.
+                // `[[NeovimNote]] ` or
+                // `[["my note"]] ` for
+                // links with spaces),
+                // including the brackets
+                // and a trailing space.
+                // We use the result as-is
+                // since the user typed
+                // `@` to trigger the
+                // completion but the
+                // expansion uses the
+                // `[[...]]` syntax (which
+                // supports link names
+                // with spaces, unlike
+                // the `@` syntax in
+                // `note_search`).
+                let name = &word[1..];
+                // Check for multiple
+                // matches first. If
+                // the link completion
+                // is ambiguous, open
+                // the completion menu
+                // so the user can
+                // pick from the
+                // candidates rather
+                // than just extending
+                // to the LCP.
+                let matches = crate::jira::notes_link_matches(&db_path, name);
+                if matches.len() >= 2 {
+                    // Open the
+                    // completion
+                    // menu. The
+                    // user
+                    // picks a
+                    // candidate
+                    // and the
+                    // menu
+                    // applies
+                    // it
+                    // wrapped
+                    // in
+                    // `[[...]]`
+                    // with a
+                    // trailing
+                    // space.
+                    self.open_completion_menu(
+                        matches,
+                        start_byte,
+                        cursor_byte,
+                        start_char,
+                        CompletionKind::NotesLink,
+                    );
+                    return;
+                }
+                let result = crate::jira::notes_link_complete(&db_path, name);
+                let result = match result {
+                    Some(r) => r,
+                    None => {
+                        self.set_status_message(format!(
+                            "notes-tab-complete: no link starts with `@{}`",
+                            name
+                        ));
+                        return;
+                    }
+                };
+                (name.to_string(), result, "link")
+            }
+            _ => {
+                // Plain text: no
+                // completion. The user
+                // is just typing a
+                // word; Tab should
+                // not interfere.
+                return;
+            }
+        };
+        let _ = name_prefix; // silence unused warning; kept for future diagnostics
+        // The completion string already
+        // includes the leading `#` or
+        // `@` and the trailing space
+        // (when unique). Replace the
+        // word at `start_byte` with
+        // the completion.
+        self.query
+            .replace_range(start_byte..cursor_byte, &completion);
+        let completion_chars = completion.chars().count();
+        self.query_cursor = start_char + completion_chars;
+        // Re-arm the debounce/idle
+        // timers and refresh so the
+        // new query fires its search
+        // immediately. This mirrors
+        // the JIRA path.
+        self.llm_touch();
+        self.recompile_regex();
+        self.refresh();
+        // Surface a status message
+        // for the unique-match case
+        // (the user can see the
+        // expanded query in the
+        // input line, but a
+        // confirmation is useful
+        // for the tag/link case
+        // where the result has
+        // many characters). We
+        // don't surface a message
+        // for the LCP case (no
+        // trailing space) because
+        // that fires every time
+        // the user presses Tab to
+        // disambiguate, and the
+        // flash would be
+        // distracting.
+        if completion.ends_with(' ') {
+            self.set_status_message(format!("expanded {} `{}`", kind, completion.trim_end()));
+        }
+    }
 }

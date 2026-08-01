@@ -545,3 +545,86 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         row.preview_scroll = half.saturating_sub(2) as u16;
     }
 }
+
+impl App {
+    /// Whether the query is a similar-phrase search request: the
+    /// query starts with the similar prefix (`"` by default). Same
+    /// underlying `segments` table as `is_segments_query`, but the
+    /// body is one literal phrase (embedded + ranked by similarity)
+    /// rather than a query DSL — see this module's doc comment.
+    pub(crate) fn is_similar_query(&self) -> bool {
+        matches(self)
+    }
+
+    /// Arm the similar-mode debounce. Mirrors `segments_touch`.
+    pub(crate) fn similar_touch(&mut self) {
+        let active = self.is_similar_query();
+        crate::debounce::touch(&mut self.similar_state, active);
+    }
+
+    /// Check whether the similar-mode debounce has elapsed and
+    /// spawn a background embed+search if so. Mirrors
+    /// `segments_maybe_autocall`.
+    pub(crate) fn similar_maybe_autocall(&mut self) {
+        if !self.is_similar_query() {
+            return;
+        }
+        if !crate::debounce::debounce_elapsed(&mut self.similar_state, SIMILAR_DEBOUNCE) {
+            return;
+        }
+        let Some(ref db_path) = self.notes_database else {
+            self.set_status_message("Similar mode: notes.database is not configured".to_string());
+            self.similar_state.debounce_started = None;
+            return;
+        };
+        let pattern = SimilarState::current_pattern(&self.query, self.query_prefixes.similar);
+        if self.similar_state.has_results_for(&pattern) {
+            return;
+        }
+        self.similar_state.last_pattern = Some(pattern.clone());
+        let db_path = db_path.clone();
+        let notes_dir = self.notes_dir.clone();
+        self.spawn_similar_search(db_path, notes_dir, pattern);
+    }
+
+    /// Spawn a background thread that embeds the phrase and runs
+    /// the similarity query. Mirrors `spawn_segments_search`.
+    pub(crate) fn spawn_similar_search(
+        &mut self,
+        db_path: std::path::PathBuf,
+        notes_dir: Option<std::path::PathBuf>,
+        pattern: String,
+    ) {
+        let request = spawn_similar_search(db_path, notes_dir, pattern);
+        self.similar_state.in_flight = true;
+        self.similar_state.request = Some(request);
+    }
+
+    /// Process a similar-mode search result from the background
+    /// thread. Mirrors `process_segments_result` — an embedding
+    /// failure (e.g. Ollama unreachable) or a search failure
+    /// surfaces as a status message.
+    pub(crate) fn process_similar_result(
+        &mut self,
+        request: SimilarRequest,
+        result: Result<Vec<HistoryRow>, String>,
+    ) {
+        self.similar_state.in_flight = false;
+        self.similar_state.request = None;
+        let current = SimilarState::current_pattern(&self.query, self.query_prefixes.similar);
+        if current != request.pattern {
+            // Stale result — the user has typed something else
+            // since this search was fired. Discard silently.
+            return;
+        }
+        match result {
+            Ok(rows) => {
+                self.similar_state.rows = rows;
+                self.refresh();
+            }
+            Err(e) => {
+                self.set_status_message(format!("Similar mode: {}", e));
+            }
+        }
+    }
+}

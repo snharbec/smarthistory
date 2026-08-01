@@ -896,3 +896,79 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     };
     Ok(rows)
 }
+
+impl App {
+    /// True if the user typed the
+    /// `directories` prefix
+    /// (default `#`). The
+    /// directories view lists
+    /// every unique directory
+    /// that's been used in the
+    /// global history, sorted by
+    /// the most-recent history
+    /// row's timestamp DESC, with
+    /// each directory's most-
+    /// recently-executed
+    /// command surfaced for
+    /// context. Selecting a row
+    /// stages a `cd <path>`
+    /// command.
+    pub(crate) fn is_directories_query(&self) -> bool {
+        crate::tui::mode::directories::matches(self)
+    }
+
+    /// The directories-search
+    /// body, i.e. everything
+    /// after the leading `#
+    /// prefix. Used to filter
+    /// the listed directories by
+    /// path substring. Empty
+    /// when not in directories
+    /// mode.
+    pub(crate) fn directories_pattern(&self) -> &str {
+        crate::tui::mode::directories::pattern(self)
+    }
+
+    /// Switch the query into
+    /// directories (`#`) mode,
+    /// preserving any body the
+    /// user has already typed.
+    /// Strips a leading
+    /// search-mode prefix
+    /// (`?`, `+`, `=`,
+    /// `@`, `!`, or `#` itself)
+    /// before prepending the
+    /// directories prefix, so
+    /// switching from `?foo`
+    /// yields `#foo` (not
+    /// `#?foo`). The cursor is
+    /// reset to the end so the
+    /// next keystroke appends
+    /// naturally. Mode-
+    /// dependent state (regex
+    /// recompile, LLM debounce)
+    /// is refreshed too.
+    pub(crate) fn enter_directories_mode(&mut self) {
+        let p = &self.query_prefixes;
+        let prefixes = [p.output, p.llm, p.question, p.notes, p.todo, p.directories];
+        let body: String = self
+            .query
+            .chars()
+            .next()
+            .map(|c| {
+                if prefixes.contains(&c) {
+                    self.query[c.len_utf8()..].to_string()
+                } else {
+                    self.query.clone()
+                }
+            })
+            .unwrap_or_default();
+        let mut s = String::with_capacity(body.len() + p.directories.len_utf8());
+        s.push(p.directories);
+        s.push_str(&body);
+        self.query = s;
+        self.recompile_regex();
+        self.query_cursor = self.query.chars().count();
+        self.llm_touch();
+    }
+}
