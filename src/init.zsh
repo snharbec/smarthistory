@@ -591,6 +591,12 @@ typeset -g _smarthistory_dropdown_hl_select="fg=4"  # blue fallback
 # `tuicolor.error` elsewhere in the app.
 typeset -g _smarthistory_dropdown_hl_success="fg=2"  # green fallback
 typeset -g _smarthistory_dropdown_hl_error="fg=1"    # red fallback
+# Ghost-text color for the currently-highlighted candidate's
+# not-yet-typed remainder (see the shadow-text block in
+# `_smarthistory_dropdown_paint`) — same `tuicolor.dim` slot the TUI
+# itself uses for secondary/de-emphasized text, and the same visual
+# convention zsh-autosuggestions uses for its own suggestion text.
+typeset -g _smarthistory_dropdown_hl_dim="fg=8"  # bright-black/gray fallback
 # `bat --theme` argument for the `dropdown.highlight` feature —
 # "dark" or "light", matching `bg`'s perceived brightness the exact
 # way `highlight_with_bat`'s `bat_theme_arg()` does (Rust side, used
@@ -660,6 +666,7 @@ if (( _smarthistory_dropdown_color_ok == 0 )); then
     _smarthistory_dropdown_hl_select=""
     _smarthistory_dropdown_hl_success=""
     _smarthistory_dropdown_hl_error=""
+    _smarthistory_dropdown_hl_dim=""
 fi
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # Disable `xtrace` for the palette-init block too — see
@@ -707,6 +714,11 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                 error)
                     local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
                     [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_error=$_hlspec
+                    unset _hlspec
+                    ;;
+                dim)
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_dim=$_hlspec
                     unset _hlspec
                     ;;
                 bg)
@@ -943,7 +955,41 @@ _smarthistory_dropdown_paint() {
     # loop above — the bold span starts right after it.
     local matchlen=$#LBUFFER
     local -r marker_len=2
-    local out=$'\n'
+    # Shadow/ghost text: when a candidate is actually highlighted
+    # (`chosen == 1`, i.e. the user has navigated to a specific row
+    # via Tab/Shift-Tab/Up/Down rather than just seeing the fresh
+    # unhighlighted box), show its not-yet-typed remainder inline
+    # right after the cursor, dimmed — the same POSTDISPLAY mechanism
+    # and visual convention zsh-autosuggestions itself uses, so it
+    # reads as a live preview of what accepting this candidate would
+    # produce (Right-arrow / Ctrl-E / Enter already commit exactly
+    # this text via `_smarthistory_dropdown_commit`, unchanged by
+    # this feature — it's purely an additional rendering, not a new
+    # accept path). `\n`/`\r` are visible-marker-substituted the same
+    # way candidate rows already are, so a multi-line candidate's
+    # ghost text can't desync the box's own newline-counted layout
+    # that follows it in `out`.
+    local out=""
+    if (( _smarthistory_dropdown_chosen == 1 )); then
+        local _sm_ghost_raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
+        local _sm_ghost_full=$(_smarthistory_unescape "$_sm_ghost_raw")
+        _sm_ghost_full=${_sm_ghost_full//$'\n'/↵}
+        _sm_ghost_full=${_sm_ghost_full//$'\r'/}
+        if [[ "$_sm_ghost_full" == "$BUFFER"* ]]; then
+            local _sm_ghost_text=${_sm_ghost_full#$BUFFER}
+            if [[ -n "$_sm_ghost_text" ]]; then
+                if [[ -n "$_smarthistory_dropdown_hl_dim" ]]; then
+                    _hl_start=$#out
+                    out+="$_sm_ghost_text"
+                    _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_dim")
+                else
+                    out+="$_sm_ghost_text"
+                fi
+            fi
+        fi
+        unset _sm_ghost_raw _sm_ghost_full _sm_ghost_text
+    fi
+    out+=$'\n'
     if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
         _hl_start=$#out
         out+="╭─${hr}─╮"
