@@ -195,7 +195,7 @@ initialmode=SESS
 | **Default** | `sess` |
 | **Env override** | — |
 
-The zsh Up/Down history-walk widget's search scope (`_smarthistory_mode` in `init.zsh`) a brand-new shell starts on: `sess` (current `$SMART_HISTORY_SESSION` only), `dir` (current working directory only), or `global` (no scope filter). This is unrelated to [`initialmode`](#initialmode) above, which controls `smarthistory tui`'s own starting scope — `zsh.mode` controls the readline-level widgets instead. `Ctrl-g` (`_smarthistory_cycle_mode`) still cycles `sess` → `dir` → `global` → `sess` at runtime regardless of this setting; it only picks the starting point for a new shell, not the cycle order.
+The Up/Down history-walk widget's search scope (`_smarthistory_mode` in `init.zsh`/`init.bash` — despite the `zsh.`-prefixed key name, this is shared by the bash port's own Up/Down and Ctrl-g widgets too, not just zsh's) a brand-new shell starts on: `sess` (current `$SMART_HISTORY_SESSION` only), `dir` (current working directory only), or `global` (no scope filter). This is unrelated to [`initialmode`](#initialmode) above, which controls `smarthistory tui`'s own starting scope — `zsh.mode` controls the readline-level widgets instead. `Ctrl-g` (`_smarthistory_cycle_mode`) still cycles `sess` → `dir` → `global` → `sess` at runtime regardless of this setting; it only picks the starting point for a new shell, not the cycle order.
 
 ```ini
 zsh.mode=global
@@ -293,7 +293,7 @@ dropdown.highlight=on
 | **Default** | `off` |
 | **Env override** | — |
 
-Whether the zsh comment-expansion widget is active. When on, typing a comment's text (as set via `smarthistory add ... --comment "..."`) at the very start of the command line, then a space, replaces it with the most recently used command carrying that exact comment — the same UX as zsh-abbr/fish abbreviations, sourced from smarthistory's own comment data. Matching is exact and case-insensitive against `command_comments.comment` (not a substring match, and not scoped to the command text), so a comment shared by multiple commands always resolves to whichever was run most recently. Off by default, same opt-in reasoning as `dropdown.enabled` above: it hooks keystroke widgets, a bigger behavior change than the prefix-triggered modes.
+Whether the comment-expansion widget is active — supported in both `smarthistory init zsh` and `smarthistory init bash` (the bash port needs bash >= 4.0; see the README's Installation section). When on, typing a comment's text (as set via `smarthistory add ... --comment "..."`) at the very start of the command line, then a space, replaces it with the most recently used command carrying that exact comment — the same UX as zsh-abbr/fish abbreviations, sourced from smarthistory's own comment data. Matching is exact and case-insensitive against `command_comments.comment` (not a substring match, and not scoped to the command text), so a comment shared by multiple commands always resolves to whichever was run most recently. Off by default, same opt-in reasoning as `dropdown.enabled` above: it hooks keystroke widgets, a bigger behavior change than the prefix-triggered modes.
 
 ```ini
 commentexpand.enabled=on
