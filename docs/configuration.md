@@ -260,8 +260,6 @@ Syntax-highlight each dropdown candidate instead of plain text: lexical token co
 
 The `--theme` choice matches the resolved `tuicolor.bg`'s perceived brightness (the same ITU-R BT.601 formula `highlight_with_bat`'s Rust-side theme detection uses), read once at shell-init time from `smarthistory config get palette` — so dropdown colors read correctly against the same light/dark background the rest of the app already assumes, not `bat`'s own default theme. The palette itself is resolved using whichever scheme (light/dark) your last TUI session actually had active (`Action::ToggleColorScheme`, persisted in the session file) — with `theme.dark`/`theme.light` both configured, toggling in the TUI and opening a new shell changes the dropdown's colors too.
 
-This does **not** reuse `zsh-patina` (a separately-installed live command-line highlighter some users run) even if it's installed — `zsh-patina` exposes no stable API for this: its `tokenize` subcommand is an explicit debug tool that can't resolve aliases/functions/builtins, and its real highlighting only happens through an undocumented, version-fragile daemon socket protocol. `bat`'s ANSI output is a stable, standard format instead, at the cost of not exactly matching a `zsh-patina` theme.
-
 Off by default: it adds one `bat` subprocess call per dropdown render (all candidates batched into a single call, not one per row), on top of the `smarthistory search` call every keystroke already makes. Silently stays off — no error, no startup warning — when `bat` isn't on `$PATH`, even if this is `on`.
 
 ```ini

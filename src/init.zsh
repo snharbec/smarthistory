@@ -528,10 +528,8 @@ _smarthistory_ansi_to_spans() {
 # (an alias, function, builtin, a command on `$PATH`, or a common zsh
 # reserved word — `if`/`for`/`while`/`case`/`{`/`sudo`/… — that a
 # lexical-only highlighter like `bat` has no way to validate) or
-# `_smarthistory_dropdown_hl_error` (nothing resolves — most likely a
-# typo). Same lookups `zsh-patina`'s own (private,
-# `_zsh_patina_resolve_callable`) validity check uses, plus the
-# reserved-word allowance it doesn't bother with. Result via `REPLY`.
+# `_smarthistory_dropdown_hl_error` 
+# Result via `REPLY`.
 _smarthistory_command_validity_hlspec() {
     local word=$1
     case "$word" in
