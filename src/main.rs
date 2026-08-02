@@ -1062,6 +1062,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(f, "  dropdown.limit = {}", cfg.dropdown_limit);
     let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
+    let _ = writeln!(f, "  segments.minwords = {}", cfg.segments_min_words);
     let _ = writeln!(
         f,
         "  dropdown.highlight = {}",
@@ -1393,6 +1394,12 @@ pub struct Config {
     /// a huge, low-signal candidate list on an empty or 1-char
     /// buffer. Set via `dropdown.minchars=<N>`.
     dropdown_min_chars: usize,
+    /// Minimum word count a segment's body (its text minus its own
+    /// header line) must have for `:` (segment search) to keep it —
+    /// segments at or under this are dropped as noise (a heading
+    /// with little or nothing under it). `0` disables the filter.
+    /// Set via `segments.minwords=<N>`.
+    segments_min_words: usize,
     /// Whether the dropdown widget syntax-highlights each candidate
     /// (via `bat`, plus a self-checked green/red for the first
     /// word's alias/function/builtin/command validity) instead of
@@ -1738,6 +1745,7 @@ impl Config {
             dropdown_enabled: false,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
+            segments_min_words: 5,
             dropdown_highlight: false,
             commentexpand_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -1979,6 +1987,13 @@ impl Config {
                     Ok(n) => self.dropdown_min_chars = n,
                     _ => eprintln!(
                         "warning: dropdown.minchars={:?} is not a non-negative integer; keeping the previous value",
+                        value
+                    ),
+                },
+                "segments.minwords" => match value.trim().parse::<usize>() {
+                    Ok(n) => self.segments_min_words = n,
+                    _ => eprintln!(
+                        "warning: segments.minwords={:?} is not a non-negative integer; keeping the previous value",
                         value
                     ),
                 },
@@ -3005,6 +3020,13 @@ impl Config {
     /// number. Default: `"+$LINE"`.
     pub fn todo_line_option(&self) -> &str {
         &self.todo_line_option
+    }
+
+    /// Minimum word count a `:` (segment search) result's body
+    /// must have to be kept — see `segments.minwords` / the
+    /// `segments_min_words` field doc comment. Default `5`.
+    pub fn segments_min_words(&self) -> usize {
+        self.segments_min_words
     }
 
     /// The user-defined JQL fragments loaded from
@@ -5008,6 +5030,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
+                    "segments.minwords" => println!("{}", cfg.segments_min_words),
                     "dropdown.highlight" => {
                         println!("{}", if cfg.dropdown_highlight { "on" } else { "off" })
                     }

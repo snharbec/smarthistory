@@ -9591,6 +9591,7 @@ fn spawn_similar_search_with_empty_phrase_returns_empty_without_network() {
         std::path::PathBuf::from("/nonexistent/notes.sqlite"),
         None,
         String::new(),
+        0,
     );
     let result = request
         .receiver
@@ -9617,6 +9618,7 @@ fn spawn_similar_search_with_only_negation_tokens_returns_empty_without_network(
         std::path::PathBuf::from("/nonexistent/notes.sqlite"),
         None,
         "[type:jira]!".to_string(),
+        0,
     );
     let result = request
         .receiver
@@ -9945,6 +9947,139 @@ fn setup_segments_cascade_db() -> (std::path::PathBuf, std::path::PathBuf) {
     (dir, db_path)
 }
 
+/// Fixture for the `segments.minwords` filter
+/// (`App::segments_min_words`): one file with three level-1
+/// segments —
+///   "Short Section": body is 3 words ("one two three") — at or
+///     under the default threshold (5), should be dropped.
+///   "Long Section": body is 8 words — over the threshold, should
+///     be kept.
+///   "This Heading Has Seven Words Total": a 7-word HEADING with a
+///     1-word body ("short") — proves the header line itself is
+///     excluded from the count: if it were wrongly included
+///     (7 + 1 = 8 > 5) this segment would survive; correctly
+///     excluded, its body-only count (1) is under the threshold and
+///     it's dropped.
+fn setup_segments_minwords_db() -> (std::path::PathBuf, std::path::PathBuf) {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-segments-minwords-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("sections.md"),
+        "# Short Section\n\
+         one two three\n\
+         \n\
+         # Long Section\n\
+         one two three four five six seven eight\n\
+         \n\
+         # This Heading Has Seven Words Total\n\
+         short\n",
+    )
+    .expect("write sections.md");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-segments-minwords-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    let data = note_search::markdown_parser::process_markdown_file(&dir.join("sections.md"), &dir)
+        .expect("process file");
+    note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+        .map_err(|e| format!("write: {e}"))
+        .expect("write db");
+    drop(conn);
+    (dir, db_path)
+}
+
+/// The default `segments_min_words` (5) drops segments whose body
+/// (header excluded) has 5 words or fewer, and keeps ones over it.
+/// See `setup_segments_minwords_db` for the fixture's exact word
+/// counts, including the header-exclusion case.
+#[test]
+fn fetch_segments_minwords_filters_short_bodies_by_default() {
+    let (dir, db_path) = setup_segments_minwords_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    assert_eq!(app.segments_min_words, 5, "default threshold");
+    app.query = ":".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    let commands: Vec<&String> = app.merged_rows().iter().map(|r| &r.command).collect();
+    assert_eq!(
+        app.merged_rows().len(),
+        1,
+        "only \"Long Section\" (8-word body) should survive the default \
+         5-word threshold, got: {commands:?}"
+    );
+    assert!(
+        commands[0].contains("Long Section"),
+        "got: {commands:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `segments.minwords=0` (via `App::segments_min_words = 0`)
+/// disables the filter entirely — every segment from the same
+/// fixture that lost two of its three segments above now survives.
+#[test]
+fn fetch_segments_minwords_zero_disables_filter() {
+    let (dir, db_path) = setup_segments_minwords_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.segments_min_words = 0;
+    app.query = ":".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert_eq!(
+        app.merged_rows().len(),
+        3,
+        "minwords=0 must keep every segment, got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// A higher configured threshold filters more aggressively — with
+/// `segments_min_words = 8`, even "Long Section" (exactly 8 words)
+/// is dropped, since the filter keeps strictly-greater-than the
+/// threshold, not greater-or-equal.
+#[test]
+fn fetch_segments_minwords_higher_threshold_filters_more() {
+    let (dir, db_path) = setup_segments_minwords_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.segments_min_words = 8;
+    app.query = ":".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert!(
+        app.merged_rows().is_empty(),
+        "threshold=8 must drop every segment (max body is exactly 8 \
+         words, filter keeps strictly > threshold), got: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
 /// `:[[link]]` filters segments by the `#tag`/`[[link]]` query DSL
 /// (`QueryExpr::Link`), not just plain substring text.
 ///
@@ -10136,6 +10271,10 @@ fn fetch_segments_negation_excludes_matching_attribute() {
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
+    // This test is about negation, not the `segments.minwords`
+    // filter — the fixture's 3-word body is deliberately minimal
+    // and would otherwise be dropped by the default threshold.
+    app.segments_min_words = 0;
     app.query = ":".to_string();
     app.refresh();
     drive_segments_search(&mut app);

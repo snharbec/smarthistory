@@ -170,6 +170,7 @@ pub fn spawn_segments_search(
     db_path: std::path::PathBuf,
     notes_dir: Option<std::path::PathBuf>,
     pattern: String,
+    min_words: usize,
 ) -> SegmentsRequest {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -177,7 +178,12 @@ pub fn spawn_segments_search(
     let pattern_for_thread = pattern.clone();
 
     std::thread::spawn(move || {
-        let result = run_segments_search(&db_path, notes_dir.as_deref(), &pattern_for_thread);
+        let result = run_segments_search(
+            &db_path,
+            notes_dir.as_deref(),
+            &pattern_for_thread,
+            min_words,
+        );
         if !cancelled_clone.load(Ordering::Relaxed) {
             let _ = tx.send(result);
         }
@@ -194,10 +200,15 @@ pub fn spawn_segments_search(
 /// query + row-mapping. Factored out of `spawn_segments_search`
 /// so it has no channel/thread concerns of its own — just "given
 /// a database and a pattern, return rows or an error message".
+/// `min_words` is the `segments.minwords` threshold: a segment
+/// whose body (its text minus its own header line) has this many
+/// words or fewer is dropped as noise before mapping — `0` disables
+/// the filter. See `segment_body_word_count`.
 fn run_segments_search(
     db_path: &std::path::Path,
     notes_dir: Option<&std::path::Path>,
     pattern: &str,
+    min_words: usize,
 ) -> Result<Vec<HistoryRow>, String> {
     // `#tag!` / `[[link]]!` negation tokens are stripped BEFORE
     // `parse_query` sees the pattern — it has no negation
@@ -235,7 +246,37 @@ fn run_segments_search(
         results.retain(|r| !excluded.contains(&(r.filename.clone(), r.start_line)));
     }
 
+    if min_words > 0 {
+        results.retain(|r| segment_body_word_count(&r.text, r.heading_level) > min_words);
+    }
+
     Ok(map_segment_results(&results, notes_dir))
+}
+
+/// Word count of a segment's body, excluding its own header line.
+/// `note_search`'s `SegmentResult::text` includes the header line
+/// verbatim as its first line when `heading_level` is `Some` (see
+/// `map_segment_results`'s doc comment) — that line is stripped
+/// before counting so a heading's own words don't count toward the
+/// `segments.minwords` threshold. A segment with no heading
+/// (`heading_level == None`, e.g. the implicit root segment before
+/// a file's first header) has no header line to strip, so the whole
+/// text counts. "Word" is a plain whitespace-separated token — no
+/// markdown-aware parsing (list markers, emphasis characters, etc.
+/// each count as part of a word like anything else).
+///
+/// `pub(crate)` (not just `run_segments_search`'s own private
+/// helper) because `crate::tui::mode::similar` applies the same
+/// `segments.minwords` threshold to its own `SegmentResult` rows —
+/// same underlying `segments` table, same filter, one shared
+/// definition of "word count" between the two modes.
+pub(crate) fn segment_body_word_count(text: &str, heading_level: Option<i32>) -> usize {
+    let body = if heading_level.is_some() {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        text
+    };
+    body.split_whitespace().count()
 }
 
 /// For each negated term (`#tag!` / `[[link]]!`), run the ordinary
@@ -667,7 +708,7 @@ impl App {
         self.segments_state.last_pattern = Some(pattern.clone());
         let db_path = db_path.clone();
         let notes_dir = self.notes_dir.clone();
-        self.spawn_segments_search(db_path, notes_dir, pattern);
+        self.spawn_segments_search(db_path, notes_dir, pattern, self.segments_min_words);
     }
 
     /// Spawn a background thread that runs the segments query.
@@ -677,8 +718,9 @@ impl App {
         db_path: std::path::PathBuf,
         notes_dir: Option<std::path::PathBuf>,
         pattern: String,
+        min_words: usize,
     ) {
-        let request = spawn_segments_search(db_path, notes_dir, pattern);
+        let request = spawn_segments_search(db_path, notes_dir, pattern, min_words);
         self.segments_state.in_flight = true;
         self.segments_state.request = Some(request);
     }

@@ -41,6 +41,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`duplicatefilter`](#duplicatefilter)
   - [`initialmode`](#initialmode)
   - [`zsh.mode`](#zshmode)
+  - [`segments.minwords`](#segmentsminwords)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -200,11 +201,24 @@ The zsh Up/Down history-walk widget's search scope (`_smarthistory_mode` in `ini
 zsh.mode=global
 ```
 
+### `segments.minwords`
+
+| | |
+| --- | --- |
+| **Type** | non-negative integer |
+| **Default** | `5` |
+| **Env override** | — |
+
+Minimum word count a segment's **body** — its text minus its own header line — must have for [`:` (segment search)](modes/segments.md) or [`"` (similar)](modes/similar.md) mode to keep it. A segment at or under this threshold (a heading with little or nothing under it) is dropped as noise. The header line itself never counts toward the total, however long it is — only what's actually written below it does. `0` disables the filter entirely, keeping every segment regardless of length.
+
+```ini
+segments.minwords=5
+segments.minwords=0    # keep every segment, however short
+```
+
 ---
 
 ## Live dropdown completion
-
-**Status: config surface only.** These three keys are parsed and readable via `smarthistory config get` today; the zsh-side live-as-you-type dropdown UI itself (a `POSTDISPLAY`-based multi-candidate menu, Fig/IRIS-style) is still being built in `src/init.zsh` and is not wired up in this build yet. Documented now so the config surface is stable ahead of that landing.
 
 ### `dropdown.enabled`
 
@@ -811,6 +825,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `duplicatefilter` | `on` \| `off` | `on` | [History list & filtering](#history-list--filtering) |
 | `initialmode` | enum | `SESS` | [History list & filtering](#history-list--filtering) |
 | `zsh.mode` | `sess` \| `dir` \| `global` | `sess` | [History list & filtering](#history-list--filtering) |
+| `segments.minwords` | non-negative int | `5` | [History list & filtering](#history-list--filtering) |
 | `dropdown.enabled` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |
