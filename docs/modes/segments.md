@@ -50,6 +50,10 @@ The highlighted result is cached per (file, line) for the session. Every keystro
 - `Enter` on a segment row stages `$EDITOR +<start_line> <file>` — the file opens at the segment's header line. Same "open the file at the matching line" convention as [`$` (Tags)](tags.md), [`,` (ag)](ag.md), and [`&` (CodeGraph)](codegraph.md).
 - `Ctrl-Y` (Yank selection) copies the row's **breadcrumb** (filename + ancestor headers' text), not the matched segment's own text — a segment's text can be a whole section joined onto one line, which is less useful on the clipboard than knowing exactly which file and section it came from. (If the output preview overlay is open, `Ctrl-Y` still copies what's on screen instead, same as every other mode.)
 
+## Filtering short segments
+
+`segments.minwords` (default `5`) drops any segment whose **body** — its text minus its own header line — has that many words or fewer, across every mode that reads from the `segments` table (not just this one — [`"` Similar mode](similar.md) shares the same underlying rows). This filters out low-signal noise like a heading with little or nothing under it. The header line itself never counts toward the threshold, however long it is. `segments.minwords=0` disables the filter entirely. See [docs/configuration.md](../configuration.md#segmentsminwords).
+
 ## Tab completion
 
 `Tab` (the default `Action::JiraFieldComplete` key) works exactly the same as [`@` (Notes) mode](notes.md#tab-completion): cursor after `#` completes a tag name, cursor after `@` completes a link name (inserted as `[[linkname]]`). Same completion source (`notes.database`'s unique tag/link values), same ambiguous-match menu, same unique-match trailing-space behavior — segments mode doesn't have its own separate tag/link namespace, so the completion candidates are identical to what `@` mode offers.

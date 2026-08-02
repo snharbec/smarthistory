@@ -1913,6 +1913,18 @@ pub(crate) struct App {
     /// thread.
     segments_state: crate::tui::mode::segments::SegmentsState,
 
+    /// Minimum word count a segment's body (its text minus its own
+    /// header line) must have to be kept by `:` (segment search) —
+    /// segments at or under this are dropped as noise (e.g. a
+    /// heading with nothing, or almost nothing, under it). `0`
+    /// disables the filter entirely. Default `5`, set via
+    /// `segments.minwords=<N>`. Not a constructor parameter —
+    /// defaulted in `App::new` and overridden by the real TUI
+    /// startup path from `Config`, same as other fields that don't
+    /// need per-test control (see `run_segments_search`, which does
+    /// the actual filtering).
+    segments_min_words: usize,
+
     /// Aggregated similar-mode (`"`) state: same shape as
     /// `segments_state`, just backed by
     /// `crate::tui::mode::similar::SimilarState` — embed-then-rank
@@ -4643,6 +4655,7 @@ impl App {
             llm_request: None,
             ag_state: crate::ag::AgState::new(),
             segments_state: crate::tui::mode::segments::SegmentsState::new(),
+            segments_min_words: 5,
             similar_state: crate::tui::mode::similar::SimilarState::new(),
             files_state: crate::files::FilesState::new(),
             files_ignores,
@@ -10474,6 +10487,7 @@ pub fn run_tui_to_stdout(
         home_list,
         session_subdirs,
     );
+    app.segments_min_words = app_cfg.segments_min_words();
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
         app.duplicate_filter = session.duplicate_filter.unwrap_or(true);

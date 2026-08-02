@@ -146,6 +146,7 @@ pub fn spawn_similar_search(
     db_path: std::path::PathBuf,
     notes_dir: Option<std::path::PathBuf>,
     pattern: String,
+    min_words: usize,
 ) -> SimilarRequest {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -153,7 +154,12 @@ pub fn spawn_similar_search(
     let pattern_for_thread = pattern.clone();
 
     std::thread::spawn(move || {
-        let result = run_similar_search(&db_path, notes_dir.as_deref(), &pattern_for_thread);
+        let result = run_similar_search(
+            &db_path,
+            notes_dir.as_deref(),
+            &pattern_for_thread,
+            min_words,
+        );
         if !cancelled_clone.load(Ordering::Relaxed) {
             let _ = tx.send(result);
         }
@@ -168,11 +174,14 @@ pub fn spawn_similar_search(
 
 /// The actual (synchronous, but run on a background thread) embed +
 /// query + row-mapping. Factored out of `spawn_similar_search` so it
-/// has no channel/thread concerns of its own.
+/// has no channel/thread concerns of its own. `min_words` is the
+/// same `segments.minwords` threshold `run_segments_search` applies
+/// — see `segment_body_word_count`.
 fn run_similar_search(
     db_path: &std::path::Path,
     notes_dir: Option<&std::path::Path>,
     phrase: &str,
+    min_words: usize,
 ) -> Result<Vec<HistoryRow>, String> {
     // `#tag!` / `[[link]]!` / `[attr:value]!` / `[attr]!` negation
     // tokens are stripped BEFORE the phrase is embedded — they're a
@@ -201,6 +210,13 @@ fn run_similar_search(
     if !negations.is_empty() {
         let excluded = excluded_similar_identities(&service, db_path, &negations)?;
         results.retain(|(el, _score)| !excluded.contains(&(el.filename.clone(), el.start_line)));
+    }
+
+    if min_words > 0 {
+        results.retain(|(el, _score)| {
+            crate::tui::mode::segments::segment_body_word_count(&el.text, el.heading_level)
+                > min_words
+        });
     }
 
     Ok(map_similar_results(&results, notes_dir))
@@ -584,7 +600,7 @@ impl App {
         self.similar_state.last_pattern = Some(pattern.clone());
         let db_path = db_path.clone();
         let notes_dir = self.notes_dir.clone();
-        self.spawn_similar_search(db_path, notes_dir, pattern);
+        self.spawn_similar_search(db_path, notes_dir, pattern, self.segments_min_words);
     }
 
     /// Spawn a background thread that embeds the phrase and runs
@@ -594,8 +610,9 @@ impl App {
         db_path: std::path::PathBuf,
         notes_dir: Option<std::path::PathBuf>,
         pattern: String,
+        min_words: usize,
     ) {
-        let request = spawn_similar_search(db_path, notes_dir, pattern);
+        let request = spawn_similar_search(db_path, notes_dir, pattern, min_words);
         self.similar_state.in_flight = true;
         self.similar_state.request = Some(request);
     }
