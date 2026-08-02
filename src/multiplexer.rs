@@ -1796,6 +1796,21 @@ fn parse_workspace_labels(json: &serde_json::Value) -> std::collections::HashMap
     out
 }
 
+/// The current pane's own workspace label, if running inside a
+/// herdr pane — i.e. `$HERDR_PANE_ID` (format `<workspace_id>:<pane_id>`)
+/// is set. Used by `smarthistory pane-exec` to find which
+/// `session.<id>`/`host.<id>` config entry (if any) this workspace
+/// was created from, by display name, the same way `stage_pane_selection`
+/// matches an *existing* workspace when the user reselects it from
+/// the `*` panes view.
+#[cfg(feature = "herdr")]
+pub(crate) fn herdr_current_workspace_label() -> Option<String> {
+    let pane_id = std::env::var("HERDR_PANE_ID").ok()?;
+    let workspace_id = pane_id.split(':').next()?.to_string();
+    let json = herdr_run_json(&["workspace", "list"])?;
+    parse_workspace_labels(&json).remove(&workspace_id)
+}
+
 #[cfg(feature = "herdr")]
 impl MultiplexerBackend for HerdrBackend {
     fn snapshot(&self) -> Vec<ActiveContext> {

@@ -78,6 +78,7 @@ smarthistory clean [QUERY] [flags]      # bulk-delete matching entries
 smarthistory prune <DAYS> [-f]          # delete entries older than N days
 smarthistory tui   [options]            # launch the TUI
 smarthistory init  zsh                  # emit the zsh init snippet
+smarthistory pane-exec                  # reconnect the current tmux/herdr session (see below)
 smarthistory config get <key>          # print a resolved config value
 smarthistory config list               # print all config values
 smarthistory config check              # validate the config file
@@ -253,6 +254,10 @@ Selecting a host row:
 
 - **tmux**: matches a pane whose `#{pane_current_command}` starts with `ssh` and contains the host's `user@host`. If found, focuses that pane. Otherwise stages `tmux new-session -d -s <display-name>; tmux switch-client -t <display-name>; tmux send-keys <ssh-argv> Enter`.
 - **herdr**: matches a workspace whose `label` equals the host's display name. If found, focuses that workspace. Otherwise stages `herdr workspace create --label <display-name>` and `herdr pane send-text` to send the `ssh` body into the new workspace's first pane.
+
+#### Reconnecting a new pane: `smarthistory pane-exec`
+
+A tmux session / herdr workspace created from a `session.<id>`/`host.<id>` entry is already named after it — no separate registration is needed. But a pane/window opened *inside* it directly (e.g. `Ctrl-b c`), not through smarthistory's own `*` panes picker, starts a plain local shell with no connection of its own. Run `smarthistory pane-exec` in that new pane to reconnect: it reads the current session name (or herdr workspace label) and re-runs whatever created it — a `session.<id>`'s `.exec`, or a `host.<id>`'s `ssh` connection (its `.exec` is not replayed, since that's meant to be typed into the remote shell after connecting, not run locally). It's a manual command only; nothing is auto-installed on pane/window creation.
 
 ### Output capture (tmux + herdr)
 

@@ -471,6 +471,30 @@ enum Commands {
         #[arg(short, long)]
         limit: Option<usize>,
     },
+    /// Re-run the connection command for the current tmux session or
+    /// herdr workspace, if it was created from a configured
+    /// `session.<id>`/`host.<id>` entry.
+    ///
+    /// For a fresh pane/window opened directly in tmux or herdr
+    /// (e.g. `Ctrl-b c`, not through smarthistory's own `*` panes
+    /// picker) — the session/workspace itself already carries the
+    /// connection, but a newly-created pane inside it starts a plain
+    /// local shell with no automatic reconnect. Run this inside that
+    /// new pane to reconnect: it reads the current tmux session name
+    /// (or herdr workspace label) and looks it up against the same
+    /// `session.<id>`/`host.<id>` config that would have created it
+    /// in the first place — no separate registration step needed,
+    /// since the session/workspace is already named after the
+    /// config entry that created it.
+    ///
+    /// A `host.<id>` match re-runs just the `ssh` connection — its
+    /// optional `.exec` (meant to be typed into the remote shell
+    /// after connecting, not run locally) isn't replayed here, since
+    /// that injection only works through the multiplexer backend's
+    /// own pane-focused API, not a plain foreground child process. A
+    /// `session.<id>` match re-runs its `.exec` directly (a normal
+    /// local command, no such mismatch).
+    PaneExec,
     /// Run a command and capture its output alongside the history entry.
     ///
     /// Captures up to 20 lines of combined stdout/stderr and stores
@@ -4219,6 +4243,57 @@ fn resolve_comment(conn: &Connection, text: &str) -> anyhow::Result<Option<Strin
     .map_err(anyhow::Error::from)
 }
 
+/// What `smarthistory pane-exec` should do for a given current
+/// session/workspace name, resolved against the configured
+/// `session.<id>`/`host.<id>` entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaneExecTarget {
+    /// Run this shell command (a `session.<id>.exec`, or a
+    /// `host.<id>`'s `ssh` connection).
+    Run(String),
+    /// A `session.<id>` entry matched, but it has no `.exec` set —
+    /// nothing to run, not an error.
+    NoExecConfigured,
+    /// No `session.<id>`/`host.<id>` entry has this display name.
+    NotFound,
+}
+
+/// Pure matching logic behind `Commands::PaneExec`, split out from
+/// the process-spawning/exit-code handling around it so it can be
+/// unit-tested directly (calling the real command handler would
+/// `std::process::exit` the test process).
+///
+/// `session.<id>` entries are checked first: an exact match on
+/// display name, `.exec` (if set) run as-is — a normal local
+/// command, no ambiguity. `host.<id>` entries are checked next: an
+/// exact match on display name OR on `host:<name>` (the label herdr
+/// may show if the user renamed the workspace — see
+/// `stage_pane_selection`'s own matcher, which accepts the same two
+/// forms). A host match's `.exec` is deliberately NOT included in
+/// the returned command — see `Commands::PaneExec`'s doc comment for
+/// why (it's meant to be typed into the remote shell after
+/// connecting, not run as a local follow-up command).
+fn resolve_pane_exec(cfg: &Config, current_name: &str) -> PaneExecTarget {
+    if let Some(row) = cfg.sessions().into_iter().find(|r| r.command == current_name) {
+        return if row.comment.is_empty() {
+            PaneExecTarget::NoExecConfigured
+        } else {
+            PaneExecTarget::Run(row.comment)
+        };
+    }
+    let host_rows = cfg.hosts();
+    let host_defs = cfg.host_defs();
+    let host_match = host_rows.iter().position(|r| {
+        r.command == current_name || format!("host:{}", r.command) == current_name
+    });
+    if let Some(pos) = host_match
+        && let Some(host_def) = host_defs.get(pos)
+    {
+        return PaneExecTarget::Run(host_def.ssh_command());
+    }
+    PaneExecTarget::NotFound
+}
+
 /// Upsert every row of an imported `HistoryExport` into `history`
 /// (plus its `command_comments` / `history_output` side tables),
 /// returning `(imported, updated)` counts. Extracted from
@@ -4868,6 +4943,65 @@ fn main() -> anyhow::Result<()> {
             for r in rows {
                 let (next, freq) = r?;
                 println!("{}\t{}", freq, crate::util::escape_field_for_output(&next));
+            }
+        }
+        Commands::PaneExec => {
+            // Herdr first, then tmux — same precedence
+            // `_smarthistory_precmd` uses for capture.
+            let current_name: Option<String> = {
+                #[cfg(feature = "herdr")]
+                {
+                    crate::multiplexer::herdr_current_workspace_label()
+                }
+                #[cfg(not(feature = "herdr"))]
+                {
+                    None
+                }
+            }
+            .or_else(|| {
+                if env::var("TMUX").is_err() {
+                    return None;
+                }
+                std::process::Command::new("tmux")
+                    .args(["display-message", "-p", "#S"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty());
+
+            let Some(current_name) = current_name else {
+                eprintln!("smarthistory: not inside a tmux session or herdr workspace");
+                std::process::exit(1);
+            };
+
+            let cfg = Config::load_tui();
+            match resolve_pane_exec(&cfg, &current_name) {
+                PaneExecTarget::Run(cmd) => {
+                    let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+                    match status {
+                        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                        Err(e) => {
+                            eprintln!("smarthistory: failed to run {:?}: {}", cmd, e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                PaneExecTarget::NoExecConfigured => {
+                    println!(
+                        "smarthistory: session {:?} has no configured exec command",
+                        current_name
+                    );
+                }
+                PaneExecTarget::NotFound => {
+                    eprintln!(
+                        "smarthistory: no session/host config entry named {:?}; nothing to run",
+                        current_name
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Capture { command } => {

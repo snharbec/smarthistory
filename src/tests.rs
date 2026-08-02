@@ -1238,6 +1238,108 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(cfg.query_prefixes().jira, '`');
     }
 
+    /// `resolve_pane_exec` (backing `smarthistory pane-exec`) must
+    /// prefer a `session.<id>` match and return its `.exec` verbatim.
+    #[test]
+    fn resolve_pane_exec_matches_session_with_exec() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["session.1 = \"Proxmox\"\nsession.1.exec = \"tmux a\"\n"]);
+        assert_eq!(
+            resolve_pane_exec(&cfg, "Proxmox"),
+            PaneExecTarget::Run("tmux a".to_string())
+        );
+    }
+
+    /// A `session.<id>` match with no `.exec` set is a deliberate
+    /// no-op, not an error and not a fall-through to a host match.
+    #[test]
+    fn resolve_pane_exec_matches_session_without_exec() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["session.1 = \"Proxmox\"\n"]);
+        assert_eq!(
+            resolve_pane_exec(&cfg, "Proxmox"),
+            PaneExecTarget::NoExecConfigured
+        );
+    }
+
+    /// A `host.<id>` match returns its `ssh` connection command —
+    /// and must NOT include `.exec`, even when one is configured
+    /// (see `resolve_pane_exec`'s doc comment for why: it's meant to
+    /// be typed into the remote shell after connecting, not run as
+    /// a local follow-up).
+    #[test]
+    fn resolve_pane_exec_matches_host_excludes_remote_exec() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "host.1 = \"Proxmox\"\nhost.1.host = \"pve-1\"\nhost.1.user = \"root\"\nhost.1.exec = \"tmux a\"\n",
+        ]);
+        assert_eq!(
+            resolve_pane_exec(&cfg, "Proxmox"),
+            PaneExecTarget::Run("ssh root@pve-1".to_string())
+        );
+    }
+
+    /// herdr may show a host-created workspace as `host:<name>` if
+    /// the user hasn't renamed it away from the auto-generated
+    /// label — `resolve_pane_exec` must match that form too, same
+    /// as `stage_pane_selection`'s own matcher.
+    #[test]
+    fn resolve_pane_exec_matches_host_prefixed_label() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["host.1 = \"Proxmox\"\nhost.1.host = \"pve-1\"\nhost.1.user = \"root\"\n"]);
+        assert_eq!(
+            resolve_pane_exec(&cfg, "host:Proxmox"),
+            PaneExecTarget::Run("ssh root@pve-1".to_string())
+        );
+    }
+
+    /// No configured session/host has this name — nothing to run.
+    #[test]
+    fn resolve_pane_exec_no_match_returns_not_found() {
+        let cfg = Config::default();
+        assert_eq!(
+            resolve_pane_exec(&cfg, "some-unrelated-session-name"),
+            PaneExecTarget::NotFound
+        );
+    }
+
+    /// `HostDef::ssh_command` directly — port and identity flags are
+    /// only included when actually set, matching the pre-extraction
+    /// inline behavior (`host_row_in_panes_mode_ssh_argv_includes_port_and_identity`
+    /// covers the same logic via the TUI staging path).
+    #[test]
+    fn host_def_ssh_command_includes_port_and_identity() {
+        let host = crate::tui::state::HostDef {
+            name: "Proxmox".to_string(),
+            host: "pve-1".to_string(),
+            hostname: String::new(),
+            user: "root".to_string(),
+            port: 2222,
+            identity: "~/.ssh/id_prod".to_string(),
+            dir: String::new(),
+            exec: String::new(),
+        };
+        let cmd = host.ssh_command();
+        assert!(cmd.starts_with("ssh -p 2222 -i "), "got: {cmd:?}");
+        assert!(cmd.ends_with(" root@pve-1"), "got: {cmd:?}");
+    }
+
+    /// Default port (0 or 22) and no identity: no `-p`/`-i` flags.
+    #[test]
+    fn host_def_ssh_command_omits_default_port_and_empty_identity() {
+        let host = crate::tui::state::HostDef {
+            name: "Proxmox".to_string(),
+            host: "pve-1".to_string(),
+            hostname: String::new(),
+            user: "root".to_string(),
+            port: 22,
+            identity: String::new(),
+            dir: String::new(),
+            exec: String::new(),
+        };
+        assert_eq!(host.ssh_command(), "ssh root@pve-1");
+    }
+
     /// Regression guard for the bug `parse_multi` exists to avoid:
     /// finalization (applying the collected `key.*` overrides) must
     /// run exactly ONCE, after every source has contributed its

@@ -373,6 +373,45 @@ pub struct HostDef {
     /// sessions.
     pub exec: String,
 }
+
+impl HostDef {
+    /// Build the `ssh` command line for this host — only the flags
+    /// that are actually set. Shared by `App::stage_pane_selection`
+    /// (the `"host"` row arm, staging a connection from the `*`
+    /// panes view) and `smarthistory pane-exec` (re-running the same
+    /// connection from a freshly-opened pane/window that didn't
+    /// exist when the workspace was first created), so the two never
+    /// drift apart on how a `HostDef` becomes an `ssh` invocation.
+    pub fn ssh_command(&self) -> String {
+        let effective_user = if self.user.is_empty() {
+            std::env::var("USER").unwrap_or_default()
+        } else {
+            self.user.clone()
+        };
+        let target = if self.hostname.is_empty() {
+            self.host.clone()
+        } else {
+            self.hostname.clone()
+        };
+        let mut ssh_body = String::from("ssh");
+        if self.port != 0 && self.port != 22 {
+            ssh_body.push_str(&format!(" -p {}", self.port));
+        }
+        if !self.identity.is_empty() {
+            let home_list: Vec<String> = std::iter::once(std::env::var("HOME").unwrap_or_default())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let id_path = crate::util::expand_home_to_absolute(&self.identity, &home_list);
+            ssh_body.push_str(&format!(" -i {}", crate::util::shell_quote(&id_path)));
+        }
+        if !effective_user.is_empty() {
+            ssh_body.push_str(&format!(" {}@{}", effective_user, target));
+        } else {
+            ssh_body.push_str(&format!(" {}", target));
+        }
+        ssh_body
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickMode {
     /// `Enter` — run the command (parent should submit the line).
