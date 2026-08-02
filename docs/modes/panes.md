@@ -22,6 +22,8 @@ A workspace header row is rendered for every tmux session / herdr workspace that
 - `Enter` on a **pane** row stages `tmux select-pane -t <pane-id>` / `tmux switch-client -t <pane-id>` (tmux) or `herdr workspace focus <ws> && herdr tab focus <tab-id>` (herdr). The TUI exits and the parent shell runs the command — your terminal flips to the target pane.
 - `Enter` on a **workspace** header row stages the workspace-focus command (no specific pane). Useful when the workspace is in another window / tab and you just want to land in it.
 
+Selecting a `Directories`/`Hosts` row for the first time creates a new tmux session / herdr workspace named after that entry (see [`docs/configuration.md`](../configuration.md#sessionid)). A pane opened *inside* that session later — directly in tmux/herdr, not through this picker — starts a plain local shell with no connection of its own; run `smarthistory pane-exec` in it to reconnect, since the session/workspace is already named after the config entry that created it and needs no separate lookup.
+
 ## Group-aware filter
 
 The filter is **group-aware**: typing a token that matches a workspace label keeps the whole workspace (header + every child pane); typing a token that matches a pane's command or cwd keeps that pane and its parent workspace header.
@@ -57,6 +59,7 @@ The multiplexer is selected via `multiplexer=tmux|herdr` in the config (default 
 ## Cross-references
 
 - [Directories mode — the per-directory view; `#` shows the *unique* directories the shell has been in, `*` shows every pane currently running in them](directories.md)
+- [`smarthistory pane-exec` — reconnect a freshly opened pane/window without going through this picker](../configuration.md#hostid)
 - [TECHNICAL — multiplexer backend details](../../TECHNICAL.md#multiplexer-integration)
 - [README — multiplexer integration](../../README.md#multiplexer-integration-tmux--herdr)
 - **[Multiplexer backend reference](../../docs/multiplexer.md)** — backend selection, building with the `herdr` feature, setup guides for both backends, troubleshooting.

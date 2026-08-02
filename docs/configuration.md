@@ -589,6 +589,8 @@ host.1.exec=tmux new-session -A -s observability
 
 **File location**: same split-or-combined rule as `session.<id>` above — `host.<id>` entries can live in `~/.config/smarthistory/hosts`, in the main config file, or both. The in-TUI "add host" dialog (`F6` by default) always writes new entries to `~/.config/smarthistory/hosts`.
 
+**Reconnecting inside a new pane**: `smarthistory pane-exec` is a manual command for a fresh pane/window opened directly in tmux or herdr (e.g. `Ctrl-b c`, not through smarthistory's own `*` panes picker). tmux sessions and herdr workspaces are already named after the `session.<id>`/`host.<id>` entry that created them, so no separate registration step is needed — `pane-exec` just reads the current session name (or workspace label) and looks it up against the same config. A `session.<id>` match re-runs its `.exec`; a `host.<id>` match re-runs its `ssh` connection only — the host's `.exec` is deliberately not replayed, since it's meant to be typed into the remote shell after connecting (via the multiplexer backend's pane-injection API), not run as a local follow-up command.
+
 ---
 
 ## Modes

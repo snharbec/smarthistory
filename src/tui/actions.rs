@@ -1115,40 +1115,15 @@ impl App {
                         return;
                     }
                 };
-                // Build the `ssh`
-                // argv from the
-                // full `HostDef`.
-                // Only include
-                // flags that are
-                // actually set.
-                let effective_user = if host_def.user.is_empty() {
-                    std::env::var("USER").unwrap_or_default()
-                } else {
-                    host_def.user.clone()
-                };
+                // Build the `ssh` argv from the full `HostDef` — only
+                // the flags that are actually set. Shared with
+                // `smarthistory pane-exec` via `HostDef::ssh_command`.
+                let ssh_body = host_def.ssh_command();
                 let target = if host_def.hostname.is_empty() {
                     host_def.host.clone()
                 } else {
                     host_def.hostname.clone()
                 };
-                let mut ssh_body = String::from("ssh");
-                if host_def.port != 0 && host_def.port != 22 {
-                    ssh_body.push_str(&format!(" -p {}", host_def.port));
-                }
-                if !host_def.identity.is_empty() {
-                    let home_list: Vec<String> =
-                        std::iter::once(std::env::var("HOME").unwrap_or_default())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                    let id_path =
-                        crate::util::expand_home_to_absolute(&host_def.identity, &home_list);
-                    ssh_body.push_str(&format!(" -i {}", crate::util::shell_quote(&id_path),));
-                }
-                if !effective_user.is_empty() {
-                    ssh_body.push_str(&format!(" {}@{}", effective_user, target,));
-                } else {
-                    ssh_body.push_str(&format!(" {}", target));
-                }
                 let quoted_body = crate::util::shell_quote(&ssh_body);
                 let exec = host_def.exec.clone();
                 // Match against
