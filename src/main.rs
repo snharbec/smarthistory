@@ -379,13 +379,17 @@ enum Commands {
         #[arg(short, long)]
         table: bool,
     },
-    /// Print the zsh init snippet to `eval` from `.zshrc`.
+    /// Print the shell init snippet to `eval` from `.zshrc`/`.bashrc`.
     ///
-    /// Sets up the preexec/precmd hooks, the Ctrl-R picker, and the
-    /// Up/Down line-editor bindings. `shell` must be `zsh` (the only
-    /// supported shell).
+    /// Sets up the preexec/precmd hooks and a set of line-editor
+    /// widgets. `shell` must be `zsh` or `bash`. The `bash` snippet
+    /// is a smaller subset — no live dropdown box (no Readline
+    /// equivalent of zsh's POSTDISPLAY/region_highlight exists) —
+    /// and needs bash >= 4.0 for the widgets specifically (the
+    /// history-capture pipeline alone still works on older bash,
+    /// e.g. macOS's stock 3.2.57).
     Init {
-        /// Must be `zsh`.
+        /// `zsh` or `bash`.
         shell: String,
     },
     /// Read or validate the resolved configuration.
@@ -4706,14 +4710,15 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Init { shell } => {
-            if shell != "zsh" {
-                anyhow::bail!(
-                    "unsupported shell: {}. Only 'zsh' is currently supported.",
+            let snippet = match shell.as_str() {
+                "zsh" => include_str!("init.zsh"),
+                "bash" => include_str!("init.bash"),
+                _ => anyhow::bail!(
+                    "unsupported shell: {}. Supported: 'zsh', 'bash'.",
                     shell
-                );
-            }
+                ),
+            };
             let session_id = generate_uuid_v4();
-            let snippet = include_str!("init.zsh");
             println!("{}", snippet.replace("{session_id}", &session_id));
         }
         Commands::ImportAtuin => {
