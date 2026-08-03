@@ -221,6 +221,19 @@ impl App {
                 // in `stage_browser_selection`.
                 self.stage_browser_selection();
             }
+            crate::tui::mode::ModeKind::Zoxide => {
+                // `~...` queries are zoxide directory
+                // rows. They're tagged `mode ==
+                // "directory"`, the same tag `#`
+                // Directories mode's rows carry, so
+                // the exact same staging function
+                // handles both: new tmux session /
+                // herdr workspace rooted at the
+                // directory, or jump to an
+                // already-active pane there if one
+                // exists.
+                self.stage_directory_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for

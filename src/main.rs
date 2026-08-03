@@ -1281,6 +1281,18 @@ pub struct QueryPrefixes {
     /// auto-detects Chrome / Firefox / Safari at their platform-
     /// default locations when none are configured.
     pub browser: char,
+    /// Prefix for the zoxide directory-jump mode (default `~`).
+    /// Lists every directory in the local `zoxide` database (`zoxide
+    /// query -l`, highest frecency score first), filtered by the
+    /// typed body the same way every other mode filters. Selecting a
+    /// row creates a new tmux session / herdr workspace rooted
+    /// there — the exact same staging as the `#` Directories mode's
+    /// "unmarked row" path (`App::stage_directory_selection`),
+    /// including the `T`-marked "jump to an already-active pane
+    /// there instead" behavior. Requires the `zoxide` binary on
+    /// `$PATH`; a directory whose entry no longer exists on disk is
+    /// skipped.
+    pub zoxide: char,
     /// Prefix for the meta-prefix mode (default `'`). Not a search
     /// mode itself — typing `'` then a partial mode name (e.g.
     /// `'jir`) and pressing Tab expands to that mode's real prefix
@@ -1311,6 +1323,7 @@ impl Default for QueryPrefixes {
             similar: '"',
             paperless: '<',
             browser: '^',
+            zoxide: '~',
             meta: '\'',
         }
     }
@@ -1327,7 +1340,7 @@ impl QueryPrefixes {
     /// (missing `paperless` in two of the three) as fields were
     /// added over time. Add a new prefix field here too when one is
     /// added to the struct.
-    pub(crate) fn all_chars(&self) -> [char; 17] {
+    pub(crate) fn all_chars(&self) -> [char; 18] {
         [
             self.output,
             self.llm,
@@ -1345,6 +1358,7 @@ impl QueryPrefixes {
             self.similar,
             self.paperless,
             self.browser,
+            self.zoxide,
             self.meta,
         ]
     }
@@ -3366,6 +3380,7 @@ impl Config {
             "similar" => prefixes.similar = c,
             "paperless" => prefixes.paperless = c,
             "browser" => prefixes.browser = c,
+            "zoxide" => prefixes.zoxide = c,
             "meta" => prefixes.meta = c,
             _ => {}
         }

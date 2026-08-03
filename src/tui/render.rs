@@ -2348,6 +2348,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         qp.browser.to_string(),
         "search browser bookmarks + history, merged from every configured/auto-detected Chrome, Firefox, or Safari profile; type `bookmark` or `history` to narrow to one source; Enter opens the URL",
     );
+    mode_row(
+        &mut lines,
+        "zoxide",
+        qp.zoxide.to_string(),
+        "list directories from the local zoxide database (highest frecency score first); Enter creates a new tmux session / herdr workspace there, or jumps to an already-active pane there (same staging as directories mode)",
+    );
 
     lines.push(Line::from(""));
 

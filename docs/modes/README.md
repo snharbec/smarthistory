@@ -23,6 +23,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | Similar | `"` | [`similar.md`](similar.md) | Rank the same `segments` table by embedding similarity to a typed phrase, instead of an exact tag/link/text query. |
 | Paperless | `<` | [`paperless.md`](paperless.md) | Search documents on a Paperless-ngx backend by title, tag (`#TAG`), or correspondent (`@AUTHOR`). |
 | Browser | `^` | [`browser.md`](browser.md) | Search browser bookmarks + history, merged from every configured/auto-detected Chrome or Firefox profile; type `bookmark` / `history` to narrow to one source. |
+| Zoxide | `~` | [`zoxide.md`](zoxide.md) | List directories from the local `zoxide` database, highest frecency score first; selecting one creates a new tmux session / herdr workspace there. |
 
 ## Cross-cutting topics
 
@@ -54,12 +55,13 @@ The first character of the query decides the mode. Examples:
 | `"budget planning for next quarter` | Similar (segments ranked by embedding similarity to that phrase). |
 | `<invoice #work @acme` | Paperless (title contains "invoice", tagged `work`, correspondent contains "acme"). |
 | `^bookmark rust` | Browser (only bookmarks matching "rust"). |
+| `~proj` | Zoxide (directories from `zoxide query -l` whose path contains "proj"). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 
 ## Meta-prefix mode (`'`): pick a mode by name
 
-Remembering 17 single-character prefixes is hard. Type `'` (configurable via
+Remembering 18 single-character prefixes is hard. Type `'` (configurable via
 `prefix.meta=<char>`) then a partial mode name and press `Tab`:
 
 - **Unique match** (e.g. `'jir` → only "jira" matches): activates immediately

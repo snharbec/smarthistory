@@ -11239,6 +11239,162 @@ fn directories_prefix_is_configurable() {
     assert_eq!(app.directories_pattern(), "home");
 }
 
+// --- Zoxide mode (`~` prefix) ----
+//
+// `crate::tui::mode::zoxide::build_rows` is the pure part of
+// `fetch` — filtering, existence-checking, and row-building from an
+// already-fetched path list — split out specifically so these tests
+// never spawn the real `zoxide` binary or touch the user's real
+// zoxide database (see `build_rows`'s doc comment). Real temporary
+// directories are used (not just string literals) because
+// `build_rows` skips any path that doesn't exist on disk, mirroring
+// how a stale zoxide database entry (a directory since deleted)
+// shouldn't produce a row the user can't actually jump to.
+
+/// Create a real, empty temporary directory for a zoxide-mode test
+/// and return its canonicalized absolute path as a `String` (matching
+/// the form `zoxide query -l` would report). Canonicalizing avoids
+/// `/tmp` vs `/private/tmp`-style symlink mismatches between the
+/// path we create and the path `shorten_home_path`/`is_dir` see.
+fn zoxide_test_dir(name: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-zoxide-{}-{}-{}",
+        std::process::id(),
+        n,
+        name
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create zoxide test dir");
+    dir.canonicalize()
+        .expect("canonicalize zoxide test dir")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn zoxide_matches_and_pattern() {
+    let mut app = directories_test_app(&[]);
+    assert!(!app.is_zoxide_query());
+    assert_eq!(app.zoxide_pattern(), "");
+    app.query = "~proj".to_string();
+    assert!(app.is_zoxide_query());
+    assert_eq!(app.zoxide_pattern(), "proj");
+}
+
+/// `build_rows` preserves zoxide's own highest-score-first order via
+/// a descending synthetic `timestamp` — so the list's default
+/// (timestamp-DESC) sort matches zoxide's ranking without smarthistory
+/// needing to know the real score.
+#[test]
+fn zoxide_build_rows_preserves_zoxide_rank_order() {
+    let a = zoxide_test_dir("a");
+    let b = zoxide_test_dir("b");
+    let c = zoxide_test_dir("c");
+    let rows = crate::tui::mode::zoxide::build_rows(
+        vec![a.clone(), b.clone(), c.clone()],
+        &[],
+        &[],
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].directory, a);
+    assert_eq!(rows[1].directory, b);
+    assert_eq!(rows[2].directory, c);
+    assert!(
+        rows[0].timestamp > rows[1].timestamp && rows[1].timestamp > rows[2].timestamp,
+        "synthetic timestamps must descend in zoxide's own rank order: {:?}",
+        rows.iter().map(|r| r.timestamp).collect::<Vec<_>>()
+    );
+}
+
+/// A zoxide database entry whose directory has since been deleted is
+/// skipped — there's nothing to jump to, and staging a `tmux
+/// new-session -c <dir>` for a non-existent path would just fail.
+#[test]
+fn zoxide_build_rows_skips_nonexistent_directories() {
+    let real = zoxide_test_dir("real");
+    let deleted = format!("{}-does-not-exist", real);
+    let rows = crate::tui::mode::zoxide::build_rows(
+        vec![deleted, real.clone()],
+        &[],
+        &[],
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].directory, real);
+}
+
+/// The typed query filters by case-insensitive substring, AND-matched
+/// across whitespace-separated tokens — same contract as every other
+/// prefix mode's filter.
+#[test]
+fn zoxide_build_rows_filters_by_tokens_case_insensitively() {
+    let work = zoxide_test_dir("Work-Project");
+    let other = zoxide_test_dir("personal-notes");
+    let rows = crate::tui::mode::zoxide::build_rows(
+        vec![work.clone(), other],
+        &["work"],
+        &[],
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].directory, work);
+}
+
+/// Rows are tagged `mode == "directory"`, the same tag `#`
+/// Directories mode's rows carry — this is what makes
+/// `App::stage_directory_selection` and the `T`-marker render logic
+/// work unmodified for a zoxide row.
+#[test]
+fn zoxide_build_rows_tags_mode_directory() {
+    let dir = zoxide_test_dir("tagged");
+    let rows = crate::tui::mode::zoxide::build_rows(vec![dir], &[], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].mode, "directory");
+    assert_eq!(rows[0].source, "zoxide");
+}
+
+/// `ModeKind::Zoxide` is dedup-eligible (same treatment as
+/// `Directories`), so `build_merged_rows` dedupes by `command` and
+/// skips the labeled-row interleave, rather than treating zoxide rows
+/// like ordinary history rows.
+#[test]
+fn zoxide_mode_is_dedup_eligible() {
+    assert!(crate::tui::mode::ModeKind::Zoxide.dedup_eligible());
+}
+
+/// Selecting a zoxide row must go through the same staging as a
+/// Directories-mode row (`stage_directory_selection`'s
+/// create-a-new-session path), not fall through to the generic
+/// "history mode" default (which would try to run the directory path
+/// itself as a shell command).
+#[test]
+fn zoxide_select_for_run_stages_new_session_not_plain_command() {
+    let mut app = directories_test_app(&[]);
+    let dir = zoxide_test_dir("select");
+    app.merged_rows = vec![crate::tui::state::HistoryRow {
+        id: -1,
+        command: dir.clone(),
+        directory: dir.clone(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 1,
+        comment: String::new(),
+        output: String::new(),
+        mode: "directory".to_string(),
+        source: "zoxide".to_string(),
+        ..Default::default()
+    }];
+    app.query = "~select".to_string();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    let staged = app.selection.as_deref().unwrap_or("");
+    assert!(
+        staged.contains("new-session") || staged.contains("workspace create"),
+        "expected a new-session/workspace-create staging command, got: {staged:?}"
+    );
+}
+
 // --- Tmux-pane marker (`#` directories mode) ----
 
 /// `directory_has_tmux_pane`
@@ -20327,9 +20483,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_seventeen_entries() {
+fn prefix_picker_has_eighteen_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 17);
+    assert_eq!(picker.options.len(), 18);
 }
 
 #[test]
@@ -20414,7 +20570,7 @@ fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
         .prefix_picker
         .as_ref()
         .expect("bare ' + Tab should open a picker");
-    assert_eq!(picker.options.len(), 17, "bare ' + Tab should show every mode");
+    assert_eq!(picker.options.len(), 18, "bare ' + Tab should show every mode");
 }
 
 /// A partial name matching nothing sets a status message and does
@@ -20539,7 +20695,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 16);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 17);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
