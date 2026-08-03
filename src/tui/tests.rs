@@ -23924,6 +23924,43 @@ fn extract_links_and_tags_handles_unicode_tags_and_links() {
     );
 }
 
+/// `build_note_body` is the pure body-builder shared by the TUI's
+/// interactive dialog and `smarthistory create-note`'s direct CLI
+/// path — covered directly here so both callers are exercised by one
+/// set of cases instead of only indirectly through dialog-state tests.
+#[test]
+fn build_note_body_combines_title_and_content_into_heading() {
+    use crate::tui::state::build_note_body;
+    let body = build_note_body("Meeting notes", "Discussed the roadmap").unwrap();
+    assert!(body.starts_with("### Meeting notes\n[time:: "), "got: {body:?}");
+    assert!(body.ends_with("\nDiscussed the roadmap"), "got: {body:?}");
+}
+
+#[test]
+fn build_note_body_pulls_links_and_tags_from_content_into_heading() {
+    use crate::tui::state::build_note_body;
+    let body = build_note_body("Standup", "Blocked on [[Project X]] #urgent").unwrap();
+    let heading_line = body.lines().next().unwrap();
+    assert_eq!(
+        heading_line, "### Standup [[Project X]] #urgent",
+        "links/tags found only in content are appended to the heading, not duplicated in it twice"
+    );
+}
+
+#[test]
+fn build_note_body_returns_none_when_both_fields_empty() {
+    use crate::tui::state::build_note_body;
+    assert_eq!(build_note_body("", ""), None);
+    assert_eq!(build_note_body("   ", "\n\t"), None, "whitespace-only fields count as empty");
+}
+
+#[test]
+fn build_note_body_allows_title_only_or_content_only() {
+    use crate::tui::state::build_note_body;
+    assert!(build_note_body("Just a title", "").is_some());
+    assert!(build_note_body("", "Just content").is_some());
+}
+
 #[test]
 fn note_create_dialog_opens_and_field_toggles() {
     // The dialog opens,
@@ -23953,6 +23990,38 @@ fn note_create_dialog_opens_and_field_toggles() {
     }
     app.note_create_cancel();
     assert!(!app.is_note_create_open());
+}
+
+/// `open_note_create_dialog_prefilled` (used by `smarthistory
+/// create-note --title/--content`) sets the dialog's fields from the
+/// given strings directly, cursors at the end of each, Title
+/// focused — same shape `open_note_create_dialog` produces from a
+/// row-selection prefill, just with explicit text instead of a
+/// derived one.
+#[test]
+fn note_create_dialog_prefilled_sets_title_and_content_with_cursors_at_end() {
+    let mut app = directories_test_app(&[]);
+    assert!(!app.is_note_create_open());
+    app.open_note_create_dialog_prefilled("Standup".to_string(), "Blocked on X".to_string());
+    assert!(app.is_note_create_open());
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.title, "Standup");
+    assert_eq!(d.title_cursor, "Standup".chars().count());
+    assert_eq!(d.content, "Blocked on X");
+    assert_eq!(d.content_cursor, "Blocked on X".chars().count());
+    assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Title);
+}
+
+/// Calling it while the dialog is already open is a no-op — matches
+/// `open_note_create_dialog`'s own re-entry guard, so a caller can't
+/// clobber in-progress user input.
+#[test]
+fn note_create_dialog_prefilled_is_noop_when_already_open() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create.as_mut().unwrap().title = "already typing".to_string();
+    app.open_note_create_dialog_prefilled("New Title".to_string(), String::new());
+    assert_eq!(app.note_create.as_ref().unwrap().title, "already typing");
 }
 
 /// A question-mode row (`mode == "question"`) pre-fills Title with
@@ -24211,6 +24280,108 @@ fn note_create_backspace_removes_char_or_joins_line() {
         assert_eq!(d.content, "");
         assert_eq!(d.content_cursor, 0);
     }
+}
+
+/// `Up`/`Down` in the create-note dialog move a line at a time
+/// through the multi-line Content field, preserving column
+/// (clamped to the shorter line's length) — same as a normal text
+/// editor, and unlike `Left`/`Right`'s plain char-index movement.
+#[test]
+fn note_create_move_up_down_within_content_preserves_column() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_toggle_field();
+    for c in "short\nmuch longer line\nmid".chars() {
+        app.note_create_push_char(c);
+    }
+    // Cursor is at the end, on the last line ("mid"), column 3.
+    app.note_create_move_up();
+    {
+        // Moves to the middle line ("much longer line"), same
+        // column (3): right after "muc".
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(&d.content[..d.content.find('\n').unwrap()], "short");
+        assert_eq!(d.content_cursor, "short\nmuc".chars().count());
+    }
+    app.note_create_move_up();
+    {
+        // Moves to the first line ("short", 5 chars): column 3
+        // fits, cursor lands after "sho".
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content_cursor, "sho".chars().count());
+    }
+    app.note_create_move_down();
+    {
+        // Back down to the middle line at the same column (3).
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.content_cursor, "short\nmuc".chars().count());
+    }
+}
+
+/// `Up`/`Down` deliberately do NOT cross between Title and Content —
+/// they stay within whichever field is active, same as `Left`/`Right`.
+/// `Up` in Title is a no-op (Title is always one line); `Up` on
+/// Content's first line stays in Content rather than jumping to
+/// Title. `Tab` is the only way to switch fields.
+///
+/// Title = "Hi" (2 chars), Content = "AB\nC" (line 0 = "AB", line 1
+/// = "C"), chosen small so every cursor position below can be
+/// checked by hand.
+#[test]
+fn note_create_move_up_down_stay_within_active_field() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "Hi".chars() {
+        app.note_create_push_char(c);
+    }
+    // `Up`/`Down` in Title are no-ops: Title has only one line.
+    app.note_create_move_up();
+    app.note_create_move_down();
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Title);
+        assert_eq!(d.title_cursor, 2);
+    }
+    app.note_create_toggle_field();
+    for c in "AB\nC".chars() {
+        app.note_create_push_char(c);
+    }
+    // Cursor is at the end: line 1 ("C"), column 1.
+    app.note_create_move_up();
+    // Line 1 -> line 0, column min(1, len("AB")=2) = 1: right after
+    // "A". Stays in Content.
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Content);
+        assert_eq!(d.content_cursor, 1);
+    }
+    // `Up` again: already on Content's first line (line 0) — no-op,
+    // does NOT cross into Title.
+    app.note_create_move_up();
+    {
+        let d = app.note_create.as_ref().unwrap();
+        assert_eq!(d.active_field, crate::tui::state::NoteCreateField::Content);
+        assert_eq!(d.content_cursor, 1);
+    }
+}
+
+/// `Down` on Content's last line is a no-op — there's no field
+/// after Content to cross into.
+#[test]
+fn note_create_move_down_on_last_content_line_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_toggle_field();
+    for c in "only one line".chars() {
+        app.note_create_push_char(c);
+    }
+    let before = app.note_create.as_ref().unwrap().content_cursor;
+    app.note_create_move_down();
+    assert_eq!(app.note_create.as_ref().unwrap().content_cursor, before);
+    assert_eq!(
+        app.note_create.as_ref().unwrap().active_field,
+        crate::tui::state::NoteCreateField::Content
+    );
 }
 
 #[test]

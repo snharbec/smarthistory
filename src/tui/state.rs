@@ -1396,6 +1396,50 @@ pub fn extract_links_and_tags(text: &str) -> (Vec<String>, Vec<String>) {
     (links, tags)
 }
 
+/// Build the level-3-heading note body (`### Heading\n[time::
+/// HH:MM]\ncontent`) from a title and content: extracts `[[link]]`s
+/// and `#tag`s from both fields (via [`extract_links_and_tags`]) and
+/// appends any not already present in the title into the heading.
+/// Returns `None` when both fields are empty after trimming — the
+/// only validation this function does; caller-specific checks (e.g.
+/// `notes.database`/`notes.dir` being configured) are the caller's
+/// responsibility.
+///
+/// Shared by the TUI's create-note dialog
+/// (`App::note_create_build_body`) and `smarthistory create-note`'s
+/// direct CLI path, so both build the exact same body from the exact
+/// same title/content shape.
+pub fn build_note_body(title: &str, content: &str) -> Option<String> {
+    let title = title.trim();
+    let content = content.trim();
+    if title.is_empty() && content.is_empty() {
+        return None;
+    }
+    let combined = format!("{}\n{}", title, content);
+    let (links, tags) = extract_links_and_tags(&combined);
+    let mut heading = title.to_string();
+    for link in &links {
+        if !heading.contains(link) {
+            if !heading.is_empty() {
+                heading.push(' ');
+            }
+            heading.push_str(link);
+        }
+    }
+    for tag in &tags {
+        if !heading.contains(tag) {
+            if !heading.is_empty() {
+                heading.push(' ');
+            }
+            heading.push('#');
+            heading.push_str(tag);
+        }
+    }
+    let now = chrono::Local::now();
+    let time_str = now.format("%H:%M").to_string();
+    Some(format!("### {}\n[time:: {}]\n{}", heading, time_str, content))
+}
+
 /// Find the byte index of the
 /// closing `]]` for a `[[link]]`
 /// span that starts at offset 0
