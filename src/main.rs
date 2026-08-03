@@ -495,32 +495,25 @@ enum Commands {
     /// `session.<id>` match re-runs its `.exec` directly (a normal
     /// local command, no such mismatch).
     PaneExec,
-    /// Create a note directly from the command line, without opening
-    /// the TUI first.
+    /// Open the interactive `create-note` dialog directly, without
+    /// having to launch the TUI and press the `Action::CreateNote`
+    /// keybinding first.
     ///
-    /// Builds the same level-3-heading body
-    /// (`### Heading\n[time:: HH:MM]\ncontent`) the interactive
-    /// `create-note` dialog (`Action::CreateNote` / `smarthistory tui
-    /// --create-note`) stages on `Ctrl-S`, extracting `[[link]]`s and
-    /// `#tag`s from `--title`/`--content` into the heading, then runs
-    /// `note_search create-note ... --type daily` directly — no TUI,
-    /// no terminal raw-mode, suitable for scripts and shell aliases.
-    /// At least one of `--title`/`--content` must be non-empty.
+    /// Shorthand for `smarthistory tui --create-note`, plus
+    /// `--title`/`--content` to pre-fill the dialog's fields (in
+    /// place of the interactive path's usual "prefill from the
+    /// currently selected row", since there's no TUI selection yet
+    /// at this point). The dialog itself — completion, `Ctrl-S` to
+    /// save, `Ctrl-O` to save and open in `$EDITOR` — is exactly the
+    /// one `Action::CreateNote` opens from inside the TUI; this is
+    /// only a different way to reach it.
     CreateNote {
-        /// Note title. Becomes the heading text (plus any extracted
-        /// `[[link]]`s/`#tag`s). May be omitted if `--content` is set.
+        /// Pre-fill the dialog's Title field.
         #[arg(long)]
         title: Option<String>,
-        /// Note body. May contain `[[link]]`s and `#tag`s, extracted
-        /// into the heading same as the title. May be omitted if
-        /// `--title` is set.
+        /// Pre-fill the dialog's Content field.
         #[arg(long)]
         content: Option<String>,
-        /// Open `$EDITOR` (falls back to `vi`) on the day's daily
-        /// note immediately after saving — same as `Ctrl-O` in the
-        /// interactive dialog.
-        #[arg(long)]
-        edit: bool,
     },
     /// Run a command and capture its output alongside the history entry.
     ///
@@ -4537,6 +4530,245 @@ fn migrate_history_mode_column(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Shared body for `Commands::Tui` and `Commands::CreateNote` — the
+/// latter is exactly the former with `create_note` forced on,
+/// `--exec` on by default (same rationale `--create-note` already
+/// has, so a bare `smarthistory create-note` doesn't need `eval
+/// "$(...)"` to actually run the staged save command once the user
+/// submits the dialog), no positional query/prefix/mode, and an
+/// optional pre-filled title/content pair for the dialog in place of
+/// the interactive path's usual "prefill from the selected row"
+/// (there's no TUI selection yet at this point).
+///
+/// Always exits the process (never returns `Ok(())` in practice) —
+/// kept as `-> anyhow::Result<()>` so the one early-return validation
+/// error (`--pane-height`) can use `?` at the call site like every
+/// other fallible command.
+#[allow(clippy::too_many_arguments)]
+fn run_tui_command(
+    conn: Connection,
+    mode: Option<String>,
+    prefix: Option<String>,
+    exec: bool,
+    query: Option<String>,
+    pane: Option<String>,
+    panes_filter: Option<String>,
+    pane_height: Option<String>,
+    create_note: bool,
+    create_note_prefill: Option<(String, String)>,
+) -> anyhow::Result<()> {
+    // `--create-note` defaults to `--exec`: without it, a
+    // bare `smarthistory tui --create-note` just prints the
+    // staged `note_search create-note ...` command and exits
+    // — nothing runs it unless the caller wraps the
+    // invocation in `eval "$(...)"`. That's an easy trap for
+    // a flag meant to be launched standalone (a herdr
+    // keybinding, a shell alias) rather than always through
+    // a shell wrapper, so `--create-note` runs the staged
+    // command itself via `sh -c`, same as passing `--exec`
+    // explicitly. `--exec` can still be passed on its own
+    // with any other flag; this only widens its default.
+    let exec = exec || create_note;
+    // Honor an explicit --mode flag first. Otherwise consult
+    // the user's environment for a preferred starting scope:
+    //   $SMARTHISTORY_TUI_MODE      — explicit override
+    //   $SMARTHISTORY_MODE          — alias
+    // Otherwise fall back to the config file's `initialmode`
+    // (or `SESS` if unset).
+    //
+    // Track which source actually supplied the scope so
+    // we can mark the corresponding `CliOverrides.mode`
+    // field. The semantic is: `--mode` and the env vars
+    // are treated as "one-off, don't persist" overrides
+    // (a herdr keybinding setting `--mode GLOBAL` for a
+    // single invocation shouldn't change the user's next
+    // plain `smarthistory tui` launch). The config-file
+    // `initialmode=` setting is treated as a persistent
+    // preference (the user wrote it in their config; they
+    // expect it to apply every launch and they expect the
+    // session file to keep their currently-active scope in
+    // sync).
+    let cli_mode_override = mode.is_some()
+        || std::env::var("SMARTHISTORY_TUI_MODE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        || std::env::var("SMARTHISTORY_MODE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some();
+    let initial_mode = mode
+        .or_else(|| {
+            std::env::var("SMARTHISTORY_TUI_MODE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("SMARTHISTORY_MODE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| {
+            let cfg = Config::load();
+            cfg.initial_mode
+        });
+    // `--prefix <char>` starts the TUI directly in a prefix
+    // mode (panes, directories, notes, etc.). It takes final
+    // precedence over both the positional `--query` and the
+    // persisted `session.query`: when set, the TUI starts
+    // with `query = "<prefix-char>"` and the persisted query
+    // is NOT restored (the user explicitly asked for a
+    // particular prefix this launch).
+    //
+    // The prefix string is passed verbatim to the TUI as the
+    // initial query (just the character itself, with no
+    // filter body). `run_tui_to_stdout` receives it as the
+    // initial query and ALSO is told (via the new
+    // `flag_override_session_query` parameter) that it
+    // should ignore `session.query` even if it's `Some`.
+    //
+    // We strip a trailing `=` (`--prefix='*'` is parsed by
+    // clap as `*=*` or similar) defensively so weird shell
+    // quoting in the user's invocation doesn't break the
+    // prefix detection. We also accept multi-character
+    // values and take the first character — the prefix is
+    // always a single character by construction (see
+    // `QueryPrefixes`).
+    //
+    // `cli_query_override` is the trigger for
+    // `CliOverrides.query` — BOTH `--prefix` and a
+    // positional `--query` (or `$SMARTHISTORY_TUI_QUERY`)
+    // are treated as one-off CLI overrides that should
+    // not leak into the next launch.
+    let env_query = std::env::var("SMARTHISTORY_TUI_QUERY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let cli_query_override = prefix.is_some() || query.is_some() || env_query.is_some();
+    let (initial_query, override_session_query) =
+        match (prefix.as_deref(), query.as_deref(), env_query.as_deref()) {
+            (Some(p), _, _) => {
+                // Take the first char of the prefix string
+                // (it's always a single char by construction;
+                // we accept multi-char input defensively for
+                // shell-quoted strings).
+                let first_char = p.chars().next().unwrap_or_default().to_string();
+                (first_char, true)
+            }
+            (None, Some(q), _) => (q.to_string(), false),
+            (None, None, Some(q)) => (q.to_string(), false),
+            (None, None, None) => (String::new(), false),
+        };
+    // Build the LLM client up front so the TUI entry
+    // point doesn't need to know about config parsing.
+    // The TUI itself only sees `Option<Box<dyn LlmClient>>`
+    // and surfaces a "not configured" status when None.
+    let tui_cfg = Config::load();
+    let llm_client: Option<Box<dyn llm::LlmClient>> = tui_cfg
+        .llm
+        .as_ref()
+        .map(llm::OllamaClient::new)
+        .map(|c| Box::new(c) as Box<dyn llm::LlmClient>);
+    let llm_config = tui_cfg.llm.clone();
+    // Bundle the four CLI override flags into a
+    // single struct. The TUI uses this to decide
+    // which session fields to NOT persist on
+    // exit, so a one-off CLI invocation (e.g.
+    // `smarthistory tui --prefix '*'` from a
+    // herdr keybinding) doesn't leak the
+    // resulting state into the next plain
+    // launch. See `CliOverrides` for the
+    // per-field rationale.
+    //
+    // Validate `--pane-height` up front so an
+    // invalid value produces a clear error
+    // message instead of being silently
+    // dropped. We don't apply the value to
+    // `app.pane_height` here — the TUI does
+    // that via `run_tui_to_stdout` — but a
+    // typo like `--pane-height fourteen`
+    // would be caught by the TUI's own
+    // `PaneHeight::parse` call. Pre-validate
+    // here so a typo surfaces a clean error
+    // and the TUI never starts.
+    if let Some(ref h) = pane_height
+        && crate::tui::state::PaneHeight::parse(h).is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "invalid --pane-height {:?}; expected a non-negative integer number of lines",
+            h
+        ));
+    }
+    let cli_overrides = tui::CliOverrides {
+        mode: cli_mode_override,
+        query: cli_query_override,
+        pane_visibility: pane.is_some(),
+        // `panes_filter` isn't currently
+        // persisted in the session file
+        // (the field is reset to its default
+        // on every launch), so this flag is
+        // informational. It's tracked for
+        // symmetry with the other four and
+        // so the documentation accurately
+        // lists all five CLI flags as
+        // "one-off".
+        panes_filter: panes_filter.is_some(),
+        // `--pane-height <HEIGHT>` is a
+        // one-off override: applied for this
+        // launch but not persisted. See
+        // `CliOverrides::pane_height` for
+        // the rationale and the corresponding
+        // `paneheight=` save-site gate.
+        pane_height: pane_height.is_some(),
+    };
+    match tui::run_tui_to_stdout(
+        initial_mode,
+        initial_query,
+        conn,
+        llm_client,
+        llm_config,
+        override_session_query,
+        pane.as_deref(),
+        panes_filter.as_deref(),
+        pane_height.as_deref(),
+        cli_overrides,
+        create_note,
+        create_note_prefill,
+    )? {
+        Some((command, pick_mode)) => {
+            if exec {
+                // `--exec` mode: run the command
+                // directly via `sh -c` and exit
+                // with its exit code. This lets
+                // the user launch the TUI from
+                // outside a shell context (e.g.
+                // a herdr keybinding or a GUI
+                // launcher) and have the
+                // tmux/herdr switch happen
+                // without a parent shell to
+                // `eval` the printed command.
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .status();
+                match status {
+                    Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                    Err(e) => {
+                        eprintln!("smarthistory: failed to exec {:?}: {}", command, e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Default: print the command to
+                // stdout for the parent shell to
+                // eval (the historical behavior).
+                println!("{}", command);
+                std::process::exit(pick_mode);
+            }
+        }
+        None => std::process::exit(tui::exit_code::CANCEL),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let conn = init_db()?;
@@ -5031,53 +5263,19 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::CreateNote {
-            title,
-            content,
-            edit,
-        } => {
-            let cfg = Config::load();
-            let Some(notes_dir) = cfg.notes_dir() else {
-                eprintln!(
-                    "smarthistory: notes.dir not configured; set it to the parent of your daily/ folder"
-                );
-                std::process::exit(1);
-            };
-            if cfg.notes_database().is_none() {
-                eprintln!("smarthistory: notes.database not configured; set it to use create-note");
-                std::process::exit(1);
-            }
-            let title = title.unwrap_or_default();
-            let content = content.unwrap_or_default();
-            let Some(body) = crate::tui::state::build_note_body(&title, &content) else {
-                eprintln!("smarthistory: nothing to save — pass --title and/or --content");
-                std::process::exit(1);
-            };
-            let mut cmd = format!(
-                "note_search create-note {} --type daily",
-                crate::util::shell_quote(&body)
-            );
-            if edit {
-                let editor = env::var("EDITOR")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "vi".to_string());
-                let note_path = crate::tui::daily_note_path(notes_dir);
-                cmd = format!(
-                    "{} && {} {}",
-                    cmd,
-                    editor,
-                    crate::util::shell_quote(&note_path.to_string_lossy())
-                );
-            }
-            let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
-            match status {
-                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
-                Err(e) => {
-                    eprintln!("smarthistory: failed to run note_search: {}", e);
-                    std::process::exit(1);
-                }
-            }
+        Commands::CreateNote { title, content } => {
+            run_tui_command(
+                conn,
+                None,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                true,
+                Some((title.unwrap_or_default(), content.unwrap_or_default())),
+            )?;
         }
         Commands::Capture { command } => {
             let cfg = Config::load();
@@ -5302,217 +5500,18 @@ fn main() -> anyhow::Result<()> {
             pane_height,
             create_note,
         } => {
-            // `--create-note` defaults to `--exec`: without it, a
-            // bare `smarthistory tui --create-note` just prints the
-            // staged `note_search create-note ...` command and exits
-            // — nothing runs it unless the caller wraps the
-            // invocation in `eval "$(...)"`. That's an easy trap for
-            // a flag meant to be launched standalone (a herdr
-            // keybinding, a shell alias) rather than always through
-            // a shell wrapper, so `--create-note` runs the staged
-            // command itself via `sh -c`, same as passing `--exec`
-            // explicitly. `--exec` can still be passed on its own
-            // with any other flag; this only widens its default.
-            let exec = exec || create_note;
-            // Honor an explicit --mode flag first. Otherwise consult
-            // the user's environment for a preferred starting scope:
-            //   $SMARTHISTORY_TUI_MODE      — explicit override
-            //   $SMARTHISTORY_MODE          — alias
-            // Otherwise fall back to the config file's `initialmode`
-            // (or `SESS` if unset).
-            //
-            // Track which source actually supplied the scope so
-            // we can mark the corresponding `CliOverrides.mode`
-            // field. The semantic is: `--mode` and the env vars
-            // are treated as "one-off, don't persist" overrides
-            // (a herdr keybinding setting `--mode GLOBAL` for a
-            // single invocation shouldn't change the user's next
-            // plain `smarthistory tui` launch). The config-file
-            // `initialmode=` setting is treated as a persistent
-            // preference (the user wrote it in their config; they
-            // expect it to apply every launch and they expect the
-            // session file to keep their currently-active scope in
-            // sync).
-            let cli_mode_override = mode.is_some()
-                || std::env::var("SMARTHISTORY_TUI_MODE")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .is_some()
-                || std::env::var("SMARTHISTORY_MODE")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .is_some();
-            let initial_mode = mode
-                .or_else(|| {
-                    std::env::var("SMARTHISTORY_TUI_MODE")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .or_else(|| {
-                    std::env::var("SMARTHISTORY_MODE")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .unwrap_or_else(|| {
-                    let cfg = Config::load();
-                    cfg.initial_mode
-                });
-            // `--prefix <char>` starts the TUI directly in a prefix
-            // mode (panes, directories, notes, etc.). It takes final
-            // precedence over both the positional `--query` and the
-            // persisted `session.query`: when set, the TUI starts
-            // with `query = "<prefix-char>"` and the persisted query
-            // is NOT restored (the user explicitly asked for a
-            // particular prefix this launch).
-            //
-            // The prefix string is passed verbatim to the TUI as the
-            // initial query (just the character itself, with no
-            // filter body). `run_tui_to_stdout` receives it as the
-            // initial query and ALSO is told (via the new
-            // `flag_override_session_query` parameter) that it
-            // should ignore `session.query` even if it's `Some`.
-            //
-            // We strip a trailing `=` (`--prefix='*'` is parsed by
-            // clap as `*=*` or similar) defensively so weird shell
-            // quoting in the user's invocation doesn't break the
-            // prefix detection. We also accept multi-character
-            // values and take the first character — the prefix is
-            // always a single character by construction (see
-            // `QueryPrefixes`).
-            //
-            // `cli_query_override` is the trigger for
-            // `CliOverrides.query` — BOTH `--prefix` and a
-            // positional `--query` (or `$SMARTHISTORY_TUI_QUERY`)
-            // are treated as one-off CLI overrides that should
-            // not leak into the next launch.
-            let env_query = std::env::var("SMARTHISTORY_TUI_QUERY")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let cli_query_override = prefix.is_some()
-                || query.is_some()
-                || env_query.is_some();
-            let (initial_query, override_session_query) =
-                match (prefix.as_deref(), query.as_deref(), env_query.as_deref()) {
-                    (Some(p), _, _) => {
-                        // Take the first char of the prefix string
-                        // (it's always a single char by construction;
-                        // we accept multi-char input defensively for
-                        // shell-quoted strings).
-                        let first_char = p.chars().next().unwrap_or_default().to_string();
-                        (first_char, true)
-                    }
-                    (None, Some(q), _) => (q.to_string(), false),
-                    (None, None, Some(q)) => (q.to_string(), false),
-                    (None, None, None) => (String::new(), false),
-                };
-            // Build the LLM client up front so the TUI entry
-            // point doesn't need to know about config parsing.
-            // The TUI itself only sees `Option<Box<dyn LlmClient>>`
-            // and surfaces a "not configured" status when None.
-            let tui_cfg = Config::load();
-            let llm_client: Option<Box<dyn llm::LlmClient>> = tui_cfg
-                .llm
-                .as_ref()
-                .map(llm::OllamaClient::new)
-                .map(|c| Box::new(c) as Box<dyn llm::LlmClient>);
-            let llm_config = tui_cfg.llm.clone();
-            // Bundle the four CLI override flags into a
-            // single struct. The TUI uses this to decide
-            // which session fields to NOT persist on
-            // exit, so a one-off CLI invocation (e.g.
-            // `smarthistory tui --prefix '*'` from a
-            // herdr keybinding) doesn't leak the
-            // resulting state into the next plain
-            // launch. See `CliOverrides` for the
-            // per-field rationale.
-            //
-            // Validate `--pane-height` up front so an
-            // invalid value produces a clear error
-            // message instead of being silently
-            // dropped. We don't apply the value to
-            // `app.pane_height` here — the TUI does
-            // that via `run_tui_to_stdout` — but a
-            // typo like `--pane-height fourteen`
-            // would be caught by the TUI's own
-            // `PaneHeight::parse` call. Pre-validate
-            // here so a typo surfaces a clean error
-            // and the TUI never starts.
-            if let Some(ref h) = pane_height
-                && crate::tui::state::PaneHeight::parse(h).is_none()
-            {
-                return Err(anyhow::anyhow!(
-                    "invalid --pane-height {:?}; expected a non-negative integer number of lines",
-                    h
-                ));
-            }
-            let cli_overrides = tui::CliOverrides {
-                mode: cli_mode_override,
-                query: cli_query_override,
-                pane_visibility: pane.is_some(),
-                // `panes_filter` isn't currently
-                // persisted in the session file
-                // (the field is reset to its default
-                // on every launch), so this flag is
-                // informational. It's tracked for
-                // symmetry with the other four and
-                // so the documentation accurately
-                // lists all five CLI flags as
-                // "one-off".
-                panes_filter: panes_filter.is_some(),
-                // `--pane-height <HEIGHT>` is a
-                // one-off override: applied for this
-                // launch but not persisted. See
-                // `CliOverrides::pane_height` for
-                // the rationale and the corresponding
-                // `paneheight=` save-site gate.
-                pane_height: pane_height.is_some(),
-            };
-            match tui::run_tui_to_stdout(
-                initial_mode,
-                initial_query,
+            run_tui_command(
                 conn,
-                llm_client,
-                llm_config,
-                override_session_query,
-                pane.as_deref(),
-                panes_filter.as_deref(),
-                pane_height.as_deref(),
-                cli_overrides,
+                mode,
+                prefix,
+                exec,
+                query,
+                pane,
+                panes_filter,
+                pane_height,
                 create_note,
-            )? {
-                Some((command, pick_mode)) => {
-                    if exec {
-                        // `--exec` mode: run the command
-                        // directly via `sh -c` and exit
-                        // with its exit code. This lets
-                        // the user launch the TUI from
-                        // outside a shell context (e.g.
-                        // a herdr keybinding or a GUI
-                        // launcher) and have the
-                        // tmux/herdr switch happen
-                        // without a parent shell to
-                        // `eval` the printed command.
-                        let status = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(&command)
-                            .status();
-                        match status {
-                            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
-                            Err(e) => {
-                                eprintln!("smarthistory: failed to exec {:?}: {}", command, e);
-                                std::process::exit(1);
-                            }
-                        }
-                    } else {
-                        // Default: print the command to
-                        // stdout for the parent shell to
-                        // eval (the historical behavior).
-                        println!("{}", command);
-                        std::process::exit(pick_mode);
-                    }
-                }
-                None => std::process::exit(tui::exit_code::CANCEL),
-            }
+                None,
+            )?;
         }
         Commands::Export {
             filename,

@@ -716,6 +716,45 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or_else(|| s.len())
 }
 
+/// Given a char-index cursor into possibly-multi-line `text`,
+/// return its `(line, column)` — both 0-based, `column` counted in
+/// characters from the start of that line. Used by the create-note
+/// dialog's `Up`/`Down` handling (`App::note_create_move_up`/`_down`)
+/// to move the cursor a line at a time through the multi-line
+/// Content field the same way a normal text editor does, rather
+/// than the char-index-only movement `Left`/`Right` use.
+fn line_col_from_cursor(text: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, c) in text.chars().enumerate() {
+        if i == cursor {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Inverse of [`line_col_from_cursor`]: the char-index cursor for a
+/// given `(line, column)` in `text`. Both are clamped — `line` to
+/// the last line, `column` to that line's actual length — so moving
+/// from a long line to a shorter one lands at end-of-line rather
+/// than out of bounds, matching normal text-editor up/down behavior.
+fn cursor_from_line_col(text: &str, line: usize, column: usize) -> usize {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let target_line = line.min(lines.len().saturating_sub(1));
+    let mut cursor = 0;
+    for l in &lines[..target_line] {
+        cursor += l.chars().count() + 1; // +1 for the '\n' consumed between lines
+    }
+    cursor + column.min(lines[target_line].chars().count())
+}
+
 /// Walk left from `cursor` (a character index in
 /// `s`) and return the new cursor position after
 /// deleting one "word" backward in the
@@ -8505,6 +8544,28 @@ impl App {
         });
     }
 
+    /// Same as `open_note_create_dialog`, but the Title/Content are
+    /// given explicitly instead of derived from the currently
+    /// selected row — used by `smarthistory create-note
+    /// --title/--content`, which has no TUI row selection to
+    /// prefill from (the TUI hasn't started yet when the CLI flags
+    /// are parsed).
+    fn open_note_create_dialog_prefilled(&mut self, title: String, content: String) {
+        if self.note_create.is_some() {
+            return;
+        }
+        let title_cursor = title.chars().count();
+        let content_cursor = content.chars().count();
+        self.note_create = Some(crate::tui::state::NoteCreateDialog {
+            title,
+            title_cursor,
+            content,
+            content_cursor,
+            active_field: crate::tui::state::NoteCreateField::Title,
+            completion: None,
+        });
+    }
+
     /// Pre-fill the create-note dialog's Title/Content from the
     /// currently selected row, so `Ctrl-I` (create-note) captures
     /// whatever the user was just looking at instead of starting
@@ -8818,6 +8879,44 @@ impl App {
         };
         if *cursor < active_len {
             *cursor += 1;
+        }
+    }
+
+    /// `Up`: move the cursor up one line within the active field —
+    /// preserving column, clamped to the shorter line's length (see
+    /// [`cursor_from_line_col`]). Title is always a single line, so
+    /// this is a no-op there; in Content it's a no-op on the first
+    /// line. Deliberately does NOT cross into Title — `Up`/`Down`
+    /// stay within whichever field is active, same as `Left`/`Right`;
+    /// `Tab` is the only way to switch fields.
+    fn note_create_move_up(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        if dialog.active_field != crate::tui::state::NoteCreateField::Content {
+            return;
+        }
+        let (line, col) = line_col_from_cursor(&dialog.content, dialog.content_cursor);
+        if line > 0 {
+            dialog.content_cursor = cursor_from_line_col(&dialog.content, line - 1, col);
+        }
+    }
+
+    /// `Down`: the mirror of `note_create_move_up` — moves down one
+    /// line within Content, preserving column (clamped); a no-op in
+    /// Title or on Content's last line. See that method's doc
+    /// comment for why field-crossing is deliberately not supported.
+    fn note_create_move_down(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        if dialog.active_field != crate::tui::state::NoteCreateField::Content {
+            return;
+        }
+        let (line, col) = line_col_from_cursor(&dialog.content, dialog.content_cursor);
+        let total_lines = dialog.content.split('\n').count();
+        if line + 1 < total_lines {
+            dialog.content_cursor = cursor_from_line_col(&dialog.content, line + 1, col);
         }
     }
 
@@ -10293,6 +10392,15 @@ pub fn run_tui_to_stdout(
     // the action from
     // inside the TUI.
     open_create_note_on_start: bool,
+    // `Some((title, content))` when the caller wants the dialog
+    // pre-filled with explicit text instead of the usual
+    // "prefill from the selected row" behavior — used by
+    // `smarthistory create-note --title/--content`, which has no
+    // TUI row selection to draw from since the TUI hasn't started
+    // yet. `None` preserves the existing `--create-note` behavior
+    // (prefill from selection, or blank if nothing selected).
+    // Ignored when `open_create_note_on_start` is `false`.
+    create_note_prefill: Option<(String, String)>,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
         anyhow::anyhow!(
@@ -10524,7 +10632,10 @@ pub fn run_tui_to_stdout(
     // one-frame flash of
     // the bare list view).
     if open_create_note_on_start {
-        app.open_note_create_dialog();
+        match create_note_prefill {
+            Some((title, content)) => app.open_note_create_dialog_prefilled(title, content),
+            None => app.open_note_create_dialog(),
+        }
     }
 
     // Apply CLI overrides for pane
@@ -13379,7 +13490,19 @@ fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
 /// - `Backspace` /
 ///   `Left` / `Right`
 ///   edit the active
-///   field.
+///   field. `Up` / `Down`
+///   move a line at a
+///   time within Content
+///   (preserving column;
+///   a no-op in Title,
+///   which is always one
+///   line) — see
+///   `App::note_create_move_up`/`_down`.
+///   They do NOT cross
+///   into the other
+///   field; `Tab` is the
+///   only way to switch
+///   fields.
 /// - `Enter` inserts
 ///   a newline in
 ///   the Content
@@ -13556,6 +13679,14 @@ fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Right => {
             app.note_create_move_right();
+            false
+        }
+        KeyCode::Up => {
+            app.note_create_move_up();
+            false
+        }
+        KeyCode::Down => {
+            app.note_create_move_down();
             false
         }
         KeyCode::Char(c) => {

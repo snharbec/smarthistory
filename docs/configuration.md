@@ -620,7 +620,7 @@ notes.database=~/Documents/notes/.search.sqlite
 notes.dir=~/Documents/notes
 ```
 
-Both keys are also required by `smarthistory create-note --title <T> --content <C> [--edit]`, a plain CLI subcommand (no TUI, no interactive dialog) that builds and runs the same staged `note_search create-note ... --type daily` command the TUI's `create-note` dialog (`Action::CreateNote`) stages on `Ctrl-S` — see [README — Quick-create from notes/todo mode](../README.md#quick-create-from-notestodo-mode).
+Both keys are also required by the TUI's `create-note` dialog (`Action::CreateNote`), including when reached via `smarthistory create-note [--title <T>] [--content <C>]` — a shortcut that opens the same interactive dialog directly (equivalent to `smarthistory tui --create-note`), with `--title`/`--content` pre-filling its fields — see [README — Quick-create from notes/todo mode](../README.md#quick-create-from-notestodo-mode).
 
 Full reference: **[docs/modes/notes.md](modes/notes.md)**.
 
