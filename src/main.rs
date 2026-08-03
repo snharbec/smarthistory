@@ -495,6 +495,33 @@ enum Commands {
     /// `session.<id>` match re-runs its `.exec` directly (a normal
     /// local command, no such mismatch).
     PaneExec,
+    /// Create a note directly from the command line, without opening
+    /// the TUI first.
+    ///
+    /// Builds the same level-3-heading body
+    /// (`### Heading\n[time:: HH:MM]\ncontent`) the interactive
+    /// `create-note` dialog (`Action::CreateNote` / `smarthistory tui
+    /// --create-note`) stages on `Ctrl-S`, extracting `[[link]]`s and
+    /// `#tag`s from `--title`/`--content` into the heading, then runs
+    /// `note_search create-note ... --type daily` directly — no TUI,
+    /// no terminal raw-mode, suitable for scripts and shell aliases.
+    /// At least one of `--title`/`--content` must be non-empty.
+    CreateNote {
+        /// Note title. Becomes the heading text (plus any extracted
+        /// `[[link]]`s/`#tag`s). May be omitted if `--content` is set.
+        #[arg(long)]
+        title: Option<String>,
+        /// Note body. May contain `[[link]]`s and `#tag`s, extracted
+        /// into the heading same as the title. May be omitted if
+        /// `--title` is set.
+        #[arg(long)]
+        content: Option<String>,
+        /// Open `$EDITOR` (falls back to `vi`) on the day's daily
+        /// note immediately after saving — same as `Ctrl-O` in the
+        /// interactive dialog.
+        #[arg(long)]
+        edit: bool,
+    },
     /// Run a command and capture its output alongside the history entry.
     ///
     /// Captures up to 20 lines of combined stdout/stderr and stores
@@ -5000,6 +5027,54 @@ fn main() -> anyhow::Result<()> {
                         "smarthistory: no session/host config entry named {:?}; nothing to run",
                         current_name
                     );
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::CreateNote {
+            title,
+            content,
+            edit,
+        } => {
+            let cfg = Config::load();
+            let Some(notes_dir) = cfg.notes_dir() else {
+                eprintln!(
+                    "smarthistory: notes.dir not configured; set it to the parent of your daily/ folder"
+                );
+                std::process::exit(1);
+            };
+            if cfg.notes_database().is_none() {
+                eprintln!("smarthistory: notes.database not configured; set it to use create-note");
+                std::process::exit(1);
+            }
+            let title = title.unwrap_or_default();
+            let content = content.unwrap_or_default();
+            let Some(body) = crate::tui::state::build_note_body(&title, &content) else {
+                eprintln!("smarthistory: nothing to save — pass --title and/or --content");
+                std::process::exit(1);
+            };
+            let mut cmd = format!(
+                "note_search create-note {} --type daily",
+                crate::util::shell_quote(&body)
+            );
+            if edit {
+                let editor = env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "vi".to_string());
+                let note_path = crate::tui::daily_note_path(notes_dir);
+                cmd = format!(
+                    "{} && {} {}",
+                    cmd,
+                    editor,
+                    crate::util::shell_quote(&note_path.to_string_lossy())
+                );
+            }
+            let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+            match status {
+                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                Err(e) => {
+                    eprintln!("smarthistory: failed to run note_search: {}", e);
                     std::process::exit(1);
                 }
             }

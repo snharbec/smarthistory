@@ -23924,6 +23924,43 @@ fn extract_links_and_tags_handles_unicode_tags_and_links() {
     );
 }
 
+/// `build_note_body` is the pure body-builder shared by the TUI's
+/// interactive dialog and `smarthistory create-note`'s direct CLI
+/// path — covered directly here so both callers are exercised by one
+/// set of cases instead of only indirectly through dialog-state tests.
+#[test]
+fn build_note_body_combines_title_and_content_into_heading() {
+    use crate::tui::state::build_note_body;
+    let body = build_note_body("Meeting notes", "Discussed the roadmap").unwrap();
+    assert!(body.starts_with("### Meeting notes\n[time:: "), "got: {body:?}");
+    assert!(body.ends_with("\nDiscussed the roadmap"), "got: {body:?}");
+}
+
+#[test]
+fn build_note_body_pulls_links_and_tags_from_content_into_heading() {
+    use crate::tui::state::build_note_body;
+    let body = build_note_body("Standup", "Blocked on [[Project X]] #urgent").unwrap();
+    let heading_line = body.lines().next().unwrap();
+    assert_eq!(
+        heading_line, "### Standup [[Project X]] #urgent",
+        "links/tags found only in content are appended to the heading, not duplicated in it twice"
+    );
+}
+
+#[test]
+fn build_note_body_returns_none_when_both_fields_empty() {
+    use crate::tui::state::build_note_body;
+    assert_eq!(build_note_body("", ""), None);
+    assert_eq!(build_note_body("   ", "\n\t"), None, "whitespace-only fields count as empty");
+}
+
+#[test]
+fn build_note_body_allows_title_only_or_content_only() {
+    use crate::tui::state::build_note_body;
+    assert!(build_note_body("Just a title", "").is_some());
+    assert!(build_note_body("", "Just content").is_some());
+}
+
 #[test]
 fn note_create_dialog_opens_and_field_toggles() {
     // The dialog opens,

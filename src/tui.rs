@@ -698,8 +698,9 @@ fn truncate_for_status(s: &str, max: usize) -> String {
 /// `App::note_create_submit_and_edit` to know which file to open
 /// without shelling out to `note_search` first — see that method's
 /// doc comment for why duplicating just the path formula (not the
-/// file I/O) is the deliberate choice here.
-fn daily_note_path(notes_dir: &std::path::Path) -> PathBuf {
+/// file I/O) is the deliberate choice here. Also used by
+/// `smarthistory create-note --edit` for the same reason.
+pub(crate) fn daily_note_path(notes_dir: &std::path::Path) -> PathBuf {
     let now = chrono::Local::now();
     notes_dir
         .join("daily")
@@ -8873,54 +8874,24 @@ impl App {
         let Some(ref dialog) = self.note_create else {
             return None;
         };
-        if dialog.title.trim().is_empty() && dialog.content.trim().is_empty() {
+        let Some(body) = crate::tui::state::build_note_body(&dialog.title, &dialog.content) else {
             self.set_status_message("Nothing to save — both fields are empty".to_string());
             return None;
-        }
-        let Some(ref _db_path) = self.notes_database else {
+        };
+        if self.notes_database.is_none() {
             self.set_status_message(
                 "notes.database not configured; set it to use the create-note dialog".to_string(),
             );
             return None;
-        };
-        let Some(ref _notes_dir) = self.notes_dir else {
+        }
+        if self.notes_dir.is_none() {
             self.set_status_message(
                 "notes_dir not configured; set `notes.dir` to the parent of your daily/ folder"
                     .to_string(),
             );
             return None;
-        };
-        let combined = format!(
-            "{}\n{}",
-            dialog.title.trim(),
-            dialog.content.trim()
-        );
-        let (links, tags) = crate::tui::state::extract_links_and_tags(&combined);
-        let mut heading = dialog.title.trim().to_string();
-        for link in &links {
-            if !heading.contains(link) {
-                if !heading.is_empty() {
-                    heading.push(' ');
-                }
-                heading.push_str(link);
-            }
         }
-        for tag in &tags {
-            if !heading.contains(tag) {
-                if !heading.is_empty() {
-                    heading.push(' ');
-                }
-                heading.push_str(tag);
-            }
-        }
-        let now = chrono::Local::now();
-        let time_str = now.format("%H:%M").to_string();
-        Some(format!(
-            "### {}\n[time:: {}]\n{}",
-            heading,
-            time_str,
-            dialog.content.trim()
-        ))
+        Some(body)
     }
 
     fn note_create_submit(&mut self) -> bool {

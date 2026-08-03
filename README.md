@@ -79,6 +79,7 @@ smarthistory prune <DAYS> [-f]          # delete entries older than N days
 smarthistory tui   [options]            # launch the TUI
 smarthistory init  zsh                  # emit the zsh init snippet
 smarthistory pane-exec                  # reconnect the current tmux/herdr session (see below)
+smarthistory create-note --title T --content C [--edit]  # create a note directly, no TUI (see below)
 smarthistory config get <key>          # print a resolved config value
 smarthistory config list               # print all config values
 smarthistory config check              # validate the config file
@@ -192,6 +193,13 @@ The first character of the query selects the prefix mode. Each mode answers a di
 All three stage a `note_search create-note` command and require `notes.database` to be configured.
 
 `Action::CreateNote` (unbound by default — bind `key.create-note=<spec>` or open it from the command palette / `Ctrl-Q`; also launchable standalone via `smarthistory tui --create-note`) opens a separate two-field Title + Content dialog with inline `@p:` / `@e:` / `@d:` / `@7:` (`@w:`) / `@n:` / `#` link and tag completion, plus `Ctrl-D` / `Ctrl-N` / `Ctrl-7` one-keystroke shortcuts for the `@d:` / `@n:` / `@7:` prefixes — see [`docs/actions.md`](docs/actions.md) for the full reference.
+
+For scripts and shell aliases, `smarthistory create-note --title "..." --content "..."` builds and runs the same staged `note_search create-note ... --type daily` command directly — no TUI, no interactive dialog. `--edit` opens `$EDITOR` on the day's daily note right after saving:
+
+```bash
+smarthistory create-note --title "Standup" --content "Blocked on [[Project X]] #urgent"
+smarthistory create-note --content "quick note, no title" --edit
+```
 
 ### Multiplexer integration (tmux + herdr)
 
