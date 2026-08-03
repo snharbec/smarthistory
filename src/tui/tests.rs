@@ -23992,6 +23992,176 @@ fn note_create_dialog_opens_and_field_toggles() {
     assert!(!app.is_note_create_open());
 }
 
+/// `Esc` on an EMPTY create-note dialog closes it immediately —
+/// there's nothing worth confirming, so no confirmation overlay
+/// appears (this is the pre-existing behavior; the new confirmation
+/// only applies when a field has text — see the `dirty` variant
+/// below).
+#[test]
+fn note_create_esc_on_empty_dialog_closes_immediately() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    crate::tui::handle_note_create_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    assert!(!app.is_note_create_open());
+}
+
+/// `Esc` on a dialog with unsaved text (Title and/or Content
+/// non-empty) does NOT close the dialog — it opens the "save or
+/// drop?" confirmation overlay instead, leaving the typed text
+/// intact underneath.
+#[test]
+fn note_create_esc_on_dirty_dialog_opens_confirm_discard() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "my title".chars() {
+        app.note_create_push_char(c);
+    }
+    crate::tui::handle_note_create_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    let d = app.note_create.as_ref().expect("dialog stays open");
+    assert!(d.confirm_discard, "confirmation overlay must open");
+    assert_eq!(d.title, "my title", "typed text must be preserved");
+}
+
+/// `Ctrl-C` mirrors `Esc`: empty dialog exits the TUI immediately
+/// (pre-existing behavior — `Ctrl-C` is the universal abort key);
+/// dirty dialog opens the confirmation instead of exiting.
+#[test]
+fn note_create_ctrl_c_dirty_opens_confirm_discard_instead_of_exiting() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "draft".chars() {
+        app.note_create_push_char(c);
+    }
+    let exited = crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(!exited, "dirty dialog must not exit the TUI on first Ctrl-C");
+    assert!(!app.cancelled);
+    let d = app.note_create.as_ref().expect("dialog stays open");
+    assert!(d.confirm_discard);
+}
+
+#[test]
+fn note_create_ctrl_c_on_empty_dialog_exits_tui() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    let exited = crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(exited);
+    assert!(app.cancelled);
+    assert!(!app.is_note_create_open());
+}
+
+/// Inside the confirm-discard overlay, `Enter` is the default action
+/// and saves — same staging `Ctrl-S` produces in the main dialog.
+#[test]
+fn note_create_confirm_discard_enter_saves_by_default() {
+    let mut app = directories_test_app(&[]);
+    app.notes_database = Some(std::path::PathBuf::from("/tmp"));
+    app.notes_dir = Some(std::path::PathBuf::from("/tmp"));
+    app.open_note_create_dialog();
+    for c in "keep me".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().confirm_discard = true;
+    let committed = crate::tui::handle_note_create_confirm_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+    );
+    assert!(committed, "Enter must save and close the dialog");
+    assert!(!app.is_note_create_open());
+    assert!(
+        app.selection.as_deref().unwrap_or("").contains("keep me"),
+        "the saved body must be staged"
+    );
+}
+
+/// `d`/`D` in the confirm-discard overlay drops the note.
+#[test]
+fn note_create_confirm_discard_d_drops_the_note() {
+    for key_code in [KeyCode::Char('d'), KeyCode::Char('D')] {
+        let mut app = directories_test_app(&[]);
+        app.open_note_create_dialog();
+        for c in "throwaway".chars() {
+            app.note_create_push_char(c);
+        }
+        app.note_create.as_mut().unwrap().confirm_discard = true;
+        let committed = crate::tui::handle_note_create_confirm_key(
+            &mut app,
+            KeyEvent::new(key_code, KeyModifiers::empty()),
+        );
+        assert!(!committed);
+        assert!(!app.is_note_create_open(), "the note must be dropped");
+    }
+}
+
+/// The Cancel binding (default `Esc`) in the confirm-discard overlay
+/// is the SAFE choice: it backs out of the confirmation WITHOUT
+/// discarding anything, leaving the dialog open with the typed text
+/// intact — consistent with every other confirmation in the TUI
+/// (Cancel never performs the destructive action).
+#[test]
+fn note_create_confirm_discard_cancel_key_backs_out_to_editing() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "still drafting".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().confirm_discard = true;
+    let committed = crate::tui::handle_note_create_confirm_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+    );
+    assert!(!committed);
+    let d = app.note_create.as_ref().expect("dialog stays open, nothing lost");
+    assert!(!d.confirm_discard, "confirmation overlay closes");
+    assert_eq!(d.title, "still drafting");
+}
+
+/// `Ctrl-C` in the confirm-discard overlay is the panic button: it
+/// force-quits the whole TUI immediately without saving, bypassing
+/// the confirmation — same semantics as `handle_confirm_delete_key`'s
+/// `Ctrl-C`.
+#[test]
+fn note_create_confirm_discard_ctrl_c_force_quits() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "urgent exit".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().confirm_discard = true;
+    let exited = crate::tui::handle_note_create_confirm_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(exited);
+    assert!(app.cancelled);
+}
+
+/// A stray keypress inside the confirm-discard overlay (neither
+/// `Enter`, `d`/`D`, Cancel, nor `Ctrl-C`) is ignored — the
+/// confirmation stays open and nothing is lost or saved.
+#[test]
+fn note_create_confirm_discard_ignores_unrelated_keys() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "careful".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().confirm_discard = true;
+    let committed = crate::tui::handle_note_create_confirm_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+    );
+    assert!(!committed);
+    let d = app.note_create.as_ref().expect("dialog stays open");
+    assert!(d.confirm_discard, "confirmation overlay stays open");
+    assert_eq!(d.title, "careful", "nothing was saved or dropped");
+}
+
 /// `open_note_create_dialog_prefilled` (used by `smarthistory
 /// create-note --title/--content`) sets the dialog's fields from the
 /// given strings directly, cursors at the end of each, Title

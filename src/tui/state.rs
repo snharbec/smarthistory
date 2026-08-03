@@ -1219,6 +1219,15 @@ pub struct NoteCreateDialog {
     /// positions — is
     /// replaced verbatim).
     pub completion: Option<NoteCreateCompletion>,
+    /// `true` while the "save or drop?" confirmation overlay is
+    /// showing — set by `Esc`/`Ctrl-C` when either field has
+    /// unsaved text, instead of closing the dialog immediately. See
+    /// `App::note_create_confirm_discard_if_dirty`'s doc comment for
+    /// the full flow. While `true`, key handling is routed to
+    /// `handle_note_create_confirm_key` instead of the normal dialog
+    /// keymap (same layering `completion` above uses to take over
+    /// the dialog's keymap while a completion menu is open).
+    pub confirm_discard: bool,
 }
 
 /// The dialog-local
