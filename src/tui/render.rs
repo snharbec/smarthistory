@@ -191,6 +191,14 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // the pattern above.
     if let Some(dialog) = app.note_create.as_ref() {
         draw_note_create(f, app, dialog);
+        // The "save or drop?" confirmation is a small overlay on
+        // top of the create-note dialog itself (not a sibling of
+        // it) — drawn right after so it always sits above, matching
+        // `handle_note_create_confirm_key`'s precedence over the
+        // dialog's own keymap.
+        if dialog.confirm_discard {
+            draw_note_create_confirm(f, app);
+        }
     }
 
     // If a comment exists, draw the labeled entries pane as an overlay
@@ -277,6 +285,59 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
             Span::raw(" or "),
             Span::styled(cancel_hint, Theme::highlight()),
             Span::raw(" to cancel."),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// The create-note dialog's "save or drop?" confirmation overlay
+/// (`dialog.confirm_discard == true`), shown by `Esc`/`Ctrl-C` when
+/// either field has unsaved text — see
+/// `App::note_create_confirm_discard_if_dirty` and
+/// `handle_note_create_confirm_key` for the full flow. Deliberately
+/// smaller than `draw_confirm_delete`'s popup (this one has no
+/// per-case message to fit, just the fixed prompt) and drawn on top
+/// of the create-note dialog rather than replacing it, so the
+/// user's typed Title/Content stay visible underneath while they
+/// decide.
+fn draw_note_create_confirm(f: &mut Frame, app: &App) {
+    let area = centered_rect(50, 18, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Unsaved note ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent());
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Save this note before closing?",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Press "),
+            Span::styled("Enter", Theme::highlight()),
+            Span::raw(" to save (default), "),
+            Span::styled("d", Theme::highlight()),
+            Span::raw(" to drop it, or "),
+            Span::styled(cancel_hint, Theme::highlight()),
+            Span::raw(" to keep editing."),
         ]),
     ];
 

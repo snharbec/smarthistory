@@ -8541,6 +8541,7 @@ impl App {
             // rather than overwriting.
             active_field: crate::tui::state::NoteCreateField::Title,
             completion: None,
+            confirm_discard: false,
         });
     }
 
@@ -8563,6 +8564,7 @@ impl App {
             content_cursor,
             active_field: crate::tui::state::NoteCreateField::Title,
             completion: None,
+            confirm_discard: false,
         });
     }
 
@@ -8958,6 +8960,37 @@ impl App {
     fn note_create_cancel(&mut self) {
         self.note_create = None;
         self.set_status_message("create-note cancelled".to_string());
+    }
+
+    /// `true` when either Title or Content has non-whitespace text —
+    /// what `Esc`/`Ctrl-C` check before closing the create-note
+    /// dialog, to decide whether a "save or drop?" confirmation is
+    /// needed first.
+    fn note_create_is_dirty(&self) -> bool {
+        self.note_create
+            .as_ref()
+            .map(|d| !d.title.trim().is_empty() || !d.content.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Called from `Esc`/`Ctrl-C` in the create-note dialog instead
+    /// of closing it outright: if the dialog has unsaved text (see
+    /// `note_create_is_dirty`), opens the "save or drop?"
+    /// confirmation overlay (`dialog.confirm_discard = true`,
+    /// handled by `handle_note_create_confirm_key`) and returns
+    /// `true` so the caller does NOT also run its normal
+    /// cancel/exit behavior. Returns `false` (does nothing) when the
+    /// dialog is empty, so the caller falls through to its usual
+    /// immediate-close behavior — an empty dialog has nothing worth
+    /// confirming.
+    fn note_create_confirm_discard_if_dirty(&mut self) -> bool {
+        if !self.note_create_is_dirty() {
+            return false;
+        }
+        if let Some(ref mut dialog) = self.note_create {
+            dialog.confirm_discard = true;
+        }
+        true
     }
 
     /// Submit the dialog.
@@ -11479,6 +11512,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // the user couldn't
     // navigate the
     // candidates.
+    //
+    // The "save or drop?" confirmation overlay (`Esc`/`Ctrl-C` with
+    // unsaved text — see `App::note_create_confirm_discard_if_dirty`)
+    // sits ABOVE even the completion menu: once it's showing, every
+    // key answers the confirmation (`Enter` saves, `d` drops, Cancel
+    // backs out, `Ctrl-C` force-quits) rather than reaching the
+    // menu's or the dialog's own keymap.
+    if app.is_note_create_open()
+        && app
+            .note_create
+            .as_ref()
+            .map(|d| d.confirm_discard)
+            .unwrap_or(false)
+    {
+        return handle_note_create_confirm_key(app, key);
+    }
     if app.is_note_create_open()
         && app
             .note_create
@@ -13457,6 +13506,54 @@ fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Key handler for the create-note dialog's "save or drop?"
+/// confirmation overlay (`dialog.confirm_discard == true`), shown by
+/// `Esc`/`Ctrl-C` in the main dialog when either field has unsaved
+/// text instead of closing immediately (see
+/// `App::note_create_confirm_discard_if_dirty`). Takes over the
+/// dialog's keymap while showing, same layering
+/// `handle_note_create_completion_key` uses for the inline
+/// completion menu.
+///
+/// - `Enter` is the **default** action (the dialog opens with it
+///   already the implied choice, per how this was specified) and
+///   saves — same as `Ctrl-S` in the main dialog.
+/// - `d` / `D` drops the note (discards it, same as
+///   `note_create_cancel`).
+/// - The configured Cancel binding (default `Esc`) is the SAFE
+///   choice, consistent with every other confirmation in the TUI
+///   (e.g. `handle_confirm_delete_key`'s Cancel never deletes): it
+///   backs out of the confirmation WITHOUT discarding anything,
+///   clearing `confirm_discard` so the user lands back in the main
+///   dialog with their text intact.
+/// - `Ctrl-C` is the panic button, matching
+///   `handle_confirm_delete_key`'s Ctrl-C: it force-quits the whole
+///   TUI immediately without saving, bypassing the confirmation
+///   entirely.
+/// - Any other key is ignored, so a stray keypress can't discard
+///   data by accident.
+fn handle_note_create_confirm_key(app: &mut App, key: KeyEvent) -> bool {
+    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    match key.code {
+        KeyCode::Enter => app.note_create_submit(),
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            app.note_create_cancel();
+            false
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
+        }
+        _ if is_cancel_key => {
+            if let Some(ref mut dialog) = app.note_create {
+                dialog.confirm_discard = false;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Key handler for the
 /// `create-note` dialog
 /// (the rich, two-field
@@ -13534,6 +13631,9 @@ fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
+                if app.note_create_confirm_discard_if_dirty() {
+                    return false;
+                }
                 app.note_create_cancel();
                 app.cancelled = true;
                 return true;
@@ -13620,6 +13720,9 @@ fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
     }
     match key.code {
         KeyCode::Esc => {
+            if app.note_create_confirm_discard_if_dirty() {
+                return false;
+            }
             app.note_create_cancel();
             false
         }
