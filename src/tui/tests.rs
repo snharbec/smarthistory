@@ -24759,6 +24759,60 @@ fn note_create_select_all_cleared_by_unrelated_key() {
     assert_eq!(d.title, "Hi!", "the key still does its normal thing");
 }
 
+/// `select_all` must be visually obvious, not just an internal
+/// flag: the active field's border title gains a "SELECTED" marker
+/// and its text renders in reverse video (the same convention the
+/// completion menu's highlighted candidate uses). Renders through
+/// the real `crate::tui::render::ui` entry point against a
+/// `TestBackend` and inspects the actual buffer, the same technique
+/// `draw_list_shows_correct_rows_when_scrolled_in_a_long_history_list`
+/// uses, so this exercises the real widget tree rather than a
+/// hand-rolled approximation of it.
+#[test]
+fn draw_note_create_shows_selected_indicator_when_ctrl_a_active() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "Standup".chars() {
+        app.note_create_push_char(c);
+    }
+    let backend = ratatui::backend::TestBackend::new(80, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text_before = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        !text_before.contains("SELECTED"),
+        "no selection indicator before Ctrl-A"
+    );
+
+    app.note_create.as_mut().unwrap().select_all = true;
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let text_after = buffer.content.iter().map(|c| c.symbol()).collect::<String>();
+    assert!(
+        text_after.contains("SELECTED"),
+        "selection indicator must appear once Ctrl-A is active, got: {text_after:?}"
+    );
+    let has_reversed_cell = buffer
+        .content
+        .iter()
+        .any(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert!(
+        has_reversed_cell,
+        "the selected field's text must render in reverse video"
+    );
+}
+
 /// `Up`/`Down` deliberately do NOT cross between Title and Content —
 /// they stay within whichever field is active, same as `Left`/`Right`.
 /// `Up` in Title is a no-op (Title is always one line); `Up` on
