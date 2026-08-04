@@ -434,6 +434,7 @@ The first character the user types to enter a mode. The default keymap covers ev
 | `prefix.similar` | similar/phrase search | `"` | same `segments` table, ranked by embedding similarity to the typed phrase (requires a reachable Ollama instance) |
 | `prefix.paperless` | paperless document search | `<` | search a Paperless-ngx backend by title / tag / correspondent |
 | `prefix.browser` | browser bookmarks + history | `^` | merged Chrome / Firefox / Safari bookmarks + history, tagged `bookmark` / `history` |
+| `prefix.zoxide` | zoxide directories | `~` | directories from the local `zoxide` database, highest frecency score first; selecting one creates a new tmux session / herdr workspace there (requires the `zoxide` binary on `$PATH`) |
 | `prefix.meta` | meta-prefix (mode picker) | `'` | not a search mode itself — type a partial mode name then Tab to expand/activate; see below |
 
 ```ini
@@ -867,6 +868,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `prefix.similar` | char | `"` | [Query prefixes](#query-prefixes) |
 | `prefix.paperless` | char | `<` | [Query prefixes](#query-prefixes) |
 | `prefix.browser` | char | `^` | [Query prefixes](#query-prefixes) |
+| `prefix.zoxide` | char | `~` | [Query prefixes](#query-prefixes) |
 | `prefix.meta` | char | `'` | [Query prefixes](#query-prefixes) |
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |

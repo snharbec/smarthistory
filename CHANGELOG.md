@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `~` prefix mode: zoxide directories. Lists every directory in the
+  local `zoxide` database (`zoxide query -l`, highest frecency score first),
+  filtered by the typed query. Selecting a row creates a new tmux session /
+  herdr workspace rooted there — the same staging `#` Directories mode uses
+  for an unmarked row, including the `T`-marked "jump to an already-active
+  pane there" behavior. Requires the `zoxide` binary on `$PATH`; see
+  `docs/modes/zoxide.md`.
 - New `^` prefix mode: browser bookmarks + history, merged from every
   configured (or auto-detected) Chrome / Firefox / Safari profile. Each row
   is tagged `bookmark` / `history` so typing that word narrows the list to

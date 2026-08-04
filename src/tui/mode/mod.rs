@@ -97,6 +97,13 @@ pub enum ModeKind {
     /// the literal word `bookmark` or `history`. Selecting a row
     /// opens the URL in the system browser.
     Browser,
+    /// `~` (default). Directories from the local `zoxide` database
+    /// (`zoxide query -l`, highest frecency score first), filtered
+    /// by the typed body. Selecting a row creates a new tmux
+    /// session / herdr workspace rooted there — the same staging
+    /// `Directories` uses for its "unmarked row" path, including the
+    /// `T`-marked "jump to an already-active pane there" behavior.
+    Zoxide,
 }
 
 impl ModeKind {
@@ -122,6 +129,7 @@ impl ModeKind {
             ModeKind::Similar => '"',
             ModeKind::Paperless => '<',
             ModeKind::Browser => '^',
+            ModeKind::Zoxide => '~',
         }
     }
 
@@ -147,6 +155,7 @@ impl ModeKind {
             ModeKind::Similar => "similar",
             ModeKind::Paperless => "paperless",
             ModeKind::Browser => "browser",
+            ModeKind::Zoxide => "zoxide",
         }
     }
 
@@ -181,6 +190,7 @@ impl ModeKind {
             ModeKind::Similar => "Similar",
             ModeKind::Paperless => "Paperless",
             ModeKind::Browser => "Browser",
+            ModeKind::Zoxide => "Zoxide",
         }
     }
 
@@ -208,6 +218,7 @@ impl ModeKind {
             ModeKind::Similar => prefixes.similar,
             ModeKind::Paperless => prefixes.paperless,
             ModeKind::Browser => prefixes.browser,
+            ModeKind::Zoxide => prefixes.zoxide,
         }
     }
 
@@ -228,6 +239,7 @@ impl ModeKind {
                 | ModeKind::Tags
                 | ModeKind::Codegraph
                 | ModeKind::Ag
+                | ModeKind::Zoxide
         )
     }
 }
@@ -276,6 +288,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Paperless
     } else if c == p.browser {
         ModeKind::Browser
+    } else if c == p.zoxide {
+        ModeKind::Zoxide
     } else {
         ModeKind::History
     }
@@ -298,6 +312,7 @@ pub mod question;
 pub mod similar;
 pub mod tags;
 pub mod todo;
+pub mod zoxide;
 
 /// Lazy-load the selected row's preview context for every mode that
 /// needs it (tags/codegraph/notes/todo/files/panes/segments/similar).
@@ -345,6 +360,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Similar => Some(Theme::accent()),
         ModeKind::Paperless => Some(Theme::info()),
         ModeKind::Browser => Some(Theme::success()),
+        ModeKind::Zoxide => Some(Theme::accent()),
         ModeKind::History => None,
     }
 }
@@ -381,6 +397,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Similar => ("\"".to_string(), format!(" similar{} ", algo)),
         ModeKind::Paperless => ("<".to_string(), format!(" paperless{} ", algo)),
         ModeKind::Browser => ("^".to_string(), format!(" browser{} ", algo)),
+        ModeKind::Zoxide => ("~".to_string(), format!(" zoxide{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -594,6 +611,7 @@ pub fn run_all_checks(
             ModeKind::Panes => crate::tui::mode::panes::check(app),
             ModeKind::Paperless => crate::tui::mode::paperless::check(app),
             ModeKind::Browser => crate::tui::mode::browser::check(app),
+            ModeKind::Zoxide => crate::tui::mode::zoxide::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -623,6 +641,7 @@ impl ModeKind {
             ModeKind::Panes,
             ModeKind::Paperless,
             ModeKind::Browser,
+            ModeKind::Zoxide,
         ]
     }
 }

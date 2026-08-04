@@ -4243,6 +4243,12 @@ impl PrefixPicker {
                 label: "Browser",
                 description: "search browser bookmarks + history (Chrome, Firefox, Safari); Enter opens the URL",
             },
+            PrefixOption {
+                prefix: Some(prefixes.zoxide),
+                name: "zoxide",
+                label: "Zoxide",
+                description: "list zoxide directories; Enter opens a new tmux session / herdr workspace there",
+            },
         ]
     }
 
@@ -4925,6 +4931,16 @@ impl App {
         if self.is_directories_query() {
             crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         }
+        // Zoxide mode (`~`) rows are also plain directory rows
+        // (`mode == "directory"`) and get the same `T`-marked
+        // "jump to an already-active pane there" treatment as `#`
+        // Directories mode — needs the same tmux/herdr snapshot
+        // primed before `fetch()` reads it. Reuses the exact same
+        // helper (it's mode-agnostic; it just populates
+        // `app.tmux_windows`).
+        if self.is_zoxide_query() {
+            crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
+        }
         // Same one-shot cache priming for the
         // `*`-prefix panes view: populate the
         // session-panes snapshot before `fetch()`
@@ -5508,6 +5524,7 @@ impl App {
             crate::tui::mode::ModeKind::Similar => return crate::tui::mode::similar::fetch(self),
             crate::tui::mode::ModeKind::Paperless => return crate::tui::mode::paperless::fetch(self),
             crate::tui::mode::ModeKind::Browser => return crate::tui::mode::browser::fetch(self),
+            crate::tui::mode::ModeKind::Zoxide => return crate::tui::mode::zoxide::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -5973,6 +5990,10 @@ impl App {
             return;
         }
         if self.is_browser_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_zoxide_query() {
             self.select_for_run_impl();
             return;
         }
@@ -10302,6 +10323,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.similar => Some(ModeKind::Similar),
             _ if c == query_prefixes.paperless => Some(ModeKind::Paperless),
             _ if c == query_prefixes.browser => Some(ModeKind::Browser),
+            _ if c == query_prefixes.zoxide => Some(ModeKind::Zoxide),
             _ => None,
         }
     });
