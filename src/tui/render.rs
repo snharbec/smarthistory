@@ -635,7 +635,10 @@ fn draw_note_create(
 
     // ----- Title field (single-line) -----
     let title_active = dialog.active_field == NoteCreateField::Title;
-    let title_border_style = if title_active {
+    let title_selected = title_active && dialog.select_all;
+    let title_border_style = if title_selected {
+        Theme::warning()
+    } else if title_active {
         Theme::accent()
     } else {
         Theme::dim()
@@ -643,17 +646,36 @@ fn draw_note_create(
     let title_block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(if title_active { " Title (active, Tab → Content) " } else { " Title " })
+        .title(if title_selected {
+            " Title (SELECTED — Ctrl-C yank, ⌫ clear) "
+        } else if title_active {
+            " Title (active, Tab → Content) "
+        } else {
+            " Title "
+        })
         .title_style(title_border_style)
         .border_style(title_border_style);
-    let title_paragraph = Paragraph::new(Line::from(Span::raw(dialog.title.as_str())))
-        .block(title_block)
-        .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
+    // The whole field is shown in reverse video while selected
+    // (`Ctrl-A`) — the same visual convention every other selection
+    // highlight in the TUI uses (see e.g. the completion menu's
+    // highlighted candidate).
+    let title_text_style = if title_selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let title_paragraph =
+        Paragraph::new(Line::from(Span::styled(dialog.title.as_str(), title_text_style)))
+            .block(title_block)
+            .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
     f.render_widget(title_paragraph, chunks[0]);
 
     // ----- Content field (multi-line) -----
     let content_active = dialog.active_field == NoteCreateField::Content;
-    let content_border_style = if content_active {
+    let content_selected = content_active && dialog.select_all;
+    let content_border_style = if content_selected {
+        Theme::warning()
+    } else if content_active {
         Theme::accent()
     } else {
         Theme::dim()
@@ -675,14 +697,26 @@ fn draw_note_create(
         .iter()
         .map(|chars| wrap_chars_to_rows(chars, inner_width_content))
         .collect();
+    // The whole field is shown in reverse video while selected
+    // (`Ctrl-A`) — same convention as the Title field above.
+    let content_text_style = if content_selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
     let display_lines: Vec<Line> = wrapped_lines
         .iter()
-        .flat_map(|rows| rows.iter().map(|(text, _)| Line::from(text.as_str())))
+        .flat_map(|rows| {
+            rows.iter()
+                .map(|(text, _)| Line::from(Span::styled(text.as_str(), content_text_style)))
+        })
         .collect();
     let content_block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(if content_active {
+        .title(if content_selected {
+            " Content (SELECTED — Ctrl-C yank, ⌫ clear) "
+        } else if content_active {
             " Content (active, Tab → Title) "
         } else {
             " Content "
