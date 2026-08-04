@@ -1228,6 +1228,17 @@ pub struct NoteCreateDialog {
     /// keymap (same layering `completion` above uses to take over
     /// the dialog's keymap while a completion menu is open).
     pub confirm_discard: bool,
+    /// `true` when the active field (Title or Content) is fully
+    /// selected via `Ctrl-A`. Not a partial-range selection — this
+    /// dialog only ever has "none" or "everything in the active
+    /// field" selected, unlike a real text editor's arbitrary
+    /// start/end range. While `true`, `Ctrl-C` yanks the field's
+    /// text to the clipboard instead of cancelling the dialog, and
+    /// `Backspace` deletes the whole field instead of one character;
+    /// any other key clears it back to `false`. See
+    /// `App::note_create_select_all` and the guard at the top of
+    /// `handle_note_create_key`.
+    pub select_all: bool,
 }
 
 /// The dialog-local

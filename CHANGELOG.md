@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `create-note` dialog: `Ctrl-A` selects the whole active field (Title or
+  Content). While selected, `Ctrl-C` yanks it to the clipboard instead of
+  cancelling the dialog, and `Backspace` deletes the whole field instead of
+  one character; any other key drops the selection.
 - New `~` prefix mode: zoxide directories. Lists every directory in the
   local `zoxide` database (`zoxide query -l`, highest frecency score first),
   filtered by the typed query. Selecting a row creates a new tmux session /

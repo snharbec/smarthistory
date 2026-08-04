@@ -8563,6 +8563,7 @@ impl App {
             active_field: crate::tui::state::NoteCreateField::Title,
             completion: None,
             confirm_discard: false,
+            select_all: false,
         });
     }
 
@@ -8586,6 +8587,7 @@ impl App {
             active_field: crate::tui::state::NoteCreateField::Title,
             completion: None,
             confirm_discard: false,
+            select_all: false,
         });
     }
 
@@ -8974,6 +8976,47 @@ impl App {
                 dialog.content.clear();
                 dialog.content_cursor = 0;
             }
+        }
+    }
+
+    /// `Ctrl-A`: select the whole active field (Title or Content).
+    /// See `NoteCreateDialog::select_all`'s doc comment for what
+    /// happens next.
+    fn note_create_select_all(&mut self) {
+        let Some(ref mut dialog) = self.note_create else {
+            return;
+        };
+        dialog.select_all = true;
+    }
+
+    /// `Ctrl-C` while a field is selected (`Ctrl-A`): copy the whole
+    /// active field's text to the clipboard and clear the
+    /// selection. Mirrors `yank_to_clipboard`'s status-message
+    /// convention ("Yanked N chars…" / "Nothing to yank" / "Yank
+    /// failed: …") so the two yank actions feel like the same
+    /// feature.
+    fn note_create_yank_selected(&mut self) {
+        let text = {
+            let Some(ref mut dialog) = self.note_create else {
+                return;
+            };
+            let text = match dialog.active_field {
+                crate::tui::state::NoteCreateField::Title => dialog.title.clone(),
+                crate::tui::state::NoteCreateField::Content => dialog.content.clone(),
+            };
+            dialog.select_all = false;
+            text
+        };
+        if text.is_empty() {
+            self.set_status_message("Nothing to yank".to_string());
+            return;
+        }
+        match copy_to_clipboard(&text) {
+            Ok(()) => self.set_status_message(format!(
+                "Yanked {} chars to clipboard",
+                text.chars().count()
+            )),
+            Err(e) => self.set_status_message(format!("Yank failed: {}", e)),
         }
     }
 
@@ -13586,8 +13629,28 @@ fn handle_note_create_confirm_key(app: &mut App, key: KeyEvent) -> bool {
 /// - `Ctrl-S` submits
 ///   (calls
 ///   `note_create_submit`).
-/// - `Ctrl-C` /
-///   `Esc` cancels.
+/// - `Ctrl-C` / `Esc`
+///   cancel — but if
+///   either field has
+///   unsaved text, opens
+///   a "save or drop?"
+///   confirmation first
+///   instead of closing
+///   immediately; see
+///   `App::note_create_confirm_discard_if_dirty`.
+/// - `Ctrl-A` selects
+///   the whole active
+///   field; while
+///   selected, `Ctrl-C`
+///   yanks it to the
+///   clipboard instead of
+///   cancelling and
+///   `Backspace` deletes
+///   the whole field
+///   instead of one
+///   character — see the
+///   guard at the top of
+///   this function.
 /// - `Ctrl-U` clears
 ///   the active field.
 /// - `Ctrl-W` deletes
@@ -13650,6 +13713,31 @@ fn handle_note_create_confirm_key(app: &mut App, key: KeyEvent) -> bool {
 /// `false` and the dialog
 /// stays open.
 fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
+    // While a field is fully selected (`Ctrl-A` — see
+    // `App::note_create_select_all`), `Ctrl-C` yanks the selected
+    // text to the clipboard instead of cancelling the dialog, and
+    // `Backspace` deletes the whole field instead of one character
+    // — the usual "select all, then act on the selection" text-
+    // editor convention. Any other key drops the selection (so a
+    // stale "everything is selected" state doesn't linger once the
+    // user starts typing or navigating again) and falls through to
+    // its normal handling below.
+    if app.note_create.as_ref().map(|d| d.select_all).unwrap_or(false) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            app.note_create_yank_selected();
+            return false;
+        }
+        if !key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Backspace {
+            app.note_create_clear();
+            if let Some(dialog) = app.note_create.as_mut() {
+                dialog.select_all = false;
+            }
+            return false;
+        }
+        if let Some(dialog) = app.note_create.as_mut() {
+            dialog.select_all = false;
+        }
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
@@ -13659,6 +13747,16 @@ fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
                 app.note_create_cancel();
                 app.cancelled = true;
                 return true;
+            }
+            KeyCode::Char('a') => {
+                // Select the whole active field (Title or Content).
+                // Not a partial-range selection — the dialog only
+                // ever has "none" or "everything in the active
+                // field" selected. See the guard at the top of this
+                // function for what `Ctrl-C` / `Backspace` do while
+                // selected.
+                app.note_create_select_all();
+                return false;
             }
             KeyCode::Char('s') => {
                 return app.note_create_submit();

@@ -24644,6 +24644,121 @@ fn note_create_move_up_down_within_content_preserves_column() {
     }
 }
 
+/// `Ctrl-A` in the create-note dialog selects the whole active
+/// field (not a partial range — see `NoteCreateDialog::select_all`).
+#[test]
+fn note_create_ctrl_a_selects_active_field() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "Standup".chars() {
+        app.note_create_push_char(c);
+    }
+    assert!(!app.note_create.as_ref().unwrap().select_all);
+    crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+    );
+    assert!(app.note_create.as_ref().unwrap().select_all);
+    // Selecting doesn't touch the text itself.
+    assert_eq!(app.note_create.as_ref().unwrap().title, "Standup");
+}
+
+/// While a field is selected, `Ctrl-C` yanks its text to the
+/// clipboard instead of cancelling the dialog — the dialog stays
+/// open, the text is untouched, and the selection clears afterward.
+/// The clipboard write goes through arboard; in CI without a
+/// display server it may fail, so (matching
+/// `yank_to_clipboard_with_selected_row_sets_status`'s established
+/// pattern) the test accepts either outcome and only confirms *some*
+/// feedback was surfaced.
+#[test]
+fn note_create_ctrl_c_while_selected_yanks_instead_of_cancelling() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create_toggle_field();
+    for c in "Blocked on X".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().select_all = true;
+    let quit = crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert!(!quit, "yanking a selection must not exit the TUI");
+    assert!(app.is_note_create_open(), "the dialog must stay open");
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.content, "Blocked on X", "yank must not alter the text");
+    assert!(!d.select_all, "selection clears after yanking");
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .expect("yank must set a status message");
+    assert!(
+        msg.starts_with("Yanked ") || msg.starts_with("Yank failed"),
+        "unexpected status message: {:?}",
+        msg
+    );
+}
+
+/// Yanking an empty selected field is a no-op with a clear status
+/// message — same contract as the main `yank_to_clipboard` action.
+#[test]
+fn note_create_ctrl_c_while_selected_on_empty_field_sets_nothing_to_yank() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    app.note_create.as_mut().unwrap().select_all = true;
+    crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(
+        app.status_message.as_ref().map(|(m, _)| m.clone()),
+        Some("Nothing to yank".to_string())
+    );
+}
+
+/// While a field is selected, `Backspace` deletes the WHOLE field
+/// (not just one character) and clears the selection.
+#[test]
+fn note_create_backspace_while_selected_deletes_whole_field() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "Meeting notes".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().select_all = true;
+    crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+    );
+    let d = app.note_create.as_ref().unwrap();
+    assert_eq!(d.title, "");
+    assert_eq!(d.title_cursor, 0);
+    assert!(!d.select_all);
+}
+
+/// Any key other than `Ctrl-C`/`Backspace` clears an active
+/// selection instead of leaving it stuck — typing a character both
+/// deselects AND inserts normally (at the existing cursor position;
+/// this dialog doesn't implement "typing replaces the selection").
+#[test]
+fn note_create_select_all_cleared_by_unrelated_key() {
+    let mut app = directories_test_app(&[]);
+    app.open_note_create_dialog();
+    for c in "Hi".chars() {
+        app.note_create_push_char(c);
+    }
+    app.note_create.as_mut().unwrap().select_all = true;
+    crate::tui::handle_note_create_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('!'), KeyModifiers::empty()),
+    );
+    let d = app.note_create.as_ref().unwrap();
+    assert!(!d.select_all, "an unrelated key must clear the selection");
+    assert_eq!(d.title, "Hi!", "the key still does its normal thing");
+}
+
 /// `Up`/`Down` deliberately do NOT cross between Title and Content —
 /// they stay within whichever field is active, same as `Left`/`Right`.
 /// `Up` in Title is a no-op (Title is always one line); `Up` on
