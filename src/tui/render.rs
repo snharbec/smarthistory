@@ -4368,10 +4368,15 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         // children.
         spans.push(Span::raw("  · "));
     } else if row.mode == "workspace" {
+        // Info color (not accent) — distinct from the running-pane
+        // marker below, which uses the highlight color. The two used
+        // to share a color in some themes, making a busy pane's `▶`
+        // marker blend into its workspace header instead of standing
+        // out from it.
         spans.push(Span::styled(
             "# ",
             Style::default()
-                .fg(Theme::accent_color())
+                .fg(Theme::info_color())
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -4482,10 +4487,13 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // children. Other rows use
     // the normal highlight path.
     if row.mode == "workspace" {
+        // Info color — see the `# ` marker span above for why this
+        // isn't accent (kept in sync with it so the marker + label
+        // read as one consistently-colored heading).
         spans.push(Span::styled(
             format!("{} ", cmd_display),
             Style::default()
-                .fg(Theme::accent_color())
+                .fg(Theme::info_color())
                 .add_modifier(Modifier::BOLD),
         ));
     } else if row.mode == "pane" && !row.command.is_empty() {
