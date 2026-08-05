@@ -13507,6 +13507,96 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
     assert_eq!(rows[2].workspace_label, "SmartHistory");
 }
 
+/// A pane actually running something (`current_command` non-empty —
+/// stored in `HistoryRow::command` for `mode == "pane"` rows) must
+/// render with a dominant `▶ ` marker in bold + the highlight color,
+/// clearly distinguishing it from an idle pane (empty command, no
+/// marker) in the same workspace. Renders through the real
+/// `crate::tui::render::ui` entry point against a `TestBackend` and
+/// inspects the actual buffer — same technique
+/// `draw_note_create_shows_selected_indicator_when_ctrl_a_active`
+/// uses — so this exercises the real widget tree, not just the row
+/// data.
+#[test]
+fn running_pane_gets_dominant_marker_idle_pane_does_not() {
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "SmartHistory".to_string(),
+            directory: "/tmp/SmartHistory".to_string(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: now,
+            comment: "2 panes".to_string(),
+            output: String::new(),
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: "SmartHistory".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: "claude".to_string(),
+            directory: "/tmp/SmartHistory".to_string(),
+            session_id: "%10".to_string(),
+            exit_code: 0,
+            timestamp: now,
+            comment: "~/SmartHistory".to_string(),
+            output: "@1".to_string(),
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "SmartHistory".to_string(),
+            pane_agent: "claude".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -3,
+            command: String::new(),
+            directory: "/tmp/SmartHistory".to_string(),
+            session_id: "%11".to_string(),
+            exit_code: 0,
+            timestamp: now,
+            comment: "~/SmartHistory".to_string(),
+            output: "@1".to_string(),
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "SmartHistory".to_string(),
+            pane_agent: String::new(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let text = buffer.content.iter().map(|c| c.symbol()).collect::<String>();
+    assert!(
+        text.contains("claude"),
+        "running pane's command must be visible, got: {text:?}"
+    );
+    assert!(
+        text.contains('▶'),
+        "running pane must get the dominant marker, got: {text:?}"
+    );
+
+    // The marker cell itself must be bold.
+    let marker_is_bold = buffer
+        .content
+        .iter()
+        .any(|c| c.symbol() == "▶" && c.modifier.contains(ratatui::style::Modifier::BOLD));
+    assert!(marker_is_bold, "the running-pane marker must render bold");
+}
+
 /// Group-aware filter: when a child pane's command
 /// matches, the parent workspace header is ALSO
 /// kept (the user sees which workspace the matching

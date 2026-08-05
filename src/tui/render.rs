@@ -4368,10 +4368,15 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         // children.
         spans.push(Span::raw("  · "));
     } else if row.mode == "workspace" {
+        // Info color (not accent) — distinct from the running-pane
+        // marker below, which uses the highlight color. The two used
+        // to share a color in some themes, making a busy pane's `▶`
+        // marker blend into its workspace header instead of standing
+        // out from it.
         spans.push(Span::styled(
             "# ",
             Style::default()
-                .fg(Theme::accent_color())
+                .fg(Theme::info_color())
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -4482,10 +4487,34 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // children. Other rows use
     // the normal highlight path.
     if row.mode == "workspace" {
+        // Info color — see the `# ` marker span above for why this
+        // isn't accent (kept in sync with it so the marker + label
+        // read as one consistently-colored heading).
         spans.push(Span::styled(
             format!("{} ", cmd_display),
             Style::default()
-                .fg(Theme::accent_color())
+                .fg(Theme::info_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if row.mode == "pane" && !row.command.is_empty() {
+        // A pane actually running something (`current_command` is
+        // non-empty — an agent, a build, an editor, anything other
+        // than a bare idle shell prompt) gets a much more dominant
+        // treatment than the plain text every other row uses: a
+        // leading `▶ ` marker plus bold + the highlight color, so a
+        // busy pane jumps out immediately when scanning a long `*`
+        // panes-mode list. An idle pane (empty `current_command`,
+        // `cmd_display` empty) falls through to the plain path below
+        // and stays visually quiet — there's nothing running to draw
+        // attention to. Bypasses `highlight_matches`/
+        // `highlight_regex_matches` (same as the `workspace` branch
+        // above) rather than layering search-match bolding on top —
+        // those helpers have no base-style parameter, and the running
+        // marker is the more important signal here.
+        spans.push(Span::styled(
+            format!("▶ {} ", cmd_display),
+            Style::default()
+                .fg(Theme::highlight_color())
                 .add_modifier(Modifier::BOLD),
         ));
     } else if app.is_regex_query() {
