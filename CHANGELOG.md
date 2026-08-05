@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `*` panes mode: a pane actually running something (not just an idle shell
+  prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so
+  busy panes stand out immediately in a long list.
 - `create-note` dialog: `Ctrl-A` selects the whole active field (Title or
   Content). While selected, `Ctrl-C` yanks it to the clipboard instead of
   cancelling the dialog, and `Backspace` deletes the whole field instead of

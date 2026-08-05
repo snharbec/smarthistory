@@ -12,6 +12,7 @@ Panes mode lists every pane across every tmux session and every herdr workspace,
 - `*nvim` — every pane whose `command` (or `cwd`) contains `nvim`, plus the parent workspace header (group-aware filter).
 - The first text column is the agent / command; the second is the cwd; the third is the timestamp.
 - Each pane row carries a `[workspace-label]` chip in the info color, e.g. `[smarthistory]` or `[dir: Downloads]`. The chip is the primary signal when the workspace header is hidden by a filter.
+- A pane actually running something (an agent, an editor, a build — anything other than a bare idle shell prompt) gets a dominant `▶ ` marker in bold + the highlight color, so busy panes jump out immediately when scanning a long list. An idle pane (just a shell prompt, no `current_command`) stays visually quiet — no marker, plain text.
 
 ## Workspace headers
 

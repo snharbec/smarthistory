@@ -4488,6 +4488,27 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
                 .fg(Theme::accent_color())
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if row.mode == "pane" && !row.command.is_empty() {
+        // A pane actually running something (`current_command` is
+        // non-empty — an agent, a build, an editor, anything other
+        // than a bare idle shell prompt) gets a much more dominant
+        // treatment than the plain text every other row uses: a
+        // leading `▶ ` marker plus bold + the highlight color, so a
+        // busy pane jumps out immediately when scanning a long `*`
+        // panes-mode list. An idle pane (empty `current_command`,
+        // `cmd_display` empty) falls through to the plain path below
+        // and stays visually quiet — there's nothing running to draw
+        // attention to. Bypasses `highlight_matches`/
+        // `highlight_regex_matches` (same as the `workspace` branch
+        // above) rather than layering search-match bolding on top —
+        // those helpers have no base-style parameter, and the running
+        // marker is the more important signal here.
+        spans.push(Span::styled(
+            format!("▶ {} ", cmd_display),
+            Style::default()
+                .fg(Theme::highlight_color())
+                .add_modifier(Modifier::BOLD),
+        ));
     } else if app.is_regex_query() {
         spans.extend(highlight_regex_matches(
             &cmd_display,
