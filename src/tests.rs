@@ -1373,3 +1373,97 @@ tmuxpaneoutputdir=~/custom-tmux
         cfg.parse_multi(&["duplicatefilter=on\n", "duplicatefilter=off\n"]);
         assert!(!cfg.duplicate_filter);
     }
+
+    // --- `prune-directories` CLI subcommand ------------------------
+
+    /// `Config::session_directories` returns every `session.<id>`
+    /// entry that has a `.dir` set, with the id preserved (needed by
+    /// `prune-directories` to remove the right lines) and the
+    /// directory expanded to an absolute path. An entry with no
+    /// `.dir` is omitted — there's nothing to check for it.
+    #[test]
+    fn session_directories_returns_entries_with_dir_only() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "session.1 = \"Has dir\"\n\
+             session.1.dir = /tmp/some-dir\n\
+             session.2 = \"No dir\"\n",
+        ]);
+        let dirs = cfg.session_directories();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].0, 1);
+        assert_eq!(dirs[0].1, "Has dir");
+        assert_eq!(dirs[0].2, "/tmp/some-dir");
+    }
+
+    /// `remove_session_lines` deletes exactly the name/`.dir`/`.exec`
+    /// lines for a given id and leaves every other id's lines (and
+    /// non-`session.*` lines) untouched — including the
+    /// `session.1` vs. `session.10` prefix-collision case.
+    #[test]
+    fn remove_session_lines_deletes_only_the_matching_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory-remove-session-lines-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("sessions");
+        std::fs::write(
+            &path,
+            "session.1 = \"Keep\"\n\
+             session.1.dir = /tmp/keep\n\
+             \n\
+             session.10 = \"Also keep (id collision check)\"\n\
+             session.10.dir = /tmp/also-keep\n\
+             \n\
+             session.2 = \"Remove\"\n\
+             session.2.dir = /tmp/remove\n\
+             session.2.exec = nvim\n",
+        )
+        .expect("write");
+
+        let ids: std::collections::HashSet<usize> = [2].into_iter().collect();
+        let removed = remove_session_lines(&path, &ids).expect("remove");
+        assert_eq!(removed, 3, "name + .dir + .exec lines for session.2");
+
+        let contents = std::fs::read_to_string(&path).expect("read back");
+        assert!(contents.contains("session.1 = \"Keep\""));
+        assert!(contents.contains("session.10 = \"Also keep"), "must not treat session.1 as a prefix of session.10");
+        assert!(!contents.contains("session.2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file with no lines matching any of the given ids is left
+    /// byte-for-byte untouched — `remove_session_lines` must not
+    /// rewrite (and so not touch the mtime of) a file it has nothing
+    /// to remove from.
+    #[test]
+    fn remove_session_lines_no_match_leaves_file_untouched() {
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory-remove-session-lines-noop-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("sessions");
+        let original = "session.1 = \"Keep\"\nsession.1.dir = /tmp/keep\n";
+        std::fs::write(&path, original).expect("write");
+
+        let ids: std::collections::HashSet<usize> = [99].into_iter().collect();
+        let removed = remove_session_lines(&path, &ids).expect("remove");
+        assert_eq!(removed, 0);
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing file is not an error — `prune-directories` calls
+    /// this for both the main config file and the dedicated
+    /// `sessions` file, and either (or both) may not exist.
+    #[test]
+    fn remove_session_lines_missing_file_returns_zero() {
+        let path = std::env::temp_dir().join(format!(
+            "smarthistory-remove-session-lines-missing-{}",
+            std::process::id()
+        ));
+        let ids: std::collections::HashSet<usize> = [1].into_iter().collect();
+        assert_eq!(remove_session_lines(&path, &ids).expect("remove"), 0);
+    }

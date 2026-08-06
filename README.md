@@ -76,6 +76,7 @@ smarthistory search [QUERY] [flags]     # print matching rows
 smarthistory next  <COMMAND>            # most-probable next command
 smarthistory clean [QUERY] [flags]      # bulk-delete matching entries
 smarthistory prune <DAYS> [-f]          # delete entries older than N days
+smarthistory prune-directories [-f]     # remove session.<id> entries whose directory no longer exists
 smarthistory tui   [options]            # launch the TUI
 smarthistory init  zsh                  # emit the zsh init snippet
 smarthistory pane-exec                  # reconnect the current tmux/herdr session (see below)
