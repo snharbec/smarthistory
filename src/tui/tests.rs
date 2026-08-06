@@ -20392,13 +20392,16 @@ fn select_for_run_in_browser_mode_without_url_is_noop() {
     assert_eq!(app.selection, None);
 }
 
-/// `Ctrl-]` (SmartOpen) in browser mode stages
+/// `Ctrl-]` (SmartOpen) in browser mode stages a pipeline that runs
 /// `note_search convert <url>` — turning the selected bookmark/
 /// history entry into a local markdown note — instead of the
-/// default "open the URL" behavior plain `Enter` still uses. Bare
-/// command, no `-o`/`-d` flags, same convention
-/// `download_jira_issue_stages_command` documents for its own
-/// `note_search jira-issue <KEY>`.
+/// default "open the URL" behavior plain `Enter` still uses, and
+/// then opens the freshly-created note in `$EDITOR`. Unlike
+/// `download_jira_issue_stages_command`'s bare `note_search
+/// jira-issue <KEY>`, the target path isn't known ahead of time
+/// (`note_search convert` names the file itself), so the staged
+/// line captures it from `note_search`'s own "Successfully created
+/// note: <path> (type: ...)" stdout line instead of precomputing it.
 #[test]
 fn download_browser_entry_as_note_stages_command() {
     let mut app = directories_test_app(&[]);
@@ -20419,11 +20422,22 @@ fn download_browser_entry_as_note_stages_command() {
     app.refresh();
     app.list_state.select(Some(0));
     app.download_browser_entry_as_note();
-    assert_eq!(
-        app.selection.as_deref(),
-        Some("note_search convert https://rust-lang.org"),
-        "got: {:?}",
-        app.selection
+    let staged = app.selection.as_deref().expect("a command must be staged");
+    assert!(
+        staged.starts_with("note_search convert https://rust-lang.org | tee /dev/tty | "),
+        "got: {staged:?}"
+    );
+    assert!(
+        staged.contains("sed -n 's/^Successfully created note: "),
+        "must extract the path from note_search's own success line, got: {staged:?}"
+    );
+    let editor = std::env::var("EDITOR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "vi".to_string());
+    assert!(
+        staged.contains(&format!("&& {editor} \"$p\"")),
+        "must open the captured path in $EDITOR ({editor:?}), got: {staged:?}"
     );
     assert_eq!(app.pick_mode, Some(PickMode::Run));
 }
@@ -20453,11 +20467,10 @@ fn smart_open_in_browser_mode_stages_convert_command() {
     app.list_state.select(Some(0));
     let quit = dispatch_action(&mut app, Action::SmartOpen);
     assert!(quit, "SmartOpen must exit the TUI once a command is staged");
-    assert_eq!(
-        app.selection.as_deref(),
-        Some("note_search convert https://rust-lang.org"),
-        "got: {:?}",
-        app.selection
+    let staged = app.selection.as_deref().expect("a command must be staged");
+    assert!(
+        staged.starts_with("note_search convert https://rust-lang.org | tee /dev/tty | "),
+        "got: {staged:?}"
     );
 }
 
