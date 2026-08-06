@@ -12171,6 +12171,15 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                         quit
                     }
                 }
+                crate::tui::mode::ModeKind::Browser => {
+                    // In `^` (browser) mode, convert the selected
+                    // bookmark/history entry's URL into a local
+                    // markdown note (`note_search convert <url>`)
+                    // instead of the default "open the URL" — that's
+                    // still what plain `Enter` does, unaffected.
+                    app.download_browser_entry_as_note();
+                    app.selection.is_some()
+                }
                 // Everywhere else, fall through to
                 // the normal `Run` action (select
                 // row / open editor / fire LLM),

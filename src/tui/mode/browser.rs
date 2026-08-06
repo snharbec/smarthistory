@@ -16,7 +16,7 @@
 //! external-list mode whose selection opens a URL).
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
-use crate::tui::App;
+use crate::tui::{App, PickMode};
 use anyhow::Result;
 
 /// Whether the query is a browser-mode request: the query starts
@@ -179,5 +179,82 @@ impl App {
             self.status_message = None;
             self.refresh();
         }
+    }
+
+    /// Convert the currently-selected browser bookmark/history entry
+    /// into a local markdown note via `note_search convert <url>` —
+    /// `note_search`'s general "convert a web page or document to a
+    /// markdown note" command — then open the freshly-created note
+    /// in `$EDITOR`. Bound to `Action::SmartOpen` (`Ctrl-]` by
+    /// default) in browser mode instead of the default "open the
+    /// URL" fallback every other mode gets — see the
+    /// `ModeKind::Browser` arm of the `SmartOpen` dispatch in
+    /// `src/tui.rs`.
+    ///
+    /// Unlike the daily-note dialog's `Ctrl-O` (`note_create_submit_and_edit`),
+    /// smarthistory can't precompute the target path here —
+    /// `note_search convert` picks the note's filename itself (from
+    /// the page title), so the path isn't known until the command
+    /// has actually run. The staged shell line instead captures it
+    /// from `note_search convert`'s own stdout, whose success line
+    /// has the fixed shape `Successfully created note: <path> (type: ...)`:
+    ///
+    /// ```sh
+    /// note_search convert '<url>' | tee /dev/tty | { p=$(sed -n 's/^Successfully created note: \(.*\) (type:.*/\1/p'); [ -n "$p" ] && $EDITOR "$p"; }
+    /// ```
+    ///
+    /// `tee /dev/tty` duplicates `note_search`'s own progress output
+    /// to the real terminal (so the user still sees "Converting web
+    /// page: …" / "Successfully created note: …" / "Title: …") while
+    /// also feeding it to `sed`, which extracts just the path out of
+    /// the success line. `[ -n "$p" ]` guards the `$EDITOR` call so a
+    /// failed conversion (bad URL, network error — no success line
+    /// printed, `p` stays empty) doesn't try to open a blank path;
+    /// the command's own error output already reached the terminal
+    /// via `tee`. No `-o`/`-d` flags passed to `note_search`, same
+    /// convention `download_jira_issue` uses: it picks up
+    /// `NOTE_SEARCH_DIR`/`NOTE_SEARCH_DATABASE` from the environment
+    /// rather than smarthistory passing them explicitly. The TUI
+    /// exits so the parent shell runs the whole line.
+    ///
+    /// On any no-op (no row selected, empty URL, not in browser
+    /// mode) a status message is surfaced and `selection` stays
+    /// `None`, so the TUI stays open and the user can react to the
+    /// feedback.
+    pub(crate) fn download_browser_entry_as_note(&mut self) {
+        // Re-gate here (the `SmartOpen` dispatcher already gates on
+        // `ModeKind::Browser`) so a stray future caller — e.g. a
+        // command-palette entry that calls into the helper directly
+        // — can't stage the wrong command from outside browser mode.
+        if !self.is_browser_query() {
+            self.set_status_message(
+                "Create-note-from-URL is only available in browser mode (type `^`)".to_string(),
+            );
+            return;
+        }
+        let Some(row) = self.selected_row().cloned() else {
+            self.set_status_message("No browser entry selected".to_string());
+            return;
+        };
+        // The URL lives in `row.comment` — see `browser_entry_to_row`
+        // in `src/browser.rs`. Empty is a no-op (a freshly-inserted
+        // row that hasn't been populated yet could in theory have
+        // one).
+        let url = row.comment.trim().to_string();
+        if url.is_empty() {
+            self.set_status_message("Selected browser entry has no URL".to_string());
+            return;
+        }
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "vi".to_string());
+        let staged = format!(
+            "note_search convert {} | tee /dev/tty | {{ p=$(sed -n 's/^Successfully created note: \\(.*\\) (type:.*/\\1/p'); [ -n \"$p\" ] && {} \"$p\"; }}",
+            crate::util::shell_quote(&url),
+            editor
+        );
+        self.selection = Some(staged);
+        self.pick_mode = Some(PickMode::Run);
     }
 }
