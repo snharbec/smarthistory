@@ -1518,6 +1518,19 @@ pub(crate) struct App {
     /// at a glance which section is
     /// filtered.
     panes_filter: PanesFilter,
+    /// Labels (`row.command`) of `*`-mode group headers currently
+    /// collapsed by the user — `Sessions`, `Directories`, `hosts`.
+    /// Toggled by `Enter` on one of those headers (see
+    /// `App::toggle_pane_group_collapsed` and
+    /// `crate::tui::mode::panes::apply_collapsed_groups`); NOT
+    /// toggled by `Enter` on an individual live workspace's own
+    /// `## <label>` sub-heading, which still stages the usual
+    /// focus-session command. In-memory only for this launch —
+    /// deliberately not persisted to the session file, unlike most
+    /// other `*`-mode UI state, since collapse state is a transient
+    /// "I'm scanning past this section right now" convenience, not
+    /// a standing preference.
+    collapsed_pane_groups: std::collections::HashSet<String>,
     /// Background request for pane cmdlines (see
     /// `PaneCmdlineRequest`). Spawned after the
     /// panes snapshot is populated so the cmdline
@@ -4653,6 +4666,7 @@ impl App {
             note_compose: None,
             note_create: None,
             panes_filter: PanesFilter::default(),
+            collapsed_pane_groups: std::collections::HashSet::new(),
             pane_cmdlines_request: None,
             panes_snapshot_id: 0,
             // Lazy pane-preview memoization: maps pane_id

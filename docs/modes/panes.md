@@ -4,7 +4,17 @@
 | --- | --- |
 | Configurable | `prefix.panes=<char>` |
 
-Panes mode lists every pane across every tmux session and every herdr workspace, organised as a tree: each session / workspace gets a header row (`# workspace-label`), and its child panes appear indented underneath (`· [workspace-label] command  cwd`). Selecting a row stages the command to focus that pane / workspace.
+Panes mode lists every pane across every tmux session and every herdr workspace, organised as a tree. Live sessions are wrapped under one common `# Sessions` heading, with each session / workspace as a `## workspace-label` sub-heading underneath it, and its child panes indented one level further (`· [workspace-label] command  cwd`):
+
+```md
+# Sessions
+## Smarthistory
+    · zsh
+## Home
+    · zsh
+```
+
+Selecting a row stages the command to focus that pane / workspace.
 
 ## What it does
 
@@ -12,16 +22,28 @@ Panes mode lists every pane across every tmux session and every herdr workspace,
 - `*nvim` — every pane whose `command` (or `cwd`) contains `nvim`, plus the parent workspace header (group-aware filter).
 - The first text column is the agent / command; the second is the cwd; the third is the timestamp.
 - Each pane row carries a `[workspace-label]` chip in the info color, e.g. `[smarthistory]` or `[dir: Downloads]`. The chip is the primary signal when the workspace header is hidden by a filter.
-- A pane actually running something (an agent, an editor, a build — anything other than a bare idle shell prompt) gets a dominant `▶ ` marker in bold + the highlight color, so busy panes jump out immediately when scanning a long list. An idle pane (just a shell prompt, no `current_command`) stays visually quiet — no marker, plain text.
+- Every pane's name (its `current_command`, e.g. `zsh`, `claude`) renders bold, always — so pane rows read distinctly from the `Directories`/`hosts` sections' plain-text children.
+- A pane actually running something (an agent, an editor, a build — anything other than a bare idle shell prompt) gets, on top of that, a dominant `▶ ` marker in the highlight color, so busy panes jump out immediately when scanning a long list. An idle pane (just a shell prompt, no `current_command`) has nothing to show and stays visually quiet — no marker, no name text (there's none to render).
 
 ## Workspace headers
 
 A workspace header row is rendered for every tmux session / herdr workspace that owns at least one pane. The header's command column shows the workspace label (e.g. `smarthistory`, `dir: Downloads`); selecting it stages the focus command for the whole workspace.
 
+## Sessions group header
+
+Whenever at least one live workspace is showing, a synthetic `# Sessions` row is inserted directly above the first one, wrapping all live workspaces under one common heading — the same `# `-headed look the `Directories`/`hosts` sections below already have. Each individual live workspace then renders as a `## ` sub-heading nested underneath it, rather than its own top-level `# ` header. It's inserted as the last step of `panes::fetch`, after filtering — so it only appears when at least one live workspace survives the current filter (F7/F8/F9, a search query, etc.), and it doesn't change how individual live workspaces are filtered or group-scoped (see [Group-aware filter](#group-aware-filter) below) — each one is still its own independently matchable group, exactly as before.
+
+## Collapsing group headers
+
+`Enter` on the `# Sessions`, `# Directories`, or `# hosts` header **collapses** it instead of trying to focus something — a `▾` (expanded, the default) / `▸` (collapsed) triangle before the `#` shows the current state. Collapsing `# Sessions` hides every live workspace's `## ` sub-heading and all their panes in one shot; collapsing `# Directories` / `# hosts` hides just that section's own entries. `Enter` again expands it back. This is purely a display toggle, held in memory for the current launch only (not persisted to the session file, and not affected by the search filter — a collapsed group stays collapsed even if you type a query that would otherwise match one of its hidden children).
+
+An individual live workspace's own `## <label>` sub-heading is a different thing and is NOT collapsible — `Enter` on it still stages the focus command, same as before this feature existed. Only the three top-level group headers toggle.
+
 ## Selecting a row
 
 - `Enter` on a **pane** row stages `tmux select-pane -t <pane-id>` / `tmux switch-client -t <pane-id>` (tmux) or `herdr workspace focus <ws> && herdr tab focus <tab-id>` (herdr). The TUI exits and the parent shell runs the command — your terminal flips to the target pane.
-- `Enter` on a **workspace** header row stages the workspace-focus command (no specific pane). Useful when the workspace is in another window / tab and you just want to land in it.
+- `Enter` on a **workspace** sub-heading (`## <label>`) stages the workspace-focus command (no specific pane). Useful when the workspace is in another window / tab and you just want to land in it.
+- `Enter` on the `# Sessions` / `# Directories` / `# hosts` group header collapses/expands it instead — see [Collapsing group headers](#collapsing-group-headers) above.
 
 Selecting a `Directories`/`Hosts` row for the first time creates a new tmux session / herdr workspace named after that entry (see [`docs/configuration.md`](../configuration.md#sessionid)). A pane opened *inside* that session later — directly in tmux/herdr, not through this picker — starts a plain local shell with no connection of its own; run `smarthistory pane-exec` in it to reconnect, since the session/workspace is already named after the config entry that created it and needs no separate lookup.
 

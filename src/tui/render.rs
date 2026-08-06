@@ -2338,7 +2338,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         // keeps that pane + its
         // parent workspace
         // header).
-        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; each pane row carries a [label] badge showing its session / workspace; the filter is group-aware: a match on the workspace label keeps the whole workspace, a match on a pane keeps the pane and its parent header)",
+        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; each pane row carries a [label] badge showing its session / workspace; the filter is group-aware: a match on the workspace label keeps the whole workspace, a match on a pane keeps the pane and its parent header); Enter on the Sessions/Directories/hosts group headers collapses/expands them (▾/▸)",
     );
     mode_row(
         &mut lines,
@@ -4355,26 +4355,47 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     //     `host` rows: `  · ` to
     //     indent them under
     //     their parent.
-    if row.mode == "pane" || row.mode == "session" || row.mode == "host" {
-        // `pane`, `session`, and `host` rows are
-        // all children of a `workspace` header row
-        // in the `*`-mode tree. Indent them with
-        // the same `  · ` tree connector so they're
-        // visually grouped under their header.
-        // Without this, `# sessions` and `# hosts`
-        // header rows would have their child rows
-        // flush with the left margin, looking like
-        // flat history rows rather than tree
-        // children.
+    if row.mode == "pane" {
+        // Live panes are two levels deep now: `# Sessions` ->
+        // `## <workspace>` -> pane. Deeper indent than
+        // `session`/`host` rows below, which sit directly under
+        // their `Directories`/`hosts` `# `-header with no
+        // intermediate level.
+        spans.push(Span::raw("    · "));
+    } else if row.mode == "session" || row.mode == "host" {
         spans.push(Span::raw("  · "));
-    } else if row.mode == "workspace" {
-        // Info color (not accent) — distinct from the running-pane
-        // marker below, which uses the highlight color. The two used
-        // to share a color in some themes, making a busy pane's `▶`
-        // marker blend into its workspace header instead of standing
-        // out from it.
+    } else if row.mode == "workspace" && row.source == "workspace" {
+        // An individual live tmux/herdr workspace — nested one
+        // level under the synthetic `# Sessions` header
+        // (`insert_sessions_group_header` in `mode/panes.rs`), so
+        // it renders as a `## ` sub-heading rather than a
+        // top-level `# ` one.
         spans.push(Span::styled(
-            "# ",
+            "  ## ",
+            Style::default()
+                .fg(Theme::info_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if row.mode == "workspace" {
+        // Top-level `# ` header: the synthetic `Sessions` wrapper
+        // itself (`source == "workspace-group"`), or the
+        // `Directories`/`hosts` sections (`source == "sessions"` /
+        // `"hosts"`). These three are collapsible — `Enter` toggles
+        // `app.collapsed_pane_groups` (see `stage_pane_selection`
+        // and `App::toggle_pane_group_collapsed`) instead of staging
+        // a focus command, and a leading `▸`/`▾` disclosure triangle
+        // shows the current state. Info color (not accent) —
+        // distinct from the running-pane marker below, which uses
+        // the highlight color. The two used to share a color in some
+        // themes, making a busy pane's `▶` marker blend into its
+        // workspace header instead of standing out from it.
+        let disclosure = if app.collapsed_pane_groups.contains(&row.command) {
+            "▸ # "
+        } else {
+            "▾ # "
+        };
+        spans.push(Span::styled(
+            disclosure,
             Style::default()
                 .fg(Theme::info_color())
                 .add_modifier(Modifier::BOLD),
@@ -4518,12 +4539,28 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
                 .add_modifier(Modifier::BOLD),
         ));
     } else if app.is_regex_query() {
-        spans.extend(highlight_regex_matches(
-            &cmd_display,
-            app.query_regex.as_ref(),
-        ));
+        let mut text_spans = highlight_regex_matches(&cmd_display, app.query_regex.as_ref());
+        if row.mode == "pane" {
+            // A pane's name is always bold, even when it doesn't
+            // take the dominant `▶`-marker branch above (an idle
+            // pane with an empty `current_command`, so there's
+            // nothing here to render anyway — this just guarantees
+            // the rule holds regardless of how a pane row got here,
+            // rather than being an incidental side effect of the
+            // running-marker styling).
+            for s in &mut text_spans {
+                s.style = s.style.add_modifier(Modifier::BOLD);
+            }
+        }
+        spans.extend(text_spans);
     } else {
-        spans.extend(highlight_matches(&cmd_display, &app.query));
+        let mut text_spans = highlight_matches(&cmd_display, &app.query);
+        if row.mode == "pane" {
+            for s in &mut text_spans {
+                s.style = s.style.add_modifier(Modifier::BOLD);
+            }
+        }
+        spans.extend(text_spans);
     }
 
     spans.push(Span::styled(
