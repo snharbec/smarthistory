@@ -96,6 +96,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_confirm_delete(f, app, mode);
     }
 
+    if let Some(ref prompt) = app.zoxide_save_prompt {
+        draw_zoxide_save_prompt(f, app, prompt);
+    }
+
     if let Some(view) = app.help_view.as_ref() {
         draw_help_view(f, app, view);
     }
@@ -338,6 +342,68 @@ fn draw_note_create_confirm(f: &mut Frame, app: &App) {
             Span::raw(" to drop it, or "),
             Span::styled(cancel_hint, Theme::highlight()),
             Span::raw(" to keep editing."),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// The `~` (zoxide) mode "save this directory?" prompt
+/// (`app.zoxide_save_prompt`), shown after selecting a directory
+/// not already saved as a `session.<id>` entry — see
+/// `crate::tui::state::ZoxideSavePrompt`'s doc comment for the full
+/// flow. Non-destructive (unlike `draw_confirm_delete`): both
+/// answers complete the directory jump, so this uses the accent
+/// color like `draw_note_create_confirm`, not the alarming error
+/// color `draw_confirm_delete` uses for its actually-destructive
+/// actions.
+fn draw_zoxide_save_prompt(
+    f: &mut Frame,
+    app: &App,
+    prompt: &crate::tui::state::ZoxideSavePrompt,
+) {
+    let area = centered_rect(60, 22, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Save directory? ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent());
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Save \"{}\" to your Directories list?", prompt.label),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            prompt.directory.as_str(),
+            Theme::dim(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Press "),
+            Span::styled("Enter", Theme::highlight()),
+            Span::raw("/"),
+            Span::styled("y", Theme::highlight()),
+            Span::raw(" to save (default), "),
+            Span::styled("n", Theme::highlight()),
+            Span::raw(" or "),
+            Span::styled(cancel_hint, Theme::highlight()),
+            Span::raw(" to skip — either way, you'll still jump there."),
         ]),
     ];
 

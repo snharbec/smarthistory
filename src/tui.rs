@@ -1480,6 +1480,11 @@ pub(crate) struct App {
     /// (Enter) or cancels
     /// (Esc).
     add_entry_dialog: Option<AddEntryDialog>,
+    /// Pending "save this directory?" prompt shown after selecting a
+    /// `~` (zoxide) row not already saved as a `session.<id>` entry.
+    /// See `crate::tui::state::ZoxideSavePrompt`'s doc comment for
+    /// the full flow.
+    zoxide_save_prompt: Option<crate::tui::state::ZoxideSavePrompt>,
     /// The in-TUI multi-line note/todo compose overlay state
     /// (`Action::ComposeNoteEntry`, `F2` by default). `None`
     /// when closed. See the `NoteComposeDialog` doc comment in
@@ -4663,6 +4668,7 @@ impl App {
             hosts: Vec::new(),
             host_defs: Vec::new(),
             add_entry_dialog: None,
+            zoxide_save_prompt: None,
             note_compose: None,
             note_create: None,
             panes_filter: PanesFilter::default(),
@@ -11518,6 +11524,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_help_view_key(app, key);
     }
 
+    // When prompting whether to save a zoxide-mode directory as a
+    // `session.<id>` entry, only allow 'y'/'n'/Enter or Esc/Ctrl+C —
+    // same "modal overlay takes over the keymap" precedence as
+    // `confirm_delete` right below.
+    if app.zoxide_save_prompt.is_some() {
+        return handle_zoxide_save_prompt_key(app, key);
+    }
+
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
     if let Some(ref mode) = app.confirm_delete {
         return handle_confirm_delete_key(app, key, mode.clone());
@@ -12220,6 +12234,50 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.global_history_next();
             false
         }
+    }
+}
+
+/// Key handler for the `zoxide_save_prompt` overlay ("save this
+/// directory to your Directories list?" — see
+/// `crate::tui::state::ZoxideSavePrompt`'s doc comment). Unlike
+/// `handle_confirm_delete_key`, this isn't a destructive-action
+/// gate: BOTH answers complete the original directory selection
+/// (create/focus the tmux/herdr session) — `y`/`n` only decide
+/// whether that directory ALSO gets saved as a `session.<id>` entry
+/// first. `Enter` is the default action (per how the user described
+/// the feature — a "should I save this?" prompt one just presses
+/// Enter through) and answers "yes", same as `y`/`Y`.
+///
+/// - `Enter` / `y` / `Y`: save, then stage the directory selection.
+/// - `n` / `N` / the configured Cancel binding: skip saving, still
+///   stage the directory selection — declining to save never blocks
+///   the jump the user pressed `Enter` for in the first place.
+/// - `Ctrl-C`: aborts the whole TUI immediately without staging
+///   anything, matching every other confirmation overlay's
+///   panic-button semantics.
+/// - Any other key is ignored, so a stray keypress can't silently
+///   answer the prompt.
+fn handle_zoxide_save_prompt_key(app: &mut App, key: KeyEvent) -> bool {
+    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.answer_zoxide_save_prompt(true);
+            app.selection.is_some()
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.answer_zoxide_save_prompt(false);
+            app.selection.is_some()
+        }
+        _ if is_cancel_key => {
+            app.answer_zoxide_save_prompt(false);
+            app.selection.is_some()
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.zoxide_save_prompt = None;
+            app.cancelled = true;
+            true
+        }
+        _ => false,
     }
 }
 

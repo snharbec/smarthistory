@@ -875,6 +875,30 @@ impl DialogField {
     }
 }
 
+/// Pending "save this directory to your Directories list?" prompt,
+/// shown after selecting a `~` (zoxide) row whose directory isn't
+/// already a configured `session.<id>` entry — see
+/// `App::stage_zoxide_selection`, which opens this INSTEAD of
+/// immediately staging the directory selection, and
+/// `App::answer_zoxide_save_prompt`, which — regardless of the
+/// answer — always finishes the original action (create/focus the
+/// tmux/herdr session there) once the prompt is answered; saying
+/// "no" only skips the save, it never blocks the jump. A "yes"
+/// answer writes a plain `session.<id>` entry (name + `.dir` only,
+/// no `.exec`) by reusing the same `AddEntryDialog` /
+/// `write_new_entry_to_config` machinery the `F5` "add session"
+/// dialog uses, just constructed and submitted programmatically
+/// instead of interactively.
+#[derive(Debug, Clone)]
+pub struct ZoxideSavePrompt {
+    /// The directory's basename — used as the new `session.<id>`
+    /// entry's display name (`session.<id> = "<label>"`).
+    pub label: String,
+    /// The absolute directory path — written as
+    /// `session.<id>.dir = "<directory>"`.
+    pub directory: String,
+}
+
 /// State for the "add session /
 /// host" dialog. Opens on
 /// `C-1` / `C-2`, walks the

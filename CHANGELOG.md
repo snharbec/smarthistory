@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `~` zoxide mode: selecting a directory not already saved as a
+  `session.<id>` entry now asks "Save directory?" first. `Enter`/`y` writes
+  a new `session.<id>` entry (name + `.dir` only, no `.exec`) before
+  jumping there; `n`/Cancel skips the save. Either answer still completes
+  the jump — the prompt never blocks it, and an already-saved directory
+  skips the prompt entirely.
 - `^` browser mode: `Ctrl-]` (`SmartOpen`) now converts the selected
   bookmark/history entry into a local markdown note (`note_search convert
   <url>`) and opens it in `$EDITOR`, instead of the default "open the URL"

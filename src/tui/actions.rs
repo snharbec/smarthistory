@@ -223,16 +223,11 @@ impl App {
             }
             crate::tui::mode::ModeKind::Zoxide => {
                 // `~...` queries are zoxide directory
-                // rows. They're tagged `mode ==
-                // "directory"`, the same tag `#`
-                // Directories mode's rows carry, so
-                // the exact same staging function
-                // handles both: new tmux session /
-                // herdr workspace rooted at the
-                // directory, or jump to an
-                // already-active pane there if one
-                // exists.
-                self.stage_directory_selection();
+                // rows. `stage_zoxide_selection` may
+                // defer the actual staging behind a
+                // "save this directory?" prompt first
+                // — see its own doc comment.
+                self.stage_zoxide_selection();
             }
             // The history / no-prefix mode
             // is the default — it stages
@@ -826,6 +821,98 @@ impl App {
             }
         }
         self.pick_mode = Some(PickMode::Run);
+    }
+
+    /// Stage the zoxide (`~`) mode selection. Zoxide rows are
+    /// tagged `mode == "directory"`, the same tag `#` Directories
+    /// mode's rows carry, so the underlying create/focus staging
+    /// (`stage_directory_selection`) is identical — this wrapper
+    /// only adds a one-time prompt on top: if the directory isn't
+    /// already a configured `session.<id>` entry, defer the actual
+    /// staging and open `zoxide_save_prompt` instead, asking
+    /// whether to save it (see that field's doc comment in
+    /// `src/tui/state.rs` and `App::answer_zoxide_save_prompt` for
+    /// the rest of the flow). Directories mode itself is untouched
+    /// — this dispatch only runs for `ModeKind::Zoxide`.
+    ///
+    /// A directory with no path (defensive — shouldn't happen for a
+    /// real zoxide row) skips the prompt and stages directly, same
+    /// as an already-saved directory.
+    fn stage_zoxide_selection(&mut self) {
+        let Some(directory) = self.selected_row().map(|r| r.directory.clone()) else {
+            return;
+        };
+        if directory.is_empty() {
+            self.stage_directory_selection();
+            return;
+        }
+        let canonical = crate::util::canonicalize_directory(&directory);
+        let already_saved = self
+            .sessions
+            .iter()
+            .any(|s| crate::util::canonicalize_directory(&s.directory) == canonical);
+        if already_saved {
+            self.stage_directory_selection();
+            return;
+        }
+        let label = std::path::Path::new(&directory)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("smarthistory")
+            .to_string();
+        self.zoxide_save_prompt = Some(crate::tui::state::ZoxideSavePrompt { label, directory });
+    }
+
+    /// Answer the `zoxide_save_prompt` opened by
+    /// `stage_zoxide_selection`. `save = true` writes a new
+    /// `session.<id>` entry (name + `.dir` only — deliberately no
+    /// `.exec`, per how the user described the feature: "create
+    /// this entry automatically without any specific execution
+    /// flags") by reusing the exact same `AddEntryDialog` /
+    /// `write_new_entry_to_config` machinery the `F5` "add session"
+    /// dialog uses, just built and submitted programmatically
+    /// instead of interactively — a real `AddEntryDialog` is
+    /// constructed (pre-filled the same way `F5` would pre-fill it
+    /// from a selected row) and immediately committed, so it's
+    /// never actually shown to the user.
+    ///
+    /// Either way — saved or not — the ORIGINAL directory selection
+    /// (create/focus the tmux/herdr session) always runs afterward:
+    /// the prompt only decides whether to ALSO save the directory,
+    /// it never blocks the jump the user actually pressed `Enter`
+    /// for.
+    pub(crate) fn answer_zoxide_save_prompt(&mut self, save: bool) {
+        let Some(prompt) = self.zoxide_save_prompt.take() else {
+            return;
+        };
+        // Stage the original directory jump FIRST, while the current
+        // row selection is still intact. `write_new_entry_to_config`
+        // (below) calls `self.refresh()`, which can re-fetch
+        // `merged_rows` (e.g. re-running the real zoxide query) and
+        // reset `list_state` — if staging ran AFTER that,
+        // `stage_directory_selection`'s `self.selected_row()` could
+        // read a different row or find none at all, staging the
+        // wrong directory (or nothing). Staging first makes the jump
+        // immune to any side effect of the save step.
+        self.stage_directory_selection();
+        if save {
+            let mut dialog = crate::tui::state::AddEntryDialog::new(
+                crate::tui::state::AddEntryKind::Session,
+                prompt.directory.clone(),
+                String::new(),
+            );
+            // `AddEntryDialog::new` leaves the required `Name`
+            // field blank (it's normally typed by hand) — fill it
+            // with the directory's basename so the programmatic
+            // commit below has a valid entry to write.
+            if let Some(name_field) = dialog.fields.first_mut() {
+                name_field.value = prompt.label.clone();
+            }
+            self.add_entry_dialog = Some(dialog);
+            if let Err(e) = self.write_new_entry_to_config() {
+                self.set_status_message(format!("could not save directory: {}", e));
+            }
+        }
     }
 
     /// Stage the panes (`*`) mode selection.
