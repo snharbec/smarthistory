@@ -12,7 +12,7 @@ ag mode searches file *contents* with [`ag`](https://github.com/ggreer/the_silve
 - `,TODO` — every line containing `TODO` in every text file under the cwd.
 - `,TODO *.rs` — every `TODO` line in every `.rs` file. The `*` in `*.rs` is a shell-style glob.
 - `,@rust TODO` — every `TODO` line in every Rust file. The `@rust` token restricts to `.rs` files via `ag --rust`.
-- The first text column is the matched line (trimmed); the second is the file basename; the third is the file path / line number (the path component in `ag`'s `file:line:content` output).
+- The first text column is the matched line (trimmed); the second is the file basename; the third is the file's modification timestamp. Results are sorted by that timestamp, newest-modified file first — matches in a file you just edited surface before matches in files you haven't touched in months. Multiple matches within the same file keep `ag`'s own line-number order.
 
 ## Selecting a row
 
