@@ -4355,24 +4355,36 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     //     `host` rows: `  · ` to
     //     indent them under
     //     their parent.
-    if row.mode == "pane" || row.mode == "session" || row.mode == "host" {
-        // `pane`, `session`, and `host` rows are
-        // all children of a `workspace` header row
-        // in the `*`-mode tree. Indent them with
-        // the same `  · ` tree connector so they're
-        // visually grouped under their header.
-        // Without this, `# sessions` and `# hosts`
-        // header rows would have their child rows
-        // flush with the left margin, looking like
-        // flat history rows rather than tree
-        // children.
+    if row.mode == "pane" {
+        // Live panes are two levels deep now: `# Sessions` ->
+        // `## <workspace>` -> pane. Deeper indent than
+        // `session`/`host` rows below, which sit directly under
+        // their `Directories`/`hosts` `# `-header with no
+        // intermediate level.
+        spans.push(Span::raw("    · "));
+    } else if row.mode == "session" || row.mode == "host" {
         spans.push(Span::raw("  · "));
+    } else if row.mode == "workspace" && row.source == "workspace" {
+        // An individual live tmux/herdr workspace — nested one
+        // level under the synthetic `# Sessions` header
+        // (`insert_sessions_group_header` in `mode/panes.rs`), so
+        // it renders as a `## ` sub-heading rather than a
+        // top-level `# ` one.
+        spans.push(Span::styled(
+            "  ## ",
+            Style::default()
+                .fg(Theme::info_color())
+                .add_modifier(Modifier::BOLD),
+        ));
     } else if row.mode == "workspace" {
-        // Info color (not accent) — distinct from the running-pane
-        // marker below, which uses the highlight color. The two used
-        // to share a color in some themes, making a busy pane's `▶`
-        // marker blend into its workspace header instead of standing
-        // out from it.
+        // Top-level `# ` header: the synthetic `Sessions` wrapper
+        // itself (`source == "workspace-group"`), or the
+        // `Directories`/`hosts` sections (`source == "sessions"` /
+        // `"hosts"`). Info color (not accent) — distinct from the
+        // running-pane marker below, which uses the highlight
+        // color. The two used to share a color in some themes,
+        // making a busy pane's `▶` marker blend into its workspace
+        // header instead of standing out from it.
         spans.push(Span::styled(
             "# ",
             Style::default()

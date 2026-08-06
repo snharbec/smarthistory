@@ -423,7 +423,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         None => section_rows,
     };
     if tokens.is_empty() && scoped_group_idxs.is_none() {
-        return Ok(section_rows);
+        return Ok(insert_sessions_group_header(section_rows));
     }
     // Per-row match predicate. Used for both
     // the Substring fast path and the Fuzzy /
@@ -483,7 +483,62 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             idx += 1;
         }
     }
-    Ok(out)
+    Ok(insert_sessions_group_header(out))
+}
+
+/// Prepend a synthetic `# Sessions` header directly above the first
+/// live tmux/herdr workspace row in `rows` (a `mode == "workspace"`
+/// row with `source == "workspace"`, as opposed to the
+/// `Directories`/`hosts` sections' own header rows, whose `source`
+/// is `"sessions"` / `"hosts"`) — purely a presentational wrapper so
+/// live sessions read as one group (`# Sessions` -> `## <workspace>`
+/// -> panes), matching the `Directories`/`hosts` sections' own
+/// `# `-headed look:
+///
+/// ```md
+/// # Sessions
+/// ## Smarthistory
+///     zsh
+/// ## Home
+///     zsh
+/// ```
+///
+/// Applied as the LAST step on every return path of `fetch` (both
+/// the unfiltered early-return and the group-aware-filtered path),
+/// so it reflects whatever survived filtering rather than
+/// participating in the filter/group-scoping machinery itself — a
+/// `Sessions` row inserted BEFORE filtering would need its own
+/// group-scoping semantics (typing "session" would need to mean
+/// "show every live workspace", a much bigger behavior change than
+/// this purely visual grouping) and could vanish or duplicate across
+/// the various filter paths (F7/F8/F9, group-scoping, fuzzy/regex).
+/// A no-op when there's no live workspace row left after filtering —
+/// same as how the `Directories`/`hosts` headers only appear when
+/// they have at least one surviving row.
+fn insert_sessions_group_header(mut rows: Vec<HistoryRow>) -> Vec<HistoryRow> {
+    let Some(pos) = rows
+        .iter()
+        .position(|r| r.mode == "workspace" && r.source == "workspace")
+    else {
+        return rows;
+    };
+    rows.insert(
+        pos,
+        HistoryRow {
+            id: -15_000,
+            command: "Sessions".to_string(),
+            directory: String::new(),
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: 0,
+            comment: String::new(),
+            output: String::new(),
+            mode: "workspace".to_string(),
+            source: "workspace-group".to_string(),
+            ..Default::default()
+        },
+    );
+    rows
 }
 
 /// Build the configured-sessions

@@ -4,7 +4,17 @@
 | --- | --- |
 | Configurable | `prefix.panes=<char>` |
 
-Panes mode lists every pane across every tmux session and every herdr workspace, organised as a tree: each session / workspace gets a header row (`# workspace-label`), and its child panes appear indented underneath (`· [workspace-label] command  cwd`). Selecting a row stages the command to focus that pane / workspace.
+Panes mode lists every pane across every tmux session and every herdr workspace, organised as a tree. Live sessions are wrapped under one common `# Sessions` heading, with each session / workspace as a `## workspace-label` sub-heading underneath it, and its child panes indented one level further (`· [workspace-label] command  cwd`):
+
+```md
+# Sessions
+## Smarthistory
+    · zsh
+## Home
+    · zsh
+```
+
+Selecting a row stages the command to focus that pane / workspace.
 
 ## What it does
 
@@ -17,6 +27,10 @@ Panes mode lists every pane across every tmux session and every herdr workspace,
 ## Workspace headers
 
 A workspace header row is rendered for every tmux session / herdr workspace that owns at least one pane. The header's command column shows the workspace label (e.g. `smarthistory`, `dir: Downloads`); selecting it stages the focus command for the whole workspace.
+
+## Sessions group header
+
+Whenever at least one live workspace is showing, a synthetic `# Sessions` row is inserted directly above the first one, wrapping all live workspaces under one common heading — the same `# `-headed look the `Directories`/`hosts` sections below already have. Each individual live workspace then renders as a `## ` sub-heading nested underneath it, rather than its own top-level `# ` header. The `Sessions` row is a pure grouping label: `Enter` on it is a no-op (there's no single workspace to focus). It's inserted as the last step of `panes::fetch`, after filtering — so it only appears when at least one live workspace survives the current filter (F7/F8/F9, a search query, etc.), and it doesn't change how individual live workspaces are filtered or group-scoped (see [Group-aware filter](#group-aware-filter) below) — each one is still its own independently matchable group, exactly as before.
 
 ## Selecting a row
 

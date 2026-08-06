@@ -13407,6 +13407,118 @@ fn fetch_panes_substring_filter_matches_command_or_cwd() {
     assert_eq!(rows[0].command, "vim");
 }
 
+// --- Sessions group header (`insert_sessions_group_header`) ----
+//
+// Live tmux/herdr workspaces get a common synthetic `# Sessions`
+// header wrapping all of them (one level higher than each
+// individual `## <workspace>` sub-header), matching the
+// `Directories`/`hosts` sections' own `# `-headed look:
+//
+//   # Sessions
+//   ## Smarthistory
+//       zsh
+//   ## Home
+//       zsh
+
+/// A `Sessions` header (`mode == "workspace"`, `source ==
+/// "workspace-group"`) is inserted directly above the first live
+/// workspace row whenever at least one is present.
+#[test]
+fn fetch_panes_inserts_sessions_group_header_when_live_workspace_present() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "Smarthistory".to_string(),
+            session_id: "Smarthistory".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: String::new(),
+            session_id: "%1".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "Smarthistory".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert_eq!(rows.len(), 3, "Sessions header + workspace + pane");
+    assert_eq!(rows[0].mode, "workspace");
+    assert_eq!(rows[0].command, "Sessions");
+    assert_eq!(rows[0].source, "workspace-group");
+    // The header itself doesn't focus anything on selection —
+    // `session_id` empty is the existing no-op contract
+    // `stage_pane_selection`'s `mode == "workspace"` arm already
+    // uses (`if label.is_empty() { return; }`).
+    assert_eq!(rows[0].session_id, "");
+    assert_eq!(rows[1].mode, "workspace");
+    assert_eq!(rows[1].command, "Smarthistory");
+    assert_eq!(rows[2].mode, "pane");
+}
+
+/// No `Sessions` header when there's no live workspace — e.g. only
+/// the configured `Directories`/`hosts` sections are present. Same
+/// "only appears when it has content" contract those sections
+/// already follow.
+#[test]
+fn fetch_panes_omits_sessions_group_header_with_no_live_workspace() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    app.sessions = vec![HistoryRow {
+        id: -1,
+        command: "Home".to_string(),
+        directory: "/home/har".to_string(),
+        ..Default::default()
+    }];
+    app.query = "*".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert!(
+        !rows.iter().any(|r| r.source == "workspace-group"),
+        "no live workspace rows, so no Sessions header should appear; got: {:?}",
+        rows.iter().map(|r| (&r.mode, &r.command)).collect::<Vec<_>>()
+    );
+    assert!(
+        rows.iter().any(|r| r.command == "Directories"),
+        "the Directories header must still be present"
+    );
+}
+
+/// Selecting the `Sessions` header row (`Enter`) is a clean no-op —
+/// it's a pure grouping label, not a focusable target.
+#[test]
+fn select_for_run_on_sessions_group_header_is_noop() {
+    use crate::tui::state::HistoryRow;
+    let mut app = directories_test_app(&[]);
+    app.session_panes = vec![HistoryRow {
+        id: -15_000,
+        command: "Sessions".to_string(),
+        session_id: String::new(),
+        mode: "workspace".to_string(),
+        source: "workspace-group".to_string(),
+        ..Default::default()
+    }];
+    app.query = "*".to_string();
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert!(
+        app.selection.is_none(),
+        "selecting the Sessions header must not stage a command"
+    );
+}
+
 /// Group-aware filter: when the user types a token
 /// that matches a workspace LABEL, the entire
 /// workspace (header + every child pane) is shown,
@@ -13484,27 +13596,29 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
     ];
     app.query = String::from("*SmartHistory");
     let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
-    // The workspace header AND its two child panes
-    // are all kept, because the workspace label
-    // matches the query.
+    // The synthetic `Sessions` group header, the workspace header,
+    // AND its two child panes are all kept, because the workspace
+    // label matches the query.
     assert_eq!(
         rows.len(),
-        3,
-        "expected workspace + 2 panes, got {} rows",
+        4,
+        "expected Sessions header + workspace + 2 panes, got {} rows",
         rows.len()
     );
     assert_eq!(rows[0].mode, "workspace");
-    assert_eq!(rows[0].command, "SmartHistory");
-    assert_eq!(rows[1].mode, "pane");
-    assert_eq!(rows[1].command, "zsh");
+    assert_eq!(rows[0].command, "Sessions");
+    assert_eq!(rows[1].mode, "workspace");
+    assert_eq!(rows[1].command, "SmartHistory");
     assert_eq!(rows[2].mode, "pane");
-    assert_eq!(rows[2].command, "vim");
+    assert_eq!(rows[2].command, "zsh");
+    assert_eq!(rows[3].mode, "pane");
+    assert_eq!(rows[3].command, "vim");
     // The renderer reads `workspace_label` to
     // show the badge; verify it was set on the
     // pane rows so the chip rendering is wired
     // up end-to-end.
-    assert_eq!(rows[1].workspace_label, "SmartHistory");
     assert_eq!(rows[2].workspace_label, "SmartHistory");
+    assert_eq!(rows[3].workspace_label, "SmartHistory");
 }
 
 /// A pane actually running something (`current_command` non-empty —
@@ -13597,6 +13711,84 @@ fn running_pane_gets_dominant_marker_idle_pane_does_not() {
     assert!(marker_is_bold, "the running-pane marker must render bold");
 }
 
+/// Live workspaces render nested under a `# Sessions` heading:
+/// `# ` for the synthetic group header, `## ` (indented) for each
+/// individual live workspace. Renders through the real
+/// `crate::tui::render::ui` entry point against a `TestBackend`,
+/// same technique as `running_pane_gets_dominant_marker_idle_pane_does_not`.
+#[test]
+fn live_workspaces_render_nested_under_sessions_heading() {
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "Smarthistory".to_string(),
+            session_id: "Smarthistory".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: "Smarthistory".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: String::new(),
+            session_id: "%1".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "Smarthistory".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -3,
+            command: "Home".to_string(),
+            session_id: "Home".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: "Home".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -4,
+            command: String::new(),
+            session_id: "%2".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "Home".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("Sessions"), "got: {text:?}");
+    assert!(text.contains("Smarthistory"), "got: {text:?}");
+    assert!(text.contains("Home"), "got: {text:?}");
+    assert!(
+        text.contains("## Smarthistory") || text.contains("##Smarthistory"),
+        "individual live workspaces must render as `## ` sub-headings, got: {text:?}"
+    );
+}
+
 /// Group-aware filter: when a child pane's command
 /// matches, the parent workspace header is ALSO
 /// kept (the user sees which workspace the matching
@@ -13650,11 +13842,13 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
     // sees the context.
     app.query = String::from("*vim");
     let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].mode, "workspace");
-    assert_eq!(rows[0].command, "SmartHistory");
-    assert_eq!(rows[1].mode, "pane");
-    assert_eq!(rows[1].command, "vim");
+    assert_eq!(rows[0].command, "Sessions");
+    assert_eq!(rows[1].mode, "workspace");
+    assert_eq!(rows[1].command, "SmartHistory");
+    assert_eq!(rows[2].mode, "pane");
+    assert_eq!(rows[2].command, "vim");
 }
 
 /// The `FilterPanesWindows` filter hides
@@ -14570,13 +14764,17 @@ fn select_for_run_in_panes_mode_dispatches_on_row_mode() {
     // workspace header)
     // for this test.
 
-    // 1.) Select row 0 —
+    // Row 0 is now the synthetic `Sessions` group header
+    // (`insert_sessions_group_header`); the wA/wB tree starts at
+    // row 1.
+    //
+    // 1.) Select row 1 —
     // the wA workspace
     // header. The staged
     // command must be
     // `tmux switch-client -t wA`
     // (session focus).
-    app.list_state.select(Some(0));
+    app.list_state.select(Some(1));
     app.select_for_run();
     assert_eq!(
         app.selection.as_deref(),
@@ -14584,7 +14782,7 @@ fn select_for_run_in_panes_mode_dispatches_on_row_mode() {
         "workspace header row must stage focus_session command"
     );
 
-    // 2.) Select row 1 —
+    // 2.) Select row 2 —
     // the wA:p1 pane row.
     // The staged command
     // must be
@@ -14596,7 +14794,7 @@ fn select_for_run_in_panes_mode_dispatches_on_row_mode() {
     // is still passed
     // to `focus_pane`.
     app.selection = None;
-    app.list_state.select(Some(1));
+    app.list_state.select(Some(2));
     app.select_for_run();
     assert_eq!(
         app.selection.as_deref(),
@@ -14999,11 +15197,13 @@ fn panes_mode_does_not_dedup_pane_rows_with_same_command() {
     // `duplicate_filter = true`.
     assert_eq!(
         app.merged_rows().len(),
-        6,
+        7,
         "panes mode must not dedup pane rows by `command`; \
                  every pane should be visible even when multiple \
                  panes share the same command (e.g. two shells, or \
-                 two agents with the same name). Got: {}",
+                 two agents with the same name); expects the two \
+                 workspace headers + 4 panes + the synthetic Sessions \
+                 group header. Got: {}",
         app.merged_rows().len()
     );
     // Spot-check that the
@@ -15186,8 +15386,9 @@ fn panes_mode_merged_rows_preserve_tree_order_top_down() {
     app.query = String::from("*");
     app.refresh();
     let rows = app.merged_rows();
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
     // The expected top-to-bottom order:
+    //   Sessions (synthetic group header)
     //   wA header
     //     · wA:p1 pane
     //   wB header
@@ -15196,14 +15397,16 @@ fn panes_mode_merged_rows_preserve_tree_order_top_down() {
     // sort path would REVERSE the order by timestamp —
     // but for panes mode there's no sort, so the
     // original (top-down tree) emission order survives.
-    assert_eq!(rows[0].session_id, "wA");
+    assert_eq!(rows[0].command, "Sessions");
     assert_eq!(rows[0].mode, "workspace");
-    assert_eq!(rows[1].session_id, "wA:p1");
-    assert_eq!(rows[1].mode, "pane");
-    assert_eq!(rows[2].session_id, "wB");
-    assert_eq!(rows[2].mode, "workspace");
-    assert_eq!(rows[3].session_id, "wB:p1");
-    assert_eq!(rows[3].mode, "pane");
+    assert_eq!(rows[1].session_id, "wA");
+    assert_eq!(rows[1].mode, "workspace");
+    assert_eq!(rows[2].session_id, "wA:p1");
+    assert_eq!(rows[2].mode, "pane");
+    assert_eq!(rows[3].session_id, "wB");
+    assert_eq!(rows[3].mode, "workspace");
+    assert_eq!(rows[4].session_id, "wB:p1");
+    assert_eq!(rows[4].mode, "pane");
 }
 
 /// Regression test for the
@@ -15289,10 +15492,11 @@ fn panes_mode_up_action_decreases_data_index() {
     ];
     app.query = String::from("*");
     app.refresh();
-    // Start: index 0 = wA
-    // workspace header (the
-    // topmost row, since panes
-    // mode is top-aligned).
+    // Row order is now: Sessions (synthetic group header, 0), wA
+    // header (1), wA:p1 pane (2), wB header (3).
+    //
+    // Start: index 0 = the synthetic `Sessions` group header (the
+    // topmost row, since panes mode is top-aligned).
     assert_eq!(app.list_state.selected(), Some(0));
     // Press Down (the user
     // expects the cursor to
@@ -15314,7 +15518,8 @@ fn panes_mode_up_action_decreases_data_index() {
         Some(1),
         "Down action must move the cursor DOWN in panes mode — \
                  to a HIGHER data index (lower-on-screen, since panes \
-                 mode is top-aligned) — not the inverse"
+                 mode is top-aligned) — not the inverse; row 1 is the \
+                 wA workspace header"
     );
     // Press Up (user expects
     // cursor to move UP).
@@ -15329,7 +15534,8 @@ fn panes_mode_up_action_decreases_data_index() {
         app.list_state.selected(),
         Some(0),
         "Up action must move the cursor UP in panes mode — \
-                 back to a LOWER data index (higher-on-screen)"
+                 back to a LOWER data index (higher-on-screen) — \
+                 back to the Sessions header"
     );
     // Sanity: the rest of
     // `selected()` stays in
@@ -15341,9 +15547,10 @@ fn panes_mode_up_action_decreases_data_index() {
     // clamps. NOTE this is
     // delta=-100 (Down action)
     // which gets inverted to
-    // +100; clamped to 2.
+    // +100; clamped to the
+    // last row (wB header, 3).
     app.move_selection(-100); // mirrors Action::Down past bottom
-    assert_eq!(app.list_state.selected(), Some(2));
+    assert_eq!(app.list_state.selected(), Some(3));
 }
 
 /// Panes mode is excluded
@@ -23101,6 +23308,10 @@ fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
     // composed count is
     // deterministic:
     // `snapshot +
+    // 1 (synthetic Sessions
+    // group header, when the
+    // snapshot has at least
+    // one live workspace) +
     // (1 + N_sessions) +
     // (1 + N_hosts)`.
     let mut app = panes_sort_test_app(vec![
@@ -23149,8 +23360,9 @@ fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
     let sessions = rows.iter().filter(|r| r.mode == "session").count();
     let hosts = rows.iter().filter(|r| r.mode == "host").count();
     assert_eq!(
-        workspaces, 4,
-        "2 snapshot workspaces + 1 sessions header + 1 hosts header"
+        workspaces, 5,
+        "2 snapshot workspaces + the synthetic Sessions group header \
+         + 1 sessions header + 1 hosts header"
     );
     assert_eq!(
         panes, 2,
@@ -23160,9 +23372,9 @@ fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
     assert_eq!(hosts, 1, "1 configured host");
     assert_eq!(
         rows.len(),
-        9,
-        "composed count must be 4 workspace rows (2 snapshot + sessions header + hosts header) \
-         + 2 panes + 2 sessions + 1 host = 9"
+        10,
+        "composed count must be 5 workspace rows (2 snapshot + synthetic Sessions group \
+         header + sessions header + hosts header) + 2 panes + 2 sessions + 1 host = 10"
     );
     // Now simulate
     // the
@@ -23187,7 +23399,7 @@ fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
     let rows2 = crate::tui::mode::panes::fetch(&mut app).unwrap();
     assert_eq!(
         rows2.len(),
-        9,
+        10,
         "post-fix: clear+impl+fetch produces the same composed count; \
          the previous bug would have grown this (snapshot was duplicated on every re-run)"
     );
@@ -23197,8 +23409,8 @@ fn panes_fetch_composes_sessions_and_hosts_with_snapshot() {
     let rows3 = crate::tui::mode::panes::fetch(&mut app).unwrap();
     assert_eq!(
         rows3.len(),
-        9,
-        "post-fix: a third clear+impl+fetch cycle still produces 9 rows; \
+        10,
+        "post-fix: a third clear+impl+fetch cycle still produces 10 rows; \
          the previous bug would have grown this further"
     );
 }
