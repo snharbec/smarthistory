@@ -31,12 +31,19 @@ A workspace header row is rendered for every tmux session / herdr workspace that
 
 ## Sessions group header
 
-Whenever at least one live workspace is showing, a synthetic `# Sessions` row is inserted directly above the first one, wrapping all live workspaces under one common heading — the same `# `-headed look the `Directories`/`hosts` sections below already have. Each individual live workspace then renders as a `## ` sub-heading nested underneath it, rather than its own top-level `# ` header. The `Sessions` row is a pure grouping label: `Enter` on it is a no-op (there's no single workspace to focus). It's inserted as the last step of `panes::fetch`, after filtering — so it only appears when at least one live workspace survives the current filter (F7/F8/F9, a search query, etc.), and it doesn't change how individual live workspaces are filtered or group-scoped (see [Group-aware filter](#group-aware-filter) below) — each one is still its own independently matchable group, exactly as before.
+Whenever at least one live workspace is showing, a synthetic `# Sessions` row is inserted directly above the first one, wrapping all live workspaces under one common heading — the same `# `-headed look the `Directories`/`hosts` sections below already have. Each individual live workspace then renders as a `## ` sub-heading nested underneath it, rather than its own top-level `# ` header. It's inserted as the last step of `panes::fetch`, after filtering — so it only appears when at least one live workspace survives the current filter (F7/F8/F9, a search query, etc.), and it doesn't change how individual live workspaces are filtered or group-scoped (see [Group-aware filter](#group-aware-filter) below) — each one is still its own independently matchable group, exactly as before.
+
+## Collapsing group headers
+
+`Enter` on the `# Sessions`, `# Directories`, or `# hosts` header **collapses** it instead of trying to focus something — a `▾` (expanded, the default) / `▸` (collapsed) triangle before the `#` shows the current state. Collapsing `# Sessions` hides every live workspace's `## ` sub-heading and all their panes in one shot; collapsing `# Directories` / `# hosts` hides just that section's own entries. `Enter` again expands it back. This is purely a display toggle, held in memory for the current launch only (not persisted to the session file, and not affected by the search filter — a collapsed group stays collapsed even if you type a query that would otherwise match one of its hidden children).
+
+An individual live workspace's own `## <label>` sub-heading is a different thing and is NOT collapsible — `Enter` on it still stages the focus command, same as before this feature existed. Only the three top-level group headers toggle.
 
 ## Selecting a row
 
 - `Enter` on a **pane** row stages `tmux select-pane -t <pane-id>` / `tmux switch-client -t <pane-id>` (tmux) or `herdr workspace focus <ws> && herdr tab focus <tab-id>` (herdr). The TUI exits and the parent shell runs the command — your terminal flips to the target pane.
-- `Enter` on a **workspace** header row stages the workspace-focus command (no specific pane). Useful when the workspace is in another window / tab and you just want to land in it.
+- `Enter` on a **workspace** sub-heading (`## <label>`) stages the workspace-focus command (no specific pane). Useful when the workspace is in another window / tab and you just want to land in it.
+- `Enter` on the `# Sessions` / `# Directories` / `# hosts` group header collapses/expands it instead — see [Collapsing group headers](#collapsing-group-headers) above.
 
 Selecting a `Directories`/`Hosts` row for the first time creates a new tmux session / herdr workspace named after that entry (see [`docs/configuration.md`](../configuration.md#sessionid)). A pane opened *inside* that session later — directly in tmux/herdr, not through this picker — starts a plain local shell with no connection of its own; run `smarthistory pane-exec` in it to reconnect, since the session/workspace is already named after the config entry that created it and needs no separate lookup.
 

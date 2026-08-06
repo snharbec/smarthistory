@@ -423,7 +423,10 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         None => section_rows,
     };
     if tokens.is_empty() && scoped_group_idxs.is_none() {
-        return Ok(insert_sessions_group_header(section_rows));
+        return Ok(apply_collapsed_groups(
+            insert_sessions_group_header(section_rows),
+            &app.collapsed_pane_groups,
+        ));
     }
     // Per-row match predicate. Used for both
     // the Substring fast path and the Fuzzy /
@@ -483,7 +486,10 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             idx += 1;
         }
     }
-    Ok(insert_sessions_group_header(out))
+    Ok(apply_collapsed_groups(
+        insert_sessions_group_header(out),
+        &app.collapsed_pane_groups,
+    ))
 }
 
 /// Prepend a synthetic `# Sessions` header directly above the first
@@ -539,6 +545,57 @@ fn insert_sessions_group_header(mut rows: Vec<HistoryRow>) -> Vec<HistoryRow> {
         },
     );
     rows
+}
+
+/// Remove the children of any COLLAPSED group header (`Sessions`,
+/// `Directories`, `hosts` — see `App::toggle_pane_group_collapsed`)
+/// from `rows`, leaving the header row itself visible (its render
+/// marker shows a `▸` instead of `▾` — see `render_row`). An
+/// individual live workspace's own `## <label>` sub-heading is never
+/// itself collapsible, but collapsing the `Sessions` super-header
+/// hides the WHOLE subtree — every live workspace sub-heading AND
+/// their panes, not just its immediate rows — which is why this
+/// walks by `source`, not by the next `mode == "workspace"` boundary
+/// the way `compute_groups` does: `Directories`/`hosts` are each
+/// followed directly by their own (non-header) children with no
+/// intermediate sub-heading level, but `Sessions` is followed by
+/// however many `## ` live-workspace headers happen to be live, each
+/// with their own pane children.
+fn apply_collapsed_groups(
+    rows: Vec<HistoryRow>,
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<HistoryRow> {
+    if collapsed.is_empty() {
+        return rows;
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    let mut idx = 0;
+    while idx < rows.len() {
+        let row = rows[idx].clone();
+        let is_group_header = row.mode == "workspace"
+            && matches!(row.source.as_str(), "workspace-group" | "sessions" | "hosts");
+        let is_collapsed = is_group_header && collapsed.contains(&row.command);
+        idx += 1;
+        out.push(row.clone());
+        if !is_collapsed {
+            continue;
+        }
+        if row.source == "workspace-group" {
+            // `Sessions`: skip every live-workspace sub-heading and
+            // pane until the next non-live-session row (the
+            // `Directories`/`hosts` header, or end of list).
+            while idx < rows.len() && matches!(rows[idx].source.as_str(), "workspace" | "pane") {
+                idx += 1;
+            }
+        } else {
+            // `Directories` / `hosts`: skip until the next
+            // `mode == "workspace"` row (any source) or end.
+            while idx < rows.len() && rows[idx].mode != "workspace" {
+                idx += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Build the configured-sessions
@@ -1722,6 +1779,25 @@ impl App {
         // first row so the cursor
         // doesn't land on a row
         // that's now filtered out.
+        self.list_state.select(Some(0));
+        self.refresh();
+    }
+
+    /// Toggle a `*`-mode group header's collapsed state (`Enter` on
+    /// `# Sessions`, `# Directories`, or `# hosts` — see
+    /// `stage_pane_selection`'s dispatch, which routes here instead
+    /// of the usual focus-session staging for these three headers
+    /// specifically; an individual live workspace's own `##
+    /// <label>` sub-heading is NOT collapsible and keeps staging
+    /// its focus command as before). `label` is the header's own
+    /// `row.command` text (`"Sessions"` / `"Directories"` /
+    /// `"hosts"`). Re-selects row 0 and refreshes so the collapse
+    /// takes effect immediately and the cursor never lands on a
+    /// row that just got hidden.
+    pub(crate) fn toggle_pane_group_collapsed(&mut self, label: &str) {
+        if !self.collapsed_pane_groups.remove(label) {
+            self.collapsed_pane_groups.insert(label.to_string());
+        }
         self.list_state.select(Some(0));
         self.refresh();
     }

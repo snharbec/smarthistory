@@ -886,6 +886,21 @@ impl App {
         };
         match row.mode.as_str() {
             "workspace" => {
+                // Group headers (`Sessions`, `Directories`, `hosts`
+                // — the synthetic wrapper + the two configured
+                // sections, as opposed to an individual live
+                // workspace's own `## <label>` sub-heading, whose
+                // `source` is plain `"workspace"`) collapse/expand
+                // on `Enter` instead of staging a focus command —
+                // their `session_id` is either empty (`Sessions`) or
+                // the literal string `"sessions"`/`"hosts"`, neither
+                // of which was ever a real focusable target, so this
+                // replaces a staged command that always silently
+                // failed with something actually useful.
+                if matches!(row.source.as_str(), "workspace-group" | "sessions" | "hosts") {
+                    self.toggle_pane_group_collapsed(&row.command.clone());
+                    return;
+                }
                 let label = row.session_id.clone();
                 if label.is_empty() {
                     return;

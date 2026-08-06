@@ -13519,6 +13519,229 @@ fn select_for_run_on_sessions_group_header_is_noop() {
     );
 }
 
+/// `Enter` on the `Sessions` group header toggles it collapsed —
+/// hiding every live workspace sub-heading and pane underneath it —
+/// and `Enter` again expands it back.
+#[test]
+fn select_for_run_on_sessions_header_toggles_collapse() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "Smarthistory".to_string(),
+            session_id: "Smarthistory".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: "Smarthistory".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: "zsh".to_string(),
+            session_id: "%1".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "Smarthistory".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*".to_string();
+    app.refresh();
+    assert!(
+        !app.collapsed_pane_groups.contains("Sessions"),
+        "starts expanded"
+    );
+    assert_eq!(app.merged_rows().len(), 3, "Sessions + workspace + pane");
+
+    // Row 0 is the Sessions header.
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert!(
+        app.collapsed_pane_groups.contains("Sessions"),
+        "Enter on the Sessions header must collapse it"
+    );
+    assert_eq!(
+        app.merged_rows().len(),
+        1,
+        "collapsed: only the Sessions header itself remains visible"
+    );
+    assert_eq!(app.merged_rows()[0].command, "Sessions");
+
+    // Enter again expands it back.
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert!(
+        !app.collapsed_pane_groups.contains("Sessions"),
+        "Enter again must expand it back"
+    );
+    assert_eq!(app.merged_rows().len(), 3, "children reappear");
+}
+
+/// Collapsing `Sessions` hides the WHOLE subtree — every live
+/// workspace sub-heading and all their panes — not just the rows
+/// immediately following the header.
+#[test]
+fn collapsing_sessions_hides_every_live_workspace_and_its_panes() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "wA".to_string(),
+            session_id: "wA".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: "zsh".to_string(),
+            session_id: "wA:p1".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "wA".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -3,
+            command: "wB".to_string(),
+            session_id: "wB".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -4,
+            command: "vim".to_string(),
+            session_id: "wB:p1".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "wB".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.collapsed_pane_groups.insert("Sessions".to_string());
+    app.query = "*".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the Sessions header survives; both workspaces and all their panes are hidden, got: {:?}",
+        rows.iter().map(|r| (&r.mode, &r.command)).collect::<Vec<_>>()
+    );
+    assert_eq!(rows[0].command, "Sessions");
+}
+
+/// Collapsing `Directories` hides its configured entries but leaves
+/// live sessions and `hosts` untouched — collapse state is
+/// per-group, not global.
+#[test]
+fn collapsing_directories_does_not_affect_other_groups() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    app.sessions = vec![HistoryRow {
+        id: -1,
+        command: "Home".to_string(),
+        directory: "/home/har".to_string(),
+        ..Default::default()
+    }];
+    app.hosts = vec![HistoryRow {
+        id: -2,
+        command: "Proxmox".to_string(),
+        directory: "root@pve-1".to_string(),
+        ..Default::default()
+    }];
+    app.collapsed_pane_groups.insert("Directories".to_string());
+    app.query = "*".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert!(
+        rows.iter().any(|r| r.command == "Directories"),
+        "the Directories header itself must stay visible"
+    );
+    assert!(
+        !rows.iter().any(|r| r.command == "Home"),
+        "Home (a child of the collapsed Directories group) must be hidden"
+    );
+    assert!(
+        rows.iter().any(|r| r.command == "hosts"),
+        "the hosts header (a different, non-collapsed group) must stay visible"
+    );
+    assert!(
+        rows.iter().any(|r| r.command == "Proxmox"),
+        "Proxmox (a child of the non-collapsed hosts group) must stay visible"
+    );
+}
+
+/// The disclosure triangle reflects collapse state: `▾` when
+/// expanded (default), `▸` when collapsed. Renders through the real
+/// `crate::tui::render::ui` entry point against a `TestBackend`.
+#[test]
+fn sessions_header_disclosure_triangle_reflects_collapse_state() {
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![HistoryRow {
+        id: -1,
+        command: "Smarthistory".to_string(),
+        session_id: "Smarthistory".to_string(),
+        timestamp: now,
+        mode: "workspace".to_string(),
+        source: "workspace".to_string(),
+        workspace_label: "Smarthistory".to_string(),
+        ..Default::default()
+    }];
+    app.query = "*".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains('▾'), "expanded state shows ▾, got: {text:?}");
+    assert!(!text.contains('▸'), "must not show ▸ while expanded");
+
+    app.collapsed_pane_groups.insert("Sessions".to_string());
+    // `merged_rows` is cached and only rebuilt by `refresh()` — the
+    // direct mutation above doesn't retrigger a fetch on its own.
+    app.refresh();
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains('▸'), "collapsed state shows ▸, got: {text:?}");
+}
+
 /// Group-aware filter: when the user types a token
 /// that matches a workspace LABEL, the entire
 /// workspace (header + every child pane) is shown,

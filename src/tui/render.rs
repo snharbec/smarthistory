@@ -2338,7 +2338,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         // keeps that pane + its
         // parent workspace
         // header).
-        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; each pane row carries a [label] badge showing its session / workspace; the filter is group-aware: a match on the workspace label keeps the whole workspace, a match on a pane keeps the pane and its parent header)",
+        "list every pane across all tmux sessions / herdr workspaces (organized as a per-session / per-workspace tree with the panes indented underneath; each pane row carries a [label] badge showing its session / workspace; the filter is group-aware: a match on the workspace label keeps the whole workspace, a match on a pane keeps the pane and its parent header); Enter on the Sessions/Directories/hosts group headers collapses/expands them (▾/▸)",
     );
     mode_row(
         &mut lines,
@@ -4380,13 +4380,22 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
         // Top-level `# ` header: the synthetic `Sessions` wrapper
         // itself (`source == "workspace-group"`), or the
         // `Directories`/`hosts` sections (`source == "sessions"` /
-        // `"hosts"`). Info color (not accent) — distinct from the
-        // running-pane marker below, which uses the highlight
-        // color. The two used to share a color in some themes,
-        // making a busy pane's `▶` marker blend into its workspace
-        // header instead of standing out from it.
+        // `"hosts"`). These three are collapsible — `Enter` toggles
+        // `app.collapsed_pane_groups` (see `stage_pane_selection`
+        // and `App::toggle_pane_group_collapsed`) instead of staging
+        // a focus command, and a leading `▸`/`▾` disclosure triangle
+        // shows the current state. Info color (not accent) —
+        // distinct from the running-pane marker below, which uses
+        // the highlight color. The two used to share a color in some
+        // themes, making a busy pane's `▶` marker blend into its
+        // workspace header instead of standing out from it.
+        let disclosure = if app.collapsed_pane_groups.contains(&row.command) {
+            "▸ # "
+        } else {
+            "▾ # "
+        };
         spans.push(Span::styled(
-            "# ",
+            disclosure,
             Style::default()
                 .fg(Theme::info_color())
                 .add_modifier(Modifier::BOLD),

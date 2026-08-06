@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `*` panes mode: `Enter` on the `# Sessions` / `# Directories` / `# hosts`
+  group header now collapses/expands it (`▾`/`▸` triangle) instead of
+  trying to focus something. In-memory for the current launch only; an
+  individual live workspace's own `## ` sub-heading is unaffected and still
+  stages its focus command as before.
 - `*` panes mode: every pane's name now renders bold, always — not just
   panes that get the dominant `▶ ` running marker.
 - `*` panes mode: live tmux/herdr workspaces now wrap under a common
