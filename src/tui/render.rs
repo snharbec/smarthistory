@@ -4530,12 +4530,28 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
                 .add_modifier(Modifier::BOLD),
         ));
     } else if app.is_regex_query() {
-        spans.extend(highlight_regex_matches(
-            &cmd_display,
-            app.query_regex.as_ref(),
-        ));
+        let mut text_spans = highlight_regex_matches(&cmd_display, app.query_regex.as_ref());
+        if row.mode == "pane" {
+            // A pane's name is always bold, even when it doesn't
+            // take the dominant `▶`-marker branch above (an idle
+            // pane with an empty `current_command`, so there's
+            // nothing here to render anyway — this just guarantees
+            // the rule holds regardless of how a pane row got here,
+            // rather than being an incidental side effect of the
+            // running-marker styling).
+            for s in &mut text_spans {
+                s.style = s.style.add_modifier(Modifier::BOLD);
+            }
+        }
+        spans.extend(text_spans);
     } else {
-        spans.extend(highlight_matches(&cmd_display, &app.query));
+        let mut text_spans = highlight_matches(&cmd_display, &app.query);
+        if row.mode == "pane" {
+            for s in &mut text_spans {
+                s.style = s.style.add_modifier(Modifier::BOLD);
+            }
+        }
+        spans.extend(text_spans);
     }
 
     spans.push(Span::styled(

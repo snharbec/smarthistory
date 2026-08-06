@@ -22,7 +22,8 @@ Selecting a row stages the command to focus that pane / workspace.
 - `*nvim` — every pane whose `command` (or `cwd`) contains `nvim`, plus the parent workspace header (group-aware filter).
 - The first text column is the agent / command; the second is the cwd; the third is the timestamp.
 - Each pane row carries a `[workspace-label]` chip in the info color, e.g. `[smarthistory]` or `[dir: Downloads]`. The chip is the primary signal when the workspace header is hidden by a filter.
-- A pane actually running something (an agent, an editor, a build — anything other than a bare idle shell prompt) gets a dominant `▶ ` marker in bold + the highlight color, so busy panes jump out immediately when scanning a long list. An idle pane (just a shell prompt, no `current_command`) stays visually quiet — no marker, plain text.
+- Every pane's name (its `current_command`, e.g. `zsh`, `claude`) renders bold, always — so pane rows read distinctly from the `Directories`/`hosts` sections' plain-text children.
+- A pane actually running something (an agent, an editor, a build — anything other than a bare idle shell prompt) gets, on top of that, a dominant `▶ ` marker in the highlight color, so busy panes jump out immediately when scanning a long list. An idle pane (just a shell prompt, no `current_command`) has nothing to show and stays visually quiet — no marker, no name text (there's none to render).
 
 ## Workspace headers
 

@@ -13709,6 +13709,68 @@ fn running_pane_gets_dominant_marker_idle_pane_does_not() {
         .iter()
         .any(|c| c.symbol() == "▶" && c.modifier.contains(ratatui::style::Modifier::BOLD));
     assert!(marker_is_bold, "the running-pane marker must render bold");
+
+    // The pane's own name text ("claude") must be bold too, not
+    // just the leading `▶` marker cell.
+    let name_cell_is_bold = buffer
+        .content
+        .iter()
+        .any(|c| c.symbol() == "c" && c.modifier.contains(ratatui::style::Modifier::BOLD));
+    assert!(name_cell_is_bold, "the pane's name text must render bold, not just the marker");
+}
+
+/// Every pane row's name renders bold, unconditionally — not just
+/// as an incidental side effect of the running-pane `▶` marker
+/// styling. Uses a plain (non-agent) shell name, still expected to
+/// render bold per the explicit "pane names are always bold" rule
+/// in `render_row`.
+#[test]
+fn pane_name_renders_bold_regardless_of_agent() {
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "SmartHistory".to_string(),
+            session_id: String::new(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: "SmartHistory".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            id: -2,
+            command: "zsh".to_string(),
+            session_id: "%10".to_string(),
+            timestamp: now,
+            mode: "pane".to_string(),
+            source: "pane".to_string(),
+            workspace_label: "SmartHistory".to_string(),
+            pane_agent: "zsh".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let zsh_cell_is_bold = buffer
+        .content
+        .iter()
+        .any(|c| c.symbol() == "z" && c.modifier.contains(ratatui::style::Modifier::BOLD));
+    assert!(
+        zsh_cell_is_bold,
+        "a plain pane name (\"zsh\", no special agent) must still render bold"
+    );
 }
 
 /// Live workspaces render nested under a `# Sessions` heading:

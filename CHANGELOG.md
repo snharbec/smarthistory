@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `*` panes mode: every pane's name now renders bold, always — not just
+  panes that get the dominant `▶ ` running marker.
 - `*` panes mode: live tmux/herdr workspaces now wrap under a common
   synthetic `# Sessions` heading, with each individual workspace rendered
   as a `## ` sub-heading underneath (panes indented one level deeper) —
