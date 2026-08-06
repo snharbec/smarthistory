@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory prune-directories [-f]` CLI command: checks every
+  `session.<id>.dir` (in `sessions` and the main `config` file) against the
+  filesystem and removes the whole entry — name, `.dir`, `.exec`,
+  `.startup_command` — for any directory that no longer exists, after
+  listing what will be removed and asking for confirmation (`-f`/`--force`
+  skips it). Entries with no `.dir` set are left alone; `host.<id>` entries
+  are untouched.
 - `~` zoxide mode: selecting a directory not already saved as a
   `session.<id>` entry now asks "Save directory?" first. `Enter`/`y` writes
   a new `session.<id>` entry (name + `.dir` only, no `.exec`) before

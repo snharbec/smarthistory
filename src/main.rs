@@ -443,6 +443,23 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Remove `session.<id>` entries (the panes-mode "Directories
+    /// list") whose `.dir` no longer exists on disk.
+    ///
+    /// Reads every `session.<id>` entry from both
+    /// `~/.config/smarthistory/config` and
+    /// `~/.config/smarthistory/sessions`, checks whether its `.dir`
+    /// still exists, and removes the whole entry (name, `.dir`,
+    /// `.exec`, `.startup_command` lines) from whichever file(s) it
+    /// lives in when it doesn't. Entries with no `.dir` set are left
+    /// alone — there's nothing to check for them. `host.<id>`
+    /// entries are untouched (a host is a remote target, not a local
+    /// directory).
+    PruneDirectories {
+        /// Skip the confirmation prompt.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Check the health of every TUI prefix mode's dependencies.
     ///
     /// Verifies each mode's (notes, todos, tags, codegraph, files,
@@ -3180,6 +3197,28 @@ impl Config {
             .collect()
     }
 
+    /// Session entries that have a `.dir` set, with the directory
+    /// expanded to an absolute path — used by the `prune-directories`
+    /// CLI subcommand to find entries whose directory no longer
+    /// exists. Entries with no `.dir` are omitted (nothing to check).
+    /// Same expansion `sessions()` uses, so a directory this reports
+    /// as existing/missing matches what the picker itself would show.
+    pub fn session_directories(&self) -> Vec<(usize, String, String)> {
+        self.sessions
+            .iter()
+            .filter(|(_, def)| !def.dir.is_empty())
+            .map(|(id, def)| {
+                let home_list: Vec<String> =
+                    std::iter::once(std::env::var("HOME").unwrap_or_default())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                let expanded =
+                    crate::util::expand_home_to_absolute(&def.dir, &home_list).into_owned();
+                (*id, def.name.clone(), expanded)
+            })
+            .collect()
+    }
+
     /// Hosts parsed from the config file
     /// (`host.<id>=...`, `host.<id>.host=...`,
     /// `host.<id>.hostname=...`, etc.) merged
@@ -4052,6 +4091,62 @@ fn pad_rows(rows: &[Vec<String>], fields: &[String]) -> Vec<Vec<String>> {
                 .collect()
         })
         .collect()
+}
+
+/// Remove every `session.<id>` line — the name line (`session.<id> =
+/// ...`) and every sub-field (`session.<id>.dir = ...`,
+/// `.exec`, `.startup_command`, ...) — for each id in `ids`, from
+/// `path`. Used by `smarthistory prune-directories` to delete stale
+/// entries from whichever of `~/.config/smarthistory/config` /
+/// `~/.config/smarthistory/sessions` they live in.
+///
+/// A missing file is not an error (a from-scratch install, or an
+/// entry that only lives in the other file) — returns `Ok(0)`. If no
+/// line in the file matches any id, the file is left untouched
+/// entirely (no needless rewrite). Otherwise the file is rewritten
+/// atomically (temp file + rename), same pattern as
+/// `App::write_new_entry_to_config`.
+///
+/// Matching is a literal prefix check (`session.<id> ` / `session.<id>.`
+/// / `session.<id>=`) against each line's trimmed start — the exact
+/// three forms `write_new_entry_to_config` ever emits — so `session.1`
+/// never matches a `session.10` line.
+fn remove_session_lines(
+    path: &std::path::Path,
+    ids: &std::collections::HashSet<usize>,
+) -> std::io::Result<usize> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    let kept: Vec<&str> = contents
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            let is_stale_session_line = ids.iter().any(|id| {
+                trimmed.starts_with(&format!("session.{} ", id))
+                    || trimmed.starts_with(&format!("session.{}.", id))
+                    || trimmed.starts_with(&format!("session.{}=", id))
+            });
+            if is_stale_session_line {
+                removed += 1;
+            }
+            !is_stale_session_line
+        })
+        .collect();
+    if removed == 0 {
+        return Ok(0);
+    }
+    let mut new_contents = kept.join("\n");
+    if contents.ends_with('\n') {
+        new_contents.push('\n');
+    }
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, new_contents.as_bytes())?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(removed)
 }
 
 /// Read a single line from stdin and return true if it starts with "y" or
@@ -5677,6 +5772,53 @@ fn main() -> anyhow::Result<()> {
                 if output_deleted == 1 { "" } else { "s" },
                 comments_deleted,
                 if comments_deleted == 1 { "" } else { "s" },
+            );
+        }
+        Commands::PruneDirectories { force } => {
+            let cfg = Config::load_tui();
+            let stale: Vec<(usize, String, String)> = cfg
+                .session_directories()
+                .into_iter()
+                .filter(|(_, _, dir)| !std::path::Path::new(dir).is_dir())
+                .collect();
+
+            if stale.is_empty() {
+                println!("No stale directory entries found.");
+                return Ok(());
+            }
+
+            println!(
+                "The following session director{} no longer exist{}:",
+                if stale.len() == 1 { "y" } else { "ies" },
+                if stale.len() == 1 { "s" } else { "" }
+            );
+            for (_, name, dir) in &stale {
+                println!("  {} ({})", name, dir);
+            }
+
+            if !force
+                && !confirm(&format!(
+                    "Remove {} entr{}? [y/N] ",
+                    stale.len(),
+                    if stale.len() == 1 { "y" } else { "ies" },
+                ))
+            {
+                println!("Aborted.");
+                return Ok(());
+            }
+
+            let ids: std::collections::HashSet<usize> =
+                stale.iter().map(|(id, _, _)| *id).collect();
+            let mut removed = 0usize;
+            for path in [sessions_path(), config_path()].into_iter().flatten() {
+                removed += remove_session_lines(&path, &ids)?;
+            }
+            println!(
+                "Removed {} stale directory entr{} from configuration ({} line{}).",
+                stale.len(),
+                if stale.len() == 1 { "y" } else { "ies" },
+                removed,
+                if removed == 1 { "" } else { "s" },
             );
         }
         Commands::Update => {
