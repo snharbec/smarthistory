@@ -168,6 +168,30 @@ fn glob_to_ag_regex(glob: &str) -> String {
     regex
 }
 
+/// A file's modification time as Unix epoch seconds, or `0` on any
+/// failure to read it (missing file, permission error, a platform
+/// without mtime support) — same "no meaningful timestamp available"
+/// convention `files.rs::walk_dir` uses, so a stat error never
+/// aborts the whole search.
+fn file_mtime(path: &str) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Sort `rows` newest-modified-file first. Ties (multiple matches in
+/// the same file, or files whose mtime couldn't be read) keep their
+/// relative order — `sort_by` is stable, so same-file matches stay
+/// in the line-number order `ag` emitted them in. Extracted from
+/// `run_ag` as a pure function so the ordering can be unit-tested
+/// without spawning the real `ag` binary.
+fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
+    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+}
+
 /// Build and run the `ag` command for the given user pattern.
 fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     // If the pattern is empty, return nothing.
@@ -238,6 +262,9 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut rows: Vec<HistoryRow> = Vec::new();
     let mut next_id: i64 = -1;
+    // Cache each file's mtime by absolute path — a file with many
+    // matches would otherwise `stat` it once per match line.
+    let mut mtime_cache: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     // Use the first explicit language for bat syntax highlighting.
     // If multiple languages were specified we use only the first
@@ -284,6 +311,16 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
         } else {
             cwd.join(file).to_string_lossy().into_owned()
         };
+
+        // The row's `timestamp` is the FILE's modification time
+        // (not "when this row was created" — every row is created
+        // at search time), same convention `files.rs::walk_dir` uses.
+        // This is both what `render_row` shows in the age/time
+        // column and the sort key applied below to show matches in
+        // recently-modified files first.
+        let mtime = *mtime_cache
+            .entry(abs_path.clone())
+            .or_insert_with(|| file_mtime(&abs_path));
 
         // Read 5 lines of context around the match (2 before,
         // the match line, 2 after) so the details pane shows
@@ -339,7 +376,7 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             // injection primitive.
             session_id: line_number.to_string(),
             exit_code: 0,
-            timestamp: 0,
+            timestamp: mtime,
             comment: basename,
             output,
             mode: "ag".to_string(),
@@ -347,12 +384,15 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             ..Default::default()
         });
         next_id -= 1;
-
-        // Cap results to keep the UI responsive.
-        if rows.len() >= 1000 {
-            break;
-        }
     }
+
+    sort_rows_newest_modified_first(&mut rows);
+    // Cap results to keep the UI responsive — applied AFTER sorting
+    // (not during accumulation) so a search with more than 1000
+    // total matches still shows the matches from the most-recently-
+    // modified files, not just whichever 1000 lines `ag` happened
+    // to emit first.
+    rows.truncate(1000);
 
     rows
 }

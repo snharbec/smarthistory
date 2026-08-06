@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `,` (ag) mode: each row's timestamp is now the matched file's real
+  modification time (was always `0`/Unix-epoch), and results sort
+  newest-modified file first (was `ag`'s own arbitrary output order).
+  Matches within the same file keep their line-number order.
 - `*` panes mode: a pane actually running something (not just an idle shell
   prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so
   busy panes stand out immediately in a long list.
