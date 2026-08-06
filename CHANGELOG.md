@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `^` browser mode: `Ctrl-]` (`SmartOpen`) now stages `note_search convert
+  <url>` for the selected bookmark/history entry — converting it into a
+  local markdown note — instead of the default "open the URL" (still what
+  plain `Enter` does).
 - `*` panes mode: `Enter` on the `# Sessions` / `# Directories` / `# hosts`
   group header now collapses/expands it (`▾`/`▸` triangle) instead of
   trying to focus something. In-memory for the current launch only; an

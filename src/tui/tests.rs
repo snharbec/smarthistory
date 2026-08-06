@@ -20392,6 +20392,131 @@ fn select_for_run_in_browser_mode_without_url_is_noop() {
     assert_eq!(app.selection, None);
 }
 
+/// `Ctrl-]` (SmartOpen) in browser mode stages
+/// `note_search convert <url>` — turning the selected bookmark/
+/// history entry into a local markdown note — instead of the
+/// default "open the URL" behavior plain `Enter` still uses. Bare
+/// command, no `-o`/`-d` flags, same convention
+/// `download_jira_issue_stages_command` documents for its own
+/// `note_search jira-issue <KEY>`.
+#[test]
+fn download_browser_entry_as_note_stages_command() {
+    let mut app = directories_test_app(&[]);
+    app.browser_state.rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "bookmark Rust Lang".to_string(),
+        directory: "chrome".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "https://rust-lang.org".to_string(),
+        output: String::new(),
+        mode: "browser".to_string(),
+        source: "bookmark".to_string(),
+        ..Default::default()
+    });
+    app.query = String::from("^");
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.download_browser_entry_as_note();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("note_search convert https://rust-lang.org"),
+        "got: {:?}",
+        app.selection
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// The `SmartOpen` action dispatches to `download_browser_entry_as_note`
+/// specifically in browser mode (not the generic `select_for_run`
+/// fallback every other mode gets) — routed via
+/// `dispatch_action(Action::SmartOpen)`'s `ModeKind::Browser` arm.
+#[test]
+fn smart_open_in_browser_mode_stages_convert_command() {
+    let mut app = directories_test_app(&[]);
+    app.browser_state.rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "history Rust Lang".to_string(),
+        directory: "firefox".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "https://rust-lang.org".to_string(),
+        output: String::new(),
+        mode: "browser".to_string(),
+        source: "history".to_string(),
+        ..Default::default()
+    });
+    app.query = String::from("^");
+    app.refresh();
+    app.list_state.select(Some(0));
+    let quit = dispatch_action(&mut app, Action::SmartOpen);
+    assert!(quit, "SmartOpen must exit the TUI once a command is staged");
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("note_search convert https://rust-lang.org"),
+        "got: {:?}",
+        app.selection
+    );
+}
+
+/// A browser row with no URL (empty `comment`) is a no-op — no
+/// broken `note_search convert ""` command staged.
+#[test]
+fn download_browser_entry_as_note_without_url_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.browser_state.rows.push(crate::tui::state::HistoryRow {
+        id: -1,
+        command: "bookmark Broken".to_string(),
+        directory: "chrome".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "browser".to_string(),
+        source: "bookmark".to_string(),
+        ..Default::default()
+    });
+    app.query = String::from("^");
+    app.refresh();
+    app.list_state.select(Some(0));
+    app.download_browser_entry_as_note();
+    assert_eq!(app.selection, None);
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(status.contains("no URL"), "got: {:?}", status);
+}
+
+/// Outside browser mode, the action is a no-op with a status message
+/// so the user understands why their key did nothing — same
+/// defence-in-depth re-gate `download_jira_issue` uses.
+#[test]
+fn download_browser_entry_as_note_outside_browser_mode_is_noop() {
+    let mut app = directories_test_app(&[("ls", "/tmp", 0)]);
+    app.query = String::from("*");
+    app.refresh();
+    app.download_browser_entry_as_note();
+    assert!(
+        app.selection.is_none(),
+        "no command should be staged outside browser mode"
+    );
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("browser mode"),
+        "status should mention browser mode: {:?}",
+        status
+    );
+}
+
 /// `<#inv<TAB>` expands to `<#invoice ` (unique tag match, same
 /// shape as `notes_tab_completion_tag_unique_match_expands_with_space`
 /// but the candidate source is `paperless_state.tag_names`, not a

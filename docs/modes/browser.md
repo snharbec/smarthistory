@@ -45,6 +45,7 @@ Every browser's database file is typically held open (and often locked) by a run
 
 - `Enter` stages `open "<url>"` (macOS) / `xdg-open "<url>"` (other Unixes) and exits. The TUI is gone before the browser opens.
 - The URL comes straight off the row (no server round-trip needed, unlike [JIRA](jira.md) or [Paperless](paperless.md), which reconstruct the browse URL from a stored id) — it's read verbatim from the browser's own bookmarks/history file, then shell-quoted before staging.
+- `Ctrl-]` (`Action::SmartOpen`) stages `note_search convert <url>` instead — `note_search`'s general "convert a web page or document to a markdown note" command, saved to `NOTE_SEARCH_DIR`/`NOTE_SEARCH_DATABASE` (or `note_search`'s own defaults if those aren't set). Same bare-command convention [JIRA mode's `Ctrl-M-s` download-as-note action](jira.md) uses — no `-o`/`-d` flags passed explicitly. This turns any bookmark or history entry into a local note without leaving the TUI to run the conversion by hand.
 
 ## Match algorithm
 
