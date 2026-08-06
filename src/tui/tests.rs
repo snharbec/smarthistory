@@ -11388,10 +11388,293 @@ fn zoxide_select_for_run_stages_new_session_not_plain_command() {
     app.query = "~select".to_string();
     app.list_state.select(Some(0));
     app.select_for_run();
+    // The directory isn't a configured `session.<id>` entry, so
+    // selecting it opens the "save this directory?" prompt instead
+    // of staging immediately — see `zoxide_save_prompt_opens_...`
+    // tests below for that behavior in isolation. Decline the save
+    // here to drive through to the actual staging this test cares
+    // about.
+    assert!(
+        app.zoxide_save_prompt.is_some(),
+        "an unsaved zoxide directory must open the save prompt first"
+    );
+    app.answer_zoxide_save_prompt(false);
     let staged = app.selection.as_deref().unwrap_or("");
     assert!(
         staged.contains("new-session") || staged.contains("workspace create"),
         "expected a new-session/workspace-create staging command, got: {staged:?}"
+    );
+}
+
+/// Build a zoxide-mode `App` with a single merged row for `dir`,
+/// selected and ready for `select_for_run`. Shared setup for the
+/// `zoxide_save_prompt` tests below.
+fn zoxide_test_app_selecting(dir: &str) -> App {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![crate::tui::state::HistoryRow {
+        id: -1,
+        command: dir.to_string(),
+        directory: dir.to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 1,
+        comment: String::new(),
+        output: String::new(),
+        mode: "directory".to_string(),
+        source: "zoxide".to_string(),
+        ..Default::default()
+    }];
+    app.query = "~select".to_string();
+    app.list_state.select(Some(0));
+    app
+}
+
+/// Selecting a zoxide directory not already in `app.sessions` opens
+/// the save prompt, pre-filled with the directory's basename as the
+/// label, instead of staging immediately.
+#[test]
+fn zoxide_save_prompt_opens_for_unsaved_directory() {
+    let dir = zoxide_test_dir("prompt-basename");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.select_for_run();
+    let prompt = app
+        .zoxide_save_prompt
+        .as_ref()
+        .expect("unsaved zoxide directory must open the save prompt");
+    assert_eq!(prompt.directory, dir);
+    assert_eq!(
+        prompt.label,
+        std::path::Path::new(&dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+    );
+    assert!(
+        app.selection.is_none(),
+        "the prompt must defer staging, not stage immediately"
+    );
+}
+
+/// A zoxide directory that's already a configured `session.<id>`
+/// entry (matched via `canonicalize_directory`, so trailing slashes
+/// etc. don't cause a false "unsaved" prompt) skips the prompt
+/// entirely and stages right away, same as before this feature
+/// existed.
+#[test]
+fn zoxide_save_prompt_skipped_for_already_saved_directory() {
+    let dir = zoxide_test_dir("already-saved");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.sessions = vec![crate::tui::state::HistoryRow {
+        id: -10_003,
+        command: String::from("existing"),
+        directory: dir.clone(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 1,
+        comment: String::new(),
+        output: String::new(),
+        mode: "directory".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.select_for_run();
+    assert!(
+        app.zoxide_save_prompt.is_none(),
+        "an already-saved directory must not open the save prompt"
+    );
+    let staged = app.selection.as_deref().unwrap_or("");
+    assert!(
+        staged.contains("new-session") || staged.contains("workspace create"),
+        "expected staging to happen directly, got: {staged:?}"
+    );
+}
+
+/// Answering "yes" (`answer_zoxide_save_prompt(true)`) writes a new
+/// `session.<id>` entry to the real `sessions` file path resolution
+/// (redirected to a scratch `$HOME` for the duration of the test —
+/// see `ENV_LOCK`) with a name and `.dir` line only, deliberately no
+/// `.exec` line ("without any specific execution flags"), and still
+/// completes the original directory staging afterward.
+#[test]
+fn zoxide_save_prompt_yes_writes_session_entry_without_exec() {
+    let _env_guard = lock_or_recover(&ENV_LOCK);
+    let tmp_home = std::env::temp_dir().join(format!(
+        "smarthistory_zoxide_save_prompt_yes_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_home);
+    std::fs::create_dir_all(tmp_home.join(".config/smarthistory")).expect("create cfg dir");
+    let prev_home = std::env::var("HOME").ok();
+    unsafe {
+        std::env::set_var("HOME", &tmp_home);
+    }
+
+    let dir = zoxide_test_dir("save-me");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.select_for_run();
+    assert!(app.zoxide_save_prompt.is_some());
+    app.answer_zoxide_save_prompt(true);
+
+    let sessions_path = tmp_home.join(".config/smarthistory/sessions");
+    let contents = std::fs::read_to_string(&sessions_path).unwrap_or_else(|e| {
+        panic!("expected sessions file at {sessions_path:?}: {e}")
+    });
+
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp_home);
+
+    let expected_label = std::path::Path::new(&dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap();
+    assert!(
+        contents.contains(&format!("= {expected_label:?}")),
+        "expected a session name line for {expected_label:?} in:\n{contents}"
+    );
+    assert!(
+        contents.contains(&format!(".dir = {dir:?}")),
+        "expected a `.dir` line for {dir:?} in:\n{contents}"
+    );
+    assert!(
+        !contents.contains(".exec"),
+        "must not write an `.exec` line — \"without any specific execution flags\":\n{contents}"
+    );
+    let staged = app.selection.as_deref().unwrap_or("");
+    assert!(
+        staged.contains("new-session") || staged.contains("workspace create"),
+        "the original directory jump must still complete after saving, got: {staged:?}"
+    );
+}
+
+/// Answering "no" must NOT write anything to the sessions file, but
+/// must still complete the original directory staging — declining to
+/// save never blocks the jump.
+#[test]
+fn zoxide_save_prompt_no_skips_write_but_still_stages() {
+    let _env_guard = lock_or_recover(&ENV_LOCK);
+    let tmp_home = std::env::temp_dir().join(format!(
+        "smarthistory_zoxide_save_prompt_no_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_home);
+    std::fs::create_dir_all(tmp_home.join(".config/smarthistory")).expect("create cfg dir");
+    let prev_home = std::env::var("HOME").ok();
+    unsafe {
+        std::env::set_var("HOME", &tmp_home);
+    }
+
+    let dir = zoxide_test_dir("dont-save-me");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.select_for_run();
+    assert!(app.zoxide_save_prompt.is_some());
+    app.answer_zoxide_save_prompt(false);
+
+    let sessions_path = tmp_home.join(".config/smarthistory/sessions");
+    let write_happened = sessions_path.exists();
+
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp_home);
+
+    assert!(
+        !write_happened,
+        "declining the save must not create a sessions file"
+    );
+    let staged = app.selection.as_deref().unwrap_or("");
+    assert!(
+        staged.contains("new-session") || staged.contains("workspace create"),
+        "declining to save must still stage the directory jump, got: {staged:?}"
+    );
+}
+
+/// `handle_zoxide_save_prompt_key` key dispatch: `Enter`/`y`/`Y` save
+/// and stage, `n`/`N` skip the save but still stage, and `Ctrl-C`
+/// aborts the whole TUI without staging anything (matching every
+/// other confirmation overlay's panic-button semantics).
+#[test]
+fn zoxide_save_prompt_key_dispatch() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    // `n` skips the save, still stages.
+    let dir = zoxide_test_dir("key-n");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.select_for_run();
+    assert!(app.zoxide_save_prompt.is_some());
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.zoxide_save_prompt.is_none());
+    assert!(app.selection.is_some());
+
+    // With the DEFAULT bindings, `Action::Cancel` is bound to both
+    // `Esc` and `C-c` (see `KeyBindings::defaults`), so Ctrl-C hits
+    // the `_ if is_cancel_key` arm before the dedicated
+    // `KeyCode::Char('c') + CONTROL` arm ever runs — same
+    // shadowed-fallback shape as `handle_confirm_delete_key`. That
+    // dedicated arm only becomes reachable if the user remaps
+    // `key.cancel` away from `C-c`; under defaults, Ctrl-C behaves
+    // exactly like `n`/Cancel here — decline the save, still stage.
+    let dir = zoxide_test_dir("key-ctrlc");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.select_for_run();
+    assert!(app.zoxide_save_prompt.is_some());
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.zoxide_save_prompt.is_none());
+    assert!(
+        app.selection.is_some(),
+        "Ctrl-C under default bindings must still stage the directory jump"
+    );
+
+    // A stray, unbound key does nothing — the prompt stays open.
+    let dir = zoxide_test_dir("key-stray");
+    let mut app = zoxide_test_app_selecting(&dir);
+    app.select_for_run();
+    assert!(app.zoxide_save_prompt.is_some());
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    assert!(
+        app.zoxide_save_prompt.is_some(),
+        "a stray key must not answer the prompt"
+    );
+}
+
+/// `draw_zoxide_save_prompt` actually renders the directory's
+/// basename and the "save?" hint text onscreen when
+/// `app.zoxide_save_prompt` is set — a `TestBackend` check, not just
+/// a check of the underlying row/state data.
+#[test]
+fn zoxide_save_prompt_renders_label_and_hint() {
+    let mut app = directories_test_app(&[]);
+    app.zoxide_save_prompt = Some(crate::tui::state::ZoxideSavePrompt {
+        label: "my-project".to_string(),
+        directory: "/tmp/my-project".to_string(),
+    });
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("my-project"),
+        "expected the directory label onscreen, got: {text:?}"
+    );
+    assert!(
+        text.contains("Save"),
+        "expected the save prompt title/text onscreen, got: {text:?}"
     );
 }
 
