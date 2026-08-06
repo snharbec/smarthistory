@@ -177,3 +177,87 @@
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn walk_dir_sets_row_timestamp_to_file_mtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory_walk_test_{}_{}",
+            std::process::id(),
+            "mtime"
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("touched.txt");
+        std::fs::write(&path, "x").unwrap();
+        let expected_mtime = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut rows = Vec::new();
+        let mut next_id: i64 = -1;
+        let ignore = IgnoreSet::new(&[]);
+        walk_dir(&dir, &dir, &[], &ignore, &mut next_id, &mut rows);
+
+        let row = rows
+            .iter()
+            .find(|r| r.command == "touched.txt")
+            .expect("touched.txt row");
+        assert_eq!(
+            row.timestamp, expected_mtime,
+            "row.timestamp must be the file's real mtime, not 0"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `sort_rows_newest_modified_first` is `spawn_walk`'s ordering,
+    /// extracted so it can be tested directly without spawning a
+    /// thread. Newest `timestamp` first; ties fall back to path
+    /// order for a deterministic display.
+    #[test]
+    fn sort_rows_newest_modified_first_orders_by_timestamp_desc() {
+        let mut rows = vec![
+            HistoryRow {
+                command: "old.txt".to_string(),
+                timestamp: 100,
+                ..Default::default()
+            },
+            HistoryRow {
+                command: "newest.txt".to_string(),
+                timestamp: 300,
+                ..Default::default()
+            },
+            HistoryRow {
+                command: "middle.txt".to_string(),
+                timestamp: 200,
+                ..Default::default()
+            },
+        ];
+        sort_rows_newest_modified_first(&mut rows);
+        let order: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(order, vec!["newest.txt", "middle.txt", "old.txt"]);
+    }
+
+    /// Equal (or missing, both `0`) timestamps fall back to path
+    /// order, so the display is deterministic rather than depending
+    /// on filesystem read_dir order.
+    #[test]
+    fn sort_rows_newest_modified_first_ties_break_by_path() {
+        let mut rows = vec![
+            HistoryRow {
+                command: "zeta.txt".to_string(),
+                timestamp: 0,
+                ..Default::default()
+            },
+            HistoryRow {
+                command: "alpha.txt".to_string(),
+                timestamp: 0,
+                ..Default::default()
+            },
+        ];
+        sort_rows_newest_modified_first(&mut rows);
+        let order: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(order, vec!["alpha.txt", "zeta.txt"]);
+    }

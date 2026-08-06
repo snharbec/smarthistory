@@ -51,6 +51,13 @@ All notable changes to this project will be documented in this file.
   URL (bare key if JIRA isn't configured); every other row (plain history,
   or any other mode) wraps the command text in a fenced ` ```bash ` block.
 
+### Fixed
+
+- `/` (files) mode: rows now carry the file's real modification time (was
+  always `0`/Unix-epoch) and the list sorts newest-modified first (was
+  directories-first then alphabetical). Matches what `docs/modes/files.md`
+  already documented.
+
 ### Security
 
 - Harden shell command staging throughout the TUI by consistently using

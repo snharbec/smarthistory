@@ -298,6 +298,22 @@ pub fn walk_dir(
                     .to_string_lossy()
                     .into_owned()
             };
+            // The row's `timestamp` is the file's modification
+            // time (not "when this row was created" — every row is
+            // created at walk time). This is both the value shown
+            // in the list's age/time column (`render_row` reads
+            // `row.timestamp` uniformly across every mode) and the
+            // sort key `spawn_walk` uses to show recently-modified
+            // files first. `0` (Unix epoch) on any failure to read
+            // it — same convention `directories.rs`/`todo.rs` use
+            // for "no meaningful timestamp available" — sorts the
+            // row to the bottom rather than erroring the whole walk.
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
             // The preview is left empty here. Loading a 4KB
             // snippet of every file in the walk would dominate
             // the runtime on large directories. The render
@@ -311,7 +327,7 @@ pub fn walk_dir(
                 directory: abs_path,
                 session_id: String::new(),
                 exit_code: 0,
-                timestamp: 0,
+                timestamp: mtime,
                 comment,
                 output: String::new(),
                 mode: mode.to_string(),
@@ -386,6 +402,21 @@ pub fn read_preview_bytes(path: &Path) -> Option<String> {
     }
 }
 
+/// Sort `rows` newest-modified first (the `/` mode is for finding
+/// files you just touched, not alphabetical browsing). Ties
+/// (identical mtime, or both `0` because the metadata read failed)
+/// fall back to path order for a deterministic display. Directories
+/// don't get a first-class grouping here — `mode::files::fetch`
+/// filters them out of what's actually shown, so sorting them in
+/// with the files instead of segregating them first means
+/// `spawn_walk`'s `truncate(1000)` quota is spent on the files that
+/// will actually be visible, not eaten by directories that never
+/// render. Extracted from `spawn_walk` as a pure function so the
+/// ordering can be unit-tested directly.
+pub(crate) fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
+    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.command.cmp(&b.command)));
+}
+
 /// Spawn a background thread that walks the current directory
 /// tree, filters by `pattern`, and sends the result over
 /// `tx`. Used by `App::files_maybe_autocall`.
@@ -409,14 +440,7 @@ pub fn spawn_walk(pattern: String, ignore: IgnoreSet) -> FilesRequest {
         let mut rows: Vec<HistoryRow> = Vec::new();
         let mut next_id: i64 = -1;
         walk_dir(&cwd, &cwd, &tokens, &ignore, &mut next_id, &mut rows);
-        rows.sort_by(|a, b| {
-            let a_is_dir = a.mode == "directory";
-            let b_is_dir = b.mode == "directory";
-            a_is_dir
-                .cmp(&b_is_dir)
-                .reverse()
-                .then(a.command.cmp(&b.command))
-        });
+        sort_rows_newest_modified_first(&mut rows);
         rows.truncate(1000);
         if !cancelled_clone.load(Ordering::Relaxed) {
             // The walker is
