@@ -11962,6 +11962,11 @@ fn aged_row(seconds_ago: i64) -> HistoryRow {
         comment: String::new(),
         output: String::new(),
         mode: "command".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }
+}
+
 /// The `[x]`/`[ ]` mark column only appears in the modes where
 /// marking a row actually has an effect: `History`/`Output` (real
 /// SQL ids, `BulkDeleteMarked` works), and `Files`/`Todo`/`Jira`
@@ -12095,6 +12100,8 @@ fn age_column_color_follows_recency_gradient() {
         Some(crate::tui::theme::Theme::dimmer_color()),
         "the timestamp: 0 sentinel must also use the dimmest color"
     );
+}
+
 /// A deep relative path is abbreviated per directory component,
 /// filename kept in full — same rule `shorten_path_dirs` already
 /// applies for ag mode.
