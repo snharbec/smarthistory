@@ -11888,6 +11888,60 @@ fn tmux_column_only_shown_in_directory_flavored_modes() {
     );
 }
 
+/// The exit-status column (`✓`/`✗`/`~`) only appears in modes whose
+/// rows can carry a genuinely varying `exit_code`: `History`,
+/// `Output`, `Llm`, `Question` (all backed by the shared history
+/// table, and `Llm`/`Question` mix a synthetic preview row in
+/// alongside real matches — see `build_merged_rows`), and `Jira`
+/// (which repurposes `exit_code` as closed/open). Every other mode
+/// hardcodes `exit_code: 0` for every row, so the column is hidden
+/// outright rather than showing an always-identical `✓`.
+#[test]
+fn exit_marker_column_scoped_to_modes_with_real_exit_codes() {
+    let mut app = directories_test_app(&[]);
+    let ok_row = indicator_test_row("");
+    let mut failing_row = indicator_test_row("");
+    failing_row.exit_code = 1;
+
+    // Shown, and correct, in the five modes with real signal.
+    for (prefix, mode_name) in [
+        ("", "history"),
+        ("+text", "output"),
+        ("=describe", "llm"),
+        ("?question", "question"),
+        ("-JIRA", "jira"),
+    ] {
+        app.query = prefix.to_string();
+        let line = crate::tui::render::render_row(&ok_row, &app, false, 3);
+        assert!(
+            line.spans.iter().any(|s| s.content.contains('✓')),
+            "{mode_name} mode must show the ✓ exit marker for a successful row, got: {:?}",
+            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        );
+        let line = crate::tui::render::render_row(&failing_row, &app, false, 3);
+        assert!(
+            line.spans.iter().any(|s| s.content.contains('✗')),
+            "{mode_name} mode must show the ✗ exit marker for a failing row, got: {:?}",
+            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    // Hidden everywhere else — spot-check a representative sample
+    // (a data-source mode, a synthetic-list mode, and a
+    // directory-flavored mode) rather than every single prefix.
+    for prefix in ["#dir", "*pane", ",pattern", "@note", "!todo", "~zox"] {
+        app.query = prefix.to_string();
+        let line = crate::tui::render::render_row(&ok_row, &app, false, 3);
+        assert!(
+            !line.spans.iter().any(|s| s.content.contains('✓')
+                || s.content.contains('✗')
+                || s.content.contains('~')),
+            "prefix {prefix:?} must hide the exit marker column entirely, got: {:?}",
+            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        );
+    }
+}
+
 // --- Tmux-pane marker (`#` directories mode) ----
 
 /// `directory_has_tmux_pane`

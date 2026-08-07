@@ -4260,6 +4260,26 @@ pub(crate) fn render_row<'a>(
     // an LLM preview. The
     // `exit_code` sentinel is the
     // load-bearing distinction.
+    // The exit-status column (`✓`/`✗`, or `~` for an LLM preview) is
+    // only shown in modes whose rows can carry a genuinely varying
+    // `exit_code` — the shared history table (`History`, `Output`,
+    // and the `Llm`/`Question` modes, which mix a synthetic preview
+    // row in alongside any matching real history rows — see
+    // `build_merged_rows`'s `preview_part` handling) and `Jira`
+    // (which repurposes `exit_code` as a closed/open sentinel, not
+    // literally command success — see the mapping in
+    // `tui/mode/jira.rs`). Every other mode hardcodes `exit_code: 0`
+    // for every row it can ever produce (a directory, a note, a
+    // file, a pane, …), so the marker would always be the identical
+    // `✓` — zero discriminating information, just visual noise.
+    let show_exit_marker = matches!(
+        active_mode,
+        crate::tui::mode::ModeKind::History
+            | crate::tui::mode::ModeKind::Output
+            | crate::tui::mode::ModeKind::Llm
+            | crate::tui::mode::ModeKind::Question
+            | crate::tui::mode::ModeKind::Jira
+    );
     let (exit_marker, exit_style) = if row.is_llm_preview() {
         ("~", Theme::accent())
     } else if row.exit_code == 0 {
@@ -4394,10 +4414,12 @@ pub(crate) fn render_row<'a>(
         tmux_span,
         llm_preview_span,
         Span::styled(format!(" {} ", age_padded), Theme::accent()),
-        Span::raw(" "),
-        Span::styled(format!(" {} ", exit_marker), exit_style),
-        Span::raw(" "),
     ];
+    if show_exit_marker {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!(" {} ", exit_marker), exit_style));
+        spans.push(Span::raw(" "));
+    }
 
     // The `*`-mode list now has a
     // **tree** layout:

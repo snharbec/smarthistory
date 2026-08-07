@@ -6,13 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- List rows now hide the two fixed-width indicator columns (output-capture
-  `o`/`.` and tmux-pane `T`/`.`) entirely in modes where they never carry
-  any information, instead of always reserving their column width with a
-  permanently-dim placeholder. The output-capture column now only appears
-  in plain history mode; the tmux-pane column only appears in `#`
-  Directories and `~` Zoxide mode (including no longer showing in `*`
-  Panes mode itself, whose own rows already are the live panes).
+- List rows now hide three fixed-width indicator columns (exit-status
+  `✓`/`✗`/`~`, output-capture `o`/`.`, and tmux-pane `T`/`.`) entirely in
+  modes where they never carry any information, instead of always
+  reserving their column width with a permanently-identical placeholder.
+  The exit-status column now only appears in modes whose rows can carry a
+  genuinely varying exit code — plain history, `+` Output, `=` LLM, `?`
+  Question (all backed by the shared history table), and `-` JIRA (which
+  repurposes it as a closed/open indicator) — hidden everywhere else,
+  where it hardcoded `exit_code: 0` and so was always the same `✓`. The
+  output-capture column now only appears in plain history mode; the
+  tmux-pane column only appears in `#` Directories and `~` Zoxide mode
+  (including no longer showing in `*` Panes mode itself, whose own rows
+  already are the live panes).
 - `,` (ag) mode: each row now shows the matched file's path first, shortened
   as compactly as possible (every directory component abbreviated to its
   first character, filename always shown in full — e.g. `~/w/p/src/main.rs`
