@@ -234,6 +234,8 @@ Whether the live dropdown is active. Defaults off — unlike most opt-in feature
 dropdown.enabled=on
 ```
 
+**Keys**: `Up`/`Down` navigate (highlight) a candidate — this is the only way to select one. `Tab` copies the highlighted candidate into the command line; with nothing highlighted yet, `Tab` falls straight through to zsh's normal completion, exactly as if the dropdown weren't showing. `Enter` always runs whatever's on the command line — it never substitutes a highlighted candidate on its own, so navigating to a candidate and pressing Enter without first pressing Tab just runs what you typed. `Ctrl-A`/`Ctrl-E`/`Right`/`Left` also commit the highlighted candidate (cursor at start/end/unmoved respectively), and `Esc` dismisses the menu for the rest of the line. This keeps history completion from ever rewriting the buffer to something you didn't deliberately select — typing a new argument that happens to be a prefix of exactly one old history entry (e.g. `less /tmp/test2` with `less /tmp/test1` in history) no longer risks `Tab` jumping the whole line to the old entry.
+
 ### `dropdown.limit`
 
 | | |
