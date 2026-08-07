@@ -12,6 +12,20 @@ All notable changes to this project will be documented in this file.
   glanceable freshness gradient on top of the existing text, reading the
   bucket straight off the existing seconds/minutes/hours/days/months unit
   ladder rather than adding a second time calculation.
+- The `[x]`/`[ ]` multi-select mark column now only appears in the modes
+  where marking a row actually has an effect — plain history and `+`
+  Output (real ids, `BulkDeleteMarked` works), `/` Files, `!` Todo, and
+  `-` JIRA (each has a `SmartOpen` handler that acts on every marked row).
+  Hidden everywhere else, where a mark would just be an inert checkbox
+  nothing ever reads.
+- `/` (files) mode: each row's displayed path (relative to the walked
+  root) is now shortened for display — every directory component
+  abbreviated to its first character, filename always shown in full —
+  same convention `,` (ag) mode uses. Search/filtering still matches
+  against the real, unabbreviated path; only the on-screen text changes.
+- Help overlay (`C-a` by default): new "Row indicators" section explains
+  what the `[x]`, `o`/`.`, `T`/`.`, and `✓`/`✗`/`~` row glyphs mean and
+  which mode(s) each one appears in.
 - List rows now hide three fixed-width indicator columns (exit-status
   `✓`/`✗`/`~`, output-capture `o`/`.`, and tmux-pane `T`/`.`) entirely in
   modes where they never carry any information, instead of always
@@ -112,6 +126,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Help overlay: the `SmartOpen` row's summary said `~` opens the selected
+  file via the per-extension command — `~` is Zoxide; the Files-mode
+  prefix is `/`. Text corrected.
 - Line-editor live dropdown (`dropdown.enabled`): reworked the key model so
   history completion can never silently rewrite the command line to
   something you didn't select. `Up`/`Down` are now the only way to select a

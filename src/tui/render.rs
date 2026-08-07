@@ -1953,6 +1953,50 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     ]));
 
     lines.push(Line::from(""));
+    // ----- Row indicators -----
+    //
+    // A static reference (not scoped to the currently-active mode,
+    // same as every other section here) explaining the passive
+    // glyph columns in the row list — none of them are
+    // self-explanatory, and since each is now only shown in the
+    // mode(s) where it carries real information (see `render_row`'s
+    // `mark_span`/`capture_span`/`tmux_span`/`show_exit_marker`
+    // gates), a column simply not appearing in the current mode is
+    // itself something a user might reasonably wonder about.
+    lines.push(Line::from(vec![Span::styled(
+        "Row indicators",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("  [x]        ", dim),
+        Span::styled(
+            "marked for a bulk action (Ctrl-X toggles) — history, output, files, todo, and JIRA mode only",
+            accent,
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  o / .      ", dim),
+        Span::styled(
+            "captured output available (Ctrl-L to view) — history mode only",
+            accent,
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  T / .      ", dim),
+        Span::styled(
+            "a live tmux/herdr pane already exists there — # Directories and ~ Zoxide mode only",
+            accent,
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  ✓ / ✗ / ~  ", dim),
+        Span::styled(
+            "exit status (✓ success / ✗ failure); ✓/✗ mean closed/open in JIRA mode, ~ marks an LLM/Question preview that hasn't run — history, output, llm, question, and JIRA mode only",
+            accent,
+        ),
+    ]));
+
+    lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
         "Keyboard shortcuts",
         Style::default().add_modifier(Modifier::BOLD),
@@ -2142,7 +2186,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
     row(
         &mut lines,
         binding_for(Action::SmartOpen),
-        "context dive: & / $ opens callers/callees; - opens the JIRA issue in the browser (background); ! toggles the selected todo's checkbox; ~ opens the selected file via the per-extension command from `smart-open.<ext>` in the config; else selects the row",
+        "context dive: & / $ opens callers/callees; - opens the JIRA issue in the browser (background); ! toggles the selected todo's checkbox; / opens the selected file via the per-extension command from `smart-open.<ext>` in the config; else selects the row",
     );
     row(
         &mut lines,
@@ -4418,7 +4462,32 @@ pub(crate) fn render_row<'a>(
     // fixed-width-placeholder convention `capture_span`/`tmux_span`
     // already use so columns stay aligned whether or not anything
     // is marked.
-    let mark_span = if app.marked_ids.contains(&mark_key(row)) {
+    //
+    // Only shown in the modes where marking actually DOES
+    // something: `Action::BulkDeleteMarked` deletes by real SQL
+    // `history.id`, which only exists for `History`/`Output` rows
+    // (every other mode's synthetic negative id matches zero rows —
+    // see `delete_marked`'s own doc comment). Everywhere else,
+    // marking only has an effect through a mode's own
+    // `smart_action_targets()`-aware `SmartOpen` handler — and there
+    // are exactly three: `smart_open_for_file` (Files), `mark_todo_done`
+    // (Todo), `open_jira_in_background` (Jira). Every other mode's
+    // `Action::SmartOpen` arm (see the dispatch in `handle_key`) acts
+    // on the single selected row only and never reads `marked_ids` —
+    // so in those modes, `[x]` would be a checkbox nothing ever
+    // consults. Hidden there entirely rather than shown as inert
+    // decoration.
+    let marking_has_effect = matches!(
+        active_mode,
+        crate::tui::mode::ModeKind::History
+            | crate::tui::mode::ModeKind::Output
+            | crate::tui::mode::ModeKind::Files
+            | crate::tui::mode::ModeKind::Todo
+            | crate::tui::mode::ModeKind::Jira
+    );
+    let mark_span = if !marking_has_effect {
+        Span::raw("")
+    } else if app.marked_ids.contains(&mark_key(row)) {
         Span::styled(
             "[x]",
             Style::default()
@@ -4635,6 +4704,33 @@ pub(crate) fn render_row<'a>(
     // where the line breaks are. The full command (with real
     // newlines) is available in the details pane.
     let cmd_display: String = row.command.replace('\n', "↵").replace('\r', "");
+    // `/` (files) mode: `row.command` is a path RELATIVE to the
+    // walked root (see `compute_display` in `src/files.rs`), which
+    // can still run long for a deeply-nested file and crowd out the
+    // filename. Abbreviate it for DISPLAY ONLY, the same way ag mode
+    // shortens its (separate) path field — every directory component
+    // down to its first character, filename kept in full.
+    //
+    // Unlike ag mode, Files mode has no separate path/content split:
+    // `row.command` IS both the searched text (`src/files.rs`'s own
+    // token filter matches against the real, unabbreviated string)
+    // and the text `highlight_matches`/`highlight_regex_matches`
+    // below highlight query matches in. Deliberately NOT touching
+    // the underlying search — only this local `cmd_display` copy is
+    // shortened, after the filtering has already happened. The
+    // tradeoff: a query match that falls inside an abbreviated-away
+    // directory character won't get highlighted (the row still
+    // correctly appears in the filtered list either way) — a minor,
+    // acceptable cosmetic miss, not a correctness bug. Don't "fix"
+    // this by reverting the abbreviation; it's the intended
+    // tradeoff, not an oversight. `"directory"`-mode rows (also part
+    // of `/` mode's results) are untouched — they already render via
+    // their own path/comment-swap convention above.
+    let cmd_display = if row.mode == "file" {
+        crate::util::shorten_path_dirs(&cmd_display, &[])
+    } else {
+        cmd_display
+    };
     // `,` (ag) mode: put the matched file's path up front, as
     // compactly as possible, before the match content itself —
     // `fetch`/`src/ag.rs` stores the absolute path in `row.directory`

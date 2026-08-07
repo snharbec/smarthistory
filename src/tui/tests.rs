@@ -11962,6 +11962,69 @@ fn aged_row(seconds_ago: i64) -> HistoryRow {
         comment: String::new(),
         output: String::new(),
         mode: "command".to_string(),
+/// The `[x]`/`[ ]` mark column only appears in the modes where
+/// marking a row actually has an effect: `History`/`Output` (real
+/// SQL ids, `BulkDeleteMarked` works), and `Files`/`Todo`/`Jira`
+/// (each has a `SmartOpen` handler that consults
+/// `smart_action_targets()`). Every other mode's `SmartOpen` arm
+/// acts on the single selected row only and never reads
+/// `marked_ids`, so the column is hidden there.
+#[test]
+fn mark_column_scoped_to_modes_where_marking_has_an_effect() {
+    let mut app = directories_test_app(&[]);
+    let row = indicator_test_row("");
+    app.marked_ids.insert(mark_key(&row));
+
+    for (prefix, mode_name) in [
+        ("", "history"),
+        ("+text", "output"),
+        ("/README", "files"),
+        ("!todo", "todo"),
+        ("-JIRA", "jira"),
+    ] {
+        app.query = prefix.to_string();
+        let line = crate::tui::render::render_row(&row, &app, false, 3);
+        assert_eq!(
+            line.spans[0].content.as_ref(),
+            "[x]",
+            "{mode_name} mode must show the mark column for a marked row, got: {:?}",
+            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    for prefix in ["#dir", "*pane", ",pattern", "@note", "~zox", "&sym"] {
+        app.query = prefix.to_string();
+        let line = crate::tui::render::render_row(&row, &app, false, 3);
+        assert_eq!(
+            line.spans[0].content.as_ref(),
+            "",
+            "prefix {prefix:?} must hide the mark column — marking has no effect there, got: {:?}",
+            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        );
+    }
+}
+
+// --- Files-mode (`/`) display path shortening ----
+//
+// `row.command` for a files-mode row is a path RELATIVE to the
+// walked root (see `compute_display` in `src/files.rs`), which can
+// still run long for a deeply-nested file. `render_row` shortens it
+// for DISPLAY ONLY via `util::shorten_path_dirs`, without touching
+// the underlying search/filter text.
+
+/// Build a minimal `/`-mode `HistoryRow` with the given relative
+/// `command` path.
+fn files_row(command: &str) -> HistoryRow {
+    HistoryRow {
+        id: -1,
+        command: command.to_string(),
+        directory: format!("/abs/{command}"),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "file".to_string(),
         source: String::new(),
         ..Default::default()
     }
@@ -12032,6 +12095,95 @@ fn age_column_color_follows_recency_gradient() {
         Some(crate::tui::theme::Theme::dimmer_color()),
         "the timestamp: 0 sentinel must also use the dimmest color"
     );
+/// A deep relative path is abbreviated per directory component,
+/// filename kept in full — same rule `shorten_path_dirs` already
+/// applies for ag mode.
+#[test]
+fn files_mode_row_shortens_deep_relative_path_for_display() {
+    let mut app = directories_test_app(&[]);
+    app.query = "/README".to_string();
+    let row = files_row("some/deeply/nested/module/main.rs");
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        text.contains("s/d/n/m/main.rs"),
+        "expected the abbreviated path onscreen, got: {text:?}"
+    );
+}
+
+/// A `"directory"`-mode row (also part of `/` mode's results) is
+/// untouched by the files-mode shortening — it already renders via
+/// its own directory/last-command display convention.
+#[test]
+fn files_mode_directory_row_display_unaffected_by_shortening() {
+    let app = directories_test_app(&[]);
+    let mut row = files_row("some/deeply/nested/module");
+    row.mode = "directory".to_string();
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        text.contains("some/deeply/nested/module"),
+        "a directory row's path must render unabbreviated, got: {text:?}"
+    );
+}
+
+/// `TestBackend` check: the abbreviated path actually appears
+/// onscreen through the full render pipeline, not just in the
+/// `render_row` return value.
+#[test]
+fn files_mode_renders_shortened_path_onscreen() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![files_row("some/deeply/nested/module/main.rs")];
+    app.query = "/main".to_string();
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("s/d/n/m/main.rs"),
+        "expected the shortened path onscreen, got: {text:?}"
+    );
+}
+
+/// The help overlay's new "Row indicators" legend renders without
+/// panicking and shows the documented glyphs, through the full
+/// `Action::OpenHelp` -> render pipeline (not just `build_help_lines`
+/// in isolation).
+#[test]
+fn help_overlay_renders_row_indicators_legend() {
+    let mut app = directories_test_app(&[]);
+    dispatch_action(&mut app, Action::OpenHelp);
+    assert!(app.help_view.is_some(), "OpenHelp must open the overlay");
+
+    let backend = ratatui::backend::TestBackend::new(100, 60);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("Row indicators"),
+        "expected the new legend section heading onscreen, got: {text:?}"
+    );
+    assert!(text.contains("[x]"));
+    assert!(text.contains("captured output available"));
+    assert!(text.contains("live tmux/herdr pane"));
+    assert!(text.contains("exit status"));
 }
 
 // --- Tmux-pane marker (`#` directories mode) ----
