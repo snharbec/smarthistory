@@ -1624,6 +1624,29 @@ pub(crate) struct App {
     /// has never run a
     /// command in them.
     session_subdirs: Vec<std::path::PathBuf>,
+    /// The `sessiondirs=...` roots to walk for `session_subdirs`,
+    /// stashed so the walk can happen LAZILY (on first `#`/`~` mode
+    /// entry — see `session_subdirs_walked` and
+    /// `crate::tui::mode::directories::ensure_session_subdirs`)
+    /// instead of unconditionally at TUI startup. Only
+    /// `run_tui_to_stdout` sets this to anything non-empty; every
+    /// test (and `run_tui_check`, which still walks eagerly via
+    /// `build_session_subdirs` up front since it's a one-shot
+    /// headless report with no interactive "mode entry" to defer
+    /// to) leaves it empty.
+    session_dirs_roots: Vec<std::path::PathBuf>,
+    /// Whether `session_subdirs` has already been computed for this
+    /// session. Defaults to `true` (nothing to do) so tests and
+    /// `run_tui_check` — which pass an already-populated
+    /// `session_subdirs` and no `session_dirs_roots` — never
+    /// trigger a real filesystem walk; `run_tui_to_stdout` flips it
+    /// to `false` right after construction when it actually has
+    /// roots to walk. Deliberately a separate flag rather than
+    /// reusing `session_subdirs.is_empty()` as the "not yet walked"
+    /// signal: a configured `sessiondirs=` root with genuinely zero
+    /// subdirectories would otherwise look permanently unwalked and
+    /// re-walk on every keystroke in `#`/`~` mode.
+    session_subdirs_walked: bool,
     /// Active directory-source
     /// filter for the
     /// `#`-mode list. The
@@ -4734,6 +4757,13 @@ impl App {
             // stored here.
             home_list,
             session_subdirs,
+            // See the field doc comments: `run_tui_to_stdout`
+            // overwrites both of these right after construction
+            // when it actually has `sessiondirs=` roots to walk
+            // lazily; every other caller (tests, `run_tui_check`)
+            // wants the no-op defaults.
+            session_dirs_roots: Vec::new(),
+            session_subdirs_walked: true,
             // Default to
             // `All` so first-time
             // users see
@@ -4983,6 +5013,7 @@ impl App {
         // but not catastrophic.
         if self.is_directories_query() {
             crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
+            crate::tui::mode::directories::ensure_session_subdirs(self);
         }
         // Zoxide mode (`~`) rows are also plain directory rows
         // (`mode == "directory"`) and get the same `T`-marked
@@ -4990,7 +5021,11 @@ impl App {
         // Directories mode — needs the same tmux/herdr snapshot
         // primed before `fetch()` reads it. Reuses the exact same
         // helper (it's mode-agnostic; it just populates
-        // `app.tmux_windows`).
+        // `app.tmux_windows`). NOT priming `session_subdirs` here
+        // deliberately: zoxide's own row list never reads it (it
+        // queries the real `zoxide` database instead), so a
+        // zoxide-only session still gets the full benefit of never
+        // walking `sessiondirs=` at all.
         if self.is_zoxide_query() {
             crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         }
@@ -10689,7 +10724,15 @@ pub fn run_tui_to_stdout(
         .and_then(crate::tui::state::PaneHeight::parse)
         .unwrap_or_default();
     let home_list = build_home_list(&app_cfg);
-    let session_subdirs = build_session_subdirs(&app_cfg);
+    // The `sessiondirs=...` walk is deliberately NOT computed here
+    // (unlike `home_list` above). It used to run unconditionally on
+    // every launch — a real filesystem walk plus a `canonicalize()`
+    // syscall per subdirectory found — even for the common case of
+    // never visiting `#`/`~` mode that session. It's now deferred to
+    // the first actual entry into one of those modes; see
+    // `session_dirs_roots`/`session_subdirs_walked` below and
+    // `crate::tui::mode::directories::ensure_session_subdirs`.
+    let session_subdirs = Vec::new();
     let mut app = App::new(
         conn,
         effective_mode,
@@ -10718,6 +10761,15 @@ pub fn run_tui_to_stdout(
         session_subdirs,
     );
     app.segments_min_words = app_cfg.segments_min_words();
+    // Stash the `sessiondirs=...` roots and mark them unwalked (see
+    // the `session_subdirs`/`session_dirs_roots`/`session_subdirs_walked`
+    // field doc comments) — the actual walk happens lazily on first
+    // `#`/`~` mode entry. Empty roots means nothing to walk, so
+    // `session_subdirs_walked` starts at "already done" in that case
+    // rather than sitting armed for a walk that would just find
+    // nothing anyway.
+    app.session_dirs_roots = app_cfg.session_dirs().to_vec();
+    app.session_subdirs_walked = app.session_dirs_roots.is_empty();
     // than the one we initialized with, honor it.
     if session.duplicate_filter.is_some() && session.duplicate_filter != Some(duplicate_filter) {
         app.duplicate_filter = session.duplicate_filter.unwrap_or(true);

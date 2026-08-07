@@ -12588,6 +12588,108 @@ fn fetch_tmux_windows_is_idempotent_when_populated() {
     assert_eq!(app.tmux_windows[0].path, "/sentinel");
 }
 
+// --- Lazy `session_subdirs` walk (perf: don't walk `sessiondirs=`
+// on every TUI launch) ----
+//
+// `ensure_session_subdirs` used to run unconditionally at TUI
+// startup (`build_session_subdirs`, called from `run_tui_to_stdout`
+// before `App::new`) — a real filesystem walk plus a
+// `canonicalize()` syscall per subdirectory, paid on every launch
+// even when the user never visits `#`/`~` mode that session. It's
+// now deferred to the first actual `#`-mode `refresh()`, gated by
+// `session_subdirs_walked` (see that field's doc comment for why a
+// dedicated flag, not `session_subdirs.is_empty()`, is the sentinel).
+
+/// The first call with unwalked roots performs a real walk and
+/// marks itself done.
+#[test]
+fn ensure_session_subdirs_walks_configured_roots() {
+    let mut app = directories_test_app(&[]);
+    let root = std::env::temp_dir().join(format!(
+        "smarthistory_lazy_subdirs_test_{}_{}",
+        std::process::id(),
+        "walk"
+    ));
+    let nested = root.join("project-a");
+    let _ = std::fs::create_dir_all(&nested);
+
+    app.session_dirs_roots = vec![root.clone()];
+    app.session_subdirs_walked = false;
+    assert!(app.session_subdirs.is_empty());
+
+    crate::tui::mode::directories::ensure_session_subdirs(&mut app);
+
+    assert!(app.session_subdirs_walked);
+    assert!(
+        app.session_subdirs.iter().any(|p| p == &nested),
+        "expected {:?} in {:?}",
+        nested,
+        app.session_subdirs
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Once `session_subdirs_walked` is `true`, a second call is a
+/// no-op — the exact "don't re-walk on every refresh" contract this
+/// feature exists for. Verified with a sentinel value that would be
+/// overwritten (with a real, but different, walk result) if the
+/// guard didn't hold.
+#[test]
+fn ensure_session_subdirs_is_idempotent_once_walked() {
+    let mut app = directories_test_app(&[]);
+    let root = std::env::temp_dir().join(format!(
+        "smarthistory_lazy_subdirs_test_{}_{}",
+        std::process::id(),
+        "idempotent"
+    ));
+    let _ = std::fs::create_dir_all(root.join("would-be-found"));
+
+    let sentinel = std::path::PathBuf::from("/sentinel/not-a-real-walk-result");
+    app.session_dirs_roots = vec![root.clone()];
+    app.session_subdirs = vec![sentinel.clone()];
+    app.session_subdirs_walked = true;
+
+    crate::tui::mode::directories::ensure_session_subdirs(&mut app);
+
+    assert_eq!(
+        app.session_subdirs,
+        vec![sentinel],
+        "must not re-walk once session_subdirs_walked is true"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `App::refresh()` in `#` (Directories) mode triggers the lazy walk
+/// end-to-end (not just the extracted helper in isolation) and the
+/// resulting subdirectory shows up as a row.
+#[test]
+fn directories_mode_refresh_triggers_lazy_session_subdirs_walk() {
+    let mut app = directories_test_app(&[]);
+    let root = std::env::temp_dir().join(format!(
+        "smarthistory_lazy_subdirs_test_{}_{}",
+        std::process::id(),
+        "end_to_end"
+    ));
+    let nested = root.join("pinned-project");
+    let _ = std::fs::create_dir_all(&nested);
+
+    app.session_dirs_roots = vec![root.clone()];
+    app.session_subdirs_walked = false;
+    app.query = "#".to_string();
+    app.refresh();
+
+    assert!(app.session_subdirs_walked);
+    let nested_str = nested.to_string_lossy().into_owned();
+    assert!(
+        app.merged_rows().iter().any(|r| r.directory == nested_str),
+        "expected the lazily-walked sessiondir to appear as a row"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Regression test for the
 /// user-reported bug:
 /// `multiplexer=herdr` in
