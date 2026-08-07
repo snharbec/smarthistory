@@ -357,6 +357,48 @@ pub fn shorten_home_path<'a>(path: &'a str, homes: &[String]) -> std::borrow::Co
     Cow::Borrowed(path)
 }
 
+/// Shorten every directory component of `path` down to its first
+/// character (two characters for a dotfile-style directory, e.g.
+/// `.config` -> `.c`, so it doesn't collapse to a bare `.` and read
+/// as "current directory") while leaving the FINAL component (the
+/// filename) fully intact — the classic shell-prompt path-shortening
+/// convention (`~/w/p/src/main.rs` for
+/// `~/work/project/src/main.rs`). `homes` is passed straight through
+/// to [`shorten_home_path`] first, so an absolute path under any
+/// configured home collapses to `~/...` before the per-component
+/// abbreviation runs; `~` itself is left as `~`, never abbreviated
+/// further. Used by ag (`,`) mode to show a content match's file
+/// path up front, as compactly as possible, without ever truncating
+/// the filename the user actually needs to recognize.
+///
+/// A path with no directory component (a bare filename, or an
+/// already-shortened one-segment string) is returned unchanged.
+pub fn shorten_path_dirs(path: &str, homes: &[String]) -> String {
+    let home_shortened = shorten_home_path(path, homes);
+    let mut parts: Vec<&str> = home_shortened.split('/').collect();
+    let Some(filename) = parts.pop() else {
+        return home_shortened.into_owned();
+    };
+    let mut out: Vec<String> = parts
+        .into_iter()
+        .map(|segment| {
+            if segment.is_empty() || segment == "~" {
+                // Empty means a leading `/` (root) or a doubled
+                // separator — preserve as-is so the join below still
+                // produces a leading slash. `~` is already as short
+                // as it gets.
+                segment.to_string()
+            } else if segment.starts_with('.') && segment.len() > 1 {
+                segment.chars().take(2).collect()
+            } else {
+                segment.chars().take(1).collect()
+            }
+        })
+        .collect();
+    out.push(filename.to_string());
+    out.join("/")
+}
+
 /// Convenience: shorten `path`
 /// using `$HOME` only.
 /// Equivalent to

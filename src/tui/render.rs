@@ -4563,6 +4563,27 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // where the line breaks are. The full command (with real
     // newlines) is available in the details pane.
     let cmd_display: String = row.command.replace('\n', "↵").replace('\r', "");
+    // `,` (ag) mode: put the matched file's path up front, as
+    // compactly as possible, before the match content itself —
+    // `fetch`/`src/ag.rs` stores the absolute path in `row.directory`
+    // and the matched line's content in `row.command`. Every
+    // intermediate directory component is abbreviated to its first
+    // character (`shorten_path_dirs`); the filename itself is always
+    // shown in full, since that's what the user actually needs to
+    // recognize which file a match is in. Not query-highlighted —
+    // ag's search terms match CONTENT, not the path — so this is a
+    // plain styled span, not routed through `highlight_matches`/
+    // `highlight_regex_matches` below (those apply to `cmd_display`,
+    // the match content, same as for every other mode).
+    if row.mode == "ag" && !row.directory.is_empty() {
+        let short_path = crate::util::shorten_path_dirs(&row.directory, &app.home_list);
+        spans.push(Span::styled(
+            format!("{}: ", short_path),
+            Style::default()
+                .fg(Theme::info_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     // For `workspace` rows in
     // the `*`-mode tree,
     // render the label (a
@@ -4639,7 +4660,11 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // comment. (The `comment` field carries the last command run in
     // a directory for `#`-mode rows, so the secondary slot is the
     // command — we don't `~`-expand it because it's not a path.)
-    if !row.comment.is_empty() {
+    // Skipped entirely for `ag` rows: `row.comment` there is just the
+    // match's basename, already shown (in full, as part of the
+    // shortened path) in the primary-text prefix above — repeating
+    // it here would be pure noise.
+    if row.mode != "ag" && !row.comment.is_empty() {
         // The secondary slot is
         // the user's free-form
         // comment for normal
@@ -4658,7 +4683,7 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
                 .fg(Theme::warning_color())
                 .add_modifier(Modifier::ITALIC),
         ));
-    } else if is_selected {
+    } else if row.mode != "ag" && is_selected {
         // Selected-row fallback:
         // the primary text is
         // already the directory

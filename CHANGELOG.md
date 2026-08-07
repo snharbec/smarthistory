@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `,` (ag) mode: each row now shows the matched file's path first, shortened
+  as compactly as possible (every directory component abbreviated to its
+  first character, filename always shown in full — e.g. `~/w/p/src/main.rs`
+  for `~/work/project/src/main.rs`), followed by the matched line content.
+  New `util::shorten_path_dirs` helper backs it.
 - New `smarthistory prune-directories [-f]` CLI command: checks every
   `session.<id>.dir` (in `sessions` and the main `config` file) against the
   filesystem and removes the whole entry — name, `.dir`, `.exec`,
