@@ -88,6 +88,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Line-editor live dropdown (`dropdown.enabled`): reworked the key model so
+  history completion can never silently rewrite the command line to
+  something you didn't select. `Up`/`Down` are now the only way to select a
+  candidate; `Tab` copies the highlighted one into the command line (or
+  falls through to normal zsh completion when nothing's highlighted —
+  including when there's only a single matching candidate, which used to
+  auto-complete on the very first `Tab` press); `Enter` always runs
+  whatever's on the line and no longer substitutes a highlighted candidate
+  on its own. `Shift-Tab` is no longer a selection key (reverts to zsh's
+  default `reverse-menu-complete`) — `Up`/`Down` cover both directions.
 - `*` (panes) mode, herdr backend: the background per-pane process-command
   lookup could respawn a full round of subprocess lookups (one per pane)
   on every ~100ms run-loop tick, forever, as soon as the previous round

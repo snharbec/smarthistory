@@ -243,12 +243,12 @@ typeset -g _smarthistory_dropdown_selected=0
 # exit path (Enter, Ctrl-C abort, empty Enter) uniformly, since precmd
 # runs before the next prompt regardless of how the previous line ended.
 typeset -g _smarthistory_dropdown_suppressed=0
-# Whether the user has actually navigated the menu (Tab / Shift-Tab)
-# since it was last (re)painted with a new candidate set. Enter only
-# commits `_smarthistory_dropdown_selected` when this is 1 — with no
-# explicit choice, `_smarthistory_dropdown_selected` sits at its
-# default 0 but nothing is highlighted and Enter just runs the typed
-# buffer. See `_smarthistory_reset_and_accept`.
+# Whether the user has actually navigated the menu (Up / Down) since
+# it was last (re)painted with a new candidate set. Tab only commits
+# `_smarthistory_dropdown_selected` into BUFFER when this is 1 — with
+# no explicit choice, `_smarthistory_dropdown_selected` sits at its
+# default 0 but nothing is highlighted and Tab falls through to plain
+# completion. See `_smarthistory_dropdown_accept`.
 typeset -g _smarthistory_dropdown_chosen=0
 typeset -ga _smarthistory_dropdown_candidates
 # `_smarthistory_dropdown_meta[i]` holds the trimmed `diff` (age,
@@ -957,7 +957,7 @@ _smarthistory_dropdown_paint() {
     local -r marker_len=2
     # Shadow/ghost text: when a candidate is actually highlighted
     # (`chosen == 1`, i.e. the user has navigated to a specific row
-    # via Tab/Shift-Tab/Up/Down rather than just seeing the fresh
+    # via Up/Down rather than just seeing the fresh
     # unhighlighted box), show its not-yet-typed remainder inline
     # right after the cursor, dimmed — the same POSTDISPLAY mechanism
     # and visual convention zsh-autosuggestions itself uses, so it
@@ -1339,7 +1339,7 @@ _smarthistory_dropdown_render() {
     fi
     _smarthistory_dropdown_visible=1
     # A fresh candidate set from a new keystroke always starts
-    # unchosen — the user must re-navigate (Tab / Shift-Tab) to pick a
+    # unchosen — the user must re-navigate (Up / Down) to pick a
     # row again, even if they had one highlighted before this render.
     _smarthistory_dropdown_chosen=0
     if (( _smarthistory_dropdown_selected >= ${#_smarthistory_dropdown_candidates} )); then
@@ -1415,75 +1415,57 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
     unset _smarthistory_dropdown_w
-    # Extend `LBUFFER` to the longest prefix common to every current
-    # `_smarthistory_dropdown_candidates` entry — readline's classic
-    # "expand to longest unambiguous completion". Pairwise-reduces a
-    # running prefix string against each candidate in turn; the
-    # candidate lists here are tiny (`dropdown.limit`, default 6) so
-    # there's no need for anything cleverer. Returns success (and
-    # updates `BUFFER`/`CURSOR`) only when that prefix is strictly
-    # longer than the current buffer — i.e. there's actually more
-    # unambiguous text to add. With exactly one candidate this always
-    # succeeds and expands to the whole thing (the `--prefix` search
-    # that built the candidate list already guarantees `LBUFFER` is a
-    # prefix of it). Failure means every candidate already diverges
-    # at the very next character — nothing to expand.
-    _smarthistory_dropdown_expand_common_prefix() {
-        local lcp=${_smarthistory_dropdown_candidates[1]}
-        local cand
-        for cand in "${_smarthistory_dropdown_candidates[@]:1}"; do
-            while [[ -n "$lcp" && "$cand" != "$lcp"* ]]; do
-                lcp=${lcp[1,-2]}
-            done
-            [[ -z "$lcp" ]] && break
-        done
-        (( $#lcp > $#LBUFFER )) || return 1
-        BUFFER=$lcp
-        CURSOR=$#BUFFER
-        return 0
+    # Pure navigation: move the highlighted row forward/backward
+    # (wraparound) and paint — NEVER touch BUFFER. These are what
+    # Up/Down (`_smarthistory_up_history` / `_smarthistory_down_history`)
+    # call while the dropdown is showing; selecting a candidate is
+    # exclusively a cursor-key action now (Tab used to double as a
+    # forward-cycle key too — see `_smarthistory_dropdown_accept`
+    # below for why that changed).
+    _smarthistory_dropdown_navigate_next() {
+        if (( _smarthistory_dropdown_chosen == 1 )); then
+            _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
+        fi
+        _smarthistory_dropdown_chosen=1
+        _smarthistory_dropdown_paint
     }
-    # Tab cycles the highlighted candidate forward (same wraparound
-    # math as Down) WITHOUT touching BUFFER or closing the menu —
-    # only Enter (see `_smarthistory_reset_and_accept` below) commits
-    # the highlighted candidate. Falls through to the normal
-    # completion widget when no menu is showing (zsh's documented
-    # default Tab binding in emacs mode, preserved explicitly since
-    # we're taking over `^I`).
+    _smarthistory_dropdown_navigate_prev() {
+        if (( _smarthistory_dropdown_chosen == 1 )); then
+            _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
+        fi
+        _smarthistory_dropdown_chosen=1
+        _smarthistory_dropdown_paint
+    }
+    # Tab has exactly two jobs, and navigation isn't one of them
+    # anymore: with a candidate already highlighted (the user
+    # navigated there with Up/Down), Tab copies it into BUFFER — via
+    # `_smarthistory_dropdown_commit` below, the same "fill in the
+    # buffer and close the menu" helper Ctrl-A/Ctrl-E/Right/Left
+    # already use — and stops there; it does NOT run the command
+    # (that's Enter's job, see `_smarthistory_reset_and_accept`
+    # further down, which no longer has any dropdown-specific
+    # special-casing of its own). With NOTHING highlighted yet (a
+    # fresh, not-yet-navigated candidate set — including the common
+    # "exactly one candidate matches" case), Tab falls straight
+    # through to the normal completion widget, same as when the
+    # dropdown isn't showing at all.
     #
-    # On a fresh (not-yet-cycled) candidate set, the FIRST Tab press
-    # instead tries `_smarthistory_dropdown_expand_common_prefix`
-    # first — if it can extend the buffer, re-render against that
-    # longer `LBUFFER` (the same `smarthistory search` round-trip
-    # every keystroke already does, naturally narrowing/refreshing
-    # the candidate list) and jump straight to "chosen" so the VERY
-    # NEXT Tab cycles instead of trying to expand again, which would
-    # be a no-op once `LBUFFER` already sits at the common prefix.
-    # When there's nothing to expand, falls through to the unchanged
-    # "highlight row 0" behavior below. `Down` (`_smarthistory_down_history`)
-    # calls this same widget when the dropdown is open, so it picks
-    # up the same expand-then-cycle behavior — consistent with that
-    # widget's existing "Down works exactly like Tab" design, not a
-    # new inconsistency.
+    # This replaces an earlier design where Tab ALSO drove selection
+    # (cycling candidates forward, plus an auto "expand to the
+    # longest common prefix" shortcut on the very first press). That
+    # auto-expand degenerates to "the whole candidate" with only one
+    # match, so typing a genuinely new argument that happened to be a
+    # prefix of exactly one old history entry (e.g. `less /tmp/test2`
+    # with `less /tmp/test1` in history) silently replaced the whole
+    # buffer with the old line on the very first Tab — before the
+    # user had navigated or selected anything. Splitting "select"
+    # (Up/Down only) from "commit" (Tab only, and only once something
+    # is actually selected) removes that surprise entirely: Tab can
+    # never rewrite the buffer to something the user didn't
+    # deliberately navigate to first.
     _smarthistory_dropdown_accept() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            if (( _smarthistory_dropdown_chosen == 0 )) \
-                && _smarthistory_dropdown_expand_common_prefix; then
-                _smarthistory_dropdown_render
-                if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-                    _smarthistory_dropdown_chosen=1
-                    _smarthistory_dropdown_paint
-                fi
-                return
-            fi
-            # Tab always advances the selection, even from the
-            # unchosen default (index 0) — so a lone-candidate menu
-            # still lets Tab "choose" it in place rather than needing
-            # a wraparound press.
-            if (( _smarthistory_dropdown_chosen == 1 )); then
-                _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
-            fi
-            _smarthistory_dropdown_chosen=1
-            _smarthistory_dropdown_paint
+        if [[ $_smarthistory_dropdown_visible -eq 1 && $_smarthistory_dropdown_chosen -eq 1 ]]; then
+            _smarthistory_dropdown_commit end
             return
         fi
         zle expand-or-complete
@@ -1506,35 +1488,21 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     }
     zle -N _smarthistory_dropdown_dismiss
     bindkey '^[' _smarthistory_dropdown_dismiss
-    # Shift-Tab cycles backward — the mirror of Tab above. Nothing
-    # was bound to it before this feature (the terminal sends
-    # `\e[Z`); falls through to `reverse-menu-complete`, the natural
-    # backward-cycle analog of Tab's `expand-or-complete` fallback,
-    # when no menu is showing.
-    _smarthistory_dropdown_accept_prev() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            # Same "first press just highlights index 0" rule as Tab
-            # above — see `_smarthistory_dropdown_accept`.
-            if (( _smarthistory_dropdown_chosen == 1 )); then
-                _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
-            fi
-            _smarthistory_dropdown_chosen=1
-            _smarthistory_dropdown_paint
-            return
-        fi
-        zle reverse-menu-complete
-    }
-    zle -N _smarthistory_dropdown_accept_prev
-    bindkey '^[[Z' _smarthistory_dropdown_accept_prev
+    # Shift-Tab is deliberately left unbound by this feature (falls
+    # through to zsh's own default, `reverse-menu-complete`, exactly
+    # as if the dropdown didn't exist). It used to be a second
+    # backward-cycling selection key alongside Tab; now that
+    # selection is exclusively Up/Down (cursor keys), there's nothing
+    # left for it to do here.
     # Commit the highlighted candidate into BUFFER and close the
     # menu. `$1` decides where CURSOR ends up: "start" -> 0, "end" ->
     # end of the new BUFFER, anything else (including no argument) ->
     # leave CURSOR at whatever value it already had (used by the
     # Right/Left arrow widgets below, which commit without repositioning
-    # the cursor at all). Shared by Ctrl-A/Ctrl-E/Right/Left. (Enter
-    # has its own copy of this logic in `_smarthistory_reset_and_accept`,
-    # outside this block, since it must run before
-    # `_smarthistory_reset_state` at a different call site.)
+    # the cursor at all). Shared by Tab/Ctrl-A/Ctrl-E/Right/Left. Enter
+    # (`_smarthistory_reset_and_accept`) no longer commits anything
+    # itself — it always just runs whatever is already in BUFFER,
+    # since committing a candidate is exclusively Tab's job now.
     _smarthistory_dropdown_commit() {
         local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         BUFFER=$(_smarthistory_unescape "$raw")
@@ -1846,22 +1814,16 @@ _smarthistory_unescape() {
 
 
 _smarthistory_up_history() {
-    # When the live dropdown is showing, Up works exactly like
-    # Shift-Tab (`_smarthistory_dropdown_accept_prev`, bound to
-    # `^[[Z` above) instead of walking the (separate, keypress-only)
-    # Up/Down history cache below — calling the same function
-    # guarantees identical behavior, including the "first press just
-    # highlights the current row without moving" rule
-    # (`_smarthistory_dropdown_chosen` gating) that a hand-rolled
-    # index decrement here previously got wrong: it always moved the
-    # index AND never set `_smarthistory_dropdown_chosen=1`, so the
-    # very first Up/Down press silently skipped a row and painted
-    # with no visible highlight at all (the paint function only
-    # marks a row when `chosen == 1`). Everything below this branch
-    # is completely unchanged from before the dropdown feature
-    # existed.
+    # When the live dropdown is showing, Up navigates the candidate
+    # list backward (`_smarthistory_dropdown_navigate_prev`) instead
+    # of walking the (separate, keypress-only) Up/Down history cache
+    # below. Selecting a dropdown candidate is exclusively a Up/Down
+    # action now — Tab used to double as a forward-cycle key too; see
+    # `_smarthistory_dropdown_accept`'s doc comment for why that
+    # changed. Everything below this branch is completely unchanged
+    # from before the dropdown feature existed.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
-        _smarthistory_dropdown_accept_prev
+        _smarthistory_dropdown_navigate_prev
         return
     fi
     # Always use smarthistory, even with an empty LBUFFER (an empty
@@ -1905,12 +1867,12 @@ _smarthistory_up_history() {
     _smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
 }
 _smarthistory_down_history() {
-    # Down works exactly like Tab (`_smarthistory_dropdown_accept`,
-    # bound to `^I` above) when the dropdown is showing — see
-    # `_smarthistory_up_history` above for why this calls the same
-    # function rather than re-deriving the index arithmetic.
+    # When the live dropdown is showing, Down navigates the candidate
+    # list forward (`_smarthistory_dropdown_navigate_next`) — see
+    # `_smarthistory_up_history` above for the backward case and why
+    # navigation lives here rather than in Tab.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
-        _smarthistory_dropdown_accept
+        _smarthistory_dropdown_navigate_next
         return
     fi
     # Down walks the match list in the *opposite* direction of Up
@@ -2034,20 +1996,12 @@ bindkey '^S' _smarthistory_next_history
 # _smarthistory_index from the previous walk and lands on an
 # unexpected match.
 _smarthistory_reset_and_accept() {
-    # If the live dropdown is showing AND the user has actually
-    # navigated to a row (Tab / Shift-Tab — see
-    # `_smarthistory_dropdown_accept`), Enter commits that row instead
-    # of running the typed buffer. With no explicit choice (the
-    # default state right after the menu opens), `_dropdown_chosen` is
-    # 0 and Enter falls through to `zle .accept-line` on whatever was
-    # typed, ignoring the menu entirely. Must read the candidate
-    # BEFORE `_smarthistory_reset_state` clears the dropdown state
-    # below.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 && $_smarthistory_dropdown_chosen -eq 1 ]]; then
-        local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
-        BUFFER=$(_smarthistory_unescape "$raw")
-        CURSOR=${#BUFFER}
-    fi
+    # Enter always runs exactly what's in BUFFER — no dropdown
+    # special-casing here anymore. Pulling a highlighted candidate
+    # into BUFFER is Tab's job alone now (`_smarthistory_dropdown_accept`);
+    # by the time Enter fires, that's either already been done (the
+    # user pressed Tab first) or the user is deliberately running
+    # what they typed, dropdown or not.
     _smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
     _smarthistory_reset_state
     zle .accept-line
