@@ -88,6 +88,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `*` (panes) mode, herdr backend: the background per-pane process-command
+  lookup could respawn a full round of subprocess lookups (one per pane)
+  on every ~100ms run-loop tick, forever, as soon as the previous round
+  finished — instead of once per actual panes-list change. This made the
+  view painfully sluggish on a slow/high-latency connection. Now spawned
+  at most once per snapshot.
 - `/` (files) mode: rows now carry the file's real modification time (was
   always `0`/Unix-epoch) and the list sorts newest-modified first (was
   directories-first then alphabetical). Matches what `docs/modes/files.md`
