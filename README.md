@@ -55,6 +55,8 @@ eval "$(smarthistory init bash)"
 
 The init snippet embeds a freshly-generated session UUID and binds the keyboard shortcuts. Re-run it once per shell startup; running it twice in the same shell is a no-op.
 
+**Prefer `cargo install --path .`?** Always pass `--locked`: `cargo install --path . --locked`. Without it, `cargo install` ignores the committed `Cargo.lock` and re-resolves every dependency fresh from crates.io, which can pick a newer (and, at times, actually broken — e.g. a transitive `zune-jpeg` version that fails to compile) combination than the one this repo is tested against. `--locked` builds the exact versions in `Cargo.lock`, same as `cargo build`/`cargo test`/CI.
+
 **bash support is a smaller subset of zsh support.** History recording works everywhere, but the interactive widgets (Ctrl-R picker, Up/Down history-walk, comment-expansion, Ctrl-S, Ctrl-G) need bash >= 4.0 — macOS ships bash 3.2.57 by default (Apple's last GPLv2 release), which doesn't have the Readline variables (`READLINE_LINE`/`READLINE_POINT`) these widgets rely on. Install a newer bash (`brew install bash` on macOS) to get them; the history-capture pipeline itself works fine on 3.2 either way. The live dropdown box (candidates, syntax highlighting, shadow text, Tab-expand) is zsh-only — it's built on zsh-specific line-editor features (`POSTDISPLAY`/`region_highlight`) that bash's Readline has no equivalent of.
 
 ## Usage
