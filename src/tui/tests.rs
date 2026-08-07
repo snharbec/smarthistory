@@ -11678,6 +11678,90 @@ fn zoxide_save_prompt_renders_label_and_hint() {
     );
 }
 
+// --- ag mode row rendering (`,` prefix) ----
+//
+// `src/ag.rs` builds each row with the matched line's content in
+// `command` and the absolute file path in `directory` (see
+// `spawn_ag_search`'s doc comment / row-building loop). Rendering
+// moves the file path to the front of the row, shortened via
+// `util::shorten_path_dirs` (every directory component abbreviated
+// to its first character, filename kept in full), followed by the
+// match content — see `render_row`'s `row.mode == "ag"` branch.
+
+/// Build a minimal ag-mode `HistoryRow` for the given absolute
+/// `directory` (file path) and matched-line `content`.
+fn ag_row(directory: &str, content: &str) -> HistoryRow {
+    let basename = std::path::Path::new(directory)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    HistoryRow {
+        id: -1,
+        command: content.to_string(),
+        directory: directory.to_string(),
+        session_id: "12".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: basename,
+        output: String::new(),
+        mode: "ag".to_string(),
+        source: "ag".to_string(),
+        ..Default::default()
+    }
+}
+
+/// The rendered row shows the shortened file path (every directory
+/// component abbreviated, filename kept in full) BEFORE the matched
+/// line content, and does not separately repeat the basename via the
+/// usual trailing `# <comment>` slot (which would just be the same
+/// filename again).
+#[test]
+fn ag_row_renders_shortened_path_before_match_content() {
+    let mut app = directories_test_app(&[]);
+    app.home_list = vec!["/Users/har".to_string()];
+    app.ag_state.rows = vec![ag_row(
+        "/Users/har/work/project/src/main.rs",
+        "fn main() {",
+    )];
+    app.query = ",main".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+
+    assert!(
+        text.contains("~/w/p/s/main.rs:"),
+        "expected the shortened path prefix onscreen, got: {text:?}"
+    );
+    assert!(
+        text.contains("fn main() {"),
+        "expected the match content onscreen, got: {text:?}"
+    );
+    // The path prefix must come before the match content, and the
+    // basename must not additionally appear a second time via the
+    // trailing `# main.rs` comment slot.
+    let path_pos = text.find("~/w/p/s/main.rs:").unwrap();
+    let content_pos = text.find("fn main() {").unwrap();
+    assert!(
+        path_pos < content_pos,
+        "shortened path must render BEFORE the match content"
+    );
+    assert!(
+        !text.contains("# main.rs"),
+        "basename must not be repeated via the trailing comment slot, got: {text:?}"
+    );
+}
+
 // --- Tmux-pane marker (`#` directories mode) ----
 
 /// `directory_has_tmux_pane`

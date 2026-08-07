@@ -550,6 +550,62 @@
         );
     }
 
+    /// `shorten_path_dirs` abbreviates every directory component to
+    /// its first character (home-shortened first) while keeping the
+    /// filename fully intact.
+    #[test]
+    fn shorten_path_dirs_abbreviates_directories_keeps_filename() {
+        assert_eq!(
+            shorten_path_dirs(
+                "/Users/har/work/project/src/main.rs",
+                &["/Users/har".to_string()],
+            ),
+            "~/w/p/s/main.rs"
+        );
+    }
+
+    /// A path outside any configured home is abbreviated the same
+    /// way, including the leading root slash (an empty path segment)
+    /// staying empty so the join still starts with `/`.
+    #[test]
+    fn shorten_path_dirs_handles_absolute_path_outside_home() {
+        assert_eq!(
+            shorten_path_dirs("/etc/ssh/sshd_config", &["/Users/har".to_string()]),
+            "/e/s/sshd_config"
+        );
+    }
+
+    /// A dotfile-style directory (e.g. `.config`) is abbreviated to
+    /// two characters, not one — a bare `.` would read as "current
+    /// directory" rather than as a shortened directory name.
+    #[test]
+    fn shorten_path_dirs_dotfile_directory_keeps_two_chars() {
+        assert_eq!(
+            shorten_path_dirs("~/.config/smarthistory/config", &["/Users/har".to_string()]),
+            "~/.c/s/config"
+        );
+    }
+
+    /// A bare filename with no directory component (nothing to
+    /// shorten) is returned unchanged.
+    #[test]
+    fn shorten_path_dirs_bare_filename_unchanged() {
+        assert_eq!(
+            shorten_path_dirs("main.rs", &["/Users/har".to_string()]),
+            "main.rs"
+        );
+    }
+
+    /// `~` itself is never abbreviated further, even though it's a
+    /// non-final path segment.
+    #[test]
+    fn shorten_path_dirs_home_segment_stays_full() {
+        assert_eq!(
+            shorten_path_dirs("~/project/main.rs", &["/Users/har".to_string()]),
+            "~/p/main.rs"
+        );
+    }
+
     /// `expand_home_to_absolute`
     /// is the inverse of
     /// `shorten_home_path`:
