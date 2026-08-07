@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- List rows now hide the two fixed-width indicator columns (output-capture
+  `o`/`.` and tmux-pane `T`/`.`) entirely in modes where they never carry
+  any information, instead of always reserving their column width with a
+  permanently-dim placeholder. The output-capture column now only appears
+  in plain history mode; the tmux-pane column only appears in `#`
+  Directories and `~` Zoxide mode (including no longer showing in `*`
+  Panes mode itself, whose own rows already are the live panes).
 - `,` (ag) mode: each row now shows the matched file's path first, shortened
   as compactly as possible (every directory component abbreviated to its
   first character, filename always shown in full — e.g. `~/w/p/src/main.rs`

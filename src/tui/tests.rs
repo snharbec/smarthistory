@@ -11762,6 +11762,132 @@ fn ag_row_renders_shortened_path_before_match_content() {
     );
 }
 
+// --- Mode-scoped indicator columns (capture / tmux-pane) ----
+//
+// The `o`/`.` output-capture column and the `T`/`.` tmux-pane column
+// are fixed-width placeholders that used to render in EVERY mode,
+// even ones where they never carry any information (e.g. a `.`
+// tmux-pane placeholder in Notes mode, which never has anything to
+// report). `render_row` now hides each column outright (an empty
+// `Span::raw("")`, contributing zero width) in every mode where it's
+// meaningless — see `render_row`'s `capture_span`/`tmux_span`
+// doc comments. These tests call `render_row` directly (made
+// `pub(crate)` for exactly this) and assert on the exact span
+// content by index, rather than scanning rendered text — the columns
+// are adjacent single-character-ish spans, easy to conflate with
+// surrounding text if tested via a flattened string.
+
+/// Build a minimal non-directory history-style row with the given
+/// `output`. Used to probe the capture (`o`/`.`) column.
+fn indicator_test_row(output: &str) -> HistoryRow {
+    HistoryRow {
+        id: 1,
+        command: "ls -la".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: output.to_string(),
+        mode: "command".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }
+}
+
+/// The output-capture column only ever appears in plain history mode
+/// (`ModeKind::History`, i.e. an empty or unprefixed query) — shown
+/// lit (` o `) when the row has captured output, dim (` . `)
+/// otherwise. In every other prefix mode it's hidden entirely (an
+/// empty span, not even the dim placeholder).
+#[test]
+fn capture_column_only_shown_in_history_mode() {
+    let app = directories_test_app(&[]);
+
+    let with_output = indicator_test_row("captured text");
+    let without_output = indicator_test_row("");
+
+    // History mode (empty query): lit when output present, dim
+    // placeholder when absent.
+    let line = crate::tui::render::render_row(&with_output, &app, false, 3);
+    assert_eq!(line.spans[1].content.as_ref(), " o ");
+    let line = crate::tui::render::render_row(&without_output, &app, false, 3);
+    assert_eq!(line.spans[1].content.as_ref(), " . ");
+
+    // Any other prefix mode: hidden entirely, regardless of whether
+    // the row happens to carry `output` text (ag mode reuses
+    // `output` for its own source-context preview, unrelated to
+    // "captured shell output" — the column would be actively
+    // misleading there, not just superfluous).
+    let mut app = app;
+    app.query = ",pattern".to_string();
+    let line = crate::tui::render::render_row(&with_output, &app, false, 3);
+    assert_eq!(
+        line.spans[1].content.as_ref(),
+        "",
+        "capture column must be hidden outside history mode, even with non-empty output"
+    );
+    let line = crate::tui::render::render_row(&without_output, &app, false, 3);
+    assert_eq!(line.spans[1].content.as_ref(), "");
+}
+
+/// The tmux-pane column only ever appears in the two modes whose
+/// rows carry `mode == "directory"` — `#` Directories and `~`
+/// Zoxide — shown dim (` . `) when no live pane matches (no
+/// multiplexer state configured in this test app) and hidden
+/// entirely everywhere else, including `*` Panes mode itself (whose
+/// own rows already ARE the live panes, so the marker would never
+/// have anything to report there either).
+#[test]
+fn tmux_column_only_shown_in_directory_flavored_modes() {
+    let mut app = directories_test_app(&[]);
+    let dir_row = HistoryRow {
+        id: 1,
+        command: "/tmp".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "directory".to_string(),
+        source: String::new(),
+        ..Default::default()
+    };
+
+    app.query = "#dir".to_string();
+    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
+    assert_eq!(
+        line.spans[2].content.as_ref(),
+        " . ",
+        "Directories mode must still show the (dim) tmux column"
+    );
+
+    app.query = "~dir".to_string();
+    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
+    assert_eq!(
+        line.spans[2].content.as_ref(),
+        " . ",
+        "Zoxide mode must still show the (dim) tmux column"
+    );
+
+    app.query = String::new();
+    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
+    assert_eq!(
+        line.spans[2].content.as_ref(),
+        "",
+        "history mode must hide the tmux column"
+    );
+
+    app.query = "*pane".to_string();
+    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
+    assert_eq!(
+        line.spans[2].content.as_ref(),
+        "",
+        "panes mode must hide the tmux column too — its own rows already ARE the live panes"
+    );
+}
+
 // --- Tmux-pane marker (`#` directories mode) ----
 
 /// `directory_has_tmux_pane`

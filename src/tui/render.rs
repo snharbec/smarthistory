@@ -4224,7 +4224,19 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 ///
 /// `age_width` is the right-aligned width of the age column so rows
 /// line up.
-fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: usize) -> Line<'a> {
+pub(crate) fn render_row<'a>(
+    row: &'a HistoryRow,
+    app: &App,
+    is_selected: bool,
+    age_width: usize,
+) -> Line<'a> {
+    // Which prefix mode is active — used below to hide the two
+    // fixed-width indicator columns (capture / tmux-pane) in modes
+    // where they never carry any information, rather than always
+    // reserving their column width with a dim `.` placeholder no
+    // mode but the relevant one ever lights up.
+    let active_mode = crate::tui::mode::active_mode(app);
+
     let age = format_diff(row.timestamp);
     let age_padded = format!("{:>age_width$}", age);
 
@@ -4258,8 +4270,16 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
 
     // Capture indicator. A bright `o ` shows the row has captured
     // output available (press ^L to view); a dim `. ` is shown
-    // otherwise so columns stay aligned.
-    let capture_span = if !row.output.is_empty() {
+    // otherwise so columns stay aligned. Only meaningful in plain
+    // history mode (`ModeKind::History`) — every other prefix mode
+    // either never populates `row.output` with captured command
+    // output at all, or repurposes the field for something else
+    // entirely (e.g. ag mode's source-context preview), so the
+    // column is hidden outright there rather than showing a
+    // permanently-dim (or, worse, misleadingly "lit") placeholder.
+    let capture_span = if active_mode != crate::tui::mode::ModeKind::History {
+        Span::raw("")
+    } else if !row.output.is_empty() {
         Span::styled(
             " o ",
             Style::default()
@@ -4286,18 +4306,27 @@ fn render_row<'a>(row: &'a HistoryRow, app: &App, is_selected: bool, age_width: 
     // the user ran the command
     // in", which doesn't have a
     // single pane attached to it
-    // at any given moment.
-    let tmux_span =
-        if row.mode == "directory" && app.directory_tmux_pane_id(&row.directory).is_some() {
-            Span::styled(
-                " T ",
-                Style::default()
-                    .fg(Theme::accent_color())
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(" . ", Theme::dim())
-        };
+    // at any given moment. Directory rows only ever appear in `#`
+    // (Directories) and `~` (Zoxide) mode — the column is hidden in
+    // every other mode (including `*` Panes, whose own rows already
+    // ARE the live panes, so a redundant "does a pane exist here"
+    // marker would never have anything useful to say there either).
+    let is_directory_flavored_mode = matches!(
+        active_mode,
+        crate::tui::mode::ModeKind::Directories | crate::tui::mode::ModeKind::Zoxide
+    );
+    let tmux_span = if !is_directory_flavored_mode {
+        Span::raw("")
+    } else if row.mode == "directory" && app.directory_tmux_pane_id(&row.directory).is_some() {
+        Span::styled(
+            " T ",
+            Style::default()
+                .fg(Theme::accent_color())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" . ", Theme::dim())
+    };
 
     // LLM preview marker. The
     // synthetic row the auto-call
