@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- README: noted that `cargo install --path .` needs `--locked` to avoid a
+  fresh dependency re-resolution that can pick a broken transitive version
+  (e.g. `zune-jpeg`, via `image`/`arboard`) instead of the tested
+  `Cargo.lock` versions `cargo build`/`cargo test`/CI already use.
 - The age column is now color-coded by recency — brightest for entries
   from the last minute, fading through green (minutes), the previous flat
   accent color (hours), dim (days), to dimmest (months or older) — a
