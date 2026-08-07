@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- The age column is now color-coded by recency — brightest for entries
+  from the last minute, fading through green (minutes), the previous flat
+  accent color (hours), dim (days), to dimmest (months or older) — a
+  glanceable freshness gradient on top of the existing text, reading the
+  bucket straight off the existing seconds/minutes/hours/days/months unit
+  ladder rather than adding a second time calculation.
 - List rows now hide three fixed-width indicator columns (exit-status
   `✓`/`✗`/`~`, output-capture `o`/`.`, and tmux-pane `T`/`.`) entirely in
   modes where they never carry any information, instead of always

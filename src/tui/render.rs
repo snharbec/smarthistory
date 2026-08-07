@@ -4239,6 +4239,27 @@ pub(crate) fn render_row<'a>(
 
     let age = format_diff(row.timestamp);
     let age_padded = format!("{:>age_width$}", age);
+    // Color the age column by recency, brightest for "just happened"
+    // fading to dim for old entries — a glanceable freshness gradient
+    // on top of the existing text, not a replacement for it (the
+    // exact age is still spelled out either way). `format_diff`'s
+    // unit ladder (seconds -> minutes -> hours -> days -> months,
+    // largest non-zero unit wins) already IS a bucket boundary, so
+    // reading the trailing unit letter off the already-computed
+    // `age` string is enough — no need to re-derive elapsed time
+    // from `row.timestamp` a second time. The "9999M" sentinel
+    // (`format_diff`'s placeholder for a zero/invalid/out-of-range
+    // timestamp — synthetic rows like a `directory`/`session` entry
+    // with `timestamp: 0`) falls into the same 'M' (months) bucket
+    // as genuinely old entries, which is the right visual outcome
+    // either way: dimmest.
+    let age_style = match age.chars().last() {
+        Some('s') => Theme::highlight(), // < 1 minute: brightest
+        Some('m') => Theme::success(),   // < 1 hour
+        Some('h') => Theme::accent(),    // < 1 day (previous flat default)
+        Some('d') => Theme::dim(),       // < 1 month
+        _ => Theme::dimmer(),            // 1+ months, or the "9999M" sentinel
+    };
 
     // The LLM preview row has `exit_code == -1` (the
     // "never executed" sentinel) and a negative `id`.
@@ -4413,7 +4434,7 @@ pub(crate) fn render_row<'a>(
         capture_span,
         tmux_span,
         llm_preview_span,
-        Span::styled(format!(" {} ", age_padded), Theme::accent()),
+        Span::styled(format!(" {} ", age_padded), age_style),
     ];
     if show_exit_marker {
         spans.push(Span::raw(" "));

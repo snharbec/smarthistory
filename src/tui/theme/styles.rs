@@ -28,7 +28,6 @@ impl Theme {
         Style::default().fg(PALETTE.with(|c| c.borrow().dim))
     }
 
-    #[allow(dead_code)]
     pub fn dimmer() -> Style {
         Style::default().fg(PALETTE.with(|c| c.borrow().dimmer))
     }
@@ -96,9 +95,12 @@ impl Theme {
     pub fn info_color() -> Color {
         PALETTE.with(|c| c.borrow().info)
     }
-    #[allow(dead_code)]
     pub fn dim_color() -> Color {
         PALETTE.with(|c| c.borrow().dim)
+    }
+    #[allow(dead_code)]
+    pub fn dimmer_color() -> Color {
+        PALETTE.with(|c| c.borrow().dimmer)
     }
 
     /// Background color used to highlight the currently-selected
