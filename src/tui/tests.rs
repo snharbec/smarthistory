@@ -13647,6 +13647,89 @@ fn patch_pane_cmdline_no_op_for_unknown_pane() {
     assert_eq!(app.session_panes.len(), 1);
 }
 
+/// Minimal herdr-named fake, only for exercising
+/// `spawn_pane_cmdlines`'s lazy-spawn gate in
+/// `process_pane_cmdlines` — every method but `name()`
+/// is unreachable from that path (it never calls the
+/// backend; it only reads `app.session_panes` and spawns
+/// a background thread that shells out to the real
+/// `herdr` binary via a free function, not this trait).
+struct NamedHerdrBackend;
+impl crate::multiplexer::MultiplexerBackend for NamedHerdrBackend {
+    fn snapshot(&self) -> Vec<crate::multiplexer::ActiveContext> {
+        Vec::new()
+    }
+    fn snapshot_current_panes(&self, _current_pane: &str) -> Vec<crate::multiplexer::CurrentPaneInfo> {
+        Vec::new()
+    }
+    fn focus_command(&self, _pane_id: &str) -> Option<String> {
+        None
+    }
+    fn focus_session(&self, _session_label: &str) -> Option<String> {
+        None
+    }
+    fn focus_pane(&self, _pane_id: &str, _tab_id: &str) -> Option<String> {
+        None
+    }
+    fn create_command(&self, _dir: &std::path::Path, _label: &str) -> Option<String> {
+        None
+    }
+    fn send_in_pane_command(&self, _pane_id: &str, _body: &str) -> Option<String> {
+        None
+    }
+    fn read_pane(&self, _pane_id: &str, _lines: usize) -> Option<String> {
+        None
+    }
+    fn name(&self) -> &'static str {
+        "herdr"
+    }
+}
+
+/// Regression test for the "panes mode is very sensitive to slow
+/// terminals" bug: `process_pane_cmdlines`'s lazy spawn used to
+/// check only `pane_cmdlines_request.is_none()`, which is ALSO true
+/// immediately after a lookup finishes (the channel disconnects and
+/// clears the request back to `None`). That respawned a full
+/// per-pane subprocess round on the very next ~100ms run-loop tick,
+/// forever — a tight loop of process lookups with no actual change
+/// to wait for. The fix adds `pane_cmdlines_spawned_for_snapshot`:
+/// once a lookup has been attempted for a given `panes_snapshot_id`,
+/// it isn't attempted again until the snapshot itself changes.
+#[test]
+fn process_pane_cmdlines_does_not_respawn_after_completing_for_the_same_snapshot() {
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "ssh")]);
+    app.multiplexer = Box::new(NamedHerdrBackend);
+    app.query = "*".to_string();
+
+    // Simulate exactly the state `process_pane_cmdlines` itself
+    // leaves behind when a background lookup finishes for the
+    // current snapshot: the request is gone, but the "spawned for
+    // this snapshot" marker is still set.
+    app.pane_cmdlines_spawned_for_snapshot = Some(app.panes_snapshot_id);
+    app.pane_cmdlines_request = None;
+
+    app.process_pane_cmdlines();
+
+    assert!(
+        app.pane_cmdlines_request.is_none(),
+        "must not respawn a lookup for a snapshot it has already \
+         completed one for — that's the tight-loop bug this guards against"
+    );
+
+    // A genuinely NEW snapshot (the panes list actually changed)
+    // must still trigger exactly one fresh spawn.
+    app.panes_snapshot_id = app.panes_snapshot_id.wrapping_add(1);
+    app.process_pane_cmdlines();
+    assert!(
+        app.pane_cmdlines_request.is_some(),
+        "a real snapshot change must still spawn a fresh lookup"
+    );
+    assert_eq!(
+        app.pane_cmdlines_spawned_for_snapshot,
+        Some(app.panes_snapshot_id)
+    );
+}
+
 /// `*` prefix switches the query into panes mode,
 /// and `is_panes_query()` / `panes_pattern()` slice
 /// the body correctly.

@@ -1548,6 +1548,21 @@ pub(crate) struct App {
     /// lookup (from an old snapshot) is detected
     /// and discarded.
     panes_snapshot_id: u64,
+    /// The `panes_snapshot_id` a background cmdline lookup has
+    /// already been spawned for (set in `spawn_pane_cmdlines`,
+    /// regardless of whether that lookup is still in flight or has
+    /// already finished). Without this, `process_pane_cmdlines`'s
+    /// lazy-spawn check (`pane_cmdlines_request.is_none()`) would
+    /// fire again on the very next run-loop tick after a completed
+    /// lookup clears `pane_cmdlines_request` — respawning the full
+    /// per-pane subprocess round every ~100ms forever, which is what
+    /// made the herdr backend's `*` panes mode painfully slow over a
+    /// laggy connection (a fresh round of process lookups, one
+    /// subprocess per pane, restarting continuously). Comparing
+    /// against this field instead makes the lookup fire exactly once
+    /// per real snapshot (i.e. once per actual panes-list change),
+    /// not once per tick.
+    pane_cmdlines_spawned_for_snapshot: Option<u64>,
 
     /// Memoization cache for `pane::ensure_selected_context`:
     /// for each pane id we've recently read, the
@@ -2488,6 +2503,13 @@ impl App {
     /// superseded by a newer one between spawn
     /// and receipt).
     fn spawn_pane_cmdlines(&mut self, snapshot_id: u64) {
+        // Record that a lookup has been attempted for this snapshot
+        // — regardless of the outcome below (non-herdr backend, no
+        // pane rows, or an actual spawn) — so `process_pane_cmdlines`'s
+        // lazy-spawn check doesn't fire again on every subsequent
+        // tick. See the field's doc comment for the "respawned every
+        // ~100ms forever" bug this prevents.
+        self.pane_cmdlines_spawned_for_snapshot = Some(snapshot_id);
         // Cancel any previous in-flight request.
         if let Some(prev) = self.pane_cmdlines_request.take() {
             prev.cancelled.store(true, Ordering::Relaxed);
@@ -2559,16 +2581,26 @@ impl App {
     /// `pane_cmdlines_request` so the next poll
     /// is a no-op.
     fn process_pane_cmdlines(&mut self) {
-        // Lazy spawn: if no lookup is in flight AND
-        // we have pane rows AND the backend is herdr,
-        // spawn one now. This fires once, after the
-        // run loop has settled (the multiple
-        // `fetch_session_panes_impl` calls during
-        // init have all happened), so the snapshot
-        // id at spawn time matches the current
-        // snapshot — the request survives long
-        // enough to deliver results.
+        // Lazy spawn: if no lookup is in flight, none has already
+        // been spawned for the CURRENT snapshot, we have pane rows,
+        // and the backend is herdr, spawn one now. This fires once
+        // per snapshot, after the run loop has settled (the multiple
+        // `fetch_session_panes_impl` calls during init have all
+        // happened), so the snapshot id at spawn time matches the
+        // current snapshot — the request survives long enough to
+        // deliver results.
+        //
+        // The `pane_cmdlines_spawned_for_snapshot` check is load-
+        // bearing, not just an optimization: without it, a completed
+        // lookup clears `pane_cmdlines_request` back to `None`
+        // (below), and the very next tick's `is_none()` check would
+        // be true again — respawning a full per-pane subprocess
+        // round every ~100ms, forever, since the snapshot itself
+        // never changes just because the lookup finished. That's
+        // what made herdr's `*` panes mode painfully slow over a
+        // laggy connection.
         if self.pane_cmdlines_request.is_none()
+            && self.pane_cmdlines_spawned_for_snapshot != Some(self.panes_snapshot_id)
             && self.multiplexer.name() == "herdr"
             && self.is_panes_query()
             && self.session_panes.iter().any(|r| r.mode == "pane")
@@ -4675,6 +4707,7 @@ impl App {
             collapsed_pane_groups: std::collections::HashSet::new(),
             pane_cmdlines_request: None,
             panes_snapshot_id: 0,
+            pane_cmdlines_spawned_for_snapshot: None,
             // Lazy pane-preview memoization: maps pane_id
             // → `Instant` of last read. The map itself
             // is `Option` so we don't pay the
