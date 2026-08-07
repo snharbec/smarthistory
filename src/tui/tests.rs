@@ -11942,6 +11942,26 @@ fn exit_marker_column_scoped_to_modes_with_real_exit_codes() {
     }
 }
 
+// --- Age column recency color ----
+
+/// Build a row whose `timestamp` is `seconds_ago` seconds before now
+/// — used to land in a specific `format_diff` unit bucket
+/// (seconds/minutes/hours/days/months) for the age-color tests below.
+fn aged_row(seconds_ago: i64) -> HistoryRow {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    HistoryRow {
+        id: 1,
+        command: "ls -la".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: now - seconds_ago,
+        comment: String::new(),
+        output: String::new(),
+        mode: "command".to_string(),
 /// The `[x]`/`[ ]` mark column only appears in the modes where
 /// marking a row actually has an effect: `History`/`Output` (real
 /// SQL ids, `BulkDeleteMarked` works), and `Files`/`Todo`/`Jira`
@@ -12010,6 +12030,71 @@ fn files_row(command: &str) -> HistoryRow {
     }
 }
 
+/// The age column's color follows a recency gradient — brightest for
+/// "just happened", dimming as the row gets older — reading the
+/// bucket straight off `format_diff`'s own unit-ladder suffix
+/// (s/m/h/d/M) rather than re-deriving elapsed time. The age span is
+/// always `spans[4]` (mark/capture/tmux/llm-preview, then age),
+/// regardless of which of those precede it are hidden for the
+/// current mode — they stay as empty placeholders in the vec, not
+/// removed.
+#[test]
+fn age_column_color_follows_recency_gradient() {
+    let app = directories_test_app(&[]);
+
+    let seconds_row = aged_row(5);
+    let line = crate::tui::render::render_row(&seconds_row, &app, false, 3);
+    assert_eq!(
+        line.spans[4].style.fg,
+        Some(crate::tui::theme::Theme::highlight_color()),
+        "a few seconds old must use the brightest (highlight) color"
+    );
+
+    let minutes_row = aged_row(5 * 60);
+    let line = crate::tui::render::render_row(&minutes_row, &app, false, 3);
+    assert_eq!(
+        line.spans[4].style.fg,
+        Some(crate::tui::theme::Theme::success_color()),
+        "a few minutes old must use the success color"
+    );
+
+    let hours_row = aged_row(5 * 3600);
+    let line = crate::tui::render::render_row(&hours_row, &app, false, 3);
+    assert_eq!(
+        line.spans[4].style.fg,
+        Some(crate::tui::theme::Theme::accent_color()),
+        "a few hours old must use the accent color (the previous flat default)"
+    );
+
+    let days_row = aged_row(5 * 86_400);
+    let line = crate::tui::render::render_row(&days_row, &app, false, 3);
+    assert_eq!(
+        line.spans[4].style.fg,
+        Some(crate::tui::theme::Theme::dim_color()),
+        "a few days old must use the dim color"
+    );
+
+    // Months old (well past `format_diff`'s month-ladder threshold).
+    let months_row = aged_row(200 * 86_400);
+    let line = crate::tui::render::render_row(&months_row, &app, false, 3);
+    assert_eq!(
+        line.spans[4].style.fg,
+        Some(crate::tui::theme::Theme::dimmer_color()),
+        "months old must use the dimmest color"
+    );
+
+    // The `timestamp: 0` sentinel `format_diff` treats as invalid
+    // (falls back to its "9999M" placeholder, e.g. a `directory` row
+    // that has no meaningful timestamp) lands in the same dimmest
+    // bucket as a genuinely old row.
+    let mut zero_row = aged_row(0);
+    zero_row.timestamp = 0;
+    let line = crate::tui::render::render_row(&zero_row, &app, false, 3);
+    assert_eq!(
+        line.spans[4].style.fg,
+        Some(crate::tui::theme::Theme::dimmer_color()),
+        "the timestamp: 0 sentinel must also use the dimmest color"
+    );
 /// A deep relative path is abbreviated per directory component,
 /// filename kept in full — same rule `shorten_path_dirs` already
 /// applies for ag mode.

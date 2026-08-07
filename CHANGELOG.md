@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- The age column is now color-coded by recency — brightest for entries
+  from the last minute, fading through green (minutes), the previous flat
+  accent color (hours), dim (days), to dimmest (months or older) — a
+  glanceable freshness gradient on top of the existing text, reading the
+  bucket straight off the existing seconds/minutes/hours/days/months unit
+  ladder rather than adding a second time calculation.
 - The `[x]`/`[ ]` multi-select mark column now only appears in the modes
   where marking a row actually has an effect — plain history and `+`
   Output (real ids, `BulkDeleteMarked` works), `/` Files, `!` Todo, and
