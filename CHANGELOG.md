@@ -133,6 +133,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Line-editor live dropdown: `Enter` now commits AND runs a highlighted
+  candidate in one press, same as before the Tab/Enter key-model rework —
+  navigate with `Up`/`Down`, then `Enter` alone accepts it. Previously
+  `Enter` only ever ran the raw typed text; committing a candidate
+  required pressing `Tab` first, then `Enter` separately. Gated on the
+  same "must be explicitly selected first" condition `Tab` already uses,
+  so this doesn't reopen the single-candidate auto-complete bug that
+  rework fixed — an unmodified `Enter` on a fresh, not-yet-navigated
+  dropdown still just runs what you typed.
 - TUI startup: the `sessiondirs=...` walk (recursively listing every
   subdirectory of each configured root) used to run unconditionally on
   every launch, even for sessions that never visit `#` (Directories) or
