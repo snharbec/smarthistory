@@ -1441,10 +1441,13 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # navigated there with Up/Down), Tab copies it into BUFFER — via
     # `_smarthistory_dropdown_commit` below, the same "fill in the
     # buffer and close the menu" helper Ctrl-A/Ctrl-E/Right/Left
-    # already use — and stops there; it does NOT run the command
-    # (that's Enter's job, see `_smarthistory_reset_and_accept`
-    # further down, which no longer has any dropdown-specific
-    # special-casing of its own). With NOTHING highlighted yet (a
+    # already use — and stops there; it does NOT run the command.
+    # (Enter, `_smarthistory_reset_and_accept` further down, commits
+    # AND runs in one press when a candidate is already selected —
+    # so Tab-then-review-then-Enter and just-Enter are both valid
+    # ways to accept a selected candidate; Tab alone is for when you
+    # want to see/edit the full command before running it.) With
+    # NOTHING highlighted yet (a
     # fresh, not-yet-navigated candidate set — including the common
     # "exactly one candidate matches" case), Tab falls straight
     # through to the normal completion widget, same as when the
@@ -1499,10 +1502,16 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # end of the new BUFFER, anything else (including no argument) ->
     # leave CURSOR at whatever value it already had (used by the
     # Right/Left arrow widgets below, which commit without repositioning
-    # the cursor at all). Shared by Tab/Ctrl-A/Ctrl-E/Right/Left. Enter
-    # (`_smarthistory_reset_and_accept`) no longer commits anything
-    # itself — it always just runs whatever is already in BUFFER,
-    # since committing a candidate is exclusively Tab's job now.
+    # the cursor at all). Shared by Tab/Ctrl-A/Ctrl-E/Right/Left, and
+    # by Enter (`_smarthistory_reset_and_accept`) when a candidate is
+    # already selected — Enter's own gate on `_smarthistory_dropdown_chosen
+    # == 1` is what keeps that fast path from reintroducing the "runs
+    # a candidate the user never actually selected" bug Tab's
+    # redesign fixed; this helper itself doesn't check `chosen`
+    # (Ctrl-A/Ctrl-E/Right/Left have always committed the current
+    # `_selected` row unconditionally, selected or not — that's
+    # their own established contract, unrelated to Tab/Enter's
+    # navigate-first rule).
     _smarthistory_dropdown_commit() {
         local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         BUFFER=$(_smarthistory_unescape "$raw")
@@ -1996,12 +2005,23 @@ bindkey '^S' _smarthistory_next_history
 # _smarthistory_index from the previous walk and lands on an
 # unexpected match.
 _smarthistory_reset_and_accept() {
-    # Enter always runs exactly what's in BUFFER — no dropdown
-    # special-casing here anymore. Pulling a highlighted candidate
-    # into BUFFER is Tab's job alone now (`_smarthistory_dropdown_accept`);
-    # by the time Enter fires, that's either already been done (the
-    # user pressed Tab first) or the user is deliberately running
-    # what they typed, dropdown or not.
+    # If a dropdown candidate is currently SELECTED (the user
+    # explicitly navigated to it with Up/Down — `_smarthistory_dropdown_chosen
+    # == 1`), Enter commits it into BUFFER and runs it immediately,
+    # same as pressing Tab then Enter separately. This is a fast
+    # path on top of Tab's own commit (`_smarthistory_dropdown_accept`);
+    # it does NOT reintroduce the bug Tab's redesign fixed, because
+    # it's gated on the exact same `chosen == 1` condition Tab uses —
+    # Enter on a FRESH, not-yet-navigated dropdown (including the
+    # single-candidate case) still just runs whatever's typed, same
+    # as before this fast path existed. Must commit BEFORE
+    # `_smarthistory_reset_state` below, which clears the dropdown
+    # state (candidates, chosen, selected) this reads.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" \
+        && $_smarthistory_dropdown_visible -eq 1 \
+        && $_smarthistory_dropdown_chosen -eq 1 ]]; then
+        _smarthistory_dropdown_commit end
+    fi
     _smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
     _smarthistory_reset_state
     zle .accept-line
