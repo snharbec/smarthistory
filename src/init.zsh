@@ -262,6 +262,17 @@ typeset -ga _smarthistory_dropdown_candidates
 # array holds bare command text and nothing else, so it can be
 # unescaped straight into BUFFER without stripping anything back out.
 typeset -ga _smarthistory_dropdown_meta
+# `_smarthistory_dropdown_exit[i]` holds the trimmed `exit_code`
+# string (e.g. "0", "1", "127") for `_smarthistory_dropdown_candidates[i]`
+# — same lockstep-array contract as `_smarthistory_dropdown_meta`
+# above, built by the same loop in `_smarthistory_dropdown_render`.
+# `_smarthistory_dropdown_paint` draws it as a `✓`/`✗` marker (green/
+# red via `_smarthistory_dropdown_hl_success`/`_hl_error`, the same
+# specs the optional `dropdown.highlight` first-word validity check
+# already uses) right after the row's selection marker. An empty
+# string (the defensive "couldn't parse this row" fallback) draws no
+# marker at all, same fail-soft convention as a missing `diff`.
+typeset -ga _smarthistory_dropdown_exit
 # `_smarthistory_dropdown_hl_spans[i]` holds the optional
 # `dropdown.highlight` syntax-color spans for
 # `_smarthistory_dropdown_candidates[i]`, as newline-joined
@@ -790,7 +801,7 @@ _smarthistory_dropdown_paint() {
     local _sm_dropdown_xtrace_was=$options[xtrace]
     setopt NO_XTRACE
     local -a rows
-    local raw c marker row i=0
+    local raw c marker exit_char row i=0
     # Leave margin for the box border (`│ ` / ` │` on each side, 4
     # columns) plus a little breathing room, so a candidate can't
     # wrap onto a second physical row (which would desync "one
@@ -841,7 +852,18 @@ _smarthistory_dropdown_paint() {
         else
             marker="  "
         fi
-        row="${marker}${c}"
+        # Exit-status marker: `✓` for a clean exit, `✗` for anything
+        # else, a blank column (not a missing column — `marker_len`
+        # below assumes every row has one) when the `exit_code` field
+        # couldn't be parsed for this row. Color is applied in the
+        # second (drawing) pass below, via a `region_highlight` span
+        # at this fixed offset — this pass only decides the glyph.
+        case "${_smarthistory_dropdown_exit[$((i+1))]:-}" in
+            0)  exit_char="✓" ;;
+            "") exit_char=" " ;;
+            *)  exit_char="✗" ;;
+        esac
+        row="${marker}${exit_char} ${c}"
         # `smarthistory search` is called with `--ansi=off` (see the
         # args comment in `_smarthistory_dropdown_render`), so `row`
         # never actually carries embedded SGR codes today — the
@@ -945,16 +967,18 @@ _smarthistory_dropdown_paint() {
     local _sm_word _sm_hl_entry _sm_hl_parts hl_base
     local _hl_start _entry gutter_spec gutter_text
     local row_start bold_start bold_end row_end
-    local age_text age_field age_start is_selected
+    local age_text age_field age_start is_selected exit_spec
     # `--prefix` search (see the args comment above) guarantees every
     # candidate's command text starts with the exact bytes of
     # `$LBUFFER` — that's the span this widget bolds to recreate the
     # "matched prefix" emphasis `--ansi=full` used to (unreliably)
-    # provide. `marker_len` is the fixed width of the `"❯ "` /
-    # `"  "` marker prepended to every row in the candidate-building
-    # loop above — the bold span starts right after it.
+    # provide. `marker_len` is the fixed width of the selection
+    # marker (`"❯ "` / `"  "`) PLUS the exit-status marker (the
+    # `✓`/`✗`/` ` glyph plus its trailing space) prepended to every
+    # row in the candidate-building loop above — the bold span starts
+    # right after both.
     local matchlen=$#LBUFFER
-    local -r marker_len=2
+    local -r marker_len=4
     # Shadow/ghost text: when a candidate is actually highlighted
     # (`chosen == 1`, i.e. the user has navigated to a specific row
     # via Up/Down rather than just seeing the fresh
@@ -1050,6 +1074,19 @@ _smarthistory_dropdown_paint() {
         # columns) — empty when no age column is being drawn at all
         # this render (`age_width == 0`).
         age_text=${_smarthistory_dropdown_meta[$((i+1))]}
+        # Color spec for this row's exit-status glyph (drawn into `row`
+        # already, by the row-building loop above) — same green/red
+        # specs `dropdown.highlight`'s command-validity check uses,
+        # resolved unconditionally at init time (gated only on color
+        # support, not on `dropdown.highlight` itself), so they're safe
+        # to reuse here even when that unrelated feature is off. Empty
+        # when the exit code couldn't be parsed for this row (blank
+        # glyph, nothing to color) or color is unavailable.
+        case "${_smarthistory_dropdown_exit[$((i+1))]:-}" in
+            0)  exit_spec=$_smarthistory_dropdown_hl_success ;;
+            "") exit_spec="" ;;
+            *)  exit_spec=$_smarthistory_dropdown_hl_error ;;
+        esac
         if (( age_width > 0 )); then
             age_field="${(l:age_width:: :)age_text}"
         else
@@ -1096,6 +1133,12 @@ _smarthistory_dropdown_paint() {
                 (( bold_start < bold_end )) && _hl+=("$bold_start $bold_end bold")
             fi
         fi
+        # Color the exit-status glyph drawn 2 bytes into `row` (right
+        # after the 2-byte selection marker) — fixed offset regardless
+        # of `is_selected`, both branches above set `row_start` to the
+        # same "start of `row` within `out`" meaning. Length 1: just
+        # the glyph itself, not its trailing space.
+        [[ -n "$exit_spec" ]] && _hl+=("$((row_start + 2)) $((row_start + 3)) $exit_spec")
         # Splice in this row's `dropdown.highlight` spans (token
         # colors + the first-word validity span, see above) — offset
         # past the marker, same for selected and unselected rows.
@@ -1248,16 +1291,19 @@ _smarthistory_dropdown_render() {
     # characters of each row — the same mechanism already used to
     # color the box chrome and bold the selected row.
     #
-    # `--fields diff,command`: `diff` (the "last called" age column,
-    # e.g. "5m"/"2h"/"3d") drawn by `_smarthistory_dropdown_paint`.
-    # `diff` MUST come first: the CLI joins fields with exactly two
-    # spaces and left-pads `diff` for column alignment, but never
-    # inserts padding *between* cells — so the first run of 2+
-    # spaces in a line is unambiguously the diff/command boundary,
-    # even in the rare case the command itself contains a run of 2+
-    # spaces later in the line (we only ever split on the FIRST
-    # such run).
-    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,command --ansi=off --prefix)
+    # `--fields diff,exit_code,command`: `diff` (the "last called" age
+    # column, e.g. "5m"/"2h"/"3d") and `exit_code` (drawn as a `✓`/`✗`
+    # marker) are both consumed by `_smarthistory_dropdown_paint`.
+    # `diff` and `exit_code` MUST come first, in this order — the CLI
+    # joins fields with exactly two spaces and left-pads `diff` for
+    # column alignment, but never inserts padding *between* cells, and
+    # `exit_code` is always a bare integer (never contains whitespace)
+    # — so the first two runs of 2+ spaces in a line unambiguously
+    # bound `diff` and `exit_code`, and everything after the second one
+    # is the command, even in the rare case the command itself
+    # contains a run of 2+ spaces later in the line (we only ever
+    # split on the first two such runs).
+    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,exit_code,command --ansi=off --prefix)
     case "$_smarthistory_mode" in
         sess)   args+=(--session) ;;
         dir)    args+=(--directory "$PWD") ;;
@@ -1272,35 +1318,41 @@ _smarthistory_dropdown_render() {
     if (( ${#_sm_dropdown_lines} == 1 )) && [[ -z "${_sm_dropdown_lines[1]}" ]]; then
         _sm_dropdown_lines=()
     fi
-    # Split each "<diff>  <command>" line and dedup by COMMAND ONLY,
-    # keeping the first (newest, since `search` returns newest-first)
-    # occurrence — the same command run N times has N different ages,
-    # so deduping on the whole line (the old `${(u)...}` one-liner)
-    # would stop deduping once the age column was added, reintroducing
-    # the duplicate-rows bug this widget already fixed once. The kept
-    # occurrence's age is exactly the correct "last called" value for
-    # that command. `_smarthistory_dropdown_candidates` ends up with
-    # its original contract unchanged (bare command text only), so no
-    # other function (commit/accept widgets, etc.) needs to change.
+    # Split each "<diff>  <exit_code>  <command>" line and dedup by
+    # COMMAND ONLY, keeping the first (newest, since `search` returns
+    # newest-first) occurrence — the same command run N times has N
+    # different ages/exit codes, so deduping on the whole line (the
+    # old `${(u)...}` one-liner) would stop deduping once the age
+    # column was added, reintroducing the duplicate-rows bug this
+    # widget already fixed once. The kept occurrence's age/exit code
+    # are exactly the correct "last called" values for that command.
+    # `_smarthistory_dropdown_candidates` ends up with its original
+    # contract unchanged (bare command text only), so no other
+    # function (commit/accept widgets, etc.) needs to change.
     _smarthistory_dropdown_candidates=()
     _smarthistory_dropdown_meta=()
+    _smarthistory_dropdown_exit=()
     local -A _sm_dropdown_seen
-    local _sm_dropdown_line _sm_dropdown_diff _sm_dropdown_cmd
+    local _sm_dropdown_line _sm_dropdown_diff _sm_dropdown_exit_field _sm_dropdown_cmd
     for _sm_dropdown_line in "${_sm_dropdown_lines[@]}"; do
-        if [[ "$_sm_dropdown_line" =~ '^[[:space:]]*([^[:space:]]*)[[:space:]]{2,}(.*)$' ]]; then
+        if [[ "$_sm_dropdown_line" =~ '^[[:space:]]*([^[:space:]]*)[[:space:]]{2,}([^[:space:]]*)[[:space:]]{2,}(.*)$' ]]; then
             _sm_dropdown_diff=$match[1]
-            _sm_dropdown_cmd=$match[2]
+            _sm_dropdown_exit_field=$match[2]
+            _sm_dropdown_cmd=$match[3]
         else
-            # Defensive fallback (e.g. a row with no diff/space run) —
-            # treat the whole line as the command with no age, same
-            # as this widget's behavior before the age column existed.
+            # Defensive fallback (e.g. a row with no diff/exit_code/
+            # space runs) — treat the whole line as the command with
+            # no age or exit marker, same as this widget's behavior
+            # before either column existed.
             _sm_dropdown_diff=""
+            _sm_dropdown_exit_field=""
             _sm_dropdown_cmd=$_sm_dropdown_line
         fi
         (( ${+_sm_dropdown_seen[$_sm_dropdown_cmd]} )) && continue
         _sm_dropdown_seen[$_sm_dropdown_cmd]=1
         _smarthistory_dropdown_candidates+=("$_sm_dropdown_cmd")
         _smarthistory_dropdown_meta+=("$_sm_dropdown_diff")
+        _smarthistory_dropdown_exit+=("$_sm_dropdown_exit_field")
     done
     if (( ${#_smarthistory_dropdown_candidates} == 0 )); then
         _smarthistory_dropdown_clear
