@@ -130,6 +130,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- TUI startup: the `sessiondirs=...` walk (recursively listing every
+  subdirectory of each configured root) used to run unconditionally on
+  every launch, even for sessions that never visit `#` (Directories) or
+  `~` (Zoxide) mode. It's now lazy — deferred to the first actual entry
+  into one of those modes, and cached for the rest of the session, same
+  pattern already used for the tmux/herdr pane snapshot. `smarthistory
+  check` is unaffected (it still walks eagerly up front, since it's a
+  one-shot report with no interactive mode entry to defer to).
 - Help overlay: the `SmartOpen` row's summary said `~` opens the selected
   file via the per-extension command — `~` is Zoxide; the Files-mode
   prefix is `/`. Text corrected.

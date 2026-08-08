@@ -176,6 +176,48 @@ pub(crate) fn ensure_multiplexer_snapshot(app: &mut App) {
         .collect();
 }
 
+/// Lazy-populate `app.session_subdirs` by walking each configured
+/// `sessiondirs=...` root (`app.session_dirs_roots`) the first time
+/// `#` (Directories) or `~` (Zoxide) mode is entered — same
+/// "compute once per TUI session" contract as
+/// `ensure_multiplexer_snapshot` above, just gated by an explicit
+/// `session_subdirs_walked` flag rather than an emptiness check:
+/// `session_subdirs.is_empty()` isn't a safe "not yet walked" signal
+/// here, since a configured root with genuinely zero subdirectories
+/// would look permanently unwalked and re-trigger a filesystem walk
+/// on every keystroke.
+///
+/// Used to run unconditionally at TUI startup (`build_session_subdirs`,
+/// called from `run_tui_to_stdout` before `App::new`) — a real
+/// filesystem walk plus a `canonicalize()` syscall per subdirectory
+/// found, paid on every launch even when the user never visits
+/// `#`/`~` mode that session. `run_tui_check` (the one-shot headless
+/// `smarthistory check` report) still walks eagerly up front via
+/// `build_session_subdirs` directly, since it has no interactive
+/// "mode entry" to defer to.
+pub(crate) fn ensure_session_subdirs(app: &mut App) {
+    if app.session_subdirs_walked {
+        return;
+    }
+    app.session_subdirs_walked = true;
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for root in &app.session_dirs_roots {
+        for sub in crate::util::walk_subdirectories(root) {
+            // Dedup on canonical path so a symlink and the real path
+            // it points to don't produce two rows — same as
+            // `build_session_subdirs`.
+            let key = std::fs::canonicalize(&sub)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| sub.to_string_lossy().into_owned());
+            if seen.insert(key) {
+                out.push(sub);
+            }
+        }
+    }
+    app.session_subdirs = out;
+}
+
 /// List every unique directory
 /// that has been used in the
 /// global history, sorted by

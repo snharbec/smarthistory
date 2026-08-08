@@ -498,7 +498,9 @@ export SMARTHISTORY_MULTIPLEXER=herdr
 | **Tilde expansion** | Yes |
 | **Env override** | — |
 
-Directories whose sub-tree is recursively walked at TUI startup; every directory found is added to the `#`-mode list, even when the user has never run a command there. The user's "always show me these projects" list. Multiple entries are allowed (one per line, like `prefix.<x>=`). A non-existent path is silently skipped (the user may have moved the directory; the next startup with the path back picks it up). The `~` is expanded at config-load time so `sessiondirs=~/.config/tmux-sessions` resolves to your real home, not the literal `~` directory.
+Directories whose sub-tree is recursively walked; every directory found is added to the `#`-mode list, even when the user has never run a command there. The user's "always show me these projects" list. Multiple entries are allowed (one per line, like `prefix.<x>=`). A non-existent path is silently skipped (the user may have moved the directory; the next startup with the path back picks it up). The `~` is expanded at config-load time so `sessiondirs=~/.config/tmux-sessions` resolves to your real home, not the literal `~` directory.
+
+The walk itself is **lazy**, not run at startup: it fires once, the first time you enter `#` (Directories) mode, and is cached for the rest of that TUI session. A launch that never visits `#` mode never pays for it at all — useful if a `sessiondirs=` entry points at a large tree.
 
 ```ini
 sessiondirs=~/work/monorepo
