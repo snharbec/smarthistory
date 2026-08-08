@@ -344,7 +344,7 @@ $ vi foo/a*<TAB>
 # shell-glob expansion)
 ```
 
-Selecting a row (`Enter`) splices its absolute path back into the command line in place of the typed glob word — `vi a*` + selecting `apple.txt` becomes `vi apple.txt`. Any word NOT containing `* ? [` falls through to normal completion untouched, and the trigger only fires when the cursor is at the end of the line (a glob word earlier in the buffer is not detected).
+Selecting a row (`Enter`) splices its path — relative to the shell's cwd, the way a real shell glob expansion reads — back into the command line in place of the typed glob word — `vi a*` + selecting `apple.txt` becomes `vi apple.txt` (a nested match keeps its intermediate directories, e.g. `sub/apple.txt`, not just the bare filename). Any word NOT containing `* ? [` falls through to normal completion untouched, and the trigger only fires when the cursor is at the end of the line (a glob word earlier in the buffer is not detected).
 
 **Inside the picker**, mode-switching is locked — the query can never leave files mode, and `F1`/`Ctrl-]` are disabled. Two dedicated keys:
 
@@ -356,6 +356,8 @@ Selecting a row (`Enter`) splices its absolute path back into the command line i
 **Root scoping.** The word is split on its last `/`: everything before it becomes the walk root (`foo/bar/a*` scopes to `foo/bar/`, filtering by `a*`), everything after is matched against each file's basename — recursively, at any depth under that root. A leading segment that's itself glob-like (`**/*.rs`, `src/*/test.rs`) can't be used to scope the root, so the walk falls back to the base directory (still fully recursive — nothing is missed, just less pruned).
 
 **Narrowing further inside the picker.** Once the picker is open, typing a space then more text adds a plain substring filter on top of the glob — the FIRST word is always the glob (established when you pressed Tab), every word after it narrows the results further by substring against each file's path. `*.md jira` matches every markdown file whose path contains "jira", not just files literally named `jira*.md`.
+
+**`cd` opens a directory picker instead.** When the command being completed is `cd` (the first word of the line — compound commands like `ls && cd proj*` aren't detected, only a simple leading `cd`), pressing Tab on a glob word opens the SAME picker but showing only directories, never files — `cd proj*<TAB>` finds every real subdirectory matching `proj*` on disk, recursively, the same glob/root-scoping/narrowing rules as the file picker. The one difference: there's no multi-select — `Ctrl-A` is a no-op (cd-ing into more than one directory at once doesn't mean anything), and `Enter` always returns just the single highlighted directory.
 
 ---
 

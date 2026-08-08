@@ -318,14 +318,29 @@ enum Commands {
         /// staging an `$EDITOR` command. `Ctrl-A` marks every
         /// visible row. Mutually exclusive with `--prefix` (this
         /// flag already implies the files prefix).
-        #[arg(long, value_name = "PATTERN", conflicts_with = "prefix")]
+        #[arg(long, value_name = "PATTERN", conflicts_with_all = ["prefix", "glob_complete_dir"])]
         glob_complete: Option<String>,
+        /// Same as `--glob-complete`, but locked into a DIRECTORY
+        /// picker instead of a file picker — every behavior is
+        /// identical (root-scoping, extra-word substring narrowing,
+        /// mode-switching locked) except: only directory entries are
+        /// shown (`walk_dir` already tags every matched entry `mode
+        /// == "file"` or `mode == "directory"`; this just keeps the
+        /// other kind), `Ctrl-A` is a no-op (cd-ing into more than
+        /// one directory doesn't mean anything), and Enter always
+        /// returns just the single selected directory, ignoring
+        /// marks even if somehow set. Produced by the zsh widget
+        /// when the command being completed is `cd` (see
+        /// `_smarthistory_globcomplete_is_cd` in `init.zsh`).
+        /// Mutually exclusive with `--prefix` and `--glob-complete`.
+        #[arg(long, value_name = "PATTERN", conflicts_with = "prefix")]
+        glob_complete_dir: Option<String>,
         /// Override the base directory used to resolve relative
         /// walk roots — both the ordinary `/` mode's cwd-rooted
-        /// walk and `--glob-complete`'s root-scoping. Defaults to
-        /// the process's actual current directory. Not files-
-        /// specific infrastructure — reusable by a future process/
-        /// directory completion phase.
+        /// walk and `--glob-complete`/`--glob-complete-dir`'s
+        /// root-scoping. Defaults to the process's actual current
+        /// directory. Not files-specific infrastructure — reusable
+        /// by a future process-completion phase.
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Execute the selected command directly (via `sh -c`)
@@ -4719,6 +4734,7 @@ fn run_tui_command(
     mode: Option<String>,
     prefix: Option<String>,
     glob_complete: Option<String>,
+    glob_complete_dir: Option<String>,
     root: Option<PathBuf>,
     exec: bool,
     query: Option<String>,
@@ -4814,26 +4830,42 @@ fn run_tui_command(
     let env_query = std::env::var("SMARTHISTORY_TUI_QUERY")
         .ok()
         .filter(|s| !s.is_empty());
-    let cli_query_override =
-        glob_complete.is_some() || prefix.is_some() || query.is_some() || env_query.is_some();
+    // `--glob-complete` and `--glob-complete-dir` are mutually
+    // exclusive (enforced by clap) and share everything except which
+    // row kind (`FilePickerKind`) the resulting picker keeps.
+    // Resolved together here so the rest of this function only has
+    // to branch on ONE `Option`, not two.
+    let glob_complete_effective: Option<(&str, tui::FilePickerKind)> = glob_complete
+        .as_deref()
+        .map(|p| (p, tui::FilePickerKind::Files))
+        .or_else(|| glob_complete_dir.as_deref().map(|p| (p, tui::FilePickerKind::Directories)));
+    let cli_query_override = glob_complete_effective.is_some()
+        || prefix.is_some()
+        || query.is_some()
+        || env_query.is_some();
     // Loaded early (moved ahead of its original position, just
-    // below) so `--glob-complete` can read the configured files
-    // prefix character before the `initial_query` match runs.
+    // below) so `--glob-complete`/`--glob-complete-dir` can read the
+    // configured files prefix character before the `initial_query`
+    // match runs.
     let tui_cfg = Config::load();
     let (initial_query, override_session_query) =
         match (
-            glob_complete.as_deref(),
+            glob_complete_effective,
             prefix.as_deref(),
             query.as_deref(),
             env_query.as_deref(),
         ) {
-            (Some(pattern), _, _, _) => {
-                // `--glob-complete <PATTERN>` implies the files
-                // prefix — same "one-off, starts in a specific
-                // mode, don't persist" treatment `--prefix` gets,
-                // just pre-filled with the raw glob word instead of
-                // a bare prefix char. `clap`'s `conflicts_with`
-                // already rules out `prefix` being `Some` here.
+            (Some((pattern, _kind)), _, _, _) => {
+                // `--glob-complete[-dir] <PATTERN>` implies the
+                // files prefix REGARDLESS of kind — a directory
+                // picker still drives the exact same underlying `/`
+                // files-mode walk/fetch pipeline, just filtered down
+                // to directory entries (see `FilePickerKind`). Same
+                // "one-off, starts in a specific mode, don't
+                // persist" treatment `--prefix` gets, just pre-filled
+                // with the raw glob word instead of a bare prefix
+                // char. `clap`'s `conflicts_with` already rules out
+                // `prefix` being `Some` here.
                 let files_prefix = tui_cfg.query_prefixes().files;
                 (format!("{}{}", files_prefix, pattern), true)
             }
@@ -4923,7 +4955,7 @@ fn run_tui_command(
         cli_overrides,
         create_note,
         create_note_prefill,
-        glob_complete.is_some(),
+        glob_complete_effective.map(|(_, kind)| kind),
         root,
     )? {
         Some((command, pick_mode)) => {
@@ -5462,6 +5494,7 @@ fn main() -> anyhow::Result<()> {
                 None,
                 None,
                 None,
+                None,
                 true,
                 None,
                 None,
@@ -5691,6 +5724,7 @@ fn main() -> anyhow::Result<()> {
             mode,
             prefix,
             glob_complete,
+            glob_complete_dir,
             root,
             exec,
             query,
@@ -5704,6 +5738,7 @@ fn main() -> anyhow::Result<()> {
                 mode,
                 prefix,
                 glob_complete,
+                glob_complete_dir,
                 root,
                 exec,
                 query,

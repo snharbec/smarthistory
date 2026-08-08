@@ -22,11 +22,18 @@ All notable changes to this project will be documented in this file.
   not just files literally named `jira*.md`). Inside the picker, mode-switching
   is locked (the query can never leave files mode, `F1`/`Ctrl-]` are
   disabled); `Ctrl-A` marks every visible row, and `Enter` returns every
-  marked row's path — space-joined, shell-quoted — or just the current row if
-  nothing is marked, spliced into the command line in place of the typed word
-  (never runs the line). New `smarthistory tui --glob-complete <PATTERN>` and
-  `--root <DIR>` CLI flags (the latter also usable to override the base
-  directory for plain `/` mode's walk).
+  marked row's path — relative to the shell's cwd (matching how a real shell
+  glob expansion reads), space-joined, shell-quoted — or just the current row
+  if nothing is marked, spliced into the command line in place of the typed
+  word (never runs the line). When the command being completed is `cd`, the
+  SAME glob/root-scoping/narrowing rules open a directory picker instead
+  (`smarthistory tui --glob-complete-dir <PATTERN>`) — only real directories
+  on disk are shown, and there's no multi-select (`Ctrl-A` is a no-op, Enter
+  always returns just the single highlighted directory) since cd-ing into
+  more than one directory doesn't mean anything. New `smarthistory tui
+  --glob-complete <PATTERN>`, `--glob-complete-dir <PATTERN>`, and `--root
+  <DIR>` CLI flags (the last also usable to override the base directory for
+  plain `/` mode's walk).
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
   users), via the new `sysinfo` dependency. The typed body filters by
   substring against the process's name/cmdline, working directory, and

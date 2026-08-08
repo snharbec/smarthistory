@@ -112,19 +112,29 @@ pub(crate) fn pattern(app: &App) -> &str {
 /// on a background thread (spawned by
 /// `App::files_touch` → `crate::files::spawn_walk`),
 /// so this just clones the cached rows from
-/// `App::files_state` and filters out pure
-/// directory rows. The files (`/`) mode is for
-/// opening files; directories are reachable via the
-/// directories (`#`) mode if the user wants
-/// directory-level navigation. Showing directories
-/// here clutters the list with rows that have no
-/// preview content.
+/// `App::files_state`, filtered by row kind. Plain
+/// `/` mode (and a locked `--glob-complete` file
+/// picker) keeps only file rows — directories are
+/// reachable via the directories (`#`) mode if the
+/// user wants directory-level navigation, and
+/// showing them here would clutter the list with
+/// rows that have no preview content. A locked
+/// `--glob-complete-dir` DIRECTORY picker (see
+/// `FilePickerKind::Directories`) inverts that:
+/// `walk_dir` already tags every matching entry
+/// `mode == "file"` or `mode == "directory"`, so no
+/// change to the walker itself is needed — only
+/// which of those two kinds this function keeps.
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
+    let want_dirs = matches!(
+        app.file_picker_lock.as_ref().map(|l| l.kind),
+        Some(crate::tui::FilePickerKind::Directories)
+    );
     Ok(app
         .files_state
         .rows
         .iter()
-        .filter(|r| r.mode != "directory")
+        .filter(|r| (r.mode == "directory") == want_dirs)
         .cloned()
         .collect())
 }

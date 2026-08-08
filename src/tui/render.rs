@@ -4228,16 +4228,29 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // the user is currently looking at.
     let selected_display_pos =
         list_display_position(app.list_state.selected(), real_count, is_panes);
+    // A locked `--glob-complete-dir` picker still runs on the files
+    // (`/`) prefix internally (see `FilePickerKind`), so
+    // `ModeKind::list_title()` would otherwise say "Files" even
+    // though only directory rows are shown — override the label to
+    // match what's actually on screen.
+    let list_title_label = if matches!(
+        app.file_picker_lock.as_ref().map(|l| l.kind),
+        Some(crate::tui::FilePickerKind::Directories)
+    ) {
+        "Directories"
+    } else {
+        active_mode.list_title()
+    };
     let title = match selected_display_pos {
         Some(pos) if real_count > 0 => format!(
             " {} — {}/{} ",
-            active_mode.list_title(),
+            list_title_label,
             pos,
             merged.len()
         ),
         _ => format!(
             " {} — {} ",
-            active_mode.list_title(),
+            list_title_label,
             merged.len()
         ),
     };

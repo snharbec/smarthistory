@@ -257,6 +257,19 @@ _smarthistory_globcomplete_word() {
     REPLY="$word"
     return 0
 }
+# True iff the command being completed is `cd` — the first
+# whitespace-separated word of `LBUFFER`, trimmed of leading
+# whitespace. When true, `_smarthistory_globcomplete_accept` opens
+# the DIRECTORY picker (`--glob-complete-dir`) instead of the file
+# picker, since `cd`'s argument is always a directory, never a file.
+# Scope limitation: only recognizes a simple leading `cd`, not `cd`
+# appearing after a `;`/`&&`/`||`/`|` in a compound command line
+# (e.g. `ls && cd proj*` still opens the file picker) — the common
+# case is a bare `cd <TAB>`, and getting the compound case right
+# would need real shell-syntax parsing, not a cheap prefix check.
+_smarthistory_globcomplete_is_cd() {
+    [[ "${LBUFFER%% *}" == "cd" ]]
+}
 # Tab handler for the glob-completion picker. When enabled and the
 # trailing word looks like a glob, launches `smarthistory tui
 # --glob-complete <word>` (a locked file-completion picker — see
@@ -275,9 +288,19 @@ _smarthistory_globcomplete_word() {
 # straight through to normal completion, so this is always safe to
 # bind as the sole `^I` handler.
 _smarthistory_globcomplete_accept() {
-    local word result
+    local word result glob_flag
     if [[ "$_smarthistory_globcomplete_enabled" = "1" ]] && _smarthistory_globcomplete_word; then
         word="$REPLY"
+        # `cd`'s argument is always a directory, never a file — open
+        # the directory picker instead (`--glob-complete-dir`), which
+        # shows only directory entries and has no multi-select (you
+        # can only `cd` into one place). See
+        # `_smarthistory_globcomplete_is_cd`.
+        if _smarthistory_globcomplete_is_cd; then
+            glob_flag="--glob-complete-dir"
+        else
+            glob_flag="--glob-complete"
+        fi
         # NO stderr redirect here — unlike the data-fetching
         # `smarthistory search`/`config get` calls elsewhere in this
         # file, this subprocess is an interactive full-screen TUI
@@ -287,7 +310,7 @@ _smarthistory_globcomplete_accept() {
         # /dev/null would discard the entire picker UI while the
         # process stays alive waiting for input — invisible, not
         # actually hung, but indistinguishable from a frozen shell.
-        result=$(smarthistory tui --glob-complete "$word")
+        result=$(smarthistory tui "$glob_flag" "$word")
         if [[ -n "$result" ]]; then
             # `$word` is glob-detected precisely because it contains
             # `* ? [` — quoting it here is load-bearing, not

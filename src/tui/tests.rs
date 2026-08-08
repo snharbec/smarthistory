@@ -28251,6 +28251,7 @@ fn file_picker_locked_app_with_rows(rows: Vec<HistoryRow>) -> App {
     app.file_picker_lock = Some(FilePickerLock {
         prefix: app.query_prefixes.files,
         base_root: std::path::PathBuf::from("/tmp"),
+        kind: FilePickerKind::Files,
     });
     app.merged_rows = rows;
     app
@@ -28375,6 +28376,7 @@ fn file_picker_locked_test_app() -> App {
     app.file_picker_lock = Some(FilePickerLock {
         prefix: app.query_prefixes.files,
         base_root: std::path::PathBuf::from("/tmp"),
+        kind: FilePickerKind::Files,
     });
     app
 }
@@ -28502,6 +28504,7 @@ fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
     app.file_picker_lock = Some(FilePickerLock {
         prefix: app.query_prefixes.files,
         base_root: dir.clone(),
+        kind: FilePickerKind::Files,
     });
     app.spawn_files_walk("*.md jira".to_string());
 
@@ -28515,6 +28518,143 @@ fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
         names,
         vec!["jira-notes.md"],
         "expected only jira-notes.md (matches *.md AND contains \"jira\"), got {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Directory picker (`--glob-complete-dir`, `cd proj*<TAB>`) ----
+
+/// Build a locked DIRECTORY-picker `App` (mirrors
+/// `file_picker_locked_test_app`, but `kind: Directories`) — a
+/// single directory row selected, `base_root = /tmp`.
+fn file_picker_locked_dir_test_app() -> App {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![HistoryRow {
+        id: -1,
+        command: "project".to_string(),
+        directory: "/tmp/project".to_string(),
+        mode: "directory".to_string(),
+        ..Default::default()
+    }];
+    app.list_state.select(Some(0));
+    app.query = "/p".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: std::path::PathBuf::from("/tmp"),
+        kind: FilePickerKind::Directories,
+    });
+    app
+}
+
+/// `mode::files::fetch` inverts its usual "exclude directory rows"
+/// filter for a `Directories`-kind lock — a `Files`-kind (or
+/// unlocked) session keeps the opposite set.
+#[test]
+fn file_picker_directories_fetch_shows_only_directory_rows() {
+    let rows = vec![
+        HistoryRow { mode: "file".to_string(), command: "a.txt".to_string(), ..Default::default() },
+        HistoryRow { mode: "directory".to_string(), command: "sub".to_string(), ..Default::default() },
+    ];
+
+    let mut dir_app = directories_test_app(&[]);
+    dir_app.files_state.rows = rows.clone();
+    dir_app.file_picker_lock = Some(FilePickerLock {
+        prefix: dir_app.query_prefixes.files,
+        base_root: std::path::PathBuf::from("/tmp"),
+        kind: FilePickerKind::Directories,
+    });
+    let dir_result = crate::tui::mode::files::fetch(&mut dir_app).unwrap();
+    assert_eq!(dir_result.len(), 1);
+    assert_eq!(dir_result[0].command, "sub");
+
+    let mut file_app = directories_test_app(&[]);
+    file_app.files_state.rows = rows;
+    let file_result = crate::tui::mode::files::fetch(&mut file_app).unwrap();
+    assert_eq!(file_result.len(), 1);
+    assert_eq!(file_result[0].command, "a.txt");
+}
+
+/// `Ctrl-A` is a no-op for a `Directories`-kind session — no marks
+/// get set (unlike the `Files`-kind case), since cd-ing into more
+/// than one directory at once doesn't mean anything.
+#[test]
+fn file_picker_directories_ctrl_a_is_noop() {
+    let mut app = file_picker_locked_dir_test_app();
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert!(app.marked_ids.is_empty(), "Ctrl-A must not mark anything for a directory picker");
+    assert!(!app.is_help_viewing());
+}
+
+/// Enter on a `Directories`-kind session always returns just the
+/// single selected row's relative path — even if marks somehow got
+/// set through another path, they're ignored (defense in depth on
+/// top of `Ctrl-A` already being a no-op).
+#[test]
+fn file_picker_directories_enter_ignores_marks_returns_single_selection() {
+    let mut app = file_picker_locked_dir_test_app();
+    app.merged_rows.push(HistoryRow {
+        id: -2,
+        command: "other".to_string(),
+        directory: "/tmp/other".to_string(),
+        mode: "directory".to_string(),
+        ..Default::default()
+    });
+    // Force both rows marked, simulating marks set through some
+    // other path — confirm_selection must still ignore them.
+    app.marked_ids.insert(mark_key(&app.merged_rows[0]));
+    app.marked_ids.insert(mark_key(&app.merged_rows[1]));
+    app.list_state.select(Some(0));
+    app.file_picker_confirm_selection();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("project"),
+        "must return only the selected row, ignoring marks entirely"
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::EditEnd));
+}
+
+/// End-to-end (real background thread + real filesystem) test: a
+/// directory-picker session's walk finds real subdirectories
+/// matching the glob and excludes matching files — the exact
+/// scenario `cd proj*<TAB>` needs.
+#[test]
+fn file_picker_directories_spawn_files_walk_finds_only_matching_directories() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_dir_picker_walk_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("project-alpha")).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::fs::write(dir.join("project-notes.txt"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: dir.clone(),
+        kind: FilePickerKind::Directories,
+    });
+    app.spawn_files_walk("project*".to_string());
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    let all_rows = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("walk did not complete within 5s (hang or panic)");
+    app.files_state.rows = all_rows;
+    let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
+    let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["project-alpha"],
+        "expected only the matching DIRECTORY, not project-notes.txt, got {names:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
