@@ -1179,6 +1179,16 @@ pub(crate) struct App {
     completion_menu: Option<CompletionMenu>,
     /// When `Some`, we are prompting for deletion confirmation.
     confirm_delete: Option<ConfirmMode>,
+    /// When `Some`, we are prompting to send a signal to a process
+    /// (`%` mode, opened by `App::stage_process_signal_prompt`). A
+    /// parallel field to `confirm_delete` rather than a `ConfirmMode`
+    /// variant: the signal dialog needs a 4th key outcome (Tab/
+    /// Shift-Tab cycles the signal without confirming or cancelling)
+    /// that doesn't fit `ConfirmMode`'s clean y/n/cancel shape shared
+    /// by 4 semantically-identical delete variants. Precedent for a
+    /// dedicated field already exists in `zoxide_save_prompt`, which
+    /// similarly isn't folded into `ConfirmMode`.
+    confirm_signal: Option<SignalConfirm>,
     /// Cached set of all history rows that have a comment, used to
     /// populate the optional labeled entries pane.
     labeled_rows: Vec<HistoryRow>,
@@ -3833,6 +3843,74 @@ enum ConfirmMode {
     },
 }
 
+/// The small, fixed set of signals the `%` (processes) mode
+/// confirmation dialog cycles through — deliberately NOT
+/// `sysinfo::Signal` (32 variants, most meaningless here); this
+/// keeps Tab/Shift-Tab cycling through exactly the 4 signals the
+/// feature asked for, in a fixed order, defaulting to `Term`
+/// (SIGTERM).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessSignal {
+    Term,
+    Kill,
+    Hup,
+    Int,
+}
+
+impl ProcessSignal {
+    fn label(self) -> &'static str {
+        match self {
+            ProcessSignal::Term => "SIGTERM",
+            ProcessSignal::Kill => "SIGKILL",
+            ProcessSignal::Hup => "SIGHUP",
+            ProcessSignal::Int => "SIGINT",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            ProcessSignal::Term => ProcessSignal::Kill,
+            ProcessSignal::Kill => ProcessSignal::Hup,
+            ProcessSignal::Hup => ProcessSignal::Int,
+            ProcessSignal::Int => ProcessSignal::Term,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            ProcessSignal::Term => ProcessSignal::Int,
+            ProcessSignal::Int => ProcessSignal::Hup,
+            ProcessSignal::Hup => ProcessSignal::Kill,
+            ProcessSignal::Kill => ProcessSignal::Term,
+        }
+    }
+
+    fn to_sysinfo(self) -> sysinfo::Signal {
+        match self {
+            ProcessSignal::Term => sysinfo::Signal::Term,
+            ProcessSignal::Kill => sysinfo::Signal::Kill,
+            ProcessSignal::Hup => sysinfo::Signal::Hangup,
+            ProcessSignal::Int => sysinfo::Signal::Interrupt,
+        }
+    }
+}
+
+/// State for the `%` (processes) mode signal-confirmation dialog,
+/// opened by `App::stage_process_signal_prompt` (`src/tui/actions.rs`)
+/// when Enter is pressed on a process row. A parallel field to
+/// `confirm_delete` rather than a `ConfirmMode` variant — see the
+/// design note on `App::confirm_signal` for why.
+pub(crate) struct SignalConfirm {
+    pub(crate) pid: i64,
+    /// Display name of the process (`row.command`), frozen at
+    /// dialog-open time so it doesn't change if the row list
+    /// refreshes while the dialog is open.
+    pub(crate) name: String,
+    /// The signal to send if confirmed. Defaults to `Term`;
+    /// Tab/Shift-Tab cycle it in `handle_confirm_signal_key`.
+    pub(crate) signal: ProcessSignal,
+}
+
 /// State for the captured-output overlay: the captured text plus a
 /// scroll offset (number of lines scrolled past the top).
 struct OutputView {
@@ -4322,6 +4400,12 @@ impl PrefixPicker {
                 label: "Zoxide",
                 description: "list zoxide directories; Enter opens a new tmux session / herdr workspace there",
             },
+            PrefixOption {
+                prefix: Some(prefixes.processes),
+                name: "processes",
+                label: "Processes",
+                description: "list running processes (all users); Enter opens a signal-confirmation dialog",
+            },
         ]
     }
 
@@ -4667,6 +4751,7 @@ impl App {
             theme_picker: None,
             completion_menu: None,
             confirm_delete: None,
+            confirm_signal: None,
             labeled_rows: Vec::new(),
             labeled_list_state: ListState::default(),
             // Refreshed by `refresh()`; initialized empty so a
@@ -5350,6 +5435,13 @@ impl App {
         if self.is_browser_query() {
             return self.rows.clone();
         }
+        // Processes mode (`%`) rows are each a unique, live OS
+        // process (keyed by PID) — there's nothing to dedup by
+        // command (many processes legitimately share a name) and no
+        // "labeled row" concept, same reasoning as Panes mode above.
+        if self.is_processes_query() {
+            return self.rows.clone();
+        }
         // Directories / JIRA / files
         // modes are completely
         // different views that must NOT
@@ -5613,6 +5705,7 @@ impl App {
             crate::tui::mode::ModeKind::Paperless => return crate::tui::mode::paperless::fetch(self),
             crate::tui::mode::ModeKind::Browser => return crate::tui::mode::browser::fetch(self),
             crate::tui::mode::ModeKind::Zoxide => return crate::tui::mode::zoxide::fetch(self),
+            crate::tui::mode::ModeKind::Processes => return crate::tui::mode::processes::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6082,6 +6175,10 @@ impl App {
             return;
         }
         if self.is_zoxide_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_processes_query() {
             self.select_for_run_impl();
             return;
         }
@@ -7409,7 +7506,7 @@ impl App {
                 // description body).
                 let is_preview_only = matches!(
                     r.mode.as_str(),
-                    "pane" | "workspace" | "session"
+                    "pane" | "workspace" | "session" | "process"
                 );
                 let text = if is_preview_only && !r.preview.is_empty() {
                     r.preview.clone()
@@ -10455,6 +10552,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.paperless => Some(ModeKind::Paperless),
             _ if c == query_prefixes.browser => Some(ModeKind::Browser),
             _ if c == query_prefixes.zoxide => Some(ModeKind::Zoxide),
+            _ if c == query_prefixes.processes => Some(ModeKind::Processes),
             _ => None,
         }
     });
@@ -11622,6 +11720,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_confirm_delete_key(app, key, mode.clone());
     }
 
+    // When prompting to send a signal to a process, only allow
+    // 'y'/'n'/Tab/Shift-Tab or Esc/Ctrl+C — same "modal overlay takes
+    // over the keymap" precedence as `confirm_delete` above.
+    if app.confirm_signal.is_some() {
+        return handle_confirm_signal_key(app, key);
+    }
+
     // When editing a comment, most keys go to the comment buffer.
     if app.is_comment_editing() {
         return handle_comment_edit_key(app, key);
@@ -12414,6 +12519,69 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
             // running the destructive
             // action.
             app.confirm_delete = None;
+            false
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Key handler for the `%` (processes) mode signal-confirmation
+/// dialog (`app.confirm_signal`). Hardcoded overlay-local keys, same
+/// convention `handle_confirm_delete_key` uses (only `Cancel` is
+/// looked up dynamically through the bindings table): `y`/`Y` sends
+/// the currently-selected signal and reports success/failure via
+/// `set_status_message` (no panics — a permission-denied kill is an
+/// expected, not exceptional, outcome); `n`/`N`/Cancel dismisses
+/// without signaling; `Tab`/`BackTab` cycle the signal without
+/// confirming or cancelling — this is the outcome `ConfirmMode`'s
+/// simpler y/n/cancel shape has no room for, which is why this
+/// dialog uses its own parallel `confirm_signal` field instead of a
+/// `ConfirmMode` variant (see `App::confirm_signal`'s doc comment).
+fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
+    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(s) = app.confirm_signal.take() {
+                let result = app.send_signal(s.pid, s.signal.to_sysinfo());
+                match result {
+                    Ok(()) => app.set_status_message(format!(
+                        "Sent {} to pid {} ({})",
+                        s.signal.label(),
+                        s.pid,
+                        s.name
+                    )),
+                    Err(e) => app.set_status_message(format!(
+                        "Failed to send {} to pid {}: {}",
+                        s.signal.label(),
+                        s.pid,
+                        e
+                    )),
+                }
+            }
+            false
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.confirm_signal = None;
+            false
+        }
+        _ if is_cancel_key => {
+            app.confirm_signal = None;
+            false
+        }
+        KeyCode::Tab => {
+            if let Some(s) = app.confirm_signal.as_mut() {
+                s.signal = s.signal.next();
+            }
+            false
+        }
+        KeyCode::BackTab => {
+            if let Some(s) = app.confirm_signal.as_mut() {
+                s.signal = s.signal.prev();
+            }
             false
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

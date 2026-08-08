@@ -1310,6 +1310,16 @@ pub struct QueryPrefixes {
     /// `$PATH`; a directory whose entry no longer exists on disk is
     /// skipped.
     pub zoxide: char,
+    /// Prefix for the processes mode (default `%`). Lists every
+    /// running OS process (macOS + Linux, via the `sysinfo` crate),
+    /// filtered by the typed body against the process name/cmdline,
+    /// cwd, and executable path. Selecting a row opens a
+    /// confirmation dialog to send it a signal — defaults to
+    /// SIGTERM, Tab/Shift-Tab cycle to SIGKILL/SIGHUP/SIGINT before
+    /// confirming with `y`. Shows processes regardless of owner;
+    /// signaling one the user doesn't own fails with a status-line
+    /// message rather than crashing.
+    pub processes: char,
     /// Prefix for the meta-prefix mode (default `'`). Not a search
     /// mode itself — typing `'` then a partial mode name (e.g.
     /// `'jir`) and pressing Tab expands to that mode's real prefix
@@ -1341,6 +1351,7 @@ impl Default for QueryPrefixes {
             paperless: '<',
             browser: '^',
             zoxide: '~',
+            processes: '%',
             meta: '\'',
         }
     }
@@ -1357,7 +1368,7 @@ impl QueryPrefixes {
     /// (missing `paperless` in two of the three) as fields were
     /// added over time. Add a new prefix field here too when one is
     /// added to the struct.
-    pub(crate) fn all_chars(&self) -> [char; 18] {
+    pub(crate) fn all_chars(&self) -> [char; 19] {
         [
             self.output,
             self.llm,
@@ -1376,6 +1387,7 @@ impl QueryPrefixes {
             self.paperless,
             self.browser,
             self.zoxide,
+            self.processes,
             self.meta,
         ]
     }
@@ -3388,7 +3400,7 @@ impl Config {
     const KNOWN_PREFIX_NAMES: &[&str] = &[
         "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
         "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
-        "meta",
+        "processes", "meta",
     ];
 
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
@@ -3420,6 +3432,7 @@ impl Config {
             "paperless" => prefixes.paperless = c,
             "browser" => prefixes.browser = c,
             "zoxide" => prefixes.zoxide = c,
+            "processes" => prefixes.processes = c,
             "meta" => prefixes.meta = c,
             _ => {}
         }

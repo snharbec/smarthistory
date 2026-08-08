@@ -24,6 +24,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | Paperless | `<` | [`paperless.md`](paperless.md) | Search documents on a Paperless-ngx backend by title, tag (`#TAG`), or correspondent (`@AUTHOR`). |
 | Browser | `^` | [`browser.md`](browser.md) | Search browser bookmarks + history, merged from every configured/auto-detected Chrome or Firefox profile; type `bookmark` / `history` to narrow to one source. |
 | Zoxide | `~` | [`zoxide.md`](zoxide.md) | List directories from the local `zoxide` database, highest frecency score first; selecting one creates a new tmux session / herdr workspace there. |
+| Processes | `%` | [`processes.md`](processes.md) | List every running OS process (macOS + Linux, all users); selecting one opens a confirm dialog to send it a signal (SIGTERM by default, cycle to SIGKILL/SIGHUP/SIGINT). |
 
 ## Cross-cutting topics
 
@@ -56,12 +57,13 @@ The first character of the query decides the mode. Examples:
 | `<invoice #work @acme` | Paperless (title contains "invoice", tagged `work`, correspondent contains "acme"). |
 | `^bookmark rust` | Browser (only bookmarks matching "rust"). |
 | `~proj` | Zoxide (directories from `zoxide query -l` whose path contains "proj"). |
+| `%nginx` | Processes (rows whose name/cmdline, cwd, or executable path contains "nginx"). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 
 ## Meta-prefix mode (`'`): pick a mode by name
 
-Remembering 18 single-character prefixes is hard. Type `'` (configurable via
+Remembering 19 single-character prefixes is hard. Type `'` (configurable via
 `prefix.meta=<char>`) then a partial mode name and press `Tab`:
 
 - **Unique match** (e.g. `'jir` → only "jira" matches): activates immediately

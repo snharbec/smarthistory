@@ -27,6 +27,7 @@
             ModeKind::Similar,
             ModeKind::Paperless,
             ModeKind::Browser,
+            ModeKind::Processes,
         ] {
             let title = kind.list_title();
             assert!(!title.is_empty(), "{:?} returned empty title", kind);
@@ -87,6 +88,7 @@
             ModeKind::Jira,
             ModeKind::Paperless,
             ModeKind::Browser,
+            ModeKind::Processes,
         ];
         for kind in others {
             let title = kind.list_title();
@@ -123,6 +125,7 @@
             ModeKind::Jira,
             ModeKind::Paperless,
             ModeKind::Browser,
+            ModeKind::Processes,
         ];
         for kind in single_word_kinds {
             let title = kind.list_title();

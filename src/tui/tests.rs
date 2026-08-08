@@ -11678,6 +11678,267 @@ fn zoxide_save_prompt_renders_label_and_hint() {
     );
 }
 
+// --- processes mode (`%` prefix) ----
+
+/// `%` mode parses the same as every other prefix mode: the query's
+/// leading `%` char strips off, and everything after it is the typed
+/// filter body.
+#[test]
+fn processes_matches_and_pattern() {
+    let mut app = directories_test_app(&[]);
+    assert!(!app.is_processes_query());
+    assert_eq!(app.processes_pattern(), "");
+    app.query = "%nginx".to_string();
+    assert!(app.is_processes_query());
+    assert_eq!(app.processes_pattern(), "nginx");
+}
+
+/// Every PID is unique — there's nothing meaningful to dedup by
+/// command (many processes legitimately share a name), same
+/// reasoning as `Panes` mode. `build_merged_rows`'s early return
+/// (rather than `dedup_eligible`) is what actually implements this;
+/// this test locks in the `dedup_eligible() == false` half of that
+/// contract so a future refactor can't accidentally add Processes to
+/// the dedup set.
+#[test]
+fn processes_mode_is_not_dedup_eligible() {
+    assert!(!crate::tui::mode::ModeKind::Processes.dedup_eligible());
+}
+
+/// `fetch` enumerates real OS processes via `sysinfo` — the running
+/// test binary's own PID is always present, giving a real, portable
+/// (macOS + Linux) assertion without mocking the process table.
+#[test]
+fn processes_fetch_finds_own_pid() {
+    let mut app = directories_test_app(&[]);
+    app.query = "%".to_string();
+    let rows = crate::tui::mode::processes::fetch(&mut app).expect("fetch");
+    let own_pid = std::process::id() as i64;
+    let own_row = rows
+        .iter()
+        .find(|r| r.id == own_pid)
+        .unwrap_or_else(|| panic!("expected own pid {own_pid} in process list"));
+    assert_eq!(own_row.mode, "process");
+    assert!(
+        !own_row.command.is_empty(),
+        "expected a non-empty command/name for the own-pid row"
+    );
+}
+
+/// The typed filter matches (case-insensitively) against command,
+/// cwd, AND executable path — a filter token unrelated to every real
+/// process on the test machine must exclude everything.
+#[test]
+fn processes_fetch_filters_by_pattern() {
+    let mut app = directories_test_app(&[]);
+    app.query = "%definitely-not-a-real-process-name-xyz123".to_string();
+    let rows = crate::tui::mode::processes::fetch(&mut app).expect("fetch");
+    assert!(
+        rows.is_empty(),
+        "expected no processes to match a nonsense filter, got {} rows",
+        rows.len()
+    );
+}
+
+/// `ensure_selected_context` populates `preview` with the selected
+/// process's environment variables. The test's own process can always
+/// read its own environment (no permission issue), so this doesn't
+/// need to mock anything platform-specific.
+///
+/// Deliberately asserts against a variable already present in the
+/// test process's environment at exec time (`std::env::vars()`,
+/// picking any real entry) rather than one set with
+/// `std::env::set_var` during the test: both macOS (`KERN_PROCARGS2`)
+/// and Linux (`/proc/<pid>/environ`) read a process's environment
+/// block as the kernel captured it at `execve`, not live post-start
+/// `setenv` mutations — a `set_var` sentinel would not reliably show
+/// up here even though it's visible to `std::env::var` within this
+/// same process.
+#[test]
+fn processes_ensure_selected_context_populates_preview_for_own_pid() {
+    let (known_key, known_value) = std::env::vars()
+        .next()
+        .expect("test process should have at least one env var set");
+
+    let mut app = directories_test_app(&[]);
+    let own_pid = std::process::id() as i64;
+    app.rows = vec![crate::tui::state::HistoryRow {
+        id: own_pid,
+        command: "test-process".to_string(),
+        directory: String::new(),
+        session_id: own_pid.to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "process".to_string(),
+        ..Default::default()
+    }];
+    app.merged_rows = app.rows.clone();
+    app.query = "%".to_string();
+    app.list_state.select(Some(0));
+
+    crate::tui::mode::processes::ensure_selected_context(&mut app);
+
+    let preview = &app.merged_rows[0].preview;
+    assert!(
+        preview.contains(&format!("{known_key}={known_value}")),
+        "expected {known_key:?} in the preview, got: {preview:?}"
+    );
+    // Written to both copies (see the panes-mode precedent this
+    // mirrors) so a subsequent rebuild doesn't wipe the preview.
+    assert_eq!(app.rows[0].preview, app.merged_rows[0].preview);
+}
+
+/// The graceful-degradation placeholder shown when a process's
+/// environment can't be read (permission denied, or the process
+/// already exited) — extracted as a pure function specifically so
+/// this can be tested without needing an actual unreadable process.
+#[test]
+fn processes_format_environ_error_mentions_pid() {
+    let msg = crate::tui::mode::processes::format_environ_error(1234);
+    assert!(msg.contains("1234"));
+    assert!(msg.to_lowercase().contains("permission"));
+}
+
+/// `Tab`/`BackTab` cycle the confirmation dialog's signal through the
+/// fixed 4-signal set, defaulting to SIGTERM, without confirming or
+/// cancelling — the one outcome `ConfirmMode`'s y/n/cancel shape has
+/// no room for, which is why this dialog uses a dedicated
+/// `confirm_signal` field. Confirmed by round-tripping the label text
+/// rather than reaching into the enum directly, since `ProcessSignal`
+/// is private to the `tui` module (same visibility `ConfirmMode` has)
+/// and this test lives in `tui::tests`, a descendant module, so it
+/// can see it — but going through `handle_key` + the rendered label
+/// also exercises the real dispatch path, not just the enum's own
+/// `next()`/`prev()`.
+#[test]
+fn processes_confirm_signal_cycles_and_defaults_to_term() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = directories_test_app(&[]);
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999,
+        name: "sleep".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    assert_eq!(app.confirm_signal.as_ref().unwrap().signal.label(), "SIGTERM");
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.confirm_signal.as_ref().unwrap().signal.label(), "SIGKILL");
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.confirm_signal.as_ref().unwrap().signal.label(), "SIGHUP");
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.confirm_signal.as_ref().unwrap().signal.label(), "SIGINT");
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.confirm_signal.as_ref().unwrap().signal.label(),
+        "SIGTERM",
+        "cycling forward 4 times must wrap back to SIGTERM"
+    );
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(
+        app.confirm_signal.as_ref().unwrap().signal.label(),
+        "SIGINT",
+        "Shift-Tab must cycle backward"
+    );
+}
+
+/// `n` dismisses the dialog without sending anything; the process
+/// list is untouched.
+#[test]
+fn processes_confirm_signal_n_dismisses_without_sending() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = directories_test_app(&[]);
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999,
+        name: "sleep".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.confirm_signal.is_none());
+}
+
+/// Selecting a process row (`Enter`) must NOT stage/run the process
+/// name as a shell command — it opens the signal-confirmation dialog
+/// instead and leaves `app.selection` untouched, mirroring
+/// `zoxide_save_prompt_opens_for_unsaved_directory`'s "defer, don't
+/// stage" assertion shape.
+#[test]
+fn processes_select_for_run_opens_confirm_dialog_without_staging() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![crate::tui::state::HistoryRow {
+        id: 4242,
+        command: "sleep 300".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: "4242".to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "process".to_string(),
+        ..Default::default()
+    }];
+    app.query = "%sleep".to_string();
+    app.list_state.select(Some(0));
+
+    app.select_for_run();
+
+    let confirm = app
+        .confirm_signal
+        .as_ref()
+        .expect("selecting a process row must open the signal confirmation dialog");
+    assert_eq!(confirm.pid, 4242);
+    assert_eq!(confirm.name, "sleep 300");
+    assert_eq!(confirm.signal.label(), "SIGTERM");
+    assert!(
+        app.selection.is_none(),
+        "the confirmation dialog must defer staging, not run the process name as a command"
+    );
+}
+
+/// End-to-end proof that `App::send_signal` actually delivers a real
+/// signal via `sysinfo::Process::kill_with`, not just that it
+/// type-checks: spawn a real disposable child process, send it
+/// SIGTERM, and confirm it actually terminates. This is the one test
+/// in this file that exercises the real OS signal-delivery path
+/// rather than mocking around it — every other processes-mode test
+/// either reads real (but never kills) processes or drives the
+/// dialog's key handling without an actual `kill(2)` call.
+#[test]
+fn processes_send_signal_actually_terminates_a_real_process() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn disposable sleep process");
+    let pid = child.id() as i64;
+
+    let app = directories_test_app(&[]);
+    let result = app.send_signal(pid, sysinfo::Signal::Term);
+    assert!(result.is_ok(), "send_signal should succeed: {result:?}");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break true,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => break false,
+        }
+    };
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("child process did not exit within 5s of receiving SIGTERM");
+    }
+}
+
 // --- ag mode row rendering (`,` prefix) ----
 //
 // `src/ag.rs` builds each row with the matched line's content in
@@ -22186,9 +22447,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_eighteen_entries() {
+fn prefix_picker_has_nineteen_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 18);
+    assert_eq!(picker.options.len(), 19);
 }
 
 #[test]
@@ -22273,7 +22534,7 @@ fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
         .prefix_picker
         .as_ref()
         .expect("bare ' + Tab should open a picker");
-    assert_eq!(picker.options.len(), 18, "bare ' + Tab should show every mode");
+    assert_eq!(picker.options.len(), 19, "bare ' + Tab should show every mode");
 }
 
 /// A partial name matching nothing sets a status message and does
@@ -22398,7 +22659,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 17);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 18);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);

@@ -104,6 +104,12 @@ pub enum ModeKind {
     /// `Directories` uses for its "unmarked row" path, including the
     /// `T`-marked "jump to an already-active pane there" behavior.
     Zoxide,
+    /// `%` (default). Running OS processes (macOS + Linux), via the
+    /// `sysinfo` crate. Selecting a row opens a confirmation dialog
+    /// to send it a signal (default SIGTERM, cycle to SIGKILL /
+    /// SIGHUP / SIGINT with Tab/Shift-Tab). Not `dedup_eligible`
+    /// (every PID is unique, same reasoning as `Panes`).
+    Processes,
 }
 
 impl ModeKind {
@@ -130,6 +136,7 @@ impl ModeKind {
             ModeKind::Paperless => '<',
             ModeKind::Browser => '^',
             ModeKind::Zoxide => '~',
+            ModeKind::Processes => '%',
         }
     }
 
@@ -156,6 +163,7 @@ impl ModeKind {
             ModeKind::Paperless => "paperless",
             ModeKind::Browser => "browser",
             ModeKind::Zoxide => "zoxide",
+            ModeKind::Processes => "processes",
         }
     }
 
@@ -191,6 +199,7 @@ impl ModeKind {
             ModeKind::Paperless => "Paperless",
             ModeKind::Browser => "Browser",
             ModeKind::Zoxide => "Zoxide",
+            ModeKind::Processes => "Processes",
         }
     }
 
@@ -219,6 +228,7 @@ impl ModeKind {
             ModeKind::Paperless => prefixes.paperless,
             ModeKind::Browser => prefixes.browser,
             ModeKind::Zoxide => prefixes.zoxide,
+            ModeKind::Processes => prefixes.processes,
         }
     }
 
@@ -290,6 +300,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Browser
     } else if c == p.zoxide {
         ModeKind::Zoxide
+    } else if c == p.processes {
+        ModeKind::Processes
     } else {
         ModeKind::History
     }
@@ -307,6 +319,7 @@ pub mod notes;
 pub mod output;
 pub mod paperless;
 pub mod panes;
+pub mod processes;
 pub mod query_negation;
 pub mod question;
 pub mod similar;
@@ -315,13 +328,13 @@ pub mod todo;
 pub mod zoxide;
 
 /// Lazy-load the selected row's preview context for every mode that
-/// needs it (tags/codegraph/notes/todo/files/panes/segments/similar).
-/// Each mode's own `ensure_selected_context` bails out immediately via
-/// its own `matches(app)` check, so calling all eight unconditionally
-/// is cheap and correct regardless of which mode is active — this is
-/// the single dispatch point every call site should use instead of
-/// re-listing the calls inline (previously duplicated across
-/// `App::refresh`, `App::move_selection`, `App::show_output_view`,
+/// needs it (tags/codegraph/notes/todo/files/panes/segments/similar/
+/// processes). Each mode's own `ensure_selected_context` bails out
+/// immediately via its own `matches(app)` check, so calling all nine
+/// unconditionally is cheap and correct regardless of which mode is
+/// active — this is the single dispatch point every call site should
+/// use instead of re-listing the calls inline (previously duplicated
+/// across `App::refresh`, `App::move_selection`, `App::show_output_view`,
 /// and `run_loop`).
 pub(crate) fn ensure_selected_context(app: &mut App) {
     crate::tui::mode::tags::ensure_selected_context(app);
@@ -332,6 +345,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     crate::tui::mode::panes::ensure_selected_context(app);
     crate::tui::mode::segments::ensure_selected_context(app);
     crate::tui::mode::similar::ensure_selected_context(app);
+    crate::tui::mode::processes::ensure_selected_context(app);
 }
 
 /// The colour used to tint the input border / title for a given
@@ -361,6 +375,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Paperless => Some(Theme::info()),
         ModeKind::Browser => Some(Theme::success()),
         ModeKind::Zoxide => Some(Theme::accent()),
+        ModeKind::Processes => Some(Theme::warning()),
         ModeKind::History => None,
     }
 }
@@ -398,6 +413,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Paperless => ("<".to_string(), format!(" paperless{} ", algo)),
         ModeKind::Browser => ("^".to_string(), format!(" browser{} ", algo)),
         ModeKind::Zoxide => ("~".to_string(), format!(" zoxide{} ", algo)),
+        ModeKind::Processes => ("%".to_string(), format!(" processes{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -612,6 +628,7 @@ pub fn run_all_checks(
             ModeKind::Paperless => crate::tui::mode::paperless::check(app),
             ModeKind::Browser => crate::tui::mode::browser::check(app),
             ModeKind::Zoxide => crate::tui::mode::zoxide::check(app),
+            ModeKind::Processes => crate::tui::mode::processes::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -642,6 +659,7 @@ impl ModeKind {
             ModeKind::Paperless,
             ModeKind::Browser,
             ModeKind::Zoxide,
+            ModeKind::Processes,
         ]
     }
 }

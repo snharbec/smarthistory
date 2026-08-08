@@ -16,6 +16,7 @@ regex = "1.10"
 rusqlite = "0.38.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sysinfo = "0.39"
 # Pin `time` to <0.3.52 because `time 0.3.52` changed the
 # `Parsing::parse` signature from 1-arg to 2-arg, but
 # `cookie 0.18.1` (transitive via `reqwest` → `note_search` →
