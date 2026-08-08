@@ -139,14 +139,23 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         .collect())
 }
 
-/// Lazy-load the first 50 lines of the currently-selected file
-/// (`/` mode) into `output` for preview in the output preview
-/// pane. Called from `App::refresh()` on every selection change.
-/// The file row carries the absolute path in `directory` (set
-/// during `walk_dir`). We read the first 50 lines and pipe
-/// through `bat` for syntax highlighting (same as tags /
-/// codegraph / notes / todo modes). Directory rows are skipped
-/// (there's no file content to preview).
+/// Lazy-load context for the currently-selected row into `output`
+/// for preview in the output preview pane. Called from
+/// `App::refresh()` on every selection change. A **file** row (the
+/// absolute path is in `directory`, set during `walk_dir`) gets its
+/// first 50 lines piped through `bat` for syntax highlighting (same
+/// as tags / codegraph / notes / todo modes). A **directory** row —
+/// only ever present in `merged_rows` for a locked
+/// `--glob-complete-dir` picker (plain `/` mode's `fetch` filters
+/// directories out entirely) — gets a plain listing of its immediate
+/// children instead, via `list_directory_preview`, so `cd
+/// proj*<TAB>` lets you see what's actually in a candidate directory
+/// before committing to it. Both bail out (return without touching
+/// `row.output`) once already populated for the current row — a
+/// fresh row from a new `walk_dir` result always starts with
+/// `output: String::new()`, so this is a correct "already loaded,
+/// don't redo the I/O every refresh tick" guard, not a stale-cache
+/// risk.
 pub(crate) fn ensure_selected_context(app: &mut App) {
     if !matches(app) {
         return;
@@ -155,52 +164,106 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         return;
     };
 
-    let filepath = match app.merged_rows.get(idx) {
-        Some(r) if r.mode == "file" => r.directory.clone(),
-        _ => return, // directory rows or other modes
+    let (kind, target_path) = match app.merged_rows.get(idx) {
+        Some(r) if r.mode == "file" => ("file", r.directory.clone()),
+        Some(r) if r.mode == "directory" => ("directory", r.directory.clone()),
+        _ => return,
     };
-
-    if filepath.is_empty() {
+    if target_path.is_empty() {
         return;
     }
-    let path = std::path::PathBuf::from(&filepath);
-    if !path.is_file() {
-        return;
+    if app
+        .merged_rows
+        .get(idx)
+        .is_some_and(|r| !r.output.is_empty())
+    {
+        return; // already loaded for this row
     }
 
-    // Read from the shared cache so files that appear in
-    // tags / codegraph results aren't re-read.
-    let content = {
-        let cache: &mut std::collections::HashMap<std::path::PathBuf, String> =
-            &mut app.tags_source_cache;
-        if !cache.contains_key(&path) {
-            match std::fs::read_to_string(&path) {
-                Ok(s) => {
-                    cache.insert(path.clone(), s);
-                }
-                Err(_) => return,
-            }
+    let output = if kind == "directory" {
+        let path = std::path::PathBuf::from(&target_path);
+        if !path.is_dir() {
+            return;
         }
-        cache.get(&path).cloned().unwrap_or_default()
+        match list_directory_preview(&path) {
+            Some(listing) => listing,
+            None => return,
+        }
+    } else {
+        let path = std::path::PathBuf::from(&target_path);
+        if !path.is_file() {
+            return;
+        }
+        // Read from the shared cache so files that appear in
+        // tags / codegraph results aren't re-read.
+        let content = {
+            let cache: &mut std::collections::HashMap<std::path::PathBuf, String> =
+                &mut app.tags_source_cache;
+            if !cache.contains_key(&path) {
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => {
+                        cache.insert(path.clone(), s);
+                    }
+                    Err(_) => return,
+                }
+            }
+            cache.get(&path).cloned().unwrap_or_default()
+        };
+        if content.is_empty() {
+            return;
+        }
+        let preview: String = content
+            .lines()
+            .take(crate::tui::SOURCE_CONTEXT_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        crate::highlight::highlight_with_bat_auto(&preview, &target_path).unwrap_or(preview)
     };
-
-    if content.is_empty() {
-        return;
-    }
-
-    let preview: String = content
-        .lines()
-        .take(crate::tui::SOURCE_CONTEXT_LINES)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let highlighted =
-        crate::highlight::highlight_with_bat_auto(&preview, &filepath).unwrap_or(preview);
 
     if let Some(row) = app.merged_rows.get_mut(idx)
-        && row.output != highlighted {
-            row.output = highlighted;
+        && row.output != output {
+            row.output = output;
         }
+}
+
+/// List the immediate (non-recursive) children of `path`, one name
+/// per line, directories suffixed with `/` (the familiar `ls -F`
+/// convention) so the two kinds are visually distinguishable at a
+/// glance. Hidden entries (leading `.`) are skipped, matching
+/// `walk_dir`'s own hidden-entry convention. Sorted case-
+/// insensitively, directories first (mirroring how a candidate `cd`
+/// target's own subdirectories are usually the more relevant thing
+/// to see at a glance), capped at `SOURCE_CONTEXT_LINES` entries so
+/// a huge directory doesn't blow out the preview pane. Returns
+/// `None` on a read error (permission denied, race with a delete,
+/// etc.) or an empty directory — `ensure_selected_context` leaves
+/// `row.output` untouched in that case, same fail-soft convention
+/// the file-content path already uses for an unreadable/empty file.
+fn list_directory_preview(path: &std::path::Path) -> Option<String> {
+    let entries = std::fs::read_dir(path).ok()?;
+    let mut names: Vec<(bool, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        if file_name.as_encoded_bytes().first() == Some(&b'.') {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        names.push((is_dir, file_name.to_string_lossy().into_owned()));
+    }
+    if names.is_empty() {
+        return None;
+    }
+    names.sort_by(|a, b| {
+        b.0.cmp(&a.0) // directories (true) before files (false)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+    let listing = names
+        .into_iter()
+        .take(crate::tui::SOURCE_CONTEXT_LINES)
+        .map(|(is_dir, name)| if is_dir { format!("{name}/") } else { name })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(listing)
 }
 
 impl App {

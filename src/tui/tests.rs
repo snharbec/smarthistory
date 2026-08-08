@@ -28659,3 +28659,123 @@ fn file_picker_directories_spawn_files_walk_finds_only_matching_directories() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Selecting a directory row in the `cd`-triggered picker populates
+/// `row.output` with a listing of its immediate children —
+/// directories suffixed with `/`, sorted directories-first then
+/// case-insensitively — instead of the empty preview a directory row
+/// got before this feature.
+#[test]
+fn file_picker_directories_ensure_selected_context_lists_directory_contents() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_dir_picker_preview_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("zeta_subdir")).unwrap();
+    std::fs::create_dir_all(dir.join("alpha_subdir")).unwrap();
+    std::fs::write(dir.join("readme.txt"), "x").unwrap();
+    std::fs::write(dir.join(".hidden"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![HistoryRow {
+        id: -1,
+        command: "project".to_string(),
+        directory: dir.to_string_lossy().into_owned(),
+        mode: "directory".to_string(),
+        ..Default::default()
+    }];
+    app.list_state.select(Some(0));
+    app.query = "/p".to_string();
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: dir.clone(),
+        kind: FilePickerKind::Directories,
+    });
+
+    crate::tui::mode::files::ensure_selected_context(&mut app);
+
+    let output = &app.merged_rows[0].output;
+    assert_eq!(
+        output,
+        "alpha_subdir/\nzeta_subdir/\nreadme.txt",
+        "expected directories first (alphabetical), then files, hidden entries excluded"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The "already loaded" guard is read-once-per-row: a second call
+/// after the directory's contents changed on disk must NOT pick up
+/// the change, matching the same convention `tags::ensure_selected_context`
+/// already uses (a fresh row from a new walk always starts with an
+/// empty `output`, so this only ever short-circuits redundant I/O
+/// within the SAME row's lifetime, not across a genuine reselection).
+#[test]
+fn file_picker_directories_ensure_selected_context_is_read_once_per_row() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_dir_picker_readonce_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![HistoryRow {
+        id: -1,
+        command: "project".to_string(),
+        directory: dir.to_string_lossy().into_owned(),
+        mode: "directory".to_string(),
+        ..Default::default()
+    }];
+    app.list_state.select(Some(0));
+    app.query = "/p".to_string();
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: dir.clone(),
+        kind: FilePickerKind::Directories,
+    });
+
+    crate::tui::mode::files::ensure_selected_context(&mut app);
+    assert_eq!(app.merged_rows[0].output, "a.txt");
+
+    std::fs::write(dir.join("b.txt"), "x").unwrap();
+    crate::tui::mode::files::ensure_selected_context(&mut app);
+    assert_eq!(
+        app.merged_rows[0].output, "a.txt",
+        "second call must be a no-op for the same row, even though the directory changed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty directory leaves `row.output` untouched (fail-soft, same
+/// convention as an unreadable/empty file).
+#[test]
+fn file_picker_directories_ensure_selected_context_empty_dir_leaves_output_untouched() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_dir_picker_empty_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![HistoryRow {
+        id: -1,
+        command: "project".to_string(),
+        directory: dir.to_string_lossy().into_owned(),
+        mode: "directory".to_string(),
+        ..Default::default()
+    }];
+    app.list_state.select(Some(0));
+    app.query = "/p".to_string();
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: dir.clone(),
+        kind: FilePickerKind::Directories,
+    });
+
+    crate::tui::mode::files::ensure_selected_context(&mut app);
+    assert!(app.merged_rows[0].output.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

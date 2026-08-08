@@ -30,10 +30,12 @@ All notable changes to this project will be documented in this file.
   (`smarthistory tui --glob-complete-dir <PATTERN>`) — only real directories
   on disk are shown, and there's no multi-select (`Ctrl-A` is a no-op, Enter
   always returns just the single highlighted directory) since cd-ing into
-  more than one directory doesn't mean anything. New `smarthistory tui
-  --glob-complete <PATTERN>`, `--glob-complete-dir <PATTERN>`, and `--root
-  <DIR>` CLI flags (the last also usable to override the base directory for
-  plain `/` mode's walk).
+  more than one directory doesn't mean anything. Selecting a directory row
+  shows its immediate contents (directories first, then files, hidden entries
+  excluded) in the output preview pane. New `smarthistory tui --glob-complete
+  <PATTERN>`, `--glob-complete-dir <PATTERN>`, and `--root <DIR>` CLI flags
+  (the last also usable to override the base directory for plain `/` mode's
+  walk).
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
   users), via the new `sysinfo` dependency. The typed body filters by
   substring against the process's name/cmdline, working directory, and
@@ -187,6 +189,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Preview-pane markdown renderer: an unclosed italic marker that was
+  actually a literal underscore (e.g. a directory or file name like
+  `alpha_sub`) was silently rewritten to an asterisk on render
+  (`alpha_sub` → `alpha*sub`) — the fallback-to-plain-text path for an
+  unclosed marker reconstructed the marker from a fixed per-*kind*
+  string (`MarkerKind::Italic` always spelled `"*"`) instead of the
+  actual character that opened it, since `*` and `_` are both valid
+  italic openers but only one was ever remembered. Found via the new
+  glob-completion directory picker's content preview, but affects any
+  preview text containing a bare underscore in any mode.
 - Line-editor live dropdown: `Enter` now commits AND runs a highlighted
   candidate in one press, same as before the Tab/Enter key-model rework —
   navigate with `Up`/`Down`, then `Enter` alone accepts it. Previously
