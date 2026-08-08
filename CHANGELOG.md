@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Live dropdown completion: each candidate row now shows a `✓`/`✗`
+  exit-status marker (green/red, same palette as `dropdown.highlight`'s
+  command-validity check) right after the selection marker, so a
+  previously-failed command can be spotted without opening the TUI or
+  re-running it. Backed by `smarthistory search`'s existing `exit_code`
+  field (no CLI/backend changes needed) — the row-parsing regex and
+  `marker_len` layout constant both grow to make room for it; a row whose
+  exit code couldn't be parsed draws a blank marker instead of guessing.
 - New curated theme: `luna` (from [luna.nvim](https://github.com/WTFox/luna.nvim)) —
   a low-saturation, near-black dark theme with a blue accent and warm orange
   secondary. Now 74 built-in themes ship in total (15 upstream + 59 curated).
