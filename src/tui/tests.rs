@@ -28221,3 +28221,301 @@ fn note_create_ctrl_d_n_7_shortcuts_act_like_typed_prefix() {
     let _ = fs::remove_file(&db_path);
 }
 
+// --- Glob-triggered Tab file completion (`--glob-complete`, `file_picker_lock`) ----
+
+/// Build a minimal file-mode `HistoryRow` for the picker tests
+/// below — `mode == "file"`, an absolute `directory` (what
+/// `file_picker_confirm_selection` reads and shell-quotes).
+fn file_picker_row(id: i64, directory: &str) -> HistoryRow {
+    HistoryRow {
+        id,
+        command: directory.rsplit('/').next().unwrap_or(directory).to_string(),
+        directory: directory.to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "file".to_string(),
+        ..Default::default()
+    }
+}
+
+/// Build a locked-picker `App` (`base_root` = `/tmp`) with the given
+/// rows already installed as `merged_rows` — shared setup for the
+/// `file_picker_confirm_selection` tests below, all of which need a
+/// real lock installed since the method's relative-path math reads
+/// `file_picker_lock.base_root`.
+fn file_picker_locked_app_with_rows(rows: Vec<HistoryRow>) -> App {
+    let mut app = directories_test_app(&[]);
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: std::path::PathBuf::from("/tmp"),
+    });
+    app.merged_rows = rows;
+    app
+}
+
+/// `Ctrl-A` marks every currently-visible row (locked picker only —
+/// no general "select all" action exists outside it).
+#[test]
+fn file_picker_select_all_marks_every_visible_row() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![
+        file_picker_row(-1, "/tmp/a.txt"),
+        file_picker_row(-2, "/tmp/b.txt"),
+        file_picker_row(-3, "/tmp/c.txt"),
+    ];
+    app.file_picker_select_all();
+    assert_eq!(app.marked_ids.len(), 3);
+}
+
+/// With nothing marked, confirming the picker selection returns just
+/// the currently selected row's path, RELATIVE to `base_root` — the
+/// way a real shell glob expansion reads (`jira-notes.md`, not
+/// `/tmp/jira-notes.md`), per the explicit user request that
+/// prompted this behavior.
+#[test]
+fn file_picker_confirm_selection_single_row_no_marks() {
+    let mut app = file_picker_locked_app_with_rows(vec![file_picker_row(-1, "/tmp/apple.txt")]);
+    app.list_state.select(Some(0));
+    app.file_picker_confirm_selection();
+    assert_eq!(app.selection.as_deref(), Some("apple.txt"));
+    assert_eq!(app.pick_mode, Some(PickMode::EditEnd));
+}
+
+/// A file nested under `base_root` (e.g. a `foo/*`-scoped search
+/// that recursed into a subdirectory) returns its path relative to
+/// `base_root`, INCLUDING the intermediate directory components —
+/// not just the bare basename, and not `row.command` (which is
+/// relative to the possibly-narrower glob-scoped walk root, not to
+/// `base_root`).
+#[test]
+fn file_picker_confirm_selection_nested_file_keeps_intermediate_dirs() {
+    let mut app = file_picker_locked_app_with_rows(vec![file_picker_row(
+        -1,
+        "/tmp/foo/bar/apple.txt",
+    )]);
+    app.list_state.select(Some(0));
+    app.file_picker_confirm_selection();
+    assert_eq!(app.selection.as_deref(), Some("foo/bar/apple.txt"));
+}
+
+/// With marks present, confirming returns every marked row's
+/// `base_root`-relative path — space-joined, in `merged_rows` order —
+/// regardless of which row is currently selected (mirrors
+/// `smart_action_targets`'s "marks win over selection" contract).
+#[test]
+fn file_picker_confirm_selection_multi_mark_space_joined() {
+    let mut app = file_picker_locked_app_with_rows(vec![
+        file_picker_row(-1, "/tmp/a.txt"),
+        file_picker_row(-2, "/tmp/b.txt"),
+        file_picker_row(-3, "/tmp/c.txt"),
+    ]);
+    app.marked_ids.insert(mark_key(&app.merged_rows[0]));
+    app.marked_ids.insert(mark_key(&app.merged_rows[2]));
+    app.list_state.select(Some(1)); // selected row (b.txt) is NOT marked
+    app.file_picker_confirm_selection();
+    assert_eq!(app.selection.as_deref(), Some("a.txt c.txt"));
+    assert_eq!(app.pick_mode, Some(PickMode::EditEnd));
+}
+
+/// A path containing a space is shell-quoted in the joined result —
+/// otherwise the spliced-back command line would be broken into
+/// extra words.
+#[test]
+fn file_picker_confirm_selection_quotes_paths_with_spaces() {
+    let mut app =
+        file_picker_locked_app_with_rows(vec![file_picker_row(-1, "/tmp/my file.txt")]);
+    app.list_state.select(Some(0));
+    app.file_picker_confirm_selection();
+    let sel = app.selection.as_deref().unwrap_or("");
+    assert!(
+        sel.contains("my file.txt") && sel != "my file.txt",
+        "expected the space-containing relative path to be shell-quoted, got: {sel:?}"
+    );
+}
+
+/// A row whose absolute path does NOT actually start with
+/// `base_root` (shouldn't happen in practice, but defensively
+/// covered) falls back to the absolute path rather than panicking
+/// or silently producing a nonsensical relative path.
+#[test]
+fn file_picker_confirm_selection_falls_back_to_absolute_when_not_under_base_root() {
+    let mut app =
+        file_picker_locked_app_with_rows(vec![file_picker_row(-1, "/elsewhere/apple.txt")]);
+    app.list_state.select(Some(0));
+    app.file_picker_confirm_selection();
+    assert_eq!(app.selection.as_deref(), Some("/elsewhere/apple.txt"));
+}
+
+/// Confirming with no row selected and nothing marked is a silent
+/// no-op — the dialog stays open, same convention `smart_open_for_file`
+/// already uses for its own empty-target case.
+#[test]
+fn file_picker_confirm_selection_empty_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![];
+    app.file_picker_confirm_selection();
+    assert!(app.selection.is_none());
+    assert!(app.pick_mode.is_none());
+}
+
+/// Build a locked-picker `App`: `file_picker_lock` set, a single
+/// file row, `OpenHelp` deliberately left at its real default
+/// binding (`Ctrl-A`) so the picker-only `Ctrl-A` intercept can be
+/// proven to win over it rather than merely being untested against
+/// a conflicting binding.
+fn file_picker_locked_test_app() -> App {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![file_picker_row(-1, "/tmp/apple.txt")];
+    app.list_state.select(Some(0));
+    app.query = "/a".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: std::path::PathBuf::from("/tmp"),
+    });
+    app
+}
+
+/// `Ctrl-A` inside a locked picker session marks every visible row,
+/// NOT the default `Action::OpenHelp` behavior — proven by asserting
+/// the help overlay never opens.
+#[test]
+fn file_picker_ctrl_a_selects_all_not_help() {
+    let mut app = file_picker_locked_test_app();
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert_eq!(app.marked_ids.len(), 1, "Ctrl-A should mark the one visible row");
+    assert!(!app.is_help_viewing(), "Ctrl-A must not open the help overlay while locked");
+}
+
+/// Enter inside a locked picker session confirms the selection
+/// (stages the quoted path, `PickMode::EditEnd`) instead of staging
+/// an `$EDITOR <path>` command the way unlocked `/` mode's Enter
+/// does.
+#[test]
+fn file_picker_enter_confirms_selection_not_editor_command() {
+    let mut app = file_picker_locked_test_app();
+    let action = crate::tui::bindings::action_for_key(
+        &app.bindings,
+        &crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+    );
+    assert_eq!(action, Some(Action::Run), "sanity: Enter must resolve to Action::Run for this test to be meaningful");
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+    );
+    assert_eq!(app.selection.as_deref(), Some("apple.txt"));
+    assert_eq!(app.pick_mode, Some(PickMode::EditEnd));
+}
+
+/// `PickPrefix` (F1) and `SmartOpen` (`Ctrl-]`) are swallowed inside
+/// a locked picker session — the picker may never leave files mode.
+#[test]
+fn file_picker_pick_prefix_and_smart_open_are_swallowed() {
+    let mut app = file_picker_locked_test_app();
+    handle_key(&mut app, crossterm::event::KeyEvent::new(crossterm::event::KeyCode::F(1), crossterm::event::KeyModifiers::NONE));
+    assert!(app.prefix_picker.is_none(), "F1 (PickPrefix) must be swallowed while locked");
+}
+
+/// Backspacing (or any other query-mutating action) can never delete
+/// the locked prefix character — the query clamps back to the bare
+/// prefix instead of falling through toward History mode.
+#[test]
+fn file_picker_backspace_cannot_delete_locked_prefix() {
+    let mut app = file_picker_locked_test_app();
+    let prefix = app.query_prefixes.files;
+    assert_eq!(app.query, format!("{prefix}a"));
+    // Backspace twice: once removes the typed 'a', the second would
+    // remove the prefix character itself on an unlocked session.
+    for _ in 0..2 {
+        handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Backspace, crossterm::event::KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(
+        app.query,
+        prefix.to_string(),
+        "query must clamp back to the bare locked prefix, never go fully empty"
+    );
+}
+
+/// Regression test for a real bug caught in manual testing:
+/// `files_maybe_autocall`'s debounce timer (`debounce::debounce_elapsed`)
+/// only returns `true` once `debounce_started` has been armed by
+/// `files_touch()` — which, for ordinary interactive `/` mode, fires
+/// reactively from the self-insert keystroke hook the moment the
+/// user types the `/` prefix themselves. A locked `--glob-complete`
+/// session's query arrives PRE-FILLED via the CLI with zero
+/// keystrokes, so without an explicit touch at setup time the walk
+/// would never spawn — the picker would sit at "0 matches" forever,
+/// only "unstuck" by the user's first incidental keypress (which is
+/// exactly what was observed: no results until something was typed).
+/// `run_tui_to_stdout` now calls `app.files_touch()` immediately
+/// after installing `file_picker_lock`; this test asserts that
+/// exact fix's effect directly, without needing a real keystroke.
+#[test]
+fn file_picker_lock_setup_arms_files_debounce_without_a_keystroke() {
+    let mut app = file_picker_locked_test_app();
+    // Simulate a fresh locked session that has NOT yet had the fix
+    // applied: `files_touch()` never called, so the debounce must
+    // never elapse — this is the exact bug's before-state.
+    assert!(
+        !crate::debounce::debounce_elapsed(&mut app.files_state, std::time::Duration::ZERO),
+        "sanity: an un-touched debounce must never report elapsed, even with a zero threshold"
+    );
+    // Apply the fix (mirrors the line added to `run_tui_to_stdout`
+    // right after `file_picker_lock` is installed).
+    app.files_touch();
+    assert!(
+        crate::debounce::debounce_elapsed(&mut app.files_state, std::time::Duration::ZERO),
+        "files_touch() must arm the debounce immediately so the walk can spawn on the very \
+         first idle tick, with no keystroke required"
+    );
+}
+
+/// End-to-end (real background thread) test of the picker's
+/// "glob word, then extra plain-text words narrow further" behavior
+/// — `*.md jira` inside the picker must match only markdown files
+/// whose relative path contains "jira", exactly the scenario
+/// reported after the debounce/space-prefix bugs were fixed.
+#[test]
+fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_file_picker_extra_words_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("jira-notes.md"), "x").unwrap();
+    std::fs::write(dir.join("readme.md"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.file_picker_lock = Some(FilePickerLock {
+        prefix: app.query_prefixes.files,
+        base_root: dir.clone(),
+    });
+    app.spawn_files_walk("*.md jira".to_string());
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    let rows = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("walk did not complete within 5s (hang or panic)");
+    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["jira-notes.md"],
+        "expected only jira-notes.md (matches *.md AND contains \"jira\"), got {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

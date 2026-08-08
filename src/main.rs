@@ -278,8 +278,8 @@ enum Commands {
         /// (e.g. `--prefix '*'` for panes, `--prefix '#'`
         /// for directories, `--prefix '@'` for notes,
         /// `--prefix '!'` for todos, `--prefix '-'` for
-        /// JIRA, `--prefix '~'` for files, `--prefix '='`
-        /// for LLM command generation, `--prefix '%'`
+        /// JIRA, `--prefix '/'` for files, `--prefix '='`
+        /// for LLM command generation, `--prefix '?'`
         /// for the question mode, `--prefix '+'`
         /// for output search, `--prefix '<'` for
         /// paperless document search). The prefix character is
@@ -302,6 +302,32 @@ enum Commands {
         /// (except JIRA).
         #[arg(long)]
         prefix: Option<String>,
+        /// Launch the TUI locked into the file-completion picker,
+        /// pre-filtered to `PATTERN` — a raw word straight from the
+        /// shell buffer (e.g. `foo/a*`, `**/*.rs`), as produced by
+        /// the new `globcomplete.enabled` zsh Tab widget. `PATTERN`
+        /// is parsed into a walk root + basename glob by
+        /// `crate::files::split_glob_root` (re-parsed on every
+        /// keystroke as the user refines the filter, not just once
+        /// at startup). Implies the files (`/`) prefix and locks
+        /// mode-switching for the whole session: the query's
+        /// leading prefix character can never change, `F1`
+        /// (PickPrefix) and `Ctrl-]` (SmartOpen) are disabled, and
+        /// Enter/Left/Right all return the marked (or selected)
+        /// file path(s) — space-joined, shell-quoted — instead of
+        /// staging an `$EDITOR` command. `Ctrl-A` marks every
+        /// visible row. Mutually exclusive with `--prefix` (this
+        /// flag already implies the files prefix).
+        #[arg(long, value_name = "PATTERN", conflicts_with = "prefix")]
+        glob_complete: Option<String>,
+        /// Override the base directory used to resolve relative
+        /// walk roots — both the ordinary `/` mode's cwd-rooted
+        /// walk and `--glob-complete`'s root-scoping. Defaults to
+        /// the process's actual current directory. Not files-
+        /// specific infrastructure — reusable by a future process/
+        /// directory completion phase.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
         /// Execute the selected command directly (via `sh -c`)
         /// instead of printing it to stdout for the parent
         /// shell to eval. Use this when launching the TUI
@@ -1138,6 +1164,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
+    let _ = writeln!(
+        f,
+        "  globcomplete.enabled = {}",
+        if cfg.globcomplete_enabled { "on" } else { "off" }
+    );
     let _ = writeln!(f, "  zsh.mode = {}", cfg.zsh_default_mode);
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
@@ -1507,6 +1538,17 @@ pub struct Config {
     /// `dropdown.enabled` above. Set via
     /// `commentexpand.enabled=on|off`.
     commentexpand_enabled: bool,
+    /// Whether the glob-triggered Tab file-completion widget
+    /// (`init.zsh`'s `_smarthistory_globcomplete_accept`) is
+    /// enabled. Default `false`, same opt-in reasoning as
+    /// `dropdown.enabled`/`commentexpand.enabled` above — it hooks
+    /// Tab. When on, pressing Tab on a word containing shell-glob
+    /// syntax (`* ? [ ]`) launches `smarthistory tui
+    /// --glob-complete <word>` (a locked file-completion picker)
+    /// instead of running normal zsh completion; anything else
+    /// still falls through unchanged. Set via
+    /// `globcomplete.enabled=on|off`.
+    globcomplete_enabled: bool,
     /// The zsh widgets' search scope at shell-init time — one of
     /// `sess` (current `$SMART_HISTORY_SESSION` only), `dir`
     /// (current working directory only), or `global` (no scope
@@ -1839,6 +1881,7 @@ impl Config {
             segments_min_words: 5,
             dropdown_highlight: false,
             commentexpand_enabled: false,
+            globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
             notes_database: None,
             notes_dir: None,
@@ -2090,6 +2133,9 @@ impl Config {
                 },
                 "commentexpand.enabled" => {
                     self.commentexpand_enabled = crate::util::parse_bool(value, false);
+                }
+                "globcomplete.enabled" => {
+                    self.globcomplete_enabled = crate::util::parse_bool(value, false);
                 }
                 "dropdown.highlight" => {
                     self.dropdown_highlight = crate::util::parse_bool(value, false);
@@ -4672,6 +4718,8 @@ fn run_tui_command(
     conn: Connection,
     mode: Option<String>,
     prefix: Option<String>,
+    glob_complete: Option<String>,
+    root: Option<PathBuf>,
     exec: bool,
     query: Option<String>,
     pane: Option<String>,
@@ -4766,10 +4814,30 @@ fn run_tui_command(
     let env_query = std::env::var("SMARTHISTORY_TUI_QUERY")
         .ok()
         .filter(|s| !s.is_empty());
-    let cli_query_override = prefix.is_some() || query.is_some() || env_query.is_some();
+    let cli_query_override =
+        glob_complete.is_some() || prefix.is_some() || query.is_some() || env_query.is_some();
+    // Loaded early (moved ahead of its original position, just
+    // below) so `--glob-complete` can read the configured files
+    // prefix character before the `initial_query` match runs.
+    let tui_cfg = Config::load();
     let (initial_query, override_session_query) =
-        match (prefix.as_deref(), query.as_deref(), env_query.as_deref()) {
-            (Some(p), _, _) => {
+        match (
+            glob_complete.as_deref(),
+            prefix.as_deref(),
+            query.as_deref(),
+            env_query.as_deref(),
+        ) {
+            (Some(pattern), _, _, _) => {
+                // `--glob-complete <PATTERN>` implies the files
+                // prefix — same "one-off, starts in a specific
+                // mode, don't persist" treatment `--prefix` gets,
+                // just pre-filled with the raw glob word instead of
+                // a bare prefix char. `clap`'s `conflicts_with`
+                // already rules out `prefix` being `Some` here.
+                let files_prefix = tui_cfg.query_prefixes().files;
+                (format!("{}{}", files_prefix, pattern), true)
+            }
+            (None, Some(p), _, _) => {
                 // Take the first char of the prefix string
                 // (it's always a single char by construction;
                 // we accept multi-char input defensively for
@@ -4777,15 +4845,14 @@ fn run_tui_command(
                 let first_char = p.chars().next().unwrap_or_default().to_string();
                 (first_char, true)
             }
-            (None, Some(q), _) => (q.to_string(), false),
-            (None, None, Some(q)) => (q.to_string(), false),
-            (None, None, None) => (String::new(), false),
+            (None, None, Some(q), _) => (q.to_string(), false),
+            (None, None, None, Some(q)) => (q.to_string(), false),
+            (None, None, None, None) => (String::new(), false),
         };
     // Build the LLM client up front so the TUI entry
     // point doesn't need to know about config parsing.
     // The TUI itself only sees `Option<Box<dyn LlmClient>>`
     // and surfaces a "not configured" status when None.
-    let tui_cfg = Config::load();
     let llm_client: Option<Box<dyn llm::LlmClient>> = tui_cfg
         .llm
         .as_ref()
@@ -4856,6 +4923,8 @@ fn run_tui_command(
         cli_overrides,
         create_note,
         create_note_prefill,
+        glob_complete.is_some(),
+        root,
     )? {
         Some((command, pick_mode)) => {
             if exec {
@@ -5391,6 +5460,8 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 None,
                 None,
+                None,
+                None,
                 true,
                 None,
                 None,
@@ -5572,6 +5643,9 @@ fn main() -> anyhow::Result<()> {
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })
                     }
+                    "globcomplete.enabled" => {
+                        println!("{}", if cfg.globcomplete_enabled { "on" } else { "off" })
+                    }
                     "zsh.mode" => println!("{}", cfg.zsh_default_mode),
                     // Resolved palette as a flat `key=value` block,
                     // one entry per `tuicolor.<field>` slot. The
@@ -5616,6 +5690,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Tui {
             mode,
             prefix,
+            glob_complete,
+            root,
             exec,
             query,
             pane,
@@ -5627,6 +5703,8 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 mode,
                 prefix,
+                glob_complete,
+                root,
                 exec,
                 query,
                 pane,

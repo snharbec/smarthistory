@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `globcomplete.enabled` zsh feature (off by default): replaces fzf-tab-style
+  file completion, phase 1 of a planned fzf replacement (process/directory
+  completion are future work). Pressing `Tab` on a word containing shell-glob
+  syntax (`* ? [`) — e.g. `vi a*<TAB>` or `vi foo/a*<TAB>` — launches
+  `smarthistory tui --glob-complete <word>`, the TUI locked into a
+  file-completion picker instead of running normal zsh completion; anything
+  else still falls through unchanged. The word is prefilled/expanded (not
+  replaced) as the filter, scoped to the directory before the last `/` when
+  one is given, and matched recursively against basenames (fzf-style fuzzy
+  find, not literal single-level glob semantics) via a new glob-to-regex
+  translator (`crate::files::glob_to_regex`). Typing a space then more text
+  inside the picker narrows further by plain substring against each file's
+  path (`*.md jira` matches every markdown file whose path contains "jira",
+  not just files literally named `jira*.md`). Inside the picker, mode-switching
+  is locked (the query can never leave files mode, `F1`/`Ctrl-]` are
+  disabled); `Ctrl-A` marks every visible row, and `Enter` returns every
+  marked row's path — space-joined, shell-quoted — or just the current row if
+  nothing is marked, spliced into the command line in place of the typed word
+  (never runs the line). New `smarthistory tui --glob-complete <PATTERN>` and
+  `--root <DIR>` CLI flags (the latter also usable to override the base
+  directory for plain `/` mode's walk).
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
   users), via the new `sysinfo` dependency. The typed body filters by
   substring against the process's name/cmdline, working directory, and

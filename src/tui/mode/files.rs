@@ -72,7 +72,7 @@ pub(crate) fn check(_app: &App) -> CheckReport {
     crate::files::walk_dir(
         &cwd,
         &cwd,
-        &[], // no filter — walk everything
+        &crate::files::FilesFilter::Substring(&[]), // no filter — walk everything
         &ignore,
         &mut next_id,
         &mut rows,
@@ -259,7 +259,58 @@ impl App {
     /// result arrives.
     pub(crate) fn spawn_files_walk(&mut self, pattern: String) {
         let ignore = crate::files::IgnoreSet::new(&self.files_ignores);
-        let request = crate::files::spawn_walk(pattern.clone(), ignore);
+        // A locked `--glob-complete` session (see `file_picker_lock`)
+        // re-resolves the scoped root + glob-vs-substring filter on
+        // EVERY walk (not just once at startup), since the query
+        // body — and therefore the root-scoping prefix before the
+        // last `/` — can keep changing as the user types. An
+        // unlocked session (the default, `file_picker_lock` is
+        // `None`) is byte-for-byte today's behavior: `files_root`
+        // (defaulting to `current_dir()`) and the substring matcher.
+        let (root, filter_spec) = match &self.file_picker_lock {
+            Some(lock) => {
+                // The typed body is split on whitespace: the FIRST
+                // word is always the glob (root-scoped via
+                // `split_glob_root`, same as before); every word
+                // after it narrows further as a plain lowercase
+                // substring against the display path — e.g. `*.md
+                // jira` matches every markdown file whose relative
+                // path contains "jira". An empty (or missing) first
+                // word matches every basename (`*`), so clearing the
+                // filter back to just the bare prefix shows
+                // everything, same as unlocked `/` mode's empty-body
+                // default.
+                let mut words = pattern.split_whitespace();
+                let first_word = words.next().unwrap_or("");
+                let extra_tokens: Vec<String> =
+                    words.map(|w| w.to_lowercase()).collect();
+                let (root_suffix, glob_pattern) = crate::files::split_glob_root(first_word);
+                let glob_pattern = if glob_pattern.is_empty() {
+                    "*".to_string()
+                } else {
+                    glob_pattern
+                };
+                let root = if root_suffix.is_empty() {
+                    lock.base_root.clone()
+                } else {
+                    lock.base_root.join(&root_suffix)
+                };
+                match crate::files::glob_to_regex(&glob_pattern) {
+                    Ok(basename) => (
+                        root,
+                        crate::files::FilesFilterSpec::Glob { basename, extra_tokens },
+                    ),
+                    Err(e) => {
+                        self.set_status_message(format!(
+                            "invalid glob pattern {glob_pattern:?}: {e}"
+                        ));
+                        return;
+                    }
+                }
+            }
+            None => (self.files_root.clone(), crate::files::FilesFilterSpec::Substring),
+        };
+        let request = crate::files::spawn_walk(pattern.clone(), ignore, root, filter_spec);
         self.files_state.in_flight = true;
         self.files_state.request = Some(request);
         self.set_status_message("Searching files…".to_string());
