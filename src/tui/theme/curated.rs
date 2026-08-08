@@ -109,6 +109,7 @@ const CURATED_FILES: &[(&str, &str)] = &[
     ("laserwave", include_str!("curated/laserwave.toml")),
     ("leuven", include_str!("curated/leuven.toml")),
     ("light-plus", include_str!("curated/light-plus.toml")),
+    ("luna", include_str!("curated/luna.toml")),
     ("material-dark", include_str!("curated/material-dark.toml")),
     ("material-light", include_str!("curated/material-light.toml")),
     ("material-theme", include_str!("curated/material-theme.toml")),
@@ -328,6 +329,30 @@ mod tests {
         assert_eq!(t.colors.accent, Color::Rgb(115, 191, 255));
         // #282c34 = (40, 44, 52)
         assert_eq!(t.colors.bg, Color::Rgb(40, 44, 52));
+    }
+
+    /// `luna` (github.com/WTFox/luna.nvim). Pins the mapping from
+    /// the upstream palette's named colors (`func`, `keyword`,
+    /// `comment`, `selection`, `ok`, ...) to smarthistory's 10
+    /// generic slots, since that mapping is a judgment call (luna
+    /// has no `accent`/`secondary`/`muted` concepts of its own) —
+    /// an accidental edit here would silently drift from the
+    /// upstream theme without any other test catching it.
+    #[test]
+    fn parses_luna_round_trip() {
+        let t = parse(include_str!("curated/luna.toml")).expect("luna.toml parses");
+        assert_eq!(t.name, "luna");
+        assert_eq!(t.display_name, "Luna");
+        // accent = `func` #75a1c7 = (117, 161, 199)
+        assert_eq!(t.colors.accent, Color::Rgb(117, 161, 199));
+        // secondary = `keyword` #e19067 = (225, 144, 103)
+        assert_eq!(t.colors.secondary, Color::Rgb(225, 144, 103));
+        // bg = `bg` #060606 = (6, 6, 6)
+        assert_eq!(t.colors.bg, Color::Rgb(6, 6, 6));
+        // muted = `comment` #7c7c7c = (124, 124, 124)
+        assert_eq!(t.colors.muted, Color::Rgb(124, 124, 124));
+        // success = `ok` #6fbe80 = (111, 190, 128)
+        assert_eq!(t.colors.success, Color::Rgb(111, 190, 128));
     }
 
     #[test]

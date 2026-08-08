@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New curated theme: `luna` (from [luna.nvim](https://github.com/WTFox/luna.nvim)) —
+  a low-saturation, near-black dark theme with a blue accent and warm orange
+  secondary. Now 74 built-in themes ship in total (15 upstream + 59 curated).
 - README: noted that `cargo install --path .` needs `--locked` to avoid a
   fresh dependency re-resolution that can pick a broken transitive version
   (e.g. `zune-jpeg`, via `image`/`arboard`) instead of the tested

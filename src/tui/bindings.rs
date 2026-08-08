@@ -30,7 +30,7 @@ pub enum Action {
     /// next frame. A status message confirms the
     /// new active scheme. This is a much faster
     /// way to switch themes than the theme picker
-    /// (which scrolls a list of 73 themes) and is
+    /// (which scrolls a list of 74 themes) and is
     /// the right key for users who only ever
     /// toggle between two specific themes (e.g.
     /// `theme.light=catppuccin-latte

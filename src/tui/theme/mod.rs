@@ -1,4 +1,4 @@
-// Theme subsystem: registry of 73 built-in palettes plus the
+// Theme subsystem: registry of 74 built-in palettes plus the
 // runtime palette plumbing (resolve_color, Palette, install_palette).
 
 use crate::Config;
@@ -161,6 +161,11 @@ pub enum BuiltinTheme {
     HorizonBright,
     Laserwave,
     Houston,
+    /// `luna.nvim` (github.com/WTFox/luna.nvim): a low-saturation
+    /// near-black dark theme built around four accent hues (blue,
+    /// orange, purple, green) plus a warm "signal" tone for
+    /// non-syntax UI cues.
+    Luna,
     Andromeeda,
     AuroraX,
     KanagawaDragon,
@@ -236,6 +241,7 @@ impl BuiltinTheme {
             BuiltinTheme::Laserwave,
             BuiltinTheme::Leuven,
             BuiltinTheme::LightPlus,
+            BuiltinTheme::Luna,
             BuiltinTheme::MaterialDark,
             BuiltinTheme::MaterialLight,
             BuiltinTheme::MaterialTheme,
@@ -354,7 +360,8 @@ impl BuiltinTheme {
             | BuiltinTheme::SnazzyLight
             | BuiltinTheme::Vesper
             | BuiltinTheme::MinDark
-            | BuiltinTheme::MinLight => None,
+            | BuiltinTheme::MinLight
+            | BuiltinTheme::Luna => None,
         }
     }
 
@@ -473,6 +480,7 @@ impl BuiltinTheme {
             BuiltinTheme::Vesper => "vesper",
             BuiltinTheme::MinDark => "min-dark",
             BuiltinTheme::MinLight => "min-light",
+            BuiltinTheme::Luna => "luna",
         }
     }
 
@@ -552,6 +560,7 @@ impl BuiltinTheme {
             BuiltinTheme::Vesper => "Vesper",
             BuiltinTheme::MinDark => "Min Dark",
             BuiltinTheme::MinLight => "Min Light",
+            BuiltinTheme::Luna => "Luna",
         }
     }
 }
@@ -970,6 +979,34 @@ mod tests {
         assert_eq!(p.accent, ratatui_themes::Color::Rgb(115, 191, 255));
         // #282c34 = (40, 44, 52)
         assert_eq!(p.bg, ratatui_themes::Color::Rgb(40, 44, 52));
+    }
+
+    /// `Luna` round-trips through `slug()`/`display_name()`/`as_upstream()`
+    /// (must be a curated theme, not upstream) and resolves to the
+    /// same palette `luna.toml` defines, end-to-end through the
+    /// `BuiltinTheme` dispatch (not just the TOML parser directly,
+    /// which `curated::tests::parses_luna_round_trip` already
+    /// covers).
+    #[test]
+    fn luna_slug_display_name_and_palette() {
+        assert_eq!(BuiltinTheme::Luna.slug(), "luna");
+        assert_eq!(BuiltinTheme::Luna.display_name(), "Luna");
+        assert_eq!(BuiltinTheme::Luna.as_upstream(), None);
+        let p = BuiltinTheme::Luna.palette();
+        // accent = `func` #75a1c7 = (117, 161, 199)
+        assert_eq!(p.accent, ratatui_themes::Color::Rgb(117, 161, 199));
+        // bg = `bg` #060606 = (6, 6, 6)
+        assert_eq!(p.bg, ratatui_themes::Color::Rgb(6, 6, 6));
+    }
+
+    /// `Luna` is listed among the curated themes (so it shows up in
+    /// the theme picker and `BuiltinTheme::all()`), not accidentally
+    /// left out of `curated()` while still having a working
+    /// `slug()`/`palette()`.
+    #[test]
+    fn luna_is_in_curated_list() {
+        assert!(BuiltinTheme::curated().contains(&BuiltinTheme::Luna));
+        assert!(BuiltinTheme::all().contains(&BuiltinTheme::Luna));
     }
 }
 
