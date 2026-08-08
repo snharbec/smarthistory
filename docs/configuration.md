@@ -49,6 +49,8 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`dropdown.highlight`](#dropdownhighlight)
 - [Comment expansion](#comment-expansion)
   - [`commentexpand.enabled`](#commentexpandenabled)
+- [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion)
+  - [`globcomplete.enabled`](#globcompleteenabled)
 - [Theme](#theme)
   - [`tuicolor.*`](#tuicolor)
 - [Key bindings](#key-bindings)
@@ -314,6 +316,48 @@ smarthistory add "docker compose up -d" --exit-code 0 --comment deploy
 **Which widget the space bar actually triggers.** Plain zsh binds the space key to `self-insert`, but many setups (including stock oh-my-zsh, via `lib/key-bindings.zsh`) rebind it to `magic-space` instead (zsh's built-in history-bang expansion, e.g. `!!` + space). `init.zsh` hooks both `self-insert`/`self-insert-unmeta` and `magic-space`, so the feature works either way — no setup needed beyond `commentexpand.enabled=on`.
 
 **Re-sourcing `init.zsh` is safe.** Every keystroke widget this feature (and `dropdown.enabled`) touches goes through one dispatcher per widget, backed by a growable, dedup'd hook list — re-running `eval "$(smarthistory init zsh)"` in an already-initialized shell (e.g. after editing the config) only appends to that list, it never re-wraps a widget. A brand-new shell is still the simplest way to pick up config or binary changes.
+
+---
+
+## Glob-triggered Tab file completion
+
+### `globcomplete.enabled`
+
+| | |
+| --- | --- |
+| **Type** | `on` \| `off` |
+| **Default** | `off` |
+| **Env override** | — |
+
+Replaces fzf-tab-style file completion (phase 1 of a planned fzf replacement — process and directory completion are not implemented yet). **zsh only** (unlike `commentexpand.enabled`, there's no bash port of this feature). When on, pressing `Tab` on a word containing shell-glob syntax (`*`, `?`, or `[`) launches the TUI locked into a file-completion picker instead of running normal zsh completion:
+
+```ini
+globcomplete.enabled=on
+```
+
+```sh
+$ vi a*<TAB>
+# launches the picker, pre-filtered to "a", searching the current directory
+$ vi foo/a*<TAB>
+# scopes the walk to the foo/ directory (still recursive underneath it —
+# this is a fuzzy-find replacement for fzf, not literal single-level
+# shell-glob expansion)
+```
+
+Selecting a row (`Enter`) splices its path — relative to the shell's cwd, the way a real shell glob expansion reads — back into the command line in place of the typed glob word — `vi a*` + selecting `apple.txt` becomes `vi apple.txt` (a nested match keeps its intermediate directories, e.g. `sub/apple.txt`, not just the bare filename). Any word NOT containing `* ? [` falls through to normal completion untouched, and the trigger only fires when the cursor is at the end of the line (a glob word earlier in the buffer is not detected).
+
+**Inside the picker**, mode-switching is locked — the query can never leave files mode, and `F1`/`Ctrl-]` are disabled. Two dedicated keys:
+
+- `Ctrl-A` marks every visible row.
+- `Enter` returns every marked row's path (space-joined, individually shell-quoted), or just the highlighted row if nothing is marked. It never runs the line — accepting a completion behaves like normal Tab-completion, not like the main history picker's Enter.
+
+`Esc`/`Ctrl-C` cancels without touching the command line at all.
+
+**Root scoping.** The word is split on its last `/`: everything before it becomes the walk root (`foo/bar/a*` scopes to `foo/bar/`, filtering by `a*`), everything after is matched against each file's basename — recursively, at any depth under that root. A leading segment that's itself glob-like (`**/*.rs`, `src/*/test.rs`) can't be used to scope the root, so the walk falls back to the base directory (still fully recursive — nothing is missed, just less pruned).
+
+**Narrowing further inside the picker.** Once the picker is open, typing a space then more text adds a plain substring filter on top of the glob — the FIRST word is always the glob (established when you pressed Tab), every word after it narrows the results further by substring against each file's path. `*.md jira` matches every markdown file whose path contains "jira", not just files literally named `jira*.md`.
+
+**`cd` opens a directory picker instead.** When the command being completed is `cd` (the first word of the line — compound commands like `ls && cd proj*` aren't detected, only a simple leading `cd`), pressing Tab on a glob word opens the SAME picker but showing only directories, never files — `cd proj*<TAB>` finds every real subdirectory matching `proj*` on disk, recursively, the same glob/root-scoping/narrowing rules as the file picker. The one difference: there's no multi-select — `Ctrl-A` is a no-op (cd-ing into more than one directory at once doesn't mean anything), and `Enter` always returns just the single highlighted directory. Selecting a directory row shows its immediate contents in the output preview pane (directories first, suffixed with `/`, then files, alphabetical within each group, hidden entries excluded) — a quick look inside before committing to `cd` there.
 
 ---
 
@@ -845,6 +889,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.highlight` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `commentexpand.enabled` | `on` \| `off` | `off` | [Comment expansion](#comment-expansion) |
+| `globcomplete.enabled` | `on` \| `off` | `off` | [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion) |
 | `tuicolor.bg` | color | theme's `bg` | [Theme](#theme) |
 | `tuicolor.fg` | color | theme's `fg` | [Theme](#theme) |
 | `tuicolor.accent` | color | theme's `accent` | [Theme](#theme) |

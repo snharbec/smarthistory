@@ -237,7 +237,7 @@ impl crate::debounce::Debounced for FilesState {
 pub fn walk_dir(
     root: &Path,
     dir: &Path,
-    tokens: &[String],
+    filter: &FilesFilter,
     ignore: &IgnoreSet,
     next_id: &mut i64,
     rows: &mut Vec<HistoryRow>,
@@ -275,11 +275,26 @@ pub fn walk_dir(
         // Compute the display path relative to root.
         let path = entry.path();
         let display = compute_display(root, &path, &name);
-        // Apply the text filter (AND by token).
-        let matches_filter = tokens.is_empty()
-            || tokens
-                .iter()
-                .all(|tok| display.to_lowercase().contains(tok));
+        // Apply the filter — either the default AND-of-substring-
+        // tokens match (against the display path relative to root),
+        // or a full-match glob-derived regex against the entry's
+        // basename only (`FilesFilter::Glob`, used exclusively by
+        // the `--glob-complete` picker).
+        let matches_filter = match filter {
+            FilesFilter::Substring(tokens) => {
+                tokens.is_empty()
+                    || tokens
+                        .iter()
+                        .all(|tok| display.to_lowercase().contains(tok))
+            }
+            FilesFilter::Glob { basename, extra_tokens } => {
+                basename.is_match(&name.to_string_lossy())
+                    && (extra_tokens.is_empty()
+                        || extra_tokens
+                            .iter()
+                            .all(|tok| display.to_lowercase().contains(tok)))
+            }
+        };
         if matches_filter {
             let id = *next_id;
             *next_id -= 1;
@@ -339,8 +354,123 @@ pub fn walk_dir(
         // are found even when the ancestor doesn't match
         // the filter pattern.
         if is_dir {
-            walk_dir(root, &path, tokens, ignore, next_id, rows);
+            walk_dir(root, &path, filter, ignore, next_id, rows);
         }
+    }
+}
+
+/// The two filtering strategies `walk_dir` supports. `Substring` is
+/// the original, default `/` mode behavior (AND of case-insensitive
+/// substring tokens against the display path relative to `root`);
+/// `Glob` is new, used exclusively by the `--glob-complete` picker
+/// (`App::spawn_files_walk`) — a full-match regex (built by
+/// `glob_to_regex`) against the entry's basename, AND (if any)
+/// case-insensitive substring tokens against the display path
+/// relative to `root`. The picker's typed body is split on
+/// whitespace: the FIRST word is always the glob (root-scoped via
+/// `split_glob_root`), every word after it narrows further as a
+/// plain substring — e.g. `*.md jira` matches every markdown file
+/// whose relative path contains "jira". The picker's walk root is
+/// already scoped to the literal-prefix directory from the first
+/// word, so `basename` only needs to check the entry itself;
+/// recursion handles "search everywhere under that root."
+pub enum FilesFilter<'a> {
+    Substring(&'a [String]),
+    Glob {
+        basename: &'a regex::Regex,
+        extra_tokens: &'a [String],
+    },
+}
+
+/// Translate a shell glob pattern (`*`, `?`, `[...]`, and `**`,
+/// which collapses to the same wildcard as `*` — see the module doc
+/// on why matching is basename-only + always-recursive rather than
+/// literal glob semantics) into an anchored, case-insensitive regex
+/// suitable for `FilesFilter::Glob`. Literal runs are regex-escaped
+/// so metacharacters like `.` or `+` in the pattern (e.g. `a.b*`)
+/// aren't misinterpreted. A leading `!` inside a bracket expression
+/// is rewritten to `^` (glob negation → regex negation); everything
+/// else inside `[...]` is passed through as-is (POSIX character
+/// classes like `[:alpha:]` aren't specially handled — out of scope
+/// for this feature's glob subset).
+pub fn glob_to_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    let mut out = String::with_capacity(pattern.len() + 8);
+    out.push_str("(?i)^");
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                // `**` collapses to the same single wildcard as `*`
+                // — this feature doesn't distinguish "any depth"
+                // from "one segment" since matching is basename-only
+                // and the walk is already unconditionally recursive.
+                out.push_str(".*");
+                while i < chars.len() && chars[i] == '*' {
+                    i += 1;
+                }
+                continue;
+            }
+            '?' => {
+                out.push('.');
+            }
+            '[' => {
+                out.push('[');
+                i += 1;
+                if i < chars.len() && chars[i] == '!' {
+                    out.push('^');
+                    i += 1;
+                }
+                while i < chars.len() && chars[i] != ']' {
+                    // Escape a literal backslash so it can't break
+                    // out of the character class in the generated
+                    // regex; everything else (including regex
+                    // metacharacters like `-` for ranges) passes
+                    // through, matching typical glob bracket syntax.
+                    if chars[i] == '\\' {
+                        out.push_str("\\\\");
+                    } else {
+                        out.push(chars[i]);
+                    }
+                    i += 1;
+                }
+                if i < chars.len() {
+                    out.push(']');
+                }
+            }
+            c => {
+                out.push_str(&regex::escape(&c.to_string()));
+            }
+        }
+        i += 1;
+    }
+    out.push('$');
+    regex::Regex::new(&out)
+}
+
+/// Split a raw glob word (straight from the shell buffer, e.g.
+/// `foo/bar/a*`) into `(root_suffix, basename_pattern)`. Leading
+/// path segments before the final `/` become `root_suffix` only if
+/// NONE of them contain glob metacharacters (`* ? [`) — so
+/// `foo/bar/a*` splits to `("foo/bar", "a*")`, but a globby leading
+/// segment like `**/*.rs` or `src/*/test.rs` falls back to an empty
+/// `root_suffix` (the walk stays at the base root) with just the
+/// FINAL segment (`*.rs`, `test.rs`) as the pattern — matching
+/// against a basename can never usefully include a literal `/`
+/// anyway. Still fully recursive under the base root, so nothing is
+/// missed, just less pruned than a literal-prefix split would be. A
+/// word with no `/` at all (e.g. `a*`) returns `("", word)`.
+pub fn split_glob_root(word: &str) -> (String, String) {
+    let Some(slash_idx) = word.rfind('/') else {
+        return (String::new(), word.to_string());
+    };
+    let leading = &word[..slash_idx];
+    let final_segment = word[slash_idx + 1..].to_string();
+    let is_globby = |s: &str| s.contains(['*', '?', '[']);
+    if leading.split('/').any(is_globby) {
+        (String::new(), final_segment)
+    } else {
+        (leading.to_string(), final_segment)
     }
 }
 
@@ -417,16 +547,38 @@ pub(crate) fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
     rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.command.cmp(&b.command)));
 }
 
-/// Spawn a background thread that walks the current directory
-/// tree, filters by `pattern`, and sends the result over
-/// `tx`. Used by `App::files_maybe_autocall`.
+/// Owned counterpart of `FilesFilter`, for crossing the
+/// `spawn_walk` thread boundary (`FilesFilter` borrows a token slice
+/// or `Regex` reference, neither of which can be moved into a
+/// spawned closure with a `'static` bound). `Substring` re-derives
+/// its tokens from `spawn_walk`'s `pattern` argument internally
+/// (unchanged from before this type existed); `Glob` carries a
+/// precompiled regex from `glob_to_regex` plus the extra substring
+/// tokens (everything after the first whitespace-separated word —
+/// see `FilesFilter::Glob`'s doc comment).
+pub enum FilesFilterSpec {
+    Substring,
+    Glob {
+        basename: regex::Regex,
+        extra_tokens: Vec<String>,
+    },
+}
+
+/// Spawn a background thread that walks `root`, filters by
+/// `pattern` (tokenized per `filter_spec`), and sends the result
+/// over `tx`. Used by `App::spawn_files_walk`.
 ///
 /// **The walk happens on a worker thread, not the main
 /// thread**, so the TUI never blocks on filesystem I/O.
 /// Cancellation is cooperative: the run loop flips
 /// `cancelled` to abort a stale walk; the worker checks
 /// the flag just before sending.
-pub fn spawn_walk(pattern: String, ignore: IgnoreSet) -> FilesRequest {
+pub fn spawn_walk(
+    pattern: String,
+    ignore: IgnoreSet,
+    root: PathBuf,
+    filter_spec: FilesFilterSpec,
+) -> FilesRequest {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_clone = cancelled.clone();
@@ -435,11 +587,16 @@ pub fn spawn_walk(pattern: String, ignore: IgnoreSet) -> FilesRequest {
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .collect();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     std::thread::spawn(move || {
         let mut rows: Vec<HistoryRow> = Vec::new();
         let mut next_id: i64 = -1;
-        walk_dir(&cwd, &cwd, &tokens, &ignore, &mut next_id, &mut rows);
+        let filter = match &filter_spec {
+            FilesFilterSpec::Substring => FilesFilter::Substring(&tokens),
+            FilesFilterSpec::Glob { basename, extra_tokens } => {
+                FilesFilter::Glob { basename, extra_tokens }
+            }
+        };
+        walk_dir(&root, &root, &filter, &ignore, &mut next_id, &mut rows);
         sort_rows_newest_modified_first(&mut rows);
         rows.truncate(1000);
         if !cancelled_clone.load(Ordering::Relaxed) {

@@ -227,6 +227,110 @@ typeset -g _smarthistory_commentexpand_enabled="0"
 if [[ "$(smarthistory config get commentexpand.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_commentexpand_enabled="1"
 fi
+# Glob-triggered Tab file completion: pressing Tab on a word
+# containing shell-glob syntax (`* ? [ ]`) — e.g. `vi a*<TAB>` or
+# `vi foo/*<TAB>` — launches `smarthistory tui --glob-complete
+# <word>`, a locked file-completion picker, instead of running
+# normal zsh completion. Off by default like `dropdown.enabled`/
+# `commentexpand.enabled` above (it hooks Tab). Enable with
+# `globcomplete.enabled=on` in ~/.config/smarthistory/config. See
+# `_smarthistory_globcomplete_accept` below for the widget itself.
+typeset -g _smarthistory_globcomplete_enabled="0"
+if [[ "$(smarthistory config get globcomplete.enabled 2>/dev/null)" == "on" ]]; then
+    _smarthistory_globcomplete_enabled="1"
+fi
+# True (and sets `REPLY` to the word) iff the cursor is at the
+# absolute end of `BUFFER` (`RBUFFER` empty — v1 scope: a glob word
+# earlier in the line is not detected, falls through to normal
+# completion untouched) AND the trailing whitespace-delimited token
+# of `LBUFFER` contains full shell-glob syntax (`*`, `?`, or a `[`
+# bracket-expression opener). Doesn't validate the glob is
+# well-formed — `crate::files::glob_to_regex` on the Rust side
+# handles a malformed pattern gracefully (zero results + a status
+# message, not a crash), so this check only needs to be a cheap,
+# permissive "does this look glob-ish" filter.
+_smarthistory_globcomplete_word() {
+    [[ -z "$RBUFFER" ]] || return 1
+    local word="${LBUFFER##* }"
+    [[ -n "$word" ]] || return 1
+    [[ "$word" == *'*'* || "$word" == *'?'* || "$word" == *'['* ]] || return 1
+    REPLY="$word"
+    return 0
+}
+# True iff the command being completed is `cd` — the first
+# whitespace-separated word of `LBUFFER`, trimmed of leading
+# whitespace. When true, `_smarthistory_globcomplete_accept` opens
+# the DIRECTORY picker (`--glob-complete-dir`) instead of the file
+# picker, since `cd`'s argument is always a directory, never a file.
+# Scope limitation: only recognizes a simple leading `cd`, not `cd`
+# appearing after a `;`/`&&`/`||`/`|` in a compound command line
+# (e.g. `ls && cd proj*` still opens the file picker) — the common
+# case is a bare `cd <TAB>`, and getting the compound case right
+# would need real shell-syntax parsing, not a cheap prefix check.
+_smarthistory_globcomplete_is_cd() {
+    [[ "${LBUFFER%% *}" == "cd" ]]
+}
+# Tab handler for the glob-completion picker. When enabled and the
+# trailing word looks like a glob, launches `smarthistory tui
+# --glob-complete <word>` (a locked file-completion picker — see
+# `docs/configuration.md`'s "Glob-triggered Tab file completion"
+# section) as a blocking subprocess, exactly like `_smarthistory_select`
+# (`^R`) does for the main history picker: the TUI renders to
+# stderr, only its final printed result hits stdout, so `$(...)`
+# captures cleanly with no `zle -I`/`stty` dance needed. A non-empty
+# result (already shell-quoted and space-joined by the Rust side)
+# replaces just the matched word — `LBUFFER` minus its trailing
+# `$word` — leaving everything before it (and all of `RBUFFER`,
+# always empty per the end-of-buffer-only check above) untouched. An
+# empty result (Esc/Ctrl-C inside the picker) leaves `BUFFER`
+# completely unmodified — we never write to it in that case. Any
+# other case (disabled, or the trailing word isn't glob-like) falls
+# straight through to normal completion, so this is always safe to
+# bind as the sole `^I` handler.
+_smarthistory_globcomplete_accept() {
+    local word result glob_flag
+    if [[ "$_smarthistory_globcomplete_enabled" = "1" ]] && _smarthistory_globcomplete_word; then
+        word="$REPLY"
+        # `cd`'s argument is always a directory, never a file — open
+        # the directory picker instead (`--glob-complete-dir`), which
+        # shows only directory entries and has no multi-select (you
+        # can only `cd` into one place). See
+        # `_smarthistory_globcomplete_is_cd`.
+        if _smarthistory_globcomplete_is_cd; then
+            glob_flag="--glob-complete-dir"
+        else
+            glob_flag="--glob-complete"
+        fi
+        # NO stderr redirect here — unlike the data-fetching
+        # `smarthistory search`/`config get` calls elsewhere in this
+        # file, this subprocess is an interactive full-screen TUI
+        # that draws to stderr specifically so `$(...)` can capture
+        # its stdout result cleanly (see `_smarthistory_select`/`^R`,
+        # the same pattern, also un-redirected). Piping stderr to
+        # /dev/null would discard the entire picker UI while the
+        # process stays alive waiting for input — invisible, not
+        # actually hung, but indistinguishable from a frozen shell.
+        result=$(smarthistory tui "$glob_flag" "$word")
+        if [[ -n "$result" ]]; then
+            # `$word` is glob-detected precisely because it contains
+            # `* ? [` — quoting it here is load-bearing, not
+            # cosmetic: zsh's `%` suffix-removal treats an UNQUOTED
+            # parameter as an active glob pattern, so `${LBUFFER%$word}`
+            # would let `word`'s own `*` match "zero or more
+            # characters" and strip too little (the shortest-match
+            # semantics of `%` would find a shorter satisfying suffix
+            # and leave the literal trailing glob characters behind
+            # in `LBUFFER`). Quoting `"$word"` inside the pattern
+            # position forces a literal (non-glob) match instead —
+            # documented zsh behavior, unlike bash where quoting
+            # doesn't affect `%`/`##` pattern interpretation.
+            LBUFFER="${LBUFFER%"${word}"}${result}"
+        fi
+        return
+    fi
+    zle expand-or-complete
+}
+zle -N _smarthistory_globcomplete_accept
 # (Palette init runs further down, after
 # `_smarthistory_color_to_hlspec` is defined — see the comment block
 # marked "Resolved TUI palette" near `_smarthistory_strip_ansi`.)
@@ -1523,7 +1627,12 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
             _smarthistory_dropdown_commit end
             return
         fi
-        zle expand-or-complete
+        # `_smarthistory_globcomplete_accept` itself falls through to
+        # `zle expand-or-complete` when `globcomplete.enabled=off`
+        # (the default) or the trailing word isn't glob-like, so this
+        # is a behavior-neutral third job for Tab, not a fourth
+        # unconditional detour — see its own doc comment.
+        _smarthistory_globcomplete_accept
     }
     zle -N _smarthistory_dropdown_accept
     bindkey '^I' _smarthistory_dropdown_accept
@@ -1673,6 +1782,18 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     }
     zle -N _smarthistory_dropdown_run_first
     bindkey '^@' _smarthistory_dropdown_run_first
+fi
+# When the dropdown feature is off (the default), nothing else in
+# this file touches `^I` — bind the glob-completion widget directly.
+# `_smarthistory_globcomplete_accept` itself falls through to `zle
+# expand-or-complete` when `globcomplete.enabled=off` or the
+# trailing word isn't glob-like, so this reproduces today's exact
+# Tab behavior byte-for-byte whenever the new feature isn't in use.
+# Guarded on the INVERSE of the dropdown gate so the two paths never
+# both try to own `^I` — see the `_smarthistory_dropdown_accept`
+# patch above for the dropdown-enabled path.
+if [[ "$_smarthistory_dropdown_enabled" != "1" ]]; then
+    bindkey '^I' _smarthistory_globcomplete_accept
 fi
 # Post-hook for the comment-expansion widget below: runs after the
 # real self-insert, so `LBUFFER` already includes the just-typed

@@ -4228,16 +4228,29 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // the user is currently looking at.
     let selected_display_pos =
         list_display_position(app.list_state.selected(), real_count, is_panes);
+    // A locked `--glob-complete-dir` picker still runs on the files
+    // (`/`) prefix internally (see `FilePickerKind`), so
+    // `ModeKind::list_title()` would otherwise say "Files" even
+    // though only directory rows are shown — override the label to
+    // match what's actually on screen.
+    let list_title_label = if matches!(
+        app.file_picker_lock.as_ref().map(|l| l.kind),
+        Some(crate::tui::FilePickerKind::Directories)
+    ) {
+        "Directories"
+    } else {
+        active_mode.list_title()
+    };
     let title = match selected_display_pos {
         Some(pos) if real_count > 0 => format!(
             " {} — {}/{} ",
-            active_mode.list_title(),
+            list_title_label,
             pos,
             merged.len()
         ),
         _ => format!(
             " {} — {} ",
-            active_mode.list_title(),
+            list_title_label,
             merged.len()
         ),
     };
@@ -5764,20 +5777,22 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
                 rest = &after_open[close_idx + close_len..];
             }
             None => {
-                // Unclosed
-                // marker.
-                // Render the
-                // rest of
-                // the line
-                // (including
-                // the
-                // literal
-                // marker)
-                // as plain
-                // text.
+                // Unclosed marker. Render the rest of the line
+                // (including the literal marker) as plain text —
+                // reconstructed from `marker_char`/`marker_len` (the
+                // ACTUAL character(s) that opened it), not a
+                // hardcoded-per-kind string: `MarkerKind::Italic`
+                // covers both `*` and `_`, so a fixed "`*`-means-
+                // italic" spelling would silently rewrite an
+                // unclosed `_` into a `*`. A plain directory listing
+                // or file path containing a bare underscore (e.g.
+                // `alpha_sub/`, never intended as markdown at all)
+                // would otherwise render with its underscore
+                // silently swapped for an asterisk.
+                let literal_marker: String = std::iter::repeat_n(marker_char, marker_len).collect();
                 push_plain_span(
                     &mut spans,
-                    format!("{}{}", marker_str(marker_kind), after_open),
+                    format!("{}{}", literal_marker, after_open),
                     base,
                 );
                 rest = "";
@@ -5807,21 +5822,6 @@ enum MarkerKind {
     Strikethrough,
     /// `[` — link (close is `](...)`).
     Link,
-}
-
-/// The literal characters that open a
-/// given marker kind. Used when an
-/// unclosed marker falls through to
-/// plain text (we re-attach the literal
-/// characters so the user sees them).
-fn marker_str(kind: MarkerKind) -> &'static str {
-    match kind {
-        MarkerKind::Bold => "**",
-        MarkerKind::Italic => "*",
-        MarkerKind::Code => "`",
-        MarkerKind::Strikethrough => "~~",
-        MarkerKind::Link => "[",
-    }
 }
 
 /// Find the earliest inline marker in
@@ -7413,6 +7413,22 @@ mod tests {
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content, "**no closer here");
         assert!(!line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Regression test: an unclosed `_` (the italic marker's OTHER
+    /// spelling — `MarkerKind::Italic` covers both `*` and `_`) must
+    /// fall through with its ACTUAL character preserved, not get
+    /// silently rewritten into `*` (a real bug found via the
+    /// glob-completion directory picker's preview — a directory
+    /// named `alpha_sub` rendered as `alpha*sub` before this fix,
+    /// since the old code used a hardcoded per-*kind* string for the
+    /// fallback instead of the character that actually opened it).
+    #[test]
+    fn preview_line_unclosed_underscore_marker_preserves_underscore_not_asterisk() {
+        let line = render_preview_line("alpha_sub/");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "alpha_sub/");
+        assert!(!line.spans[0].style.add_modifier.contains(Modifier::ITALIC));
     }
 
     /// An empty line produces a
