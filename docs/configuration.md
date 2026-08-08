@@ -351,7 +351,7 @@ tuicolor.accent=#ffb86c      # a warm orange that works on both light and dark b
 
 ### Built-in theme
 
-The built-in theme is set via the TUI's theme picker (`F2` / `ThemePicker` by default). The selected theme is persisted to the session file (`~/.local/cache/smarthistory/last_session.json`) and reapplied on next TUI launch. There is no config-file key to set the theme — the picker is the canonical path (so the searchable picker, the live preview, and the session-file write all stay in sync). 73 themes ship in `src/tui/theme/curated/` (15 upstream from `ratatui_themes` + 58 curated).
+The built-in theme is set via the TUI's theme picker (`F2` / `ThemePicker` by default). The selected theme is persisted to the session file (`~/.local/cache/smarthistory/last_session.json`) and reapplied on next TUI launch. There is no config-file key to set the theme — the picker is the canonical path (so the searchable picker, the live preview, and the session-file write all stay in sync). 74 themes ship in `src/tui/theme/curated/` (15 upstream from `ratatui_themes` + 59 curated).
 
 ### User theme directory
 

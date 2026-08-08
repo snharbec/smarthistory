@@ -1,0 +1,14 @@
+name = "luna"
+display_name = "Luna"
+
+[colors]
+accent = "#75a1c7"
+secondary = "#e19067"
+bg = "#060606"
+fg = "#e4e4e8"
+muted = "#7c7c7c"
+selection = "#384048"
+error = "#e08585"
+warning = "#d9a35a"
+success = "#6fbe80"
+info = "#8c9cb8"
