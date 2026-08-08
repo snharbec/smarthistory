@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `%` (processes) mode: lists every running OS process (macOS + Linux, all
+  users), via the new `sysinfo` dependency. The typed body filters by
+  substring against the process's name/cmdline, working directory, and
+  executable path. `Enter` on a row does not stage/run the process name as a
+  shell command — it opens a confirmation dialog to send it a signal,
+  defaulting to SIGTERM with `Tab`/`Shift-Tab` cycling to SIGKILL/SIGHUP/
+  SIGINT before confirming with `y`; the dialog's message updates live as the
+  signal is cycled. Sending a signal to a process you don't own fails with a
+  status-line message rather than crashing, the same way `kill(1)` itself
+  would. The details/preview pane shows the process's working directory,
+  executable path, and (loaded lazily on first selection) its full
+  environment (`NAME=value`, one per line); a process whose environment can't
+  be read (permission denied, or it already exited) shows a graceful
+  placeholder instead of erroring. No `#[cfg(target_os = ...)]` needed
+  anywhere — `sysinfo` abstracts macOS vs. Linux for everything this mode
+  needs; the only platform-observable difference is permission behavior on
+  the environment read, which both platforms funnel into the same
+  placeholder text.
 - Live dropdown completion: each candidate row now shows a `✓`/`✗`
   exit-status marker (green/red, same palette as `dropdown.highlight`'s
   command-validity check) right after the selection marker, so a

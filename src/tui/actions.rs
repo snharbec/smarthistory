@@ -229,6 +229,13 @@ impl App {
                 // — see its own doc comment.
                 self.stage_zoxide_selection();
             }
+            crate::tui::mode::ModeKind::Processes => {
+                // `%...` queries are running-process rows. Enter
+                // must NOT stage/run the process name as a shell
+                // command — it opens a signal-confirmation dialog
+                // instead. See `stage_process_signal_prompt`.
+                self.stage_process_signal_prompt();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for
@@ -913,6 +920,27 @@ impl App {
                 self.set_status_message(format!("could not save directory: {}", e));
             }
         }
+    }
+
+    /// Open the signal-confirmation dialog for the selected process
+    /// (`%` mode) row. Deliberately does NOT set `self.selection` /
+    /// `self.pick_mode` — unlike every other mode's staging, Enter
+    /// here must not close the TUI and hand a command to the parent
+    /// shell; it opens `confirm_signal` and waits for `y`/`n`/Tab,
+    /// same defer-don't-stage pattern as `stage_zoxide_selection`
+    /// above deferring behind `zoxide_save_prompt`.
+    fn stage_process_signal_prompt(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if row.mode != "process" {
+            return;
+        }
+        self.confirm_signal = Some(crate::tui::SignalConfirm {
+            pid: row.id,
+            name: row.command.clone(),
+            signal: crate::tui::ProcessSignal::Term,
+        });
     }
 
     /// Stage the panes (`*`) mode selection.

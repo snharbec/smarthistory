@@ -96,6 +96,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_confirm_delete(f, app, mode);
     }
 
+    if let Some(ref signal) = app.confirm_signal {
+        draw_confirm_signal(f, app, signal);
+    }
+
     if let Some(ref prompt) = app.zoxide_save_prompt {
         draw_zoxide_save_prompt(f, app, prompt);
     }
@@ -289,6 +293,68 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
             Span::raw(" or "),
             Span::styled(cancel_hint, Theme::highlight()),
             Span::raw(" to cancel."),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// The `%` (processes) mode signal-confirmation dialog
+/// (`app.confirm_signal`), opened by `App::stage_process_signal_prompt`
+/// when Enter is pressed on a process row. Modeled directly on
+/// `draw_confirm_delete` (same red/error styling — sending a signal
+/// is destructive, unlike the non-destructive `zoxide_save_prompt`
+/// below) with one addition: the message is built fresh from
+/// `signal.signal` every frame, so Tab/Shift-Tab cycling the signal
+/// (`handle_confirm_signal_key`) updates the displayed text on the
+/// very next render with no extra plumbing.
+fn draw_confirm_signal(f: &mut Frame, app: &App, signal: &crate::tui::SignalConfirm) {
+    let area = centered_rect(60, 25, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let title = " Send signal to process ";
+    let message = format!(
+        "Send {} to pid {} ({})?",
+        signal.signal.label(),
+        signal.pid,
+        signal.name,
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .title_style(Theme::error())
+        .border_style(Theme::error());
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            message,
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Press "),
+            Span::styled("y", Theme::highlight()),
+            Span::raw(" to confirm, "),
+            Span::styled("n", Theme::highlight()),
+            Span::raw(" or "),
+            Span::styled(cancel_hint, Theme::highlight()),
+            Span::raw(" to cancel, "),
+            Span::styled("Tab", Theme::highlight()),
+            Span::raw(" to cycle the signal."),
         ]),
     ];
 
@@ -2497,6 +2563,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "zoxide",
         qp.zoxide.to_string(),
         "list directories from the local zoxide database (highest frecency score first); Enter creates a new tmux session / herdr workspace there, or jumps to an already-active pane there (same staging as directories mode)",
+    );
+    mode_row(
+        &mut lines,
+        "processes",
+        qp.processes.to_string(),
+        "list running OS processes (macOS + Linux, all users); the preview shows cwd/exe/environment; Enter opens a confirm dialog to send a signal (defaults to SIGTERM, Tab/Shift-Tab cycles SIGKILL/SIGHUP/SIGINT)",
     );
 
     lines.push(Line::from(""));
@@ -6451,7 +6523,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // content" bug the user reported.
     let preview_only = matches!(
         row.mode.as_str(),
-        "pane" | "workspace" | "session"
+        "pane" | "workspace" | "session" | "process"
     );
     let preview_text: &str = if !row.preview.is_empty() {
         row.preview.as_str()
@@ -6508,6 +6580,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         || row.mode == "pane"
         || row.mode == "segment"
         || row.mode == "similar"
+        || row.mode == "process"
     {
         crate::tui::SOURCE_CONTEXT_LINES
     } else {
