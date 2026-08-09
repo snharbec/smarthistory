@@ -1804,28 +1804,31 @@ pub struct Config {
     /// is used.
     multiplexer: crate::multiplexer::MultiplexerKind,
     /// Named sessions parsed from
-    /// `session.<id> = "name"` /
-    /// `session.<id>.dir = "~/path"` /
-    /// `session.<id>.startup_command = "cmd"`
-    /// config keys. Each entry
-    /// becomes a row in the panes
-    /// (`*`) view.
-    sessions: Vec<(usize, SessionDef)>,
+    /// `session.<key> = "name"` /
+    /// `session.<key>.dir = "~/path"` /
+    /// `session.<key>.startup_command = "cmd"`
+    /// config keys — `<key>` is an opaque
+    /// join key (a legacy numeric index or a
+    /// name-derived slug, see `unique_slug`;
+    /// the parser doesn't care which). Each
+    /// entry becomes a row in the panes (`*`)
+    /// view, in file declaration order.
+    sessions: Vec<(String, SessionDef)>,
     /// Host entries parsed from
-    /// `host.<id> = "name"` /
-    /// `host.<id>.host = "alias"` /
-    /// `host.<id>.hostname = "real"` /
-    /// `host.<id>.user = "u"` /
-    /// `host.<id>.port = N` /
-    /// `host.<id>.identity = "path"` /
-    /// `host.<id>.dir = "~/path"` /
-    /// `host.<id>.exec = "cmd"`. Each entry
+    /// `host.<key> = "name"` /
+    /// `host.<key>.host = "alias"` /
+    /// `host.<key>.hostname = "real"` /
+    /// `host.<key>.user = "u"` /
+    /// `host.<key>.port = N` /
+    /// `host.<key>.identity = "path"` /
+    /// `host.<key>.dir = "~/path"` /
+    /// `host.<key>.exec = "cmd"`. Each entry
     /// becomes a row in the `# hosts`
     /// section of the panes (`*`) view.
     /// SSH config (`~/.ssh/config`) entries
     /// without a config-file companion are
     /// auto-appended by `Config::load`.
-    hosts: Vec<(usize, crate::tui::state::HostDef)>,
+    hosts: Vec<(String, crate::tui::state::HostDef)>,
     /// Browser sources for the `^`-prefix mode, parsed from
     /// `browser.<id>.type = "chrome"|"firefox"` /
     /// `browser.<id>.profile = "~/path"` config keys. `profile`
@@ -2473,56 +2476,62 @@ impl Config {
                             }
                         }
                     } else if let Some(rest) = other.strip_prefix("session.") {
-                        // Parse `session.<id> = "name"`,
-                        // `session.<id>.dir = "~/path"`,
-                        // `session.<id>.startup_command = "cmd"`.
-                        // The `<id>` is a numeric index
-                        // determining display order.
+                        // Parse `session.<key> = "name"`,
+                        // `session.<key>.dir = "~/path"`,
+                        // `session.<key>.startup_command = "cmd"`.
+                        // `<key>` determines display order (first
+                        // declaration wins) and doubles as the
+                        // cross-line join key for an entry's fields.
+                        // Historically a numeric index (`session.1`);
+                        // new entries are written with a name-derived
+                        // slug instead (`session.monorepo`, see
+                        // `unique_slug`) — both are just opaque
+                        // strings to this parser, so old numeric-keyed
+                        // entries keep working unmodified forever.
                         let unquoted = value.trim().trim_matches('"').trim();
-                        if let Some((id_str, field)) = rest.split_once('.') {
-                            if let Ok(id) = id_str.parse::<usize>() {
-                                let pos = self.sessions.iter().position(|(i, _)| *i == id);
-                                match (field, pos) {
-                                    ("dir", Some(idx)) => {
-                                        self.sessions[idx].1.dir = unquoted.to_string();
-                                    }
-                                    ("dir", None) => {
-                                        self.sessions.push((
-                                            id,
-                                            SessionDef {
-                                                name: String::new(),
-                                                dir: unquoted.to_string(),
-                                                exec: String::new(),
-                                            },
-                                        ));
-                                    }
-                                    ("exec", Some(idx)) => {
-                                        self.sessions[idx].1.exec = unquoted.to_string();
-                                    }
-                                    ("exec", None) => {
-                                        self.sessions.push((
-                                            id,
-                                            SessionDef {
-                                                name: String::new(),
-                                                dir: String::new(),
-                                                exec: unquoted.to_string(),
-                                            },
-                                        ));
-                                    }
-                                    ("startup_command", _) => {
-                                        // Accepted but not used yet.
-                                    }
-                                    _ => {}
+                        if let Some((key, field)) = rest.split_once('.') {
+                            let pos = self.sessions.iter().position(|(k, _)| k == key);
+                            match (field, pos) {
+                                ("dir", Some(idx)) => {
+                                    self.sessions[idx].1.dir = unquoted.to_string();
                                 }
+                                ("dir", None) => {
+                                    self.sessions.push((
+                                        key.to_string(),
+                                        SessionDef {
+                                            name: String::new(),
+                                            dir: unquoted.to_string(),
+                                            exec: String::new(),
+                                        },
+                                    ));
+                                }
+                                ("exec", Some(idx)) => {
+                                    self.sessions[idx].1.exec = unquoted.to_string();
+                                }
+                                ("exec", None) => {
+                                    self.sessions.push((
+                                        key.to_string(),
+                                        SessionDef {
+                                            name: String::new(),
+                                            dir: String::new(),
+                                            exec: unquoted.to_string(),
+                                        },
+                                    ));
+                                }
+                                ("startup_command", _) => {
+                                    // Accepted but not used yet.
+                                }
+                                _ => {}
                             }
-                        } else if let Ok(id) = rest.parse::<usize>() {
-                            // `session.<id> = "name"` (no sub-field).
+                        } else {
+                            // `session.<key> = "name"` (no sub-field).
+                            let key = rest;
                             if !unquoted.is_empty() {
-                                let pos = self.sessions.iter().position(|(i, _)| *i == id);
+                                let pos = self.sessions.iter().position(|(k, _)| k == key);
                                 match pos {
                                     Some(idx) => self.sessions[idx].1.name = unquoted.to_string(),
                                     None => self.sessions.push((
-                                        id,
+                                        key.to_string(),
                                         SessionDef {
                                             name: unquoted.to_string(),
                                             dir: String::new(),
@@ -2533,16 +2542,16 @@ impl Config {
                             }
                         }
                     } else if let Some(rest) = other.strip_prefix("host.") {
-                        // Parse `host.<id> = "name"`,
-                        // `host.<id>.host = "alias"`,
-                        // `host.<id>.hostname = "real"`,
-                        // `host.<id>.user = "u"`,
-                        // `host.<id>.port = N`,
-                        // `host.<id>.identity = "path"`,
-                        // `host.<id>.dir = "~/path"`,
-                        // `host.<id>.exec = "cmd"`.
-                        // The `<id>` is a numeric index
-                        // determining display order.
+                        // Parse `host.<key> = "name"`,
+                        // `host.<key>.host = "alias"`,
+                        // `host.<key>.hostname = "real"`,
+                        // `host.<key>.user = "u"`,
+                        // `host.<key>.port = N`,
+                        // `host.<key>.identity = "path"`,
+                        // `host.<key>.dir = "~/path"`,
+                        // `host.<key>.exec = "cmd"`. `<key>` is an
+                        // opaque join key (numeric or slug — see the
+                        // `session.` branch above for why both work).
                         //
                         // `host` is the SSH config
                         // `Host` alias (also used as
@@ -2551,57 +2560,56 @@ impl Config {
                         // `hostname` is the real
                         // `HostName` to connect to.
                         let unquoted = value.trim().trim_matches('"').trim();
-                        if let Some((id_str, field)) = rest.split_once('.') {
-                            if let Ok(id) = id_str.parse::<usize>() {
-                                let pos = self.hosts.iter().position(|(i, _)| *i == id);
-                                let set = |host: &mut crate::tui::state::HostDef,
-                                           field: &str,
-                                           val: &str| {
-                                    match field {
-                                        "host" => host.host = val.to_string(),
-                                        "hostname" => host.hostname = val.to_string(),
-                                        "user" => host.user = val.to_string(),
-                                        "port" => {
-                                            if let Ok(n) = val.parse::<u16>() {
-                                                host.port = n;
-                                            } else {
-                                                eprintln!(
-                                                    "warning: host.{}.port = {:?} is not a valid port; ignoring",
-                                                    id, val
-                                                );
-                                            }
-                                        }
-                                        "identity" => host.identity = val.to_string(),
-                                        "dir" => host.dir = val.to_string(),
-                                        "exec" => host.exec = val.to_string(),
-                                        _ => {
+                        if let Some((key, field)) = rest.split_once('.') {
+                            let pos = self.hosts.iter().position(|(k, _)| k == key);
+                            let set = |host: &mut crate::tui::state::HostDef,
+                                       field: &str,
+                                       val: &str| {
+                                match field {
+                                    "host" => host.host = val.to_string(),
+                                    "hostname" => host.hostname = val.to_string(),
+                                    "user" => host.user = val.to_string(),
+                                    "port" => {
+                                        if let Ok(n) = val.parse::<u16>() {
+                                            host.port = n;
+                                        } else {
                                             eprintln!(
-                                                "warning: unknown host field {:?} in host.{}; ignoring",
-                                                field, id
+                                                "warning: host.{}.port = {:?} is not a valid port; ignoring",
+                                                key, val
                                             );
                                         }
                                     }
-                                };
-                                match pos {
-                                    Some(idx) => {
-                                        let (_, host) = &mut self.hosts[idx];
-                                        set(host, field, unquoted);
-                                    }
-                                    None => {
-                                        let mut host = crate::tui::state::HostDef::default();
-                                        set(&mut host, field, unquoted);
-                                        self.hosts.push((id, host));
+                                    "identity" => host.identity = val.to_string(),
+                                    "dir" => host.dir = val.to_string(),
+                                    "exec" => host.exec = val.to_string(),
+                                    _ => {
+                                        eprintln!(
+                                            "warning: unknown host field {:?} in host.{}; ignoring",
+                                            field, key
+                                        );
                                     }
                                 }
+                            };
+                            match pos {
+                                Some(idx) => {
+                                    let (_, host) = &mut self.hosts[idx];
+                                    set(host, field, unquoted);
+                                }
+                                None => {
+                                    let mut host = crate::tui::state::HostDef::default();
+                                    set(&mut host, field, unquoted);
+                                    self.hosts.push((key.to_string(), host));
+                                }
                             }
-                        } else if let Ok(id) = rest.parse::<usize>() {
-                            // `host.<id> = "name"` (no sub-field).
+                        } else {
+                            // `host.<key> = "name"` (no sub-field).
+                            let key = rest;
                             if !unquoted.is_empty() {
-                                let pos = self.hosts.iter().position(|(i, _)| *i == id);
+                                let pos = self.hosts.iter().position(|(k, _)| k == key);
                                 match pos {
                                     Some(idx) => self.hosts[idx].1.name = unquoted.to_string(),
                                     None => self.hosts.push((
-                                        id,
+                                        key.to_string(),
                                         crate::tui::state::HostDef {
                                             name: unquoted.to_string(),
                                             ..crate::tui::state::HostDef::default()
@@ -2710,7 +2718,7 @@ impl Config {
         }
         // Merge `~/.ssh/config` into `self.hosts`.
         // For every `Host` block in the SSH
-        // config, look up a `host.<id>` entry
+        // config, look up a `host.<key>` entry
         // whose `host` field matches the
         // alias. If found, the explicit
         // entry wins for every set field;
@@ -2723,16 +2731,16 @@ impl Config {
         // `User`, identity = first
         // `IdentityFile`, port = `Port`).
         //
-        // Auto-included entries get a
-        // synthetic id starting from
-        // `usize::MAX` and going down so
-        // they sort after every explicit
-        // `host.<id>` entry (which start
-        // from 1 and go up). The id is
-        // only used for display ordering,
-        // so the choice of magnitude is
-        // arbitrary as long as the two
-        // ranges don't collide.
+        // Auto-appended entries key off the
+        // SSH alias itself (slugified —
+        // aliases are almost always already
+        // key-safe), disambiguated against
+        // every existing key via
+        // `unique_slug` so an alias that
+        // collides with an explicit
+        // `host.<key>` entry gets `-2`
+        // appended rather than silently
+        // merging into it.
         if let Some(home) = env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .or_else(|| env::var_os("USERPROFILE").map(std::path::PathBuf::from))
@@ -2786,21 +2794,16 @@ impl Config {
                         }
                     }
                     None => {
-                        // Auto-append.
-                        // Pick an id
-                        // that doesn't
-                        // collide with
-                        // any existing
-                        // entry.
-                        let next_id = self
-                            .hosts
-                            .iter()
-                            .map(|(i, _)| *i)
-                            .max()
-                            .map(|m| m.saturating_add(1))
-                            .unwrap_or(1);
+                        // Auto-append, keyed off the SSH alias
+                        // (slugified, disambiguated against every
+                        // existing key).
+                        let key = crate::util::unique_slug(
+                            self.hosts.iter().map(|(k, _)| k.as_str()),
+                            &block.alias,
+                            "host",
+                        );
                         self.hosts.push((
-                            next_id,
+                            key,
                             crate::tui::state::HostDef {
                                 name: block.alias.clone(),
                                 host: block.alias.clone(),
@@ -3285,7 +3288,8 @@ impl Config {
     pub fn sessions(&self) -> Vec<crate::tui::state::HistoryRow> {
         self.sessions
             .iter()
-            .map(|(id, def)| {
+            .enumerate()
+            .map(|(idx, (_, def))| {
                 let home_list: Vec<String> =
                     std::iter::once(std::env::var("HOME").unwrap_or_default())
                         .filter(|s| !s.is_empty())
@@ -3293,7 +3297,7 @@ impl Config {
                 let expanded =
                     crate::util::expand_home_to_absolute(&def.dir, &home_list).into_owned();
                 crate::tui::state::HistoryRow {
-                    id: -10_000 - (*id as i64),
+                    id: -10_000 - (idx as i64),
                     command: def.name.clone(),
                     directory: expanded,
                     session_id: String::new(),
@@ -3315,18 +3319,18 @@ impl Config {
     /// exists. Entries with no `.dir` are omitted (nothing to check).
     /// Same expansion `sessions()` uses, so a directory this reports
     /// as existing/missing matches what the picker itself would show.
-    pub fn session_directories(&self) -> Vec<(usize, String, String)> {
+    pub fn session_directories(&self) -> Vec<(String, String, String)> {
         self.sessions
             .iter()
             .filter(|(_, def)| !def.dir.is_empty())
-            .map(|(id, def)| {
+            .map(|(key, def)| {
                 let home_list: Vec<String> =
                     std::iter::once(std::env::var("HOME").unwrap_or_default())
                         .filter(|s| !s.is_empty())
                         .collect();
                 let expanded =
                     crate::util::expand_home_to_absolute(&def.dir, &home_list).into_owned();
-                (*id, def.name.clone(), expanded)
+                (key.clone(), def.name.clone(), expanded)
             })
             .collect()
     }
@@ -4206,27 +4210,27 @@ fn pad_rows(rows: &[Vec<String>], fields: &[String]) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Remove every `session.<id>` line — the name line (`session.<id> =
-/// ...`) and every sub-field (`session.<id>.dir = ...`,
-/// `.exec`, `.startup_command`, ...) — for each id in `ids`, from
+/// Remove every `session.<key>` line — the name line (`session.<key> =
+/// ...`) and every sub-field (`session.<key>.dir = ...`,
+/// `.exec`, `.startup_command`, ...) — for each key in `keys`, from
 /// `path`. Used by `smarthistory prune-directories` to delete stale
 /// entries from whichever of `~/.config/smarthistory/config` /
 /// `~/.config/smarthistory/sessions` they live in.
 ///
 /// A missing file is not an error (a from-scratch install, or an
 /// entry that only lives in the other file) — returns `Ok(0)`. If no
-/// line in the file matches any id, the file is left untouched
+/// line in the file matches any key, the file is left untouched
 /// entirely (no needless rewrite). Otherwise the file is rewritten
 /// atomically (temp file + rename), same pattern as
 /// `App::write_new_entry_to_config`.
 ///
-/// Matching is a literal prefix check (`session.<id> ` / `session.<id>.`
-/// / `session.<id>=`) against each line's trimmed start — the exact
-/// three forms `write_new_entry_to_config` ever emits — so `session.1`
-/// never matches a `session.10` line.
+/// Matching is a literal prefix check (`session.<key> ` / `session.<key>.`
+/// / `session.<key>=`) against each line's trimmed start — the exact
+/// three forms `write_new_entry_to_config` ever emits — so `session.foo`
+/// never matches a `session.foobar` line.
 fn remove_session_lines(
     path: &std::path::Path,
-    ids: &std::collections::HashSet<usize>,
+    keys: &std::collections::HashSet<String>,
 ) -> std::io::Result<usize> {
     let contents = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -4238,10 +4242,10 @@ fn remove_session_lines(
         .lines()
         .filter(|line| {
             let trimmed = line.trim_start();
-            let is_stale_session_line = ids.iter().any(|id| {
-                trimmed.starts_with(&format!("session.{} ", id))
-                    || trimmed.starts_with(&format!("session.{}.", id))
-                    || trimmed.starts_with(&format!("session.{}=", id))
+            let is_stale_session_line = keys.iter().any(|key| {
+                trimmed.starts_with(&format!("session.{} ", key))
+                    || trimmed.starts_with(&format!("session.{}.", key))
+                    || trimmed.starts_with(&format!("session.{}=", key))
             });
             if is_stale_session_line {
                 removed += 1;
@@ -5989,7 +5993,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::PruneDirectories { force } => {
             let cfg = Config::load_tui();
-            let stale: Vec<(usize, String, String)> = cfg
+            let stale: Vec<(String, String, String)> = cfg
                 .session_directories()
                 .into_iter()
                 .filter(|(_, _, dir)| !std::path::Path::new(dir).is_dir())
@@ -6020,11 +6024,11 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let ids: std::collections::HashSet<usize> =
-                stale.iter().map(|(id, _, _)| *id).collect();
+            let keys: std::collections::HashSet<String> =
+                stale.iter().map(|(key, _, _)| key.clone()).collect();
             let mut removed = 0usize;
             for path in [sessions_path(), config_path()].into_iter().flatten() {
-                removed += remove_session_lines(&path, &ids)?;
+                removed += remove_session_lines(&path, &keys)?;
             }
             println!(
                 "Removed {} stale directory entr{} from configuration ({} line{}).",

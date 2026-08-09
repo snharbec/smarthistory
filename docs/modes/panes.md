@@ -45,7 +45,7 @@ An individual live workspace's own `## <label>` sub-heading is a different thing
 - `Enter` on a **workspace** sub-heading (`## <label>`) stages the workspace-focus command (no specific pane). Useful when the workspace is in another window / tab and you just want to land in it.
 - `Enter` on the `# Sessions` / `# Directories` / `# hosts` group header collapses/expands it instead — see [Collapsing group headers](#collapsing-group-headers) above.
 
-Selecting a `Directories`/`Hosts` row for the first time creates a new tmux session / herdr workspace named after that entry (see [`docs/configuration.md`](../configuration.md#sessionid)). A pane opened *inside* that session later — directly in tmux/herdr, not through this picker — starts a plain local shell with no connection of its own; run `smarthistory pane-exec` in it to reconnect, since the session/workspace is already named after the config entry that created it and needs no separate lookup.
+Selecting a `Directories`/`Hosts` row for the first time creates a new tmux session / herdr workspace named after that entry (see [`docs/configuration.md`](../configuration.md#sessionkey)). A pane opened *inside* that session later — directly in tmux/herdr, not through this picker — starts a plain local shell with no connection of its own; run `smarthistory pane-exec` in it to reconnect, since the session/workspace is already named after the config entry that created it and needs no separate lookup.
 
 ## Group-aware filter
 
@@ -57,8 +57,8 @@ The intuition: a pane that *transiently* runs `nvim` shouldn't orphan its worksp
 
 Below the live multiplexer workspaces, `*` mode appends two more groups built from your config, each with its own `# `-prefixed header row and indented children, same tree shape as a live workspace:
 
-- **Directories** — the `session.N` quick-launch entries from `~/.config/smarthistory/sessions` (or the main config file — see [`docs/configuration.md#sessionid`](../configuration.md#sessionid)), e.g. `session.1 = "⛩️ Home"`, `session.1.dir = "~/"`. Displayed as `# Directories` — despite the `session.N` config key name, these are directory shortcuts, not multiplexer sessions, so the group is labeled for what it actually is rather than the config syntax that defines it.
-- **Hosts** — the `host.N` entries (SSH connections) from `~/.config/smarthistory/hosts` (or the main config file). Displayed as `# hosts`.
+- **Directories** — the `session.<key>` quick-launch entries from `~/.config/smarthistory/sessions` (or the main config file — see [`docs/configuration.md#sessionkey`](../configuration.md#sessionkey)), e.g. `session.home = "⛩️ Home"`, `session.home.dir = "~/"`. Displayed as `# Directories` — despite the `session.<key>` config key name, these are directory shortcuts, not multiplexer sessions, so the group is labeled for what it actually is rather than the config syntax that defines it.
+- **Hosts** — the `host.<key>` entries (SSH connections) from `~/.config/smarthistory/hosts` (or the main config file). Displayed as `# hosts`.
 
 These groups use the *same* group-aware filter as live workspaces: the header stays visible (with every sibling entry) as long as any row in the group matches, not just the one(s) that do. Searching `*Home` shows the `Directories` header and every configured directory entry, with `Home` pre-selected — not just the `Home` row with its header stripped away.
 
@@ -82,7 +82,7 @@ The multiplexer is selected via `multiplexer=tmux|herdr` in the config (default 
 ## Cross-references
 
 - [Directories mode — the per-directory view; `#` shows the *unique* directories the shell has been in, `*` shows every pane currently running in them](directories.md)
-- [`smarthistory pane-exec` — reconnect a freshly opened pane/window without going through this picker](../configuration.md#hostid)
+- [`smarthistory pane-exec` — reconnect a freshly opened pane/window without going through this picker](../configuration.md#hostkey)
 - [TECHNICAL — multiplexer backend details](../../TECHNICAL.md#multiplexer-integration)
 - [README — multiplexer integration](../../README.md#multiplexer-integration-tmux--herdr)
 - **[Multiplexer backend reference](../../docs/multiplexer.md)** — backend selection, building with the `herdr` feature, setup guides for both backends, troubleshooting.

@@ -7,8 +7,8 @@ Every value `smarthistory` reads at startup, with the config-file key, default, 
 | Location | What |
 | --- | --- |
 | `~/.config/smarthistory/config` | The user config file (INI-style `key=value` lines; `#` starts a comment; `~` is expanded in path values). Read at startup by `Config::load`. Missing file → built-in defaults. |
-| `~/.config/smarthistory/hosts` | Optional: `host.<id>.*` entries, same syntax as in the main config file. Only read by the TUI (`Config::load_tui`) — see [`host.<id>`](#hostid). |
-| `~/.config/smarthistory/sessions` | Optional: `session.<id>.*` entries, same syntax as in the main config file. Only read by the TUI (`Config::load_tui`) — see [`session.<id>`](#sessionid). |
+| `~/.config/smarthistory/hosts` | Optional: `host.<key>.*` entries, same syntax as in the main config file. Only read by the TUI (`Config::load_tui`) — see [`host.<key>`](#hostkey). |
+| `~/.config/smarthistory/sessions` | Optional: `session.<key>.*` entries, same syntax as in the main config file. Only read by the TUI (`Config::load_tui`) — see [`session.<key>`](#sessionkey). |
 | `~/.local/cache/smarthistory/` | Runtime cache: `query_history.json` (per-mode recall), `global_query_history.json` (cross-mode recall, `Ctrl+Shift+P`/`Ctrl+Shift+N`), `widget-debug.log` (TUI debug trace), `last_session.json` (the most recent session, for `smarthistory tui` resume). Not hand-edited. |
 | `~/.cache/tmux-history/` | Per-pane tmux output logs (set via `tmuxpaneoutputdir`). |
 | `~/.config/smarthistory/themes/` | Optional user theme directory (TOML files matching the built-in theme shape). |
@@ -17,7 +17,7 @@ Every value `smarthistory` reads at startup, with the config-file key, default, 
 
 1. Built-in defaults (`Config::default`).
 2. `~/.config/smarthistory/config` — each `key=value` line is parsed in order; later values override earlier ones.
-3. **TUI only**: `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions`, folded in as if they were appended to the main config file (`Config::load_tui`; see [`session.<id>`](#sessionid) / [`host.<id>`](#hostid)). Every other CLI subcommand uses the plain `Config::load` and never reads these two files.
+3. **TUI only**: `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions`, folded in as if they were appended to the main config file (`Config::load_tui`; see [`session.<key>`](#sessionkey) / [`host.<key>`](#hostkey)). Every other CLI subcommand uses the plain `Config::load` and never reads these two files.
 4. Environment variables (noted per-item below; they always win over the config file when set).
 
 **Validation**
@@ -64,8 +64,8 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`multiplexer`](#multiplexer)
   - [`sessiondirs`](#sessiondirs)
   - [`homemap`](#homemap)
-  - [`session.<id>`](#sessionid)
-  - [`host.<id>`](#hostid)
+  - [`session.<key>`](#sessionkey)
+  - [`host.<key>`](#hostkey)
 - [Modes](#modes)
   - [Notes (`@` mode)](#notes--mode)
   - [Todo (`!` mode)](#todo--mode)
@@ -594,75 +594,79 @@ homemap=/Volumes/HUGE/har
 homemap=/Volumes/Backup
 ```
 
-### `session.<id>`
+### `session.<key>`
 
 | | |
 | --- | --- |
-| **Type** | sub-keyed group (`<id>` is a non-negative integer) |
+| **Type** | sub-keyed group (`<key>` is an arbitrary identifier — see below) |
 | **Default** | — |
 | **File** | `~/.config/smarthistory/sessions` (or the main config file — see below) |
 | **Tilde expansion** | Yes (on `dir`) |
 | **Env override** | — |
 
-A named session row in the `*` (panes) view. The `<id>` is the display order (1-based, ascending); a missing `<id>` keeps the entry sorted after the existing max. Sub-keys:
+A named session row in the `*` (panes) view. `<key>` is just a join key tying an entry's lines together — it never has to be typed elsewhere and isn't shown anywhere itself (the display name is the separate `session.<key>` bare value, below). Display order is file declaration order (first-seen order wins); there's no separate numbering to maintain. `smarthistory` picks `<key>` automatically when it writes a new entry (F5, or the `~` Zoxide save prompt): it slugifies the display name you typed — lowercased, spaces/punctuation collapsed to `-` — and appends `-2`, `-3`, … only if that slug is already taken, so `session.monorepo`, not `session.3`. You're free to hand-edit `<key>` to anything you like (or add entries by hand with whatever key you want) — it just has to be unique among `session.*` entries and contain no `.` (dots split it from the sub-key that follows).
+
+**Older configs**: entries written before this scheme (numeric `session.1`, `session.2`, …) keep working exactly as before — the numeric id is just an opaque key to the parser, same as a slug. Nothing needs migrating; new entries just get better keys going forward.
+
+Sub-keys:
 
 | Sub-key | Required? | Meaning |
 | --- | --- | --- |
-| `session.<id>` | yes | The display name (used in the picker / status bar) |
-| `session.<id>.dir` | no | The directory the session starts in (after `cd`) |
-| `session.<id>.exec` | no | The command to run after creating the workspace (e.g. `nvim`, `claude`) |
-| `session.<id>.startup_command` | accepted, not yet used | Reserved for future use |
+| `session.<key>` | yes | The display name (used in the picker / status bar) |
+| `session.<key>.dir` | no | The directory the session starts in (after `cd`) |
+| `session.<key>.exec` | no | The command to run after creating the workspace (e.g. `nvim`, `claude`) |
+| `session.<key>.startup_command` | accepted, not yet used | Reserved for future use |
 
 ```ini
 # ~/.config/smarthistory/sessions
-session.1="monorepo"
-session.1.dir=~/work/monorepo
-session.1.exec=claude
+session.monorepo="monorepo"
+session.monorepo.dir=~/work/monorepo
+session.monorepo.exec=claude
 
-session.2="notes"
-session.2.dir=~/Documents/notes
+session.notes="notes"
+session.notes.dir=~/Documents/notes
 ```
 
-**File location**: `session.<id>` entries can live in their own dedicated `~/.config/smarthistory/sessions` file, in the main `~/.config/smarthistory/config` file, or split across both — they're folded together as if it were one file (later-defined `<id>` sub-keys for the same entry win, same as within a single file). This file (like `hosts`, below) is read **only by the TUI** (`smarthistory tui` / `smarthistory check`), not by the plain CLI subcommands (`search`, `add`, `capture-*`, …), since session/host data is exclusively a `*`-mode (panes) concern and those commands run on every shell prompt — keeping them off that hot path avoids two needless file reads per command. The in-TUI "add session" dialog (`F5` by default) always writes new entries to `~/.config/smarthistory/sessions`, creating the file (and the `~/.config/smarthistory/` directory) if it doesn't exist yet. `~` (Zoxide) mode's "save this directory?" prompt (see [`zoxide.md`](modes/zoxide.md#selecting-a-row)) writes here too — a plain name + `.dir` entry, no `.exec`. `smarthistory prune-directories [-f]` is the cleanup side of that: it checks every `session.<id>.dir` (in both `sessions` and the main `config` file) against the filesystem and removes the whole entry for any that no longer exist, after listing them and asking for confirmation (`-f`/`--force` skips the prompt). Entries with no `.dir` set are left alone.
+**File location**: `session.<key>` entries can live in their own dedicated `~/.config/smarthistory/sessions` file, in the main `~/.config/smarthistory/config` file, or split across both — they're folded together as if it were one file (later-defined `<key>` sub-keys for the same entry win, same as within a single file). This file (like `hosts`, below) is read **only by the TUI** (`smarthistory tui` / `smarthistory check`), not by the plain CLI subcommands (`search`, `add`, `capture-*`, …), since session/host data is exclusively a `*`-mode (panes) concern and those commands run on every shell prompt — keeping them off that hot path avoids two needless file reads per command. The in-TUI "add session" dialog (`F5` by default) always writes new entries to `~/.config/smarthistory/sessions`, creating the file (and the `~/.config/smarthistory/` directory) if it doesn't exist yet. `~` (Zoxide) mode's "save this directory?" prompt (see [`zoxide.md`](modes/zoxide.md#selecting-a-row)) writes here too — a plain name + `.dir` entry, no `.exec`. `smarthistory prune-directories [-f]` is the cleanup side of that: it checks every `session.<key>.dir` (in both `sessions` and the main `config` file) against the filesystem and removes the whole entry for any that no longer exist, after listing them and asking for confirmation (`-f`/`--force` skips the prompt). Entries with no `.dir` set are left alone.
 
-### `host.<id>`
+### `host.<key>`
 
 | | |
 | --- | --- |
-| **Type** | sub-keyed group (`<id>` is a non-negative integer) |
+| **Type** | sub-keyed group (`<key>` is an arbitrary identifier — see [`session.<key>`](#sessionkey) above) |
 | **Default** | — (auto-appended from `~/.ssh/config`) |
 | **File** | `~/.config/smarthistory/hosts` (or the main config file — see below) |
 | **Tilde expansion** | Yes (on `dir`, `identity`) |
 | **Env override** | — |
 
-An SSH host row in the `# hosts` block of the `*` (panes) view. The `<id>` is the display order; missing `<id>` sorts after the existing max. Hosts in `~/.ssh/config` are auto-appended (one per `Host` block) when the config is loaded, so users only need explicit `host.<id>` entries for the fields `~/.ssh/config` doesn't already cover, or to override what the SSH config says.
+An SSH host row in the `# hosts` block of the `*` (panes) view. Same key scheme as `session.<key>` above — display order is file declaration order, and `<key>` is just a join key (auto-picked as a slug of the display name when written by the TUI, hand-editable to anything unique otherwise). Hosts in `~/.ssh/config` are auto-appended (one per `Host` block, keyed off the SSH alias itself) when the config is loaded, so users only need explicit `host.<key>` entries for the fields `~/.ssh/config` doesn't already cover, or to override what the SSH config says.
 
 | Sub-key | Meaning |
 | --- | --- |
-| `host.<id>` | Display name (used in the picker) |
-| `host.<id>.host` | The SSH `Host` alias (the connection target) |
-| `host.<id>.hostname` | The real `HostName` to connect to (falls back to `host` if unset) |
-| `host.<id>.user` | The SSH `User` |
-| `host.<id>.port` | The SSH `Port` (positive integer; invalid values are dropped with a warning) |
-| `host.<id>.identity` | The `IdentityFile` (path with `~` expanded) |
-| `host.<id>.dir` | The directory the session starts in on the remote (after `ssh -t host 'cd … && $SHELL'`) |
-| `host.<id>.exec` | The command to run after `cd` (e.g. `tmux new-session -A -s main`) |
+| `host.<key>` | Display name (used in the picker) |
+| `host.<key>.host` | The SSH `Host` alias (the connection target) |
+| `host.<key>.hostname` | The real `HostName` to connect to (falls back to `host` if unset) |
+| `host.<key>.user` | The SSH `User` |
+| `host.<key>.port` | The SSH `Port` (positive integer; invalid values are dropped with a warning) |
+| `host.<key>.identity` | The `IdentityFile` (path with `~` expanded) |
+| `host.<key>.dir` | The directory the session starts in on the remote (after `ssh -t host 'cd … && $SHELL'`) |
+| `host.<key>.exec` | The command to run after `cd` (e.g. `tmux new-session -A -s main`) |
 
 ```ini
 # ~/.config/smarthistory/hosts
-host.1="prod-db"
-host.1.host=db1
-host.1.hostname=db1.internal.example.com
-host.1.user=ops
-host.1.port=2222
-host.1.identity=~/.ssh/id_ed25519_prod
-host.1.dir=/srv/observability
-host.1.exec=tmux new-session -A -s observability
+host.prod-db="prod-db"
+host.prod-db.host=db1
+host.prod-db.hostname=db1.internal.example.com
+host.prod-db.user=ops
+host.prod-db.port=2222
+host.prod-db.identity=~/.ssh/id_ed25519_prod
+host.prod-db.dir=/srv/observability
+host.prod-db.exec=tmux new-session -A -s observability
 ```
 
-**File location**: same split-or-combined rule as `session.<id>` above — `host.<id>` entries can live in `~/.config/smarthistory/hosts`, in the main config file, or both. The in-TUI "add host" dialog (`F6` by default) always writes new entries to `~/.config/smarthistory/hosts`.
+**File location**: same split-or-combined rule as `session.<key>` above — `host.<key>` entries can live in `~/.config/smarthistory/hosts`, in the main config file, or both. The in-TUI "add host" dialog (`F6` by default) always writes new entries to `~/.config/smarthistory/hosts`.
 
-**Reconnecting inside a new pane**: `smarthistory pane-exec` is a manual command for a fresh pane/window opened directly in tmux or herdr (e.g. `Ctrl-b c`, not through smarthistory's own `*` panes picker). tmux sessions and herdr workspaces are already named after the `session.<id>`/`host.<id>` entry that created them, so no separate registration step is needed — `pane-exec` just reads the current session name (or workspace label) and looks it up against the same config. A `session.<id>` match re-runs its `.exec`; a `host.<id>` match re-runs its `ssh` connection only — the host's `.exec` is deliberately not replayed, since it's meant to be typed into the remote shell after connecting (via the multiplexer backend's pane-injection API), not run as a local follow-up command.
+**Reconnecting inside a new pane**: `smarthistory pane-exec` is a manual command for a fresh pane/window opened directly in tmux or herdr (e.g. `Ctrl-b c`, not through smarthistory's own `*` panes picker). tmux sessions and herdr workspaces are already named after the `session.<key>`/`host.<key>` entry's DISPLAY NAME (not `<key>` itself) that created them, so no separate registration step is needed — `pane-exec` just reads the current session name (or workspace label) and looks it up against every entry's display name. A `session.<key>` match re-runs its `.exec`; a `host.<key>` match re-runs its `ssh` connection only — the host's `.exec` is deliberately not replayed, since it's meant to be typed into the remote shell after connecting (via the multiplexer backend's pane-injection API), not run as a local follow-up command.
 
 ---
 
@@ -977,18 +981,18 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |
 | `homemap` | path prefix list | — | [Multiplexer integration](#multiplexer-integration) |
-| `session.<id>` | string | — | [Multiplexer integration](#multiplexer-integration) |
-| `session.<id>.dir` | path | — | [Multiplexer integration](#multiplexer-integration) |
-| `session.<id>.exec` | string | — | [Multiplexer integration](#multiplexer-integration) |
-| `session.<id>.startup_command` | string | (reserved) | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>` | string | — (auto from `~/.ssh/config`) | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.host` | string | — | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.hostname` | string | — | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.user` | string | — | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.port` | int | — | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.identity` | path | — | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.dir` | path | — | [Multiplexer integration](#multiplexer-integration) |
-| `host.<id>.exec` | string | — | [Multiplexer integration](#multiplexer-integration) |
+| `session.<key>` | string | — | [Multiplexer integration](#multiplexer-integration) |
+| `session.<key>.dir` | path | — | [Multiplexer integration](#multiplexer-integration) |
+| `session.<key>.exec` | string | — | [Multiplexer integration](#multiplexer-integration) |
+| `session.<key>.startup_command` | string | (reserved) | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>` | string | — (auto from `~/.ssh/config`) | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.host` | string | — | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.hostname` | string | — | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.user` | string | — | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.port` | int | — | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.identity` | path | — | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.dir` | path | — | [Multiplexer integration](#multiplexer-integration) |
+| `host.<key>.exec` | string | — | [Multiplexer integration](#multiplexer-integration) |
 | `notes.database` | path | — (feature disabled) | [Notes (`@` mode)](#notes--mode) |
 | `notes.dir` | path | — (feature disabled) | [Notes (`@` mode)](#notes--mode) |
 | `todo.line_option` | template | `+$LINE` | [Todo (`!` mode)](#todo--mode) |

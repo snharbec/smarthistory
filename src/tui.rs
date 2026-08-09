@@ -9951,7 +9951,7 @@ impl App {
     /// success, or an error
     /// string the caller can
     /// surface to the user.
-    fn write_new_entry_to_config(&mut self) -> Result<usize, String> {
+    fn write_new_entry_to_config(&mut self) -> Result<String, String> {
         // Snapshot the dialog
         // up-front so the
         // immutable borrow of
@@ -9980,9 +9980,9 @@ impl App {
         // field becomes a
         // line:
         //
-        // session.3 = "Proxmox"
-        // session.3.dir = "~/foo"
-        // session.3.exec = "nvim"
+        // session.proxmox = "Proxmox"
+        // session.proxmox.dir = "~/foo"
+        // session.proxmox.exec = "nvim"
         //
         // The Name field
         // (config_suffix = "")
@@ -9991,7 +9991,7 @@ impl App {
         // follow. Empty
         // sub-fields are
         // skipped (no
-        // `session.3.dir =`
+        // `session.proxmox.dir =`
         // lines for unset
         // values).
         let name = fields
@@ -10001,16 +10001,10 @@ impl App {
         if name.is_empty() {
             return Err("`Name` is required".to_string());
         }
-        // Read the existing
-        // sessions/hosts file so
-        // we can find the next
-        // available id. A
-        // missing file (the
-        // user's first session/
-        // host entry) is treated
-        // as empty content —
-        // `next_config_index`
-        // returns 1 for that.
+        // Read the existing sessions/hosts file so we can derive a
+        // unique key. A missing file (the user's first session/host
+        // entry) is treated as empty content — nothing to collide
+        // with, so `unique_config_slug` just returns the bare slug.
         let contents = match std::fs::read_to_string(&target_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -10020,8 +10014,7 @@ impl App {
             AddEntryKind::Session => "session",
             AddEntryKind::Host => "host",
         };
-        let new_id = crate::tui::state::next_config_index(&contents, prefix)
-            .ok_or_else(|| format!("no free {} id (existing ids are exhausted)", prefix,))?;
+        let new_id = crate::tui::state::unique_config_slug(&contents, prefix, &name);
         // Build the new
         // lines. The Name
         // field's value is
@@ -10153,7 +10146,7 @@ impl App {
             AddEntryKind::Session => "session",
             AddEntryKind::Host => "host",
         };
-        self.set_status_message(format!("added {} {:?} (id={})", kind_label, name, new_id,));
+        self.set_status_message(format!("added {} {:?} (key={})", kind_label, name, new_id,));
         Ok(new_id)
     }
 

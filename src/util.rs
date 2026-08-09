@@ -15,6 +15,62 @@ pub fn parse_bool(s: &str, default: bool) -> bool {
     }
 }
 
+/// Turn a free-text display name into a config-file-safe key
+/// fragment: lowercased, runs of anything that isn't
+/// ASCII-alphanumeric/`-`/`_` collapsed to a single `-`, leading/
+/// trailing `-` trimmed. Used to derive `session.<key>`/`host.<key>`
+/// keys from a session/host's display name (e.g. "⛩️ Home " →
+/// "home", "SmartHistory" → "smarthistory") — see
+/// `Config::write_new_entry_to_config`'s use via `unique_slug` and
+/// the SSH-config auto-append merge in `Config::parse`. Falls back to
+/// `fallback` (e.g. `"session"`/`"host"`) when nothing alphanumeric
+/// survives (an all-emoji name, an empty string).
+pub fn slugify(name: &str, fallback: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_was_sep = true; // swallow a leading separator
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+            last_was_sep = false;
+        } else if !last_was_sep {
+            out.push('-');
+            last_was_sep = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
+
+/// [`slugify`] `name`, then disambiguate against `existing` keys by
+/// appending `-2`, `-3`, … until the result doesn't collide — e.g. a
+/// second host named "paperless" becomes `paperless-2`. Used
+/// whenever a new `session.<key>`/`host.<key>` entry is about to be
+/// created (the F5/F6 "add entry" dialogs, the zoxide save prompt,
+/// and the SSH-config auto-append merge), so two entries can never
+/// silently clobber each other the way two `session.<id>` lines with
+/// the same numeric id used to.
+pub fn unique_slug<'a>(existing: impl Iterator<Item = &'a str>, name: &str, fallback: &str) -> String {
+    let base = slugify(name, fallback);
+    let existing: std::collections::HashSet<&str> = existing.collect();
+    if !existing.contains(base.as_str()) {
+        return base;
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !existing.contains(candidate.as_str()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Format a Unix epoch (seconds) as "dd.Mon.YYYY HH:MM:SS" in UTC, e.g.
 /// "03.Jun.2026 17:43:01". Returns a placeholder string for invalid
 /// timestamps so that history items with no valid time stamp can still

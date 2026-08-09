@@ -1391,7 +1391,7 @@ tmuxpaneoutputdir=~/custom-tmux
         ]);
         let dirs = cfg.session_directories();
         assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0].0, 1);
+        assert_eq!(dirs[0].0, "1");
         assert_eq!(dirs[0].1, "Has dir");
         assert_eq!(dirs[0].2, "/tmp/some-dir");
     }
@@ -1422,7 +1422,7 @@ tmuxpaneoutputdir=~/custom-tmux
         )
         .expect("write");
 
-        let ids: std::collections::HashSet<usize> = [2].into_iter().collect();
+        let ids: std::collections::HashSet<String> = ["2".to_string()].into_iter().collect();
         let removed = remove_session_lines(&path, &ids).expect("remove");
         assert_eq!(removed, 3, "name + .dir + .exec lines for session.2");
 
@@ -1448,7 +1448,7 @@ tmuxpaneoutputdir=~/custom-tmux
         let original = "session.1 = \"Keep\"\nsession.1.dir = /tmp/keep\n";
         std::fs::write(&path, original).expect("write");
 
-        let ids: std::collections::HashSet<usize> = [99].into_iter().collect();
+        let ids: std::collections::HashSet<String> = ["99".to_string()].into_iter().collect();
         let removed = remove_session_lines(&path, &ids).expect("remove");
         assert_eq!(removed, 0);
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), original);
@@ -1464,6 +1464,6 @@ tmuxpaneoutputdir=~/custom-tmux
             "smarthistory-remove-session-lines-missing-{}",
             std::process::id()
         ));
-        let ids: std::collections::HashSet<usize> = [1].into_iter().collect();
+        let ids: std::collections::HashSet<String> = ["1".to_string()].into_iter().collect();
         assert_eq!(remove_session_lines(&path, &ids).expect("remove"), 0);
     }
