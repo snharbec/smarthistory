@@ -170,6 +170,16 @@ case "$_smarthistory_mode" in
     *) _smarthistory_mode="sess" ;;
 esac
 
+# Whether `_smarthistory_update_rprompt` prints the "[smarthistory:
+# SESS]"/"[~]" indicator text after a `Ctrl-g`/`Ctrl-t` toggle (and
+# once at shell init). Default on (the historical behavior); turn off
+# via `zsh.indicator=off` once an external prompt system reads
+# `SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE` instead (see
+# `_smarthistory_sync_prompt_env` below) — the toggle keys still work
+# either way, this only silences the printed line.
+typeset -g _smarthistory_indicator_enabled="1"
+[[ "$(smarthistory config get zsh.indicator 2>/dev/null)" == "off" ]] && _smarthistory_indicator_enabled="0"
+
 # Save the user's original RPROMPT (if any) at init time so we can
 # append our mode indicator without clobbering their customization.
 typeset -g _smarthistory_rprompt_save="$RPROMPT"
@@ -1944,7 +1954,14 @@ _smarthistory_update_rprompt() {
     else
         MYPROMPT="$label"
     fi
-    echo $MYPROMPT
+    # `$MYPROMPT` is always computed above (cheap, and left available
+    # for anyone who wants to reference it in their own prompt), but
+    # only actually printed when `zsh.indicator` is on — see
+    # `_smarthistory_indicator_enabled`'s doc comment near its
+    # declaration. `SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE`
+    # (`_smarthistory_sync_prompt_env`) stay in sync either way, so
+    # turning this off doesn't affect an external prompt reading those.
+    [[ "$_smarthistory_indicator_enabled" = "1" ]] && echo $MYPROMPT
 }
 
 _smarthistory_cycle_mode() {

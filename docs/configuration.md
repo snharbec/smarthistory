@@ -41,6 +41,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`duplicatefilter`](#duplicatefilter)
   - [`initialmode`](#initialmode)
   - [`zsh.mode`](#zshmode)
+  - [`zsh.indicator`](#zshindicator)
   - [`segments.minwords`](#segmentsminwords)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
@@ -203,6 +204,20 @@ The Up/Down history-walk widget's search scope (`_smarthistory_mode` in `init.zs
 
 ```ini
 zsh.mode=global
+```
+
+### `zsh.indicator`
+
+| | |
+| --- | --- |
+| **Type** | `on` \| `off` |
+| **Default** | `on` |
+| **Env override** | — |
+
+Whether `Ctrl-g` (`_smarthistory_cycle_mode`) and `Ctrl-t` (`_smarthistory_cycle_matchmode`, see [`dropdown.matchmode`](#dropdownmatchmode)) print the `[smarthistory: SESS]`/`[~]` indicator text after toggling (and once at shell init). Turn off once an external prompt system reads [`SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE`](#published-environment-variables) instead — both toggle keys keep working and those env vars stay in sync either way; this only silences the printed line.
+
+```ini
+zsh.indicator=off
 ```
 
 ### `segments.minwords`
@@ -931,6 +946,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `duplicatefilter` | `on` \| `off` | `on` | [History list & filtering](#history-list--filtering) |
 | `initialmode` | enum | `SESS` | [History list & filtering](#history-list--filtering) |
 | `zsh.mode` | `sess` \| `dir` \| `global` | `sess` | [History list & filtering](#history-list--filtering) |
+| `zsh.indicator` | `on` \| `off` | `on` | [History list & filtering](#history-list--filtering) |
 | `segments.minwords` | non-negative int | `5` | [History list & filtering](#history-list--filtering) |
 | `dropdown.enabled` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |

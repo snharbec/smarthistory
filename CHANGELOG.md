@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `zsh.indicator=on|off` config key (default `on`): whether `Ctrl-g`/
+  `Ctrl-t` print the `[smarthistory: SESS]`/`[~]` indicator text after
+  toggling. Turn off once an external prompt system reads
+  `SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE` instead — both toggle keys
+  and the exported env vars keep working either way, this only silences
+  the printed line.
 - `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
   `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment
   variables, kept in sync on every `Ctrl-g`/`Ctrl-t` toggle

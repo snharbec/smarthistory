@@ -1202,6 +1202,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         if cfg.globcomplete_enabled { "on" } else { "off" }
     );
     let _ = writeln!(f, "  zsh.mode = {}", cfg.zsh_default_mode);
+    let _ = writeln!(
+        f,
+        "  zsh.indicator = {}",
+        if cfg.zsh_indicator { "on" } else { "off" }
+    );
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
     use crate::tui::bindings::ALL_ACTIONS;
@@ -1606,6 +1611,16 @@ pub struct Config {
     /// matching the historical hardcoded starting value. Set via
     /// `zsh.mode=sess|dir|global`.
     zsh_default_mode: String,
+    /// Whether `Ctrl-g` (`_smarthistory_cycle_mode`) and `Ctrl-t`
+    /// (`_smarthistory_cycle_matchmode`) print the `[smarthistory:
+    /// SESS]`/`[~]` indicator text to the terminal after toggling.
+    /// Default `true` (the historical behavior). Turn off once an
+    /// external prompt system reads `SMARTHISTORY_MODE`/
+    /// `SMARTHISTORY_MATCHMODE` instead (see "Published environment
+    /// variables" in docs/configuration.md) — the toggle still works
+    /// either way, this only silences the printed confirmation line.
+    /// Set via `zsh.indicator=on|off`.
+    zsh_indicator: bool,
     /// Path to the note_search SQLite database. When set, the `@`
     /// prefix searches notes instead of shell history.
     /// Can also be set via the NOTE_SEARCH_DATABASE env var.
@@ -1930,6 +1945,7 @@ impl Config {
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
+            zsh_indicator: true,
             notes_database: None,
             notes_dir: None,
             todo_line_option: String::from("+$LINE"),
@@ -2164,6 +2180,9 @@ impl Config {
                         value
                     ),
                 },
+                "zsh.indicator" => {
+                    self.zsh_indicator = crate::util::parse_bool(value, true);
+                }
                 "dropdown.minchars" => match value.trim().parse::<usize>() {
                     Ok(n) => self.dropdown_min_chars = n,
                     _ => eprintln!(
@@ -5754,6 +5773,9 @@ fn main() -> anyhow::Result<()> {
                         println!("{}", if cfg.globcomplete_enabled { "on" } else { "off" })
                     }
                     "zsh.mode" => println!("{}", cfg.zsh_default_mode),
+                    "zsh.indicator" => {
+                        println!("{}", if cfg.zsh_indicator { "on" } else { "off" })
+                    }
                     // Resolved palette as a flat `key=value` block,
                     // one entry per `tuicolor.<field>` slot. The
                     // widget reads this once at init time and
