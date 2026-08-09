@@ -63,20 +63,12 @@ pub(crate) fn check(_app: &App) -> CheckReport {
     //    just use the default set.
     let ignore = crate::files::IgnoreSet::new(&[]);
 
-    // 3. Walk. We cap the result count at 10
-    //    rows for the probe; the runtime walk
-    //    has its own debounce / cancellation
-    //    logic we don't need to exercise here.
+    // 3. Walk. The probe just runs `walk_dir` directly (unfiltered,
+    //    same as the runtime's one-shot walk) rather than exercising
+    //    the debounce/background-thread plumbing.
     let mut rows: Vec<crate::tui::state::HistoryRow> = Vec::new();
     let mut next_id: i64 = -1;
-    crate::files::walk_dir(
-        &cwd,
-        &cwd,
-        &crate::files::FilesFilter::Substring(&[]), // no filter — walk everything
-        &ignore,
-        &mut next_id,
-        &mut rows,
-    );
+    crate::files::walk_dir(&cwd, &cwd, &ignore, &mut next_id, &mut rows);
 
     if rows.is_empty() {
         CheckReport::warn(
@@ -109,31 +101,64 @@ pub(crate) fn pattern(app: &App) -> &str {
 }
 
 /// Fetch the files-mode result set. The walk runs
-/// on a background thread (spawned by
-/// `App::files_touch` → `crate::files::spawn_walk`),
-/// so this just clones the cached rows from
-/// `App::files_state`, filtered by row kind. Plain
-/// `/` mode (and a locked `--glob-complete` file
-/// picker) keeps only file rows — directories are
-/// reachable via the directories (`#`) mode if the
-/// user wants directory-level navigation, and
-/// showing them here would clutter the list with
-/// rows that have no preview content. A locked
-/// `--glob-complete-dir` DIRECTORY picker (see
-/// `FilePickerKind::Directories`) inverts that:
-/// `walk_dir` already tags every matching entry
-/// `mode == "file"` or `mode == "directory"`, so no
-/// change to the walker itself is needed — only
-/// which of those two kinds this function keeps.
+/// on a background thread, exactly once per session (spawned by
+/// `App::files_touch` → `crate::files::spawn_walk`; see the
+/// module-level doc comment on `crate::files`). This function does
+/// the actual per-keystroke work: it derives a filter (glob or
+/// substring, same detection `App::spawn_files_walk` used to do
+/// before every walk — see there for why glob detection applies
+/// regardless of `file_picker_lock`) from the CURRENT query and
+/// applies it in memory, via `crate::files::filter_rows`, against
+/// the cached tree — no filesystem access. Plain `/` mode (and a
+/// locked `--glob-complete` file picker) keeps only file rows —
+/// directories are reachable via the directories (`#`) mode if the
+/// user wants directory-level navigation, and showing them here
+/// would clutter the list with rows that have no preview content. A
+/// locked `--glob-complete-dir` DIRECTORY picker (see
+/// `FilePickerKind::Directories`) inverts that: `walk_dir` already
+/// tags every entry `mode == "file"` or `mode == "directory"`, so no
+/// change to the walker itself is needed — only which of those two
+/// kinds this function keeps.
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     let want_dirs = app.is_directory_picker();
-    Ok(app
-        .files_state
-        .rows
-        .iter()
-        .filter(|r| (r.mode == "directory") == want_dirs)
-        .cloned()
-        .collect())
+    let pattern = crate::files::FilesState::current_pattern(&app.query, app.query_prefixes.files);
+    let mut words = pattern.split_whitespace();
+    let first_word = words.next().unwrap_or("");
+    let is_glob = first_word.contains(['*', '?', '[']);
+    // Mirrors `App::spawn_files_walk`'s old per-walk filter
+    // resolution, just run in memory on every keystroke instead of
+    // gating a filesystem walk — see the module-level doc comment
+    // on `crate::files` for why this moved here.
+    let (root_suffix, spec) = if is_glob {
+        let extra_tokens: Vec<String> = words.map(|w| w.to_lowercase()).collect();
+        let (root_suffix, glob_pattern) = crate::files::split_glob_root(first_word);
+        let glob_pattern = if glob_pattern.is_empty() { "*".to_string() } else { glob_pattern };
+        match crate::files::glob_to_regex(&glob_pattern) {
+            Ok(basename) => (root_suffix, crate::files::FilesFilterSpec::Glob { basename, extra_tokens }),
+            Err(e) => {
+                app.set_status_message(format!("invalid glob pattern {glob_pattern:?}: {e}"));
+                return Ok(Vec::new());
+            }
+        }
+    } else {
+        let tokens: Vec<String> =
+            pattern.split_whitespace().map(|w| w.to_lowercase()).collect();
+        (String::new(), crate::files::FilesFilterSpec::Substring(tokens))
+    };
+    let Some(all_rows) = app.files_state.all_rows.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let filter = match &spec {
+        crate::files::FilesFilterSpec::Substring(tokens) => crate::files::FilesFilter::Substring(tokens),
+        crate::files::FilesFilterSpec::Glob { basename, extra_tokens } => {
+            crate::files::FilesFilter::Glob { basename, extra_tokens }
+        }
+    };
+    let mut rows = crate::files::filter_rows(all_rows, &root_suffix, &filter);
+    rows.retain(|r| (r.mode == "directory") == want_dirs);
+    crate::files::sort_rows_newest_modified_first(&mut rows);
+    rows.truncate(1000);
+    Ok(rows)
 }
 
 /// Lazy-load context for the currently-selected row into `output`
@@ -273,157 +298,74 @@ impl App {
         matches(self)
     }
 
-    /// Arm or clear the files-mode
-    /// walk debounce. Called from
-    /// `llm_touch` on every keystroke
-    /// (same co-location pattern as
-    /// `jira_touch`). Re-arms the
-    /// timer when the user is still in
-    /// files mode; resets all pending
-    /// state when the user leaves.
+    /// Spawn the one-shot background directory walk if we're in
+    /// files mode (or a locked file/directory picker) and haven't
+    /// walked yet this session. Called from `llm_touch` on every
+    /// keystroke (same co-location pattern as `jira_touch`) AND
+    /// from the run loop's idle tick (`files_maybe_autocall`, a
+    /// thin alias kept for symmetry with the other modes'
+    /// `*_maybe_autocall` idle-tick hooks) — both are safe to call
+    /// repeatedly: `all_rows.is_some() || in_flight` makes every
+    /// call after the first a no-op, so there's no debounce to
+    /// arm/race here (see the module-level doc comment on
+    /// `crate::files` for why the walk itself no longer needs one).
     pub(crate) fn files_touch(&mut self) {
-        let active = self.is_files_query();
-        crate::debounce::touch(&mut self.files_state, active);
-    }
-
-    /// Check whether the files-mode
-    /// debounce has elapsed and, if so,
-    /// spawn a background directory walk.
-    /// Called from the run-loop's idle
-    /// tick (same pattern as
-    /// `llm_maybe_autocall` and
-    /// `jira_maybe_autocall`). Returns
-    /// immediately when not in files
-    /// mode, when a walk is already in
-    /// flight, or when the debounce
-    /// window hasn't elapsed.
-    pub(crate) fn files_maybe_autocall(&mut self) {
         if !self.is_files_query() {
             return;
         }
-        if !crate::debounce::debounce_elapsed(&mut self.files_state, crate::files::FILES_DEBOUNCE) {
+        if self.files_state.all_rows.is_some() || self.files_state.in_flight {
             return;
         }
-        let pattern =
-            crate::files::FilesState::current_pattern(&self.query, self.query_prefixes.files);
-        // Skip if we already have results for this pattern.
-        if self.files_state.has_results_for(&pattern) {
-            return;
-        }
-        // First entry into files mode:
-        // arm the debounce so the walk
-        // fires on the next tick even
-        // if the user never types
-        // another character.
-        self.files_state.last_pattern = Some(pattern.clone());
-        self.spawn_files_walk(pattern);
+        self.spawn_files_walk();
     }
 
-    /// Spawn a background thread that
-    /// walks the current directory tree,
-    /// filters by `pattern`, and sends
-    /// the result back over an mpsc
-    /// channel. The run loop polls the
-    /// receiver and calls
-    /// `process_files_result` when the
-    /// result arrives.
-    pub(crate) fn spawn_files_walk(&mut self, pattern: String) {
+    /// Idle-tick backstop for `files_touch` — see its doc comment.
+    /// Kept as a separate name so the run loop's per-mode
+    /// `*_maybe_autocall()` dispatch list (`llm_maybe_autocall`,
+    /// `jira_maybe_autocall`, etc.) stays uniform even though files
+    /// mode no longer has a real debounce to drive.
+    pub(crate) fn files_maybe_autocall(&mut self) {
+        self.files_touch();
+    }
+
+    /// Spawn a background thread that walks the session's files-mode
+    /// root ONCE (see `crate::files::spawn_walk` / the module-level
+    /// doc comment on `crate::files`) and sends the result back over
+    /// an mpsc channel. The run loop polls the receiver and calls
+    /// `process_files_result` when the result arrives.
+    pub(crate) fn spawn_files_walk(&mut self) {
         let ignore = crate::files::IgnoreSet::new(&self.files_ignores);
-        // Base root: `file_picker_lock.base_root` for a locked
+        // The walk root: `file_picker_lock.base_root` for a locked
         // `--glob-complete[-dir]` session, else `files_root`
         // (defaulting to `current_dir()`, overridable via
-        // `smarthistory tui --root`). Independent of whether THIS
-        // particular walk ends up glob- or substring-filtered below.
+        // `smarthistory tui --root`). Fixed for the whole session —
+        // unlike the old per-keystroke design, nothing here depends
+        // on the typed pattern, since the walk is pattern-agnostic
+        // (filtering happens per-keystroke in `fetch`, not here).
         let base_root = self
             .file_picker_lock
             .as_ref()
             .map(|l| l.base_root.clone())
             .unwrap_or_else(|| self.files_root.clone());
-        // The typed body is split on whitespace. If the FIRST word
-        // contains shell-glob syntax (`* ? [`), it's root-scoped
-        // (`split_glob_root`) and translated to a basename regex
-        // (`glob_to_regex`); every word after it narrows further as
-        // a plain lowercase substring against the display path —
-        // e.g. `* tui` matches every path containing "tui" anywhere
-        // under the walk root, `*.md jira` matches every markdown
-        // file whose path contains "jira". This applies REGARDLESS
-        // of `file_picker_lock` — plain interactive `/` mode gets
-        // the exact same glob-aware matching the `--glob-complete`
-        // picker uses, not just today's literal-substring behavior,
-        // since `* ? [` were never usable as literal substring
-        // search terms anyway (real filenames essentially never
-        // contain them) — this is a strict improvement, not a
-        // narrower special case. A query with NO glob-looking first
-        // word (the common case: plain text) is completely
-        // unaffected, falling through to the original AND-of-
-        // substring-tokens matcher untouched.
-        let mut words = pattern.split_whitespace();
-        let first_word = words.next().unwrap_or("");
-        let is_glob = first_word.contains(['*', '?', '[']);
-        let (root, filter_spec) = if is_glob {
-            let extra_tokens: Vec<String> = words.map(|w| w.to_lowercase()).collect();
-            let (root_suffix, glob_pattern) = crate::files::split_glob_root(first_word);
-            // A trailing `/` (e.g. `foo*/`, or a globby leading
-            // segment whose final component is empty) leaves
-            // `glob_pattern` empty — treat that as "match every
-            // basename" (`*`), same as an empty picker filter
-            // showing everything, rather than building a regex that
-            // matches nothing.
-            let glob_pattern = if glob_pattern.is_empty() {
-                "*".to_string()
-            } else {
-                glob_pattern
-            };
-            let root = if root_suffix.is_empty() {
-                base_root
-            } else {
-                base_root.join(&root_suffix)
-            };
-            match crate::files::glob_to_regex(&glob_pattern) {
-                Ok(basename) => (
-                    root,
-                    crate::files::FilesFilterSpec::Glob { basename, extra_tokens },
-                ),
-                Err(e) => {
-                    self.set_status_message(format!(
-                        "invalid glob pattern {glob_pattern:?}: {e}"
-                    ));
-                    return;
-                }
-            }
-        } else {
-            (base_root, crate::files::FilesFilterSpec::Substring)
-        };
-        let request = crate::files::spawn_walk(pattern.clone(), ignore, root, filter_spec);
+        let request = crate::files::spawn_walk(base_root, ignore);
         self.files_state.in_flight = true;
         self.files_state.request = Some(request);
         self.set_status_message("Searching files…".to_string());
     }
 
-    /// Process a files-mode walk result
-    /// that arrived from the background
-    /// thread. Caches the rows in
-    /// `self.files_state.rows` and
-    /// refreshes the list. Stale results
-    /// (the pattern changed between spawn
-    /// and delivery) are discarded.
+    /// Process the one-shot files-mode walk result that arrived from
+    /// the background thread. Caches the full (unfiltered) tree in
+    /// `self.files_state.all_rows` and refreshes the list — every
+    /// keystroke after this filters the cached tree in memory (see
+    /// `fetch`) instead of re-walking.
     pub(crate) fn process_files_result(
         &mut self,
-        request: crate::files::FilesRequest,
+        _request: crate::files::FilesRequest,
         rows: Vec<HistoryRow>,
     ) {
         self.files_state.in_flight = false;
         self.files_state.request = None;
-        // Only accept if this result
-        // matches the current pattern
-        // (the user may have typed
-        // more characters while the
-        // walk was running).
-        let current =
-            crate::files::FilesState::current_pattern(&self.query, self.query_prefixes.files);
-        if current == request.pattern {
-            self.files_state.rows = rows;
-            self.refresh();
-        }
+        self.files_state.all_rows = Some(rows);
+        self.refresh();
     }
 }

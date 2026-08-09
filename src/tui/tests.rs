@@ -28450,37 +28450,30 @@ fn file_picker_backspace_cannot_delete_locked_prefix() {
     );
 }
 
-/// Regression test for a real bug caught in manual testing:
-/// `files_maybe_autocall`'s debounce timer (`debounce::debounce_elapsed`)
-/// only returns `true` once `debounce_started` has been armed by
-/// `files_touch()` — which, for ordinary interactive `/` mode, fires
-/// reactively from the self-insert keystroke hook the moment the
-/// user types the `/` prefix themselves. A locked `--glob-complete`
-/// session's query arrives PRE-FILLED via the CLI with zero
-/// keystrokes, so without an explicit touch at setup time the walk
-/// would never spawn — the picker would sit at "0 matches" forever,
-/// only "unstuck" by the user's first incidental keypress (which is
-/// exactly what was observed: no results until something was typed).
-/// `run_tui_to_stdout` now calls `app.files_touch()` immediately
-/// after installing `file_picker_lock`; this test asserts that
-/// exact fix's effect directly, without needing a real keystroke.
+/// Regression test for a real bug caught in manual testing: the
+/// files-mode walk used to only fire reactively from the
+/// self-insert keystroke hook, so a locked `--glob-complete`
+/// session's query — which arrives PRE-FILLED via the CLI with zero
+/// keystrokes — never triggered a walk, leaving the picker stuck at
+/// "0 matches" until the user's first incidental keypress. Fixed by
+/// having `run_tui_to_stdout` call `app.files_touch()` immediately
+/// after installing `file_picker_lock`. Since the walk-once
+/// redesign, `files_touch()` no longer arms a debounce timer — it
+/// spawns the one-shot walk directly (see the module-level doc
+/// comment on `crate::files`) — so this test asserts that directly:
+/// no walk in flight before the call, one in flight immediately
+/// after, with no keystroke required.
 #[test]
-fn file_picker_lock_setup_arms_files_debounce_without_a_keystroke() {
+fn files_touch_spawns_walk_without_a_keystroke() {
     let mut app = file_picker_locked_test_app();
-    // Simulate a fresh locked session that has NOT yet had the fix
-    // applied: `files_touch()` never called, so the debounce must
-    // never elapse — this is the exact bug's before-state.
     assert!(
-        !crate::debounce::debounce_elapsed(&mut app.files_state, std::time::Duration::ZERO),
-        "sanity: an un-touched debounce must never report elapsed, even with a zero threshold"
+        app.files_state.all_rows.is_none() && !app.files_state.in_flight,
+        "sanity: a fresh session has no cached tree and no walk in flight yet"
     );
-    // Apply the fix (mirrors the line added to `run_tui_to_stdout`
-    // right after `file_picker_lock` is installed).
     app.files_touch();
     assert!(
-        crate::debounce::debounce_elapsed(&mut app.files_state, std::time::Duration::ZERO),
-        "files_touch() must arm the debounce immediately so the walk can spawn on the very \
-         first idle tick, with no keystroke required"
+        app.files_state.in_flight,
+        "files_touch() must spawn the one-shot walk immediately, with no keystroke required"
     );
 }
 
@@ -28506,14 +28499,17 @@ fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
         base_root: dir.clone(),
         kind: FilePickerKind::Files,
     });
-    app.spawn_files_walk("*.md jira".to_string());
+    app.query = format!("{}*.md jira", app.query_prefixes.files);
+    app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
     let rows = request
         .receiver
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("walk did not complete within 5s (hang or panic)");
-    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    app.files_state.all_rows = Some(rows);
+    let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
+    let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(
         names,
         vec!["jira-notes.md"],
@@ -28546,14 +28542,17 @@ fn spawn_files_walk_unlocked_glob_first_word_narrows_by_extra_substring() {
     let mut app = directories_test_app(&[]);
     app.files_root = dir.clone();
     assert!(app.file_picker_lock.is_none(), "sanity: this is the UNLOCKED path");
-    app.spawn_files_walk("* tui".to_string());
+    app.query = format!("{}* tui", app.query_prefixes.files);
+    app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
     let rows = request
         .receiver
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("walk did not complete within 5s (hang or panic)");
-    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    app.files_state.all_rows = Some(rows);
+    let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
+    let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(
         names,
         vec!["sub/tui.rs"],
@@ -28578,14 +28577,17 @@ fn spawn_files_walk_unlocked_plain_text_still_uses_substring_matcher() {
 
     let mut app = directories_test_app(&[]);
     app.files_root = dir.clone();
-    app.spawn_files_walk("apple".to_string());
+    app.query = format!("{}apple", app.query_prefixes.files);
+    app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
     let rows = request
         .receiver
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("walk did not complete within 5s (hang or panic)");
-    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    app.files_state.all_rows = Some(rows);
+    let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
+    let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(names, vec!["apple.txt"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -28626,7 +28628,7 @@ fn file_picker_directories_fetch_shows_only_directory_rows() {
     ];
 
     let mut dir_app = directories_test_app(&[]);
-    dir_app.files_state.rows = rows.clone();
+    dir_app.files_state.all_rows = Some(rows.clone());
     dir_app.file_picker_lock = Some(FilePickerLock {
         prefix: dir_app.query_prefixes.files,
         base_root: std::path::PathBuf::from("/tmp"),
@@ -28637,7 +28639,7 @@ fn file_picker_directories_fetch_shows_only_directory_rows() {
     assert_eq!(dir_result[0].command, "sub");
 
     let mut file_app = directories_test_app(&[]);
-    file_app.files_state.rows = rows;
+    file_app.files_state.all_rows = Some(rows);
     let file_result = crate::tui::mode::files::fetch(&mut file_app).unwrap();
     assert_eq!(file_result.len(), 1);
     assert_eq!(file_result[0].command, "a.txt");
@@ -28709,14 +28711,15 @@ fn file_picker_directories_spawn_files_walk_finds_only_matching_directories() {
         base_root: dir.clone(),
         kind: FilePickerKind::Directories,
     });
-    app.spawn_files_walk("project*".to_string());
+    app.query = format!("{}project*", app.query_prefixes.files);
+    app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
     let all_rows = request
         .receiver
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("walk did not complete within 5s (hang or panic)");
-    app.files_state.rows = all_rows;
+    app.files_state.all_rows = Some(all_rows);
     let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
     let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(
