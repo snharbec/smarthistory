@@ -189,6 +189,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word
+  now actually works in plain interactive use, not just inside the
+  `--glob-complete` picker — `docs/modes/files.md` already documented
+  `/*.toml` and `*<glob>` path segments as supported, but the walker only
+  ever did literal AND-of-substring matching, so a query like `* tui`
+  required a literal `*` character in the filename (never happens) and
+  matched nothing, forever. The first word is now glob-matched (root-scoped,
+  recursive, basename-only) exactly like the picker; every word after it
+  still narrows further by substring, and a query with no glob-looking
+  first word is completely unaffected.
 - Preview-pane markdown renderer: an unclosed italic marker that was
   actually a literal underscore (e.g. a directory or file name like
   `alpha_sub`) was silently rewritten to an asterisk on render

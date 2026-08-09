@@ -28522,6 +28522,74 @@ fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Regression test: glob syntax must ALSO work in plain, unlocked
+/// interactive `/` mode (typed by the user, not launched via
+/// `--glob-complete`), not just inside the locked picker — a real
+/// bug reported after the picker shipped: typing `* tui` in normal
+/// `/` mode was falling through to the OLD literal-substring
+/// matcher, which requires a literal `*` character in the filename
+/// (never happens), so it matched nothing and never narrowed. The
+/// first word containing `* ? [` must be glob-matched (recursively,
+/// against basenames) exactly like the picker does; a query with NO
+/// glob-looking first word is completely unaffected.
+#[test]
+fn spawn_files_walk_unlocked_glob_first_word_narrows_by_extra_substring() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_unlocked_glob_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub").join("tui.rs"), "x").unwrap();
+    std::fs::write(dir.join("other.rs"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.files_root = dir.clone();
+    assert!(app.file_picker_lock.is_none(), "sanity: this is the UNLOCKED path");
+    app.spawn_files_walk("* tui".to_string());
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    let rows = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("walk did not complete within 5s (hang or panic)");
+    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["sub/tui.rs"],
+        "expected only sub/tui.rs (basename matches `*`, path contains \"tui\"), got {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A query with no glob-looking first word is completely unaffected
+/// by the glob-detection change — plain text still goes through the
+/// original AND-of-substring-tokens matcher.
+#[test]
+fn spawn_files_walk_unlocked_plain_text_still_uses_substring_matcher() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_unlocked_plain_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("apple.txt"), "x").unwrap();
+    std::fs::write(dir.join("banana.txt"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.files_root = dir.clone();
+    app.spawn_files_walk("apple".to_string());
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    let rows = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("walk did not complete within 5s (hang or panic)");
+    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    assert_eq!(names, vec!["apple.txt"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- Directory picker (`--glob-complete-dir`, `cd proj*<TAB>`) ----
 
 /// Build a locked DIRECTORY-picker `App` (mirrors

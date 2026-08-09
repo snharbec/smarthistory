@@ -332,56 +332,70 @@ impl App {
     /// result arrives.
     pub(crate) fn spawn_files_walk(&mut self, pattern: String) {
         let ignore = crate::files::IgnoreSet::new(&self.files_ignores);
-        // A locked `--glob-complete` session (see `file_picker_lock`)
-        // re-resolves the scoped root + glob-vs-substring filter on
-        // EVERY walk (not just once at startup), since the query
-        // body — and therefore the root-scoping prefix before the
-        // last `/` — can keep changing as the user types. An
-        // unlocked session (the default, `file_picker_lock` is
-        // `None`) is byte-for-byte today's behavior: `files_root`
-        // (defaulting to `current_dir()`) and the substring matcher.
-        let (root, filter_spec) = match &self.file_picker_lock {
-            Some(lock) => {
-                // The typed body is split on whitespace: the FIRST
-                // word is always the glob (root-scoped via
-                // `split_glob_root`, same as before); every word
-                // after it narrows further as a plain lowercase
-                // substring against the display path — e.g. `*.md
-                // jira` matches every markdown file whose relative
-                // path contains "jira". An empty (or missing) first
-                // word matches every basename (`*`), so clearing the
-                // filter back to just the bare prefix shows
-                // everything, same as unlocked `/` mode's empty-body
-                // default.
-                let mut words = pattern.split_whitespace();
-                let first_word = words.next().unwrap_or("");
-                let extra_tokens: Vec<String> =
-                    words.map(|w| w.to_lowercase()).collect();
-                let (root_suffix, glob_pattern) = crate::files::split_glob_root(first_word);
-                let glob_pattern = if glob_pattern.is_empty() {
-                    "*".to_string()
-                } else {
-                    glob_pattern
-                };
-                let root = if root_suffix.is_empty() {
-                    lock.base_root.clone()
-                } else {
-                    lock.base_root.join(&root_suffix)
-                };
-                match crate::files::glob_to_regex(&glob_pattern) {
-                    Ok(basename) => (
-                        root,
-                        crate::files::FilesFilterSpec::Glob { basename, extra_tokens },
-                    ),
-                    Err(e) => {
-                        self.set_status_message(format!(
-                            "invalid glob pattern {glob_pattern:?}: {e}"
-                        ));
-                        return;
-                    }
+        // Base root: `file_picker_lock.base_root` for a locked
+        // `--glob-complete[-dir]` session, else `files_root`
+        // (defaulting to `current_dir()`, overridable via
+        // `smarthistory tui --root`). Independent of whether THIS
+        // particular walk ends up glob- or substring-filtered below.
+        let base_root = self
+            .file_picker_lock
+            .as_ref()
+            .map(|l| l.base_root.clone())
+            .unwrap_or_else(|| self.files_root.clone());
+        // The typed body is split on whitespace. If the FIRST word
+        // contains shell-glob syntax (`* ? [`), it's root-scoped
+        // (`split_glob_root`) and translated to a basename regex
+        // (`glob_to_regex`); every word after it narrows further as
+        // a plain lowercase substring against the display path —
+        // e.g. `* tui` matches every path containing "tui" anywhere
+        // under the walk root, `*.md jira` matches every markdown
+        // file whose path contains "jira". This applies REGARDLESS
+        // of `file_picker_lock` — plain interactive `/` mode gets
+        // the exact same glob-aware matching the `--glob-complete`
+        // picker uses, not just today's literal-substring behavior,
+        // since `* ? [` were never usable as literal substring
+        // search terms anyway (real filenames essentially never
+        // contain them) — this is a strict improvement, not a
+        // narrower special case. A query with NO glob-looking first
+        // word (the common case: plain text) is completely
+        // unaffected, falling through to the original AND-of-
+        // substring-tokens matcher untouched.
+        let mut words = pattern.split_whitespace();
+        let first_word = words.next().unwrap_or("");
+        let is_glob = first_word.contains(['*', '?', '[']);
+        let (root, filter_spec) = if is_glob {
+            let extra_tokens: Vec<String> = words.map(|w| w.to_lowercase()).collect();
+            let (root_suffix, glob_pattern) = crate::files::split_glob_root(first_word);
+            // A trailing `/` (e.g. `foo*/`, or a globby leading
+            // segment whose final component is empty) leaves
+            // `glob_pattern` empty — treat that as "match every
+            // basename" (`*`), same as an empty picker filter
+            // showing everything, rather than building a regex that
+            // matches nothing.
+            let glob_pattern = if glob_pattern.is_empty() {
+                "*".to_string()
+            } else {
+                glob_pattern
+            };
+            let root = if root_suffix.is_empty() {
+                base_root
+            } else {
+                base_root.join(&root_suffix)
+            };
+            match crate::files::glob_to_regex(&glob_pattern) {
+                Ok(basename) => (
+                    root,
+                    crate::files::FilesFilterSpec::Glob { basename, extra_tokens },
+                ),
+                Err(e) => {
+                    self.set_status_message(format!(
+                        "invalid glob pattern {glob_pattern:?}: {e}"
+                    ));
+                    return;
                 }
             }
-            None => (self.files_root.clone(), crate::files::FilesFilterSpec::Substring),
+        } else {
+            (base_root, crate::files::FilesFilterSpec::Substring)
         };
         let request = crate::files::spawn_walk(pattern.clone(), ignore, root, filter_spec);
         self.files_state.in_flight = true;
