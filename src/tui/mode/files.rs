@@ -126,10 +126,7 @@ pub(crate) fn pattern(app: &App) -> &str {
 /// change to the walker itself is needed — only
 /// which of those two kinds this function keeps.
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
-    let want_dirs = matches!(
-        app.file_picker_lock.as_ref().map(|l| l.kind),
-        Some(crate::tui::FilePickerKind::Directories)
-    );
+    let want_dirs = app.is_directory_picker();
     Ok(app
         .files_state
         .rows

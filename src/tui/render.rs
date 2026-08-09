@@ -4233,10 +4233,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // `ModeKind::list_title()` would otherwise say "Files" even
     // though only directory rows are shown — override the label to
     // match what's actually on screen.
-    let list_title_label = if matches!(
-        app.file_picker_lock.as_ref().map(|l| l.kind),
-        Some(crate::tui::FilePickerKind::Directories)
-    ) {
+    let list_title_label = if app.is_directory_picker() {
         "Directories"
     } else {
         active_mode.list_title()

@@ -10371,6 +10371,19 @@ impl App {
         self.marked_ids = self.merged_rows.iter().map(mark_key).collect();
     }
 
+    /// True iff a locked `--glob-complete-dir` (directory) picker
+    /// session is active, as opposed to a `--glob-complete` (file)
+    /// session or no lock at all. Single source of truth for the
+    /// `file_picker_lock.kind` check, shared with `render.rs`'s
+    /// list-title override and `mode::files::fetch`'s row-kind
+    /// filter.
+    pub(crate) fn is_directory_picker(&self) -> bool {
+        matches!(
+            self.file_picker_lock.as_ref().map(|l| l.kind),
+            Some(FilePickerKind::Directories)
+        )
+    }
+
     /// Confirm the locked file-completion picker's selection
     /// (Enter/Left/Right, all treated identically — see the
     /// `handle_key` guard). For a `Files`-kind session, reuses
@@ -10399,10 +10412,7 @@ impl App {
     /// (dialog stays open) when nothing is selected, same silent-
     /// no-op convention `smart_open_for_file` already uses.
     fn file_picker_confirm_selection(&mut self) {
-        let is_dirs = matches!(
-            self.file_picker_lock.as_ref().map(|l| l.kind),
-            Some(FilePickerKind::Directories)
-        );
+        let is_dirs = self.is_directory_picker();
         let targets: Vec<HistoryRow> = if is_dirs {
             self.selected_row().cloned().into_iter().collect()
         } else {
@@ -11911,6 +11921,67 @@ fn run_loop(
     }
 }
 
+/// Shared key-handling for a locked completion picker session
+/// (`file_picker_lock` / `process_picker_lock` — see `handle_key`'s
+/// two call sites). Both picker kinds intercept the same three
+/// things ahead of normal dispatch: a hardcoded `Ctrl-A`
+/// "select all visible" shortcut (or, per `ctrl_a_swallow_message`,
+/// a swallow-with-status-message instead — used by the directory
+/// picker, where multi-selecting doesn't mean anything), Enter/
+/// Left/Right confirming the selection via `confirm_selection`
+/// (insert-only, never "run"), and `PickPrefix`/`SmartOpen` being
+/// swallowed since a locked session may never switch modes. Any
+/// other action dispatches normally, then the query is clamped
+/// back to the bare `prefix` if it fell victim to Backspace/
+/// ClearQuery/etc., so the locked prefix character can never be
+/// deleted.
+///
+/// Returns `Some(terminate)` if the key was handled by the picker
+/// (the caller should return `terminate` from `handle_key`
+/// immediately), or `None` if the key didn't resolve to a bound
+/// action at all (the caller should fall through to whatever
+/// follows the picker check).
+fn handle_picker_lock_key(
+    app: &mut App,
+    key: KeyEvent,
+    prefix: char,
+    ctrl_a_swallow_message: Option<&'static str>,
+    confirm_selection: impl FnOnce(&mut App),
+) -> Option<bool> {
+    if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(message) = ctrl_a_swallow_message {
+            app.set_status_message(message.to_string());
+        } else {
+            app.picker_select_all();
+        }
+        return Some(false);
+    }
+    let action = action_for_key(&app.bindings, &key)?;
+    match action {
+        Action::Run | Action::EditStart | Action::EditEnd => {
+            confirm_selection(app);
+            return Some(app.selection.is_some());
+        }
+        Action::PickPrefix | Action::SmartOpen => {
+            app.set_status_message("Not available in the completion picker".to_string());
+            return Some(false);
+        }
+        _ => {}
+    }
+    let terminate = dispatch_action(app, action);
+    // A plain keystroke can't cause this: `push_char` always
+    // inserts at the END of the query in every non-LLM mode, never
+    // before position 0. This only clamps Backspace / DeleteWordBackward
+    // / ClearQuery (or any other query-mutating action) back to the
+    // bare prefix instead of silently falling through to History mode.
+    if !app.query.starts_with(prefix) {
+        app.query = prefix.to_string();
+        app.query_cursor = 1;
+        app.refresh();
+    }
+    Some(terminate)
+}
+
 /// Returns `true` if the app should exit (selection made or cancelled).
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
@@ -12106,61 +12177,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     // Locked file-completion picker session (`smarthistory tui
     // --glob-complete <word>`, launched from the new zsh Tab
-    // widget) — two guard clauses, both gated on
-    // `file_picker_lock.is_some()` so every other session sees
-    // byte-for-byte identical `handle_key` behavior.
+    // widget) — gated on `file_picker_lock.is_some()` so every
+    // other session sees byte-for-byte identical `handle_key`
+    // behavior. Files-only: multi-selecting directories doesn't
+    // mean anything (you can only `cd` into one at a time), so a
+    // directory-picker session swallows `Ctrl-A` with a status
+    // message instead of `picker_select_all()` — see
+    // `handle_picker_lock_key`'s `ctrl_a_swallow_message`.
     if let Some(lock) = app.file_picker_lock.clone() {
-        // `Ctrl-A` is a hardcoded picker-only "select all visible"
-        // shortcut, checked on the raw key (not through
-        // `action_for_key`) so it works regardless of whatever the
-        // user has `Action::OpenHelp` (its normal default binding)
-        // rebound to elsewhere. Files-only: multi-selecting
-        // directories doesn't mean anything (you can only `cd` into
-        // one at a time), so a directory-picker session swallows it
-        // with a status message instead.
-        if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if lock.kind == FilePickerKind::Directories {
-                app.set_status_message(
-                    "Select a single directory with Enter".to_string(),
-                );
-            } else {
-                app.picker_select_all();
-            }
-            return false;
-        }
-        if let Some(action) = action_for_key(&app.bindings, &key) {
-            match action {
-                // Enter/Left/Right all mean the same thing here:
-                // confirm the picker's selection, insert-only,
-                // never "run" — see `file_picker_confirm_selection`.
-                Action::Run | Action::EditStart | Action::EditEnd => {
-                    app.file_picker_confirm_selection();
-                    return app.selection.is_some();
-                }
-                // Mode-switching entry points: swallowed rather
-                // than dispatched, since a locked picker session
-                // may never leave files mode.
-                Action::PickPrefix | Action::SmartOpen => {
-                    app.set_status_message(
-                        "Not available in the completion picker".to_string(),
-                    );
-                    return false;
-                }
-                _ => {}
-            }
-            let terminate = dispatch_action(app, action);
-            // Backspace / DeleteWordBackward / ClearQuery (or any
-            // other query-mutating action) must never be able to
-            // delete the locked prefix character — clamp back to
-            // the bare prefix instead of silently falling through
-            // to History mode. A plain keystroke can't cause this:
-            // `push_char` always inserts at the END of the query in
-            // every non-LLM mode, never before position 0.
-            if !app.query.starts_with(lock.prefix) {
-                app.query = lock.prefix.to_string();
-                app.query_cursor = 1;
-                app.refresh();
-            }
+        let ctrl_a_swallow_message = (lock.kind == FilePickerKind::Directories)
+            .then_some("Select a single directory with Enter");
+        if let Some(terminate) = handle_picker_lock_key(
+            app,
+            key,
+            lock.prefix,
+            ctrl_a_swallow_message,
+            |app| app.file_picker_confirm_selection(),
+        ) {
             return terminate;
         }
     }
@@ -12171,47 +12204,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // the file-completion picker guard above, but simpler: no
     // root-scoping, and `Ctrl-A` always marks (multi-select IS
     // meaningful for `kill`, unlike the `cd` directory picker).
-    if let Some(lock) = app.process_picker_lock.clone() {
-        if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            app.picker_select_all();
-            return false;
-        }
-        if let Some(action) = action_for_key(&app.bindings, &key) {
-            match action {
-                // Enter/Left/Right all mean the same thing here:
-                // confirm the picker's selection (return PIDs),
-                // insert-only, never "run" — and crucially, NEVER
-                // the normal processes-mode Enter behavior of
-                // opening the signal-confirmation dialog
-                // (`stage_process_signal_prompt`), which this
-                // intercept bypasses entirely by returning before
-                // `dispatch_action`/`select_for_run` ever runs.
-                Action::Run | Action::EditStart | Action::EditEnd => {
-                    app.process_picker_confirm_selection();
-                    return app.selection.is_some();
-                }
-                // Mode-switching / the normal processes-mode
-                // "dive" key: swallowed, since a locked picker
-                // session may never leave processes mode (and
-                // SmartOpen's wildcard fallback would otherwise
-                // also reach `select_for_run` and open the signal
-                // dialog, same as a bare Enter would).
-                Action::PickPrefix | Action::SmartOpen => {
-                    app.set_status_message(
-                        "Not available in the completion picker".to_string(),
-                    );
-                    return false;
-                }
-                _ => {}
-            }
-            let terminate = dispatch_action(app, action);
-            if !app.query.starts_with(lock.prefix) {
-                app.query = lock.prefix.to_string();
-                app.query_cursor = 1;
-                app.refresh();
-            }
-            return terminate;
-        }
+    // Enter/Left/Right confirming here crucially never reaches
+    // `dispatch_action`/`select_for_run`, so it can never open the
+    // normal processes-mode signal-confirmation dialog
+    // (`stage_process_signal_prompt`).
+    if let Some(lock) = app.process_picker_lock.clone()
+        && let Some(terminate) = handle_picker_lock_key(
+            app,
+            key,
+            lock.prefix,
+            None,
+            |app| app.process_picker_confirm_selection(),
+        )
+    {
+        return terminate;
     }
 
     // Action-based dispatch: look up the user-configured binding

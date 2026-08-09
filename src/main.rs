@@ -4744,15 +4744,27 @@ fn migrate_history_mode_column(conn: &Connection) -> anyhow::Result<()> {
 /// kept as `-> anyhow::Result<()>` so the one early-return validation
 /// error (`--pane-height`) can use `?` at the call site like every
 /// other fallible command.
+/// The CLI flags that launch a locked completion picker
+/// (`--glob-complete[-dir]`/`--pid-complete`) plus the
+/// `--root` they scope against. Bundled into one struct so
+/// `run_tui_command`'s signature doesn't carry four
+/// separate same-typed positional parameters that a future
+/// edit could silently transpose — see `CliOverrides` for
+/// the same rationale applied to the persistence-override
+/// flags.
+struct CompletionPickerArgs {
+    glob_complete: Option<String>,
+    glob_complete_dir: Option<String>,
+    pid_complete: Option<String>,
+    root: Option<PathBuf>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tui_command(
     conn: Connection,
     mode: Option<String>,
     prefix: Option<String>,
-    glob_complete: Option<String>,
-    glob_complete_dir: Option<String>,
-    pid_complete: Option<String>,
-    root: Option<PathBuf>,
+    picker: CompletionPickerArgs,
     exec: bool,
     query: Option<String>,
     pane: Option<String>,
@@ -4761,6 +4773,12 @@ fn run_tui_command(
     create_note: bool,
     create_note_prefill: Option<(String, String)>,
 ) -> anyhow::Result<()> {
+    let CompletionPickerArgs {
+        glob_complete,
+        glob_complete_dir,
+        pid_complete,
+        root,
+    } = picker;
     // `--create-note` defaults to `--exec`: without it, a
     // bare `smarthistory tui --create-note` just prints the
     // staged `note_search create-note ...` command and exits
@@ -5521,10 +5539,12 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 None,
                 None,
-                None,
-                None,
-                None,
-                None,
+                CompletionPickerArgs {
+                    glob_complete: None,
+                    glob_complete_dir: None,
+                    pid_complete: None,
+                    root: None,
+                },
                 true,
                 None,
                 None,
@@ -5768,10 +5788,12 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 mode,
                 prefix,
-                glob_complete,
-                glob_complete_dir,
-                pid_complete,
-                root,
+                CompletionPickerArgs {
+                    glob_complete,
+                    glob_complete_dir,
+                    pid_complete,
+                    root,
+                },
                 exec,
                 query,
                 pane,

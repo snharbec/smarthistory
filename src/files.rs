@@ -234,6 +234,17 @@ impl crate::debounce::Debounced for FilesState {
 /// the *current* entry is added to the result list. Directory
 /// recursion is unconditional, so `~main.rs` still finds
 /// `src/main.rs` even though `src/` itself doesn't match.
+/// True iff every token in `tokens` is a case-insensitive
+/// substring of `display`. Empty `tokens` always matches — used
+/// by both `FilesFilter::Substring` (the whole filter) and
+/// `FilesFilter::Glob`'s `extra_tokens` (narrowing on top of the
+/// basename regex match).
+fn matches_all_tokens(display: &str, tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .all(|tok| display.to_lowercase().contains(tok))
+}
+
 pub fn walk_dir(
     root: &Path,
     dir: &Path,
@@ -281,18 +292,10 @@ pub fn walk_dir(
         // basename only (`FilesFilter::Glob`, used exclusively by
         // the `--glob-complete` picker).
         let matches_filter = match filter {
-            FilesFilter::Substring(tokens) => {
-                tokens.is_empty()
-                    || tokens
-                        .iter()
-                        .all(|tok| display.to_lowercase().contains(tok))
-            }
+            FilesFilter::Substring(tokens) => matches_all_tokens(&display, tokens),
             FilesFilter::Glob { basename, extra_tokens } => {
                 basename.is_match(&name.to_string_lossy())
-                    && (extra_tokens.is_empty()
-                        || extra_tokens
-                            .iter()
-                            .all(|tok| display.to_lowercase().contains(tok)))
+                    && matches_all_tokens(&display, extra_tokens)
             }
         };
         if matches_filter {
