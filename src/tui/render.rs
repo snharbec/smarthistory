@@ -4562,6 +4562,13 @@ pub(crate) fn render_row<'a>(
     // so in those modes, `[x]` would be a checkbox nothing ever
     // consults. Hidden there entirely rather than shown as inert
     // decoration.
+    // A locked `--pid-complete` process picker is the one addition
+    // to this list that ISN'T keyed off `active_mode` alone: normal,
+    // unlocked `%` (Processes) mode marking still does nothing (its
+    // `SmartOpen` wildcard dispatch never reads `marked_ids`), but
+    // inside `process_picker_lock`, `Ctrl-A`/Enter (see `handle_key`)
+    // make it fully meaningful — `kill` can legitimately target more
+    // than one PID at once.
     let marking_has_effect = matches!(
         active_mode,
         crate::tui::mode::ModeKind::History
@@ -4569,7 +4576,7 @@ pub(crate) fn render_row<'a>(
             | crate::tui::mode::ModeKind::Files
             | crate::tui::mode::ModeKind::Todo
             | crate::tui::mode::ModeKind::Jira
-    );
+    ) || app.process_picker_lock.is_some();
     let mark_span = if !marking_has_effect {
         Span::raw("")
     } else if app.marked_ids.contains(&mark_key(row)) {
