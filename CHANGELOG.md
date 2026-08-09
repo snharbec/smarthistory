@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `dropdown.matchmode=prefix|substring` config key (default `prefix`,
+  matching the historical hardcoded behavior): the live dropdown-completion
+  widget's match mode against history. `Ctrl-t` (`_smarthistory_cycle_matchmode`)
+  toggles between `prefix` (only commands STARTING WITH what's typed) and
+  `substring` (matches anywhere in the command, the same broader match
+  `Up`/`Down` and the TUI's own search already use) at runtime, same
+  relationship `zsh.mode`/`Ctrl-g` has to the search-scope cycle. A `[~]`
+  marker appears next to the RPROMPT scope label while in `substring` mode.
 - New `globcomplete.enabled` zsh feature (off by default): replaces fzf-tab-style
   completion for files, directories, and processes. Pressing `Tab` on a word containing shell-glob
   syntax (`* ? [`) — e.g. `vi a*<TAB>` or `vi foo/a*<TAB>` — launches

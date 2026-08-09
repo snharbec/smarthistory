@@ -195,6 +195,15 @@ typeset -g _smarthistory_rprompt_save="$RPROMPT"
 typeset -g _smarthistory_dropdown_enabled="0"
 typeset -g _smarthistory_dropdown_limit=6
 typeset -g _smarthistory_dropdown_minchars=1
+# The dropdown's match mode: "prefix" (only commands STARTING WITH
+# what's typed — the historical, hardcoded behavior) or "substring"
+# (matches anywhere in the command, same as Up/Down and the TUI's own
+# search). Cycled with Ctrl-t (`_smarthistory_cycle_matchmode`,
+# defined below the dropdown-enabled block). The starting value for a
+# brand-new shell is configurable via `dropdown.matchmode=prefix|substring`
+# in ~/.config/smarthistory/config (defaults to "prefix"); this only
+# picks what a new shell starts on — Ctrl-t still toggles regardless.
+typeset -g _smarthistory_matchmode="prefix"
 if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_dropdown_enabled="1"
     _smarthistory_dropdown_limit_raw=$(smarthistory config get dropdown.limit 2>/dev/null)
@@ -202,6 +211,10 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_dropdown_minchars_raw=$(smarthistory config get dropdown.minchars 2>/dev/null)
     [[ "$_smarthistory_dropdown_minchars_raw" == <-> ]] && _smarthistory_dropdown_minchars=$_smarthistory_dropdown_minchars_raw
     unset _smarthistory_dropdown_limit_raw _smarthistory_dropdown_minchars_raw
+    case "$(smarthistory config get dropdown.matchmode 2>/dev/null)" in
+        substring) _smarthistory_matchmode="substring" ;;
+        *) _smarthistory_matchmode="prefix" ;;
+    esac
 fi
 # Optional per-candidate syntax highlighting inside the dropdown box
 # (`dropdown.highlight=on`): lexical token coloring via `bat`, plus a
@@ -1410,7 +1423,11 @@ _smarthistory_dropdown_render() {
     # made "ls" match `open "http://.../details"` (contains "ls"
     # inside the URL), which is surprising for a live as-you-type
     # completion (unlike Up/Down's keypress-triggered walk, which
-    # keeps the broader substring match).
+    # keeps the broader substring match). Only added when
+    # `_smarthistory_matchmode` is "prefix" (the default) — Ctrl-t
+    # (`_smarthistory_cycle_matchmode`) toggles it to "substring" for
+    # anyone who wants the broader match here too, accepting the
+    # above noise tradeoff.
     #
     # `--ansi=off`: the widget always pipes the search call into a
     # `$()`-style capture, which is never a TTY — so `--ansi=full`
@@ -1438,7 +1455,8 @@ _smarthistory_dropdown_render() {
     # is the command, even in the rare case the command itself
     # contains a run of 2+ spaces later in the line (we only ever
     # split on the first two such runs).
-    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,exit_code,command --ansi=off --prefix)
+    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,exit_code,command --ansi=off)
+    [[ "$_smarthistory_matchmode" == "prefix" ]] && args+=(--prefix)
     case "$_smarthistory_mode" in
         sess)   args+=(--session) ;;
         dir)    args+=(--directory "$PWD") ;;
@@ -1892,6 +1910,20 @@ _smarthistory_update_rprompt() {
         global) label="[smarthistory: GLOBAL]" ;;
         *)      label="[smarthistory: ?]" ;;
     esac
+    # The match-mode marker only matters when the dropdown is
+    # actually running (it's the only widget `_smarthistory_matchmode`
+    # affects — see `_smarthistory_cycle_matchmode`); showing it
+    # unconditionally would clutter RPROMPT for anyone who never
+    # turned the dropdown on. Only surfaced for the non-default
+    # "substring" mode, matching the general convention here of not
+    # advertising defaults.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && "$_smarthistory_matchmode" == "substring" ]]; then
+        # `${label}[~]`, NOT `$label[~]` — zsh parses `$var[...]` as an
+        # array/subscript reference even inside double quotes, so the
+        # unbraced form throws "bad math expression" here instead of
+        # appending the literal text.
+        label="${label}[~]"
+    fi
     if [ -n "$_smarthistory_rprompt_save" ]; then
         MYPROMPT="$label $_smarthistory_rprompt_save"
     else
@@ -1919,6 +1951,36 @@ _smarthistory_cycle_mode() {
     if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_dropdown_render
     fi
+}
+
+# Toggle the dropdown's match mode between "prefix" (only commands
+# STARTING WITH what's typed) and "substring" (matches anywhere in
+# the command — the same broader match Up/Down already uses). A
+# no-op when the dropdown itself is off, since match mode has nothing
+# to affect in that case; bound unconditionally anyway (not gated
+# inside the dropdown-enabled block like the dropdown-specific
+# widgets above) so toggling it before turning the dropdown on still
+# sticks for when it IS turned on later in the same shell.
+_smarthistory_cycle_matchmode() {
+    local old_mode="$_smarthistory_matchmode"
+    case "$_smarthistory_matchmode" in
+        prefix)    _smarthistory_matchmode="substring" ;;
+        substring) _smarthistory_matchmode="prefix" ;;
+    esac
+    _smarthistory_debug_log "cycle_matchmode: $old_mode -> $_smarthistory_matchmode"
+    [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return
+    # Same re-render-immediately rationale as `_smarthistory_cycle_mode`
+    # — Ctrl-T doesn't fire self-insert, so nothing else would trigger
+    # a re-query under the new match mode. Unconditional call (not
+    # gated on visibility/minchars): `_smarthistory_reset_state` just
+    # cleared `_smarthistory_dropdown_visible` to 0 above, so a
+    # visibility check here could never be true anyway —
+    # `_smarthistory_dropdown_render` already has its own minchars/
+    # cursor-position guards and handles the "nothing to show" case
+    # by clearing, exactly like `_smarthistory_cycle_mode` relies on.
+    _smarthistory_reset_state
+    _smarthistory_update_rprompt
+    _smarthistory_dropdown_render
 }
 
 # Populate the match cache for the current (mode, pwd, prefix) triple.
@@ -2125,6 +2187,7 @@ _smarthistory_down_history() {
 zle -N _smarthistory_up_history
 zle -N _smarthistory_down_history
 zle -N _smarthistory_cycle_mode
+zle -N _smarthistory_cycle_matchmode
 # Ctrl-S: insert the most probable next command that follows the
 # last executed command in the global history. Each subsequent
 # press cycles through the next candidates in order of decreasing
@@ -2198,6 +2261,11 @@ fi
 # Ctrl-g: cycle the search scope (SESS -> DIR -> GLOBAL -> SESS) and
 # show the current scope in the RPROMPT.
 bindkey '^G' _smarthistory_cycle_mode
+# Ctrl-t: toggle the dropdown's match mode (prefix <-> substring —
+# see `_smarthistory_cycle_matchmode`). Unconditional, like Ctrl-g
+# above, not gated behind the dropdown-enabled block — it's harmless
+# (and a documented no-op) to toggle even when the dropdown is off.
+bindkey '^T' _smarthistory_cycle_matchmode
 # Ctrl-S: insert the most probable next command (see the
 # _smarthistory_next_history widget above). On most terminals
 # Ctrl-S is the XOFF flow-control character; `stty -ixon` makes

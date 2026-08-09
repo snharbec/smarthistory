@@ -1190,6 +1190,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         "  dropdown.highlight = {}",
         if cfg.dropdown_highlight { "on" } else { "off" }
     );
+    let _ = writeln!(f, "  dropdown.matchmode = {}", cfg.dropdown_matchmode);
     let _ = writeln!(
         f,
         "  commentexpand.enabled = {}",
@@ -1562,6 +1563,20 @@ pub struct Config {
     /// isn't on `$PATH`, even when this is `true`. Set via
     /// `dropdown.highlight=on|off`.
     dropdown_highlight: bool,
+    /// The dropdown widget's match mode at shell-init time — one of
+    /// `prefix` (only commands STARTING WITH what's typed; the
+    /// historical, hardcoded behavior — see `--prefix` on
+    /// `Commands::Search` for why: a plain substring match made "ls"
+    /// match `open "http://.../details"` because it contains "ls"
+    /// inside the URL) or `substring` (matches anywhere in the
+    /// command, same as the Up/Down history-walk widget and the TUI's
+    /// own search). Read by `init.zsh` via `smarthistory config get
+    /// dropdown.matchmode` and assigned to `_smarthistory_matchmode`,
+    /// the same variable `Ctrl-t` (`_smarthistory_cycle_matchmode`)
+    /// toggles at runtime — this only changes what a brand-new shell
+    /// starts on. Default `prefix`, matching the historical hardcoded
+    /// behavior. Set via `dropdown.matchmode=prefix|substring`.
+    dropdown_matchmode: String,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -1911,6 +1926,7 @@ impl Config {
             dropdown_min_chars: 1,
             segments_min_words: 5,
             dropdown_highlight: false,
+            dropdown_matchmode: "prefix".to_string(),
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -2171,6 +2187,13 @@ impl Config {
                 "dropdown.highlight" => {
                     self.dropdown_highlight = crate::util::parse_bool(value, false);
                 }
+                "dropdown.matchmode" => match value.trim() {
+                    "prefix" | "substring" => self.dropdown_matchmode = value.trim().to_string(),
+                    _ => eprintln!(
+                        "warning: dropdown.matchmode={:?} is not one of prefix/substring; keeping the previous value",
+                        value
+                    ),
+                },
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
                     if matches!(
@@ -5723,6 +5746,7 @@ fn main() -> anyhow::Result<()> {
                     "dropdown.highlight" => {
                         println!("{}", if cfg.dropdown_highlight { "on" } else { "off" })
                     }
+                    "dropdown.matchmode" => println!("{}", cfg.dropdown_matchmode),
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })
                     }
