@@ -6,14 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
+  `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment
+  variables, kept in sync on every `Ctrl-g`/`Ctrl-t` toggle
+  (`_smarthistory_sync_prompt_env`) — lets an external prompt system
+  (oh-my-posh, starship, …) show the current widget state itself, since
+  those run as a separate subprocess per prompt render and can't see
+  zsh-internal shell variables. See "Published environment variables" in
+  docs/configuration.md for oh-my-posh/starship segment examples.
 - New `dropdown.matchmode=prefix|substring` config key (default `prefix`,
   matching the historical hardcoded behavior): the live dropdown-completion
   widget's match mode against history. `Ctrl-t` (`_smarthistory_cycle_matchmode`)
   toggles between `prefix` (only commands STARTING WITH what's typed) and
   `substring` (matches anywhere in the command, the same broader match
   `Up`/`Down` and the TUI's own search already use) at runtime, same
-  relationship `zsh.mode`/`Ctrl-g` has to the search-scope cycle. A `[~]`
-  marker appears next to the RPROMPT scope label while in `substring` mode.
+  relationship `zsh.mode`/`Ctrl-g` has to the search-scope cycle. Each
+  press confirms the new mode with a transient `zle -M` status message
+  ("smarthistory match set to substring"/"smarthistory mode set to DIR"
+  for `Ctrl-g` too), replacing the earlier RPROMPT-text approach entirely.
 - New `globcomplete.enabled` zsh feature (off by default): replaces fzf-tab-style
   completion for files, directories, and processes. Pressing `Tab` on a word containing shell-glob
   syntax (`* ? [`) — e.g. `vi a*<TAB>` or `vi foo/a*<TAB>` — launches

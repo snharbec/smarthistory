@@ -76,6 +76,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [Paperless (`<` mode)](#paperless--mode)
   - [Browser (`^` mode)](#browser--mode)
 - [Environment variables](#environment-variables)
+  - [Published environment variables](#published-environment-variables)
 - [All keys at a glance](#all-keys-at-a-glance)
 
 ---
@@ -198,7 +199,7 @@ initialmode=SESS
 | **Default** | `sess` |
 | **Env override** | — |
 
-The Up/Down history-walk widget's search scope (`_smarthistory_mode` in `init.zsh`/`init.bash` — despite the `zsh.`-prefixed key name, this is shared by the bash port's own Up/Down and Ctrl-g widgets too, not just zsh's) a brand-new shell starts on: `sess` (current `$SMART_HISTORY_SESSION` only), `dir` (current working directory only), or `global` (no scope filter). This is unrelated to [`initialmode`](#initialmode) above, which controls `smarthistory tui`'s own starting scope — `zsh.mode` controls the readline-level widgets instead. `Ctrl-g` (`_smarthistory_cycle_mode`) still cycles `sess` → `dir` → `global` → `sess` at runtime regardless of this setting; it only picks the starting point for a new shell, not the cycle order.
+The Up/Down history-walk widget's search scope (`_smarthistory_mode` in `init.zsh`/`init.bash` — despite the `zsh.`-prefixed key name, this is shared by the bash port's own Up/Down and Ctrl-g widgets too, not just zsh's) a brand-new shell starts on: `sess` (current `$SMART_HISTORY_SESSION` only), `dir` (current working directory only), or `global` (no scope filter). This is unrelated to [`initialmode`](#initialmode) above, which controls `smarthistory tui`'s own starting scope — `zsh.mode` controls the readline-level widgets instead. `Ctrl-g` (`_smarthistory_cycle_mode`) still cycles `sess` → `dir` → `global` → `sess` at runtime regardless of this setting; it only picks the starting point for a new shell, not the cycle order. Each press confirms the new scope with a transient `zle -M` status message ("smarthistory mode set to DIR") — shown until the next keystroke, not a permanent prompt fixture.
 
 ```ini
 zsh.mode=global
@@ -298,7 +299,7 @@ dropdown.highlight=on
 | **Default** | `prefix` |
 | **Env override** | — |
 
-The dropdown's match mode a brand-new shell starts on: `prefix` matches only commands that START WITH what's typed (the historical, hardcoded behavior — a plain substring match made typing `ls` match `open "http://.../details"`, since that URL contains "ls"); `substring` matches anywhere in the command, the same broader match the `Up`/`Down` history-walk widget and the TUI's own search already use. `Ctrl-t` (`_smarthistory_cycle_matchmode`) toggles between the two at runtime regardless of this setting — it only picks the starting point for a new shell, same relationship [`zsh.mode`](#zshmode)/`Ctrl-g` has. When the dropdown is in `substring` mode, a `[~]` marker appears next to the RPROMPT scope label (`Ctrl-t` is a no-op with nothing to indicate when the dropdown itself is off, so the marker only shows while `dropdown.enabled=on`).
+The dropdown's match mode a brand-new shell starts on: `prefix` matches only commands that START WITH what's typed (the historical, hardcoded behavior — a plain substring match made typing `ls` match `open "http://.../details"`, since that URL contains "ls"); `substring` matches anywhere in the command, the same broader match the `Up`/`Down` history-walk widget and the TUI's own search already use. `Ctrl-t` (`_smarthistory_cycle_matchmode`) toggles between the two at runtime regardless of this setting — it only picks the starting point for a new shell, same relationship [`zsh.mode`](#zshmode)/`Ctrl-g` has. Each press confirms the new mode with a transient `zle -M` status message ("smarthistory match set to substring"), regardless of whether the dropdown is currently on.
 
 ```ini
 dropdown.enabled=on
@@ -885,6 +886,35 @@ Most config has a config-file equivalent; the env-var form is for users who want
 | `JIRA_HOST_CERTIFICATE` | — | Client certificate path (mTLS). |
 | `JIRA_HOST_CERTIFICATE_PASSWORD` | — | Client certificate password. |
 | `JIRA_CA_CERTIFICATE` | — | CA bundle for server-cert verification. |
+
+### Published environment variables
+
+The table above is env vars you set to configure smarthistory; these two go the other way — `init.zsh` publishes them so a *separate* prompt system (oh-my-posh, starship, a custom `precmd`, …) can show the current widget state without needing to know anything about `init.zsh`'s internal shell variables. A prompt system like oh-my-posh runs as its own subprocess on every prompt render, so it can only see real exported env vars — not zsh-internal state like `$_smarthistory_mode`. `init.zsh`'s own [`zsh.mode`](#zshmode)/`Ctrl-g` and [`dropdown.matchmode`](#dropdownmatchmode)/`Ctrl-t` widgets confirm each toggle with a transient `zle -M` status message ("smarthistory mode set to DIR") driven by this same underlying state, kept in sync by `_smarthistory_sync_prompt_env` — these two env vars are that state, exported for anyone who'd rather render it as a persistent prompt segment instead of a one-off message.
+
+| Variable | Values | Updated by |
+| --- | --- | --- |
+| `SMARTHISTORY_MODE` | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`) |
+| `SMARTHISTORY_MATCHMODE` | `prefix` \| `substring` | `Ctrl-t` (`_smarthistory_cycle_matchmode`) |
+
+**oh-my-posh** example — a `text` segment reading both via Go templates (add to your theme's `blocks[].segments`):
+
+```json
+{
+  "type": "text",
+  "style": "plain",
+  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | upper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}]"
+}
+```
+
+**starship** example (`~/.config/starship.toml`) — a `custom` command segment:
+
+```toml
+[custom.smarthistory]
+command = "printf '[smarthistory: %s%s]' \"$(echo $SMARTHISTORY_MODE | tr a-z A-Z)\" \"$([ \"$SMARTHISTORY_MATCHMODE\" = substring ] && echo '~')\""
+when = true
+```
+
+Both examples re-run their command/template on every prompt draw, so the indicator stays current as you toggle `Ctrl-g`/`Ctrl-t` — no shell restart needed.
 
 ---
 
