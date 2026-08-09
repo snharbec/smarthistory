@@ -170,20 +170,6 @@ case "$_smarthistory_mode" in
     *) _smarthistory_mode="sess" ;;
 esac
 
-# Whether `_smarthistory_update_rprompt` prints the "[smarthistory:
-# SESS]"/"[~]" indicator text after a `Ctrl-g`/`Ctrl-t` toggle (and
-# once at shell init). Default on (the historical behavior); turn off
-# via `zsh.indicator=off` once an external prompt system reads
-# `SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE` instead (see
-# `_smarthistory_sync_prompt_env` below) — the toggle keys still work
-# either way, this only silences the printed line.
-typeset -g _smarthistory_indicator_enabled="1"
-[[ "$(smarthistory config get zsh.indicator 2>/dev/null)" == "off" ]] && _smarthistory_indicator_enabled="0"
-
-# Save the user's original RPROMPT (if any) at init time so we can
-# append our mode indicator without clobbering their customization.
-typeset -g _smarthistory_rprompt_save="$RPROMPT"
-
 # ---- Live dropdown completion (opt-in, config file only) ----
 #
 # Shows a live, multi-candidate suggestion menu below the cursor as
@@ -193,7 +179,7 @@ typeset -g _smarthistory_rprompt_save="$RPROMPT"
 # the prefix-triggered features. Enable with `dropdown.enabled=on`
 # in ~/.config/smarthistory/config (requires a new shell — config is
 # read once here at init time, same as every other cached value in
-# this file, e.g. `_smarthistory_rprompt_save` above).
+# this file, e.g. `_smarthistory_mode` above).
 #
 # Rendering uses zsh's `POSTDISPLAY` parameter (the same mechanism
 # zsh-autosuggestions uses for ghost text) rather than hand-rolled
@@ -1928,42 +1914,6 @@ _smarthistory_reset_state() {
     _smarthistory_debug_log "reset_state: cleared all caches"
 }
 
-_smarthistory_update_rprompt() {
-    case "$_smarthistory_mode" in
-        sess)   label="[smarthistory: SESS]" ;;
-        dir)    label="[smarthistory: DIR]" ;;
-        global) label="[smarthistory: GLOBAL]" ;;
-        *)      label="[smarthistory: ?]" ;;
-    esac
-    # The match-mode marker only matters when the dropdown is
-    # actually running (it's the only widget `_smarthistory_matchmode`
-    # affects — see `_smarthistory_cycle_matchmode`); showing it
-    # unconditionally would clutter RPROMPT for anyone who never
-    # turned the dropdown on. Only surfaced for the non-default
-    # "substring" mode, matching the general convention here of not
-    # advertising defaults.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && "$_smarthistory_matchmode" == "substring" ]]; then
-        # `${label}[~]`, NOT `$label[~]` — zsh parses `$var[...]` as an
-        # array/subscript reference even inside double quotes, so the
-        # unbraced form throws "bad math expression" here instead of
-        # appending the literal text.
-        label="${label}[~]"
-    fi
-    if [ -n "$_smarthistory_rprompt_save" ]; then
-        MYPROMPT="$label $_smarthistory_rprompt_save"
-    else
-        MYPROMPT="$label"
-    fi
-    # `$MYPROMPT` is always computed above (cheap, and left available
-    # for anyone who wants to reference it in their own prompt), but
-    # only actually printed when `zsh.indicator` is on — see
-    # `_smarthistory_indicator_enabled`'s doc comment near its
-    # declaration. `SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE`
-    # (`_smarthistory_sync_prompt_env`) stay in sync either way, so
-    # turning this off doesn't affect an external prompt reading those.
-    [[ "$_smarthistory_indicator_enabled" = "1" ]] && echo $MYPROMPT
-}
-
 _smarthistory_cycle_mode() {
     local old_mode="$_smarthistory_mode"
     case "$_smarthistory_mode" in
@@ -1976,7 +1926,6 @@ _smarthistory_cycle_mode() {
     # Invalidate the match cache; the next Up/Down will re-query under
     # the new scope.
     _smarthistory_reset_state
-    _smarthistory_update_rprompt
     # `_smarthistory_reset_state` just cleared the dropdown (if any
     # was showing); re-render immediately under the new scope rather
     # than leaving the buffer bare until the next keystroke. Ctrl-G
@@ -1984,6 +1933,13 @@ _smarthistory_cycle_mode() {
     if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_dropdown_render
     fi
+    # `zle -M` is a transient status-line message (same mechanism the
+    # Up/Down widgets use for "no history matches" etc.) — shown until
+    # the next keystroke, not a permanent prompt fixture, so there's
+    # no leftover text to clean up. `${(U)_smarthistory_mode}`
+    # uppercases via a zsh parameter-expansion flag, matching the
+    # SESS/DIR/GLOBAL spelling used elsewhere.
+    zle -M "smarthistory mode set to ${(U)_smarthistory_mode}"
 }
 
 # Toggle the dropdown's match mode between "prefix" (only commands
@@ -2002,19 +1958,24 @@ _smarthistory_cycle_matchmode() {
     esac
     _smarthistory_debug_log "cycle_matchmode: $old_mode -> $_smarthistory_matchmode"
     _smarthistory_sync_prompt_env
-    [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return
-    # Same re-render-immediately rationale as `_smarthistory_cycle_mode`
-    # — Ctrl-T doesn't fire self-insert, so nothing else would trigger
-    # a re-query under the new match mode. Unconditional call (not
-    # gated on visibility/minchars): `_smarthistory_reset_state` just
-    # cleared `_smarthistory_dropdown_visible` to 0 above, so a
-    # visibility check here could never be true anyway —
-    # `_smarthistory_dropdown_render` already has its own minchars/
-    # cursor-position guards and handles the "nothing to show" case
-    # by clearing, exactly like `_smarthistory_cycle_mode` relies on.
-    _smarthistory_reset_state
-    _smarthistory_update_rprompt
-    _smarthistory_dropdown_render
+    if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
+        # Same re-render-immediately rationale as `_smarthistory_cycle_mode`
+        # — Ctrl-T doesn't fire self-insert, so nothing else would trigger
+        # a re-query under the new match mode. Unconditional call (not
+        # gated on visibility/minchars): `_smarthistory_reset_state` just
+        # cleared `_smarthistory_dropdown_visible` to 0 above, so a
+        # visibility check here could never be true anyway —
+        # `_smarthistory_dropdown_render` already has its own minchars/
+        # cursor-position guards and handles the "nothing to show" case
+        # by clearing, exactly like `_smarthistory_cycle_mode` relies on.
+        _smarthistory_reset_state
+        _smarthistory_dropdown_render
+    fi
+    # Shown regardless of whether the dropdown is on — the toggle key
+    # should always confirm it did something, not just when there's a
+    # dropdown to re-render. See `_smarthistory_cycle_mode`'s `zle -M`
+    # for why this is transient (no leftover text to clean up).
+    zle -M "smarthistory match set to $_smarthistory_matchmode"
 }
 
 # Populate the match cache for the current (mode, pwd, prefix) triple.
@@ -2293,12 +2254,13 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     bindkey '^[OD' _smarthistory_dropdown_select_start_arrow
 fi
 # Ctrl-g: cycle the search scope (SESS -> DIR -> GLOBAL -> SESS) and
-# show the current scope in the RPROMPT.
+# confirm the new scope via a transient `zle -M` message.
 bindkey '^G' _smarthistory_cycle_mode
 # Ctrl-t: toggle the dropdown's match mode (prefix <-> substring —
 # see `_smarthistory_cycle_matchmode`). Unconditional, like Ctrl-g
-# above, not gated behind the dropdown-enabled block — it's harmless
-# (and a documented no-op) to toggle even when the dropdown is off.
+# above, not gated behind the dropdown-enabled block — the state still
+# changes (and is still confirmed via `zle -M`) even when the dropdown
+# is off, it just has nothing to visibly re-render in that case.
 bindkey '^T' _smarthistory_cycle_matchmode
 # Ctrl-S: insert the most probable next command (see the
 # _smarthistory_next_history widget above). On most terminals
@@ -2350,11 +2312,3 @@ _smarthistory_reset_and_abort_line() {
 }
 zle -N _smarthistory_reset_and_abort_line
 bindkey '^C' _smarthistory_reset_and_abort_line
-# Initialize the RPROMPT the first time the prompt is shown. We can't
-# call the update function inline at init time because ZLE is not yet
-# active (zle reset-prompt would error).
-_smarthistory_init_rprompt() {
-    _smarthistory_update_rprompt
-    add-zsh-hook -d precmd _smarthistory_init_rprompt
-}
-add-zsh-hook precmd _smarthistory_init_rprompt
