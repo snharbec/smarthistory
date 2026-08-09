@@ -6,6 +6,36 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `globcomplete.enabled` zsh feature (off by default): replaces fzf-tab-style
+  file completion, phase 1 of a planned fzf replacement (process/directory
+  completion are future work). Pressing `Tab` on a word containing shell-glob
+  syntax (`* ? [`) — e.g. `vi a*<TAB>` or `vi foo/a*<TAB>` — launches
+  `smarthistory tui --glob-complete <word>`, the TUI locked into a
+  file-completion picker instead of running normal zsh completion; anything
+  else still falls through unchanged. The word is prefilled/expanded (not
+  replaced) as the filter, scoped to the directory before the last `/` when
+  one is given, and matched recursively against basenames (fzf-style fuzzy
+  find, not literal single-level glob semantics) via a new glob-to-regex
+  translator (`crate::files::glob_to_regex`). Typing a space then more text
+  inside the picker narrows further by plain substring against each file's
+  path (`*.md jira` matches every markdown file whose path contains "jira",
+  not just files literally named `jira*.md`). Inside the picker, mode-switching
+  is locked (the query can never leave files mode, `F1`/`Ctrl-]` are
+  disabled); `Ctrl-A` marks every visible row, and `Enter` returns every
+  marked row's path — relative to the shell's cwd (matching how a real shell
+  glob expansion reads), space-joined, shell-quoted — or just the current row
+  if nothing is marked, spliced into the command line in place of the typed
+  word (never runs the line). When the command being completed is `cd`, the
+  SAME glob/root-scoping/narrowing rules open a directory picker instead
+  (`smarthistory tui --glob-complete-dir <PATTERN>`) — only real directories
+  on disk are shown, and there's no multi-select (`Ctrl-A` is a no-op, Enter
+  always returns just the single highlighted directory) since cd-ing into
+  more than one directory doesn't mean anything. Selecting a directory row
+  shows its immediate contents (directories first, then files, hidden entries
+  excluded) in the output preview pane. New `smarthistory tui --glob-complete
+  <PATTERN>`, `--glob-complete-dir <PATTERN>`, and `--root <DIR>` CLI flags
+  (the last also usable to override the base directory for plain `/` mode's
+  walk).
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
   users), via the new `sysinfo` dependency. The typed body filters by
   substring against the process's name/cmdline, working directory, and
@@ -159,6 +189,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Preview-pane markdown renderer: an unclosed italic marker that was
+  actually a literal underscore (e.g. a directory or file name like
+  `alpha_sub`) was silently rewritten to an asterisk on render
+  (`alpha_sub` → `alpha*sub`) — the fallback-to-plain-text path for an
+  unclosed marker reconstructed the marker from a fixed per-*kind*
+  string (`MarkerKind::Italic` always spelled `"*"`) instead of the
+  actual character that opened it, since `*` and `_` are both valid
+  italic openers but only one was ever remembered. Found via the new
+  glob-completion directory picker's content preview, but affects any
+  preview text containing a bare underscore in any mode.
 - Line-editor live dropdown: `Enter` now commits AND runs a highlighted
   candidate in one press, same as before the Tab/Enter key-model rework —
   navigate with `Up`/`Down`, then `Enter` alone accepts it. Previously
