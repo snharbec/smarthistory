@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
+  `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment
+  variables, kept in sync on every `Ctrl-g`/`Ctrl-t` toggle
+  (`_smarthistory_sync_prompt_env`) — lets an external prompt system
+  (oh-my-posh, starship, …) show the current widget state itself, since
+  those run as a separate subprocess per prompt render and can't see
+  zsh-internal shell variables. See "Published environment variables" in
+  docs/configuration.md for oh-my-posh/starship segment examples.
 - New `dropdown.matchmode=prefix|substring` config key (default `prefix`,
   matching the historical hardcoded behavior): the live dropdown-completion
   widget's match mode against history. `Ctrl-t` (`_smarthistory_cycle_matchmode`)

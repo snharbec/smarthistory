@@ -76,6 +76,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [Paperless (`<` mode)](#paperless--mode)
   - [Browser (`^` mode)](#browser--mode)
 - [Environment variables](#environment-variables)
+  - [Published environment variables](#published-environment-variables)
 - [All keys at a glance](#all-keys-at-a-glance)
 
 ---
@@ -885,6 +886,35 @@ Most config has a config-file equivalent; the env-var form is for users who want
 | `JIRA_HOST_CERTIFICATE` | — | Client certificate path (mTLS). |
 | `JIRA_HOST_CERTIFICATE_PASSWORD` | — | Client certificate password. |
 | `JIRA_CA_CERTIFICATE` | — | CA bundle for server-cert verification. |
+
+### Published environment variables
+
+The table above is env vars you set to configure smarthistory; these two go the other way — `init.zsh` publishes them so a *separate* prompt system (oh-my-posh, starship, a custom `precmd`, …) can show the current widget state without needing to know anything about `init.zsh`'s internal shell variables. A prompt system like oh-my-posh runs as its own subprocess on every prompt render, so it can only see real exported env vars — not zsh-internal state like `$_smarthistory_mode`. `init.zsh`'s own [`zsh.mode`](#zshmode)/`Ctrl-g` and [`dropdown.matchmode`](#dropdownmatchmode)/`Ctrl-t` indicators (the `[smarthistory: SESS]`/`[~]` RPROMPT text) are driven by the same underlying state, kept in sync by `_smarthistory_sync_prompt_env` — think of these two as that indicator's data, exported for anyone who'd rather render it themselves.
+
+| Variable | Values | Updated by |
+| --- | --- | --- |
+| `SMARTHISTORY_MODE` | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`) |
+| `SMARTHISTORY_MATCHMODE` | `prefix` \| `substring` | `Ctrl-t` (`_smarthistory_cycle_matchmode`) |
+
+**oh-my-posh** example — a `text` segment reading both via Go templates (add to your theme's `blocks[].segments`):
+
+```json
+{
+  "type": "text",
+  "style": "plain",
+  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | toUpper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}]"
+}
+```
+
+**starship** example (`~/.config/starship.toml`) — a `custom` command segment:
+
+```toml
+[custom.smarthistory]
+command = "printf '[smarthistory: %s%s]' \"$(echo $SMARTHISTORY_MODE | tr a-z A-Z)\" \"$([ \"$SMARTHISTORY_MATCHMODE\" = substring ] && echo '~')\""
+when = true
+```
+
+Both examples re-run their command/template on every prompt draw, so the indicator stays current as you toggle `Ctrl-g`/`Ctrl-t` — no shell restart needed, same as the built-in RPROMPT text.
 
 ---
 

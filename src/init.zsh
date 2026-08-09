@@ -216,6 +216,21 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
         *) _smarthistory_matchmode="prefix" ;;
     esac
 fi
+# Mirror the search-scope/match-mode state into real environment
+# variables, not just the zsh-internal `$_smarthistory_mode`/
+# `$_smarthistory_matchmode` shell variables above — a separate
+# prompt system (oh-my-posh, starship, etc.) runs as its own
+# subprocess on every prompt render and can only see actual exported
+# env vars, not this shell's internal state. Kept in sync by
+# `_smarthistory_sync_prompt_env`, called here and again from
+# `_smarthistory_cycle_mode`/`_smarthistory_cycle_matchmode` whenever
+# either value changes. See docs/configuration.md for a sample
+# oh-my-posh segment reading these.
+_smarthistory_sync_prompt_env() {
+    export SMARTHISTORY_MODE="$_smarthistory_mode"
+    export SMARTHISTORY_MATCHMODE="$_smarthistory_matchmode"
+}
+_smarthistory_sync_prompt_env
 # Optional per-candidate syntax highlighting inside the dropdown box
 # (`dropdown.highlight=on`): lexical token coloring via `bat`, plus a
 # self-checked green/red for the first word's alias/function/
@@ -1940,6 +1955,7 @@ _smarthistory_cycle_mode() {
         global) _smarthistory_mode="sess" ;;
     esac
     _smarthistory_debug_log "cycle_mode: $old_mode -> $_smarthistory_mode"
+    _smarthistory_sync_prompt_env
     # Invalidate the match cache; the next Up/Down will re-query under
     # the new scope.
     _smarthistory_reset_state
@@ -1968,6 +1984,7 @@ _smarthistory_cycle_matchmode() {
         substring) _smarthistory_matchmode="prefix" ;;
     esac
     _smarthistory_debug_log "cycle_matchmode: $old_mode -> $_smarthistory_matchmode"
+    _smarthistory_sync_prompt_env
     [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return
     # Same re-render-immediately rationale as `_smarthistory_cycle_mode`
     # — Ctrl-T doesn't fire self-insert, so nothing else would trigger
