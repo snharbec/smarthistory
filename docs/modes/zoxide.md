@@ -20,7 +20,7 @@ Requires the `zoxide` binary on `$PATH`. Nothing else to configure — zoxide mo
 - `Enter` on an unmarked row creates a new tmux session / herdr workspace rooted at the directory and switches to it.
 - `Enter` on a `T`-marked row (a tmux / herdr pane is already active there) focuses that existing pane instead of creating a duplicate session.
 - Both paths are handled by the same staging function `#` Directories mode uses (`App::stage_directory_selection`) — a zoxide row is tagged `mode == "directory"` internally, so the rest of the TUI treats it identically to a Directories-mode row. A `.command` file in the directory (or an ancestor) is bootstrapped the same way too — see [`directories.md`](directories.md#selecting-a-row) for the full `.command`-chaining behavior.
-- If the selected directory **isn't already** a configured `session.<id>` entry (see [`configuration.md`](../configuration.md)), selecting it first opens a "Save directory?" prompt. `Enter`/`y` saves it as a new `session.<id>` entry (name + `.dir` only — no `.exec` flag) before jumping there; `n`/Cancel skips the save. Either answer still completes the jump — the prompt never blocks it. A directory that's already saved skips the prompt entirely.
+- If the selected directory **isn't already** a configured `session.<key>` entry (see [`configuration.md`](../configuration.md)), selecting it first opens a "Save directory?" prompt. `Enter`/`y` saves it as a new `session.<key>` entry (name + `.dir` only — no `.exec` flag) before jumping there; `n`/Cancel skips the save. Either answer still completes the jump — the prompt never blocks it. A directory that's already saved skips the prompt entirely.
 
 ## Relationship to Directories mode
 

@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `session.<key>`/`host.<key>` (`~/.config/smarthistory/sessions`/`hosts`)
+  no longer require a manually-numbered `<key>` (`session.1`, `session.2`,
+  …) — error-prone to hand-edit, since inserting an entry meant
+  renumbering everything after it, and two entries could silently collide
+  on the same number. New entries written by the TUI (F5/F6, the `~`
+  Zoxide save prompt) now get a `<key>` slugified from the display name
+  instead (`session.monorepo`, `host.prod-db`), deduplicated with a
+  `-2`/`-3`/… suffix on collision (`crate::util::slugify`/`unique_slug`).
+  Display order is file declaration order either way — nothing to
+  renumber. Fully backward compatible: `<key>` was always just an opaque
+  join key to the parser, so existing numeric-keyed entries keep working
+  unmodified, no migration needed.
 - The `--glob-complete[-dir]`/`--pid-complete` pickers (`vi a*<TAB>`,
   `cd proj*<TAB>`, `kill sleep<TAB>`) now prefill the query with a
   trailing space (`a* `, `proj* `, `sleep `) instead of no space —

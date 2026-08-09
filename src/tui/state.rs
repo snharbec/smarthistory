@@ -1748,56 +1748,31 @@ impl MatchAlgorithm {
 #[cfg(test)]
 mod tests;
 
-/// Find the next free
-/// `<prefix>.<id>` index
-/// in a config file. Scans
-/// every line for entries
-/// matching
-/// `<prefix>.<number>...`
-/// (the number is the
-/// integer before the
-/// first `.` that follows
-/// the prefix), tracks the
-/// maximum seen, and
-/// returns `max + 1`.
+/// Compute a unique `<prefix>.<key>` slug for a NEW config entry
+/// named `name`, given the raw (as read from disk) contents of the
+/// target config file. Scans every line for a key starting with
+/// `<prefix>.` (bare `session.foo = ...` or sub-fielded
+/// `session.foo.dir = ...`) and collects the part up to the first
+/// `.` after the prefix — this picks up every key already in use,
+/// including legacy numeric ids from `session.<id>`-style entries a
+/// pre-slug config may still have (those collide with a slug just
+/// like any other key would, so they're disambiguated the same way).
 ///
-/// Returns `None` only when
-/// the existing indices are
-/// at `usize::MAX` (a
-/// configuration with
-/// `session.18446744073709551615`
-/// or similar). In practice
-/// this is impossible (the
-/// user would have to add
-/// entries one at a time
-/// for 18 quintillion
-/// years) so the `None`
-/// case is a defensive
-/// guard, not a real-world
-/// failure mode.
+/// `crate::util::slugify(name, prefix)` derives the candidate slug
+/// from the entry's display name (e.g. "SmartHistory" →
+/// "smarthistory"); `crate::util::unique_slug` appends `-2`, `-3`, …
+/// if it collides with something already in the file.
 ///
-/// Used by the TUI's
-/// add-entry dialog to pick
-/// the id for a new
-/// `session.<id>` or
-/// `host.<id>` line before
-/// appending it. The scan
-/// is line-based and
-/// matches only the exact
-/// `<prefix>.` prefix at
-/// the start of the line
-/// (so `sessiondirs=...`
-/// config keys, which
-/// happen to start with
-/// `session`, are NOT
-/// matched — the regex
-/// requires `<prefix>.`,
-/// i.e. a literal dot after
-/// the prefix).
-pub fn next_config_index(contents: &str, prefix: &str) -> Option<usize> {
+/// Used by the TUI's add-entry dialog (F5/F6) and the zoxide save
+/// prompt to pick the key for a new `session.<key>`/`host.<key>`
+/// line before appending it. The scan is line-based and matches only
+/// the exact `<prefix>.` prefix at the start of the line (so
+/// `sessiondirs=...` config keys, which happen to start with
+/// `session`, are NOT matched — the match requires `<prefix>.`, i.e.
+/// a literal dot after the prefix).
+pub fn unique_config_slug(contents: &str, prefix: &str, name: &str) -> String {
     let needle = format!("{}.", prefix);
-    let mut max: usize = 0;
-    let mut found_any = false;
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in contents.lines() {
         let line = line.trim_start();
         // The config syntax
@@ -1813,50 +1788,21 @@ pub fn next_config_index(contents: &str, prefix: &str) -> Option<usize> {
             Some(i) => &line[..i],
             None => line,
         };
-        // Must start with
-        // `<prefix>.` AND
-        // the rest of the key
-        // (after the dot) must
-        // be a valid integer
-        // (i.e. no further
-        // dots, no other
-        // suffix characters).
         if let Some(rest) = key.strip_prefix(needle.as_str()) {
-            // The `rest` is
-            // everything after
-            // `<prefix>.`. For
-            // `session.3.dir`,
-            // that's `3.dir`,
-            // which is not a
-            // valid integer. We
-            // want to match only
-            // the bare `session.3`
-            // line.
-            if let Ok(n) = rest.parse::<usize>() {
-                if n >= max {
-                    max = n;
-                }
-                found_any = true;
+            // `rest` is everything after `<prefix>.` — for
+            // `session.foo.dir` that's `foo.dir`; take up to the
+            // first `.` to recover just the key (`foo`).
+            let existing_key = rest.split('.').next().unwrap_or(rest);
+            if !existing_key.is_empty() {
+                existing.insert(existing_key.to_string());
             }
         }
     }
-    if !found_any {
-        // No existing entry:
-        // start at 1 (the
-        // config syntax
-        // expects positive
-        // integer ids, and
-        // `session.0` would
-        // be ambiguous in
-        // some downstream
-        // parsers).
-        return Some(1);
-    }
-    max.checked_add(1)
+    crate::util::unique_slug(existing.iter().map(String::as_str), name, prefix)
 }
 
 #[cfg(test)]
-mod next_config_index_tests;
+mod unique_config_slug_tests;
 
 #[cfg(test)]
 mod add_entry_dialog_tests;

@@ -645,7 +645,7 @@ Delete every marked row (with confirmation) — same `y`/`n`/`Esc`/`Ctrl-C` dial
 | Default key | `F5` |
 | Category | config |
 
-Add the selected row's directory as a new `session.<id>` entry. Opens a multi-field dialog (Name, Dir, Exec) that writes the entry to `~/.config/smarthistory/sessions` (creating the file if it doesn't exist yet) and reloads the in-memory session list. The new session appears in the `*` panes view under the `# Directories` header (renamed from `# sessions` — see [`panes.md`](modes/panes.md#configured-groups-directories-and-hosts)).
+Add the selected row's directory as a new `session.<key>` entry. Opens a multi-field dialog (Name, Dir, Exec) that writes the entry to `~/.config/smarthistory/sessions` (creating the file if it doesn't exist yet) and reloads the in-memory session list. The new session appears in the `*` panes view under the `# Directories` header (renamed from `# sessions` — see [`panes.md`](modes/panes.md#configured-groups-directories-and-hosts)).
 
 ### `AddHost`
 
@@ -656,7 +656,7 @@ Add the selected row's directory as a new `session.<id>` entry. Opens a multi-fi
 | Default key | `F6` |
 | Category | config |
 
-Add the selected row's directory as a new `host.<id>` entry. Opens a multi-field dialog (Name, Host, Hostname, User, Port, Identity, Exec) that writes the entry to `~/.config/smarthistory/hosts` (creating the file if it doesn't exist yet) and reloads the in-memory host list. The new host appears in the `*` panes view under a `# hosts` header.
+Add the selected row's directory as a new `host.<key>` entry. Opens a multi-field dialog (Name, Host, Hostname, User, Port, Identity, Exec) that writes the entry to `~/.config/smarthistory/hosts` (creating the file if it doesn't exist yet) and reloads the in-memory host list. The new host appears in the `*` panes view under a `# hosts` header.
 
 ### `ComposeNoteEntry`
 

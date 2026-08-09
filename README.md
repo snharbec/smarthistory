@@ -25,10 +25,10 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`?`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`/`), tags (`$`), CodeGraph (`&`), ag content search (`,`), note-segment search (`:`), similar-phrase search (`"`, ranks note segments by embedding similarity), and browser bookmarks + history (`^`, merged from Chrome/Firefox/Safari, tagged `bookmark`/`history`). A meta-prefix mode (`'`) lets you pick any of these by typing a partial name and pressing Tab instead of memorizing the character.
 - **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate natural-language into a runnable command (`=`), describe a command in plain prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
-- **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<id>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
+- **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<key>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
 - **Output capture** for both tmux (`pipe-pane` log) and herdr (`herdr pane read`): captured output is searchable via the `+` prefix and viewable via `Ctrl+L`.
 - **Note/todo integration** with [note_search](https://github.com/snharbec/note_search): search notes (`@`), list open todos (`!`), and create new entries (`@new <text>` / `!@new <text>`) directly from the TUI.
-- **Named sessions** (config): define sessions in `~/.config/smarthistory/sessions` (or the main config file) via `session.<id> = "name"` + `session.<id>.dir = "~/path"`. They appear in the panes (`*`) view under a `# Directories` header; selecting one creates/switches a workspace.
+- **Named sessions** (config): define sessions in `~/.config/smarthistory/sessions` (or the main config file) via `session.<key> = "name"` + `session.<key>.dir = "~/path"`. They appear in the panes (`*`) view under a `# Directories` header; selecting one creates/switches a workspace.
 - **Single Rust binary, no runtime dependencies.** No `fzf`, no `uuidgen`, no `/dev/urandom` access.
 
 ## Installation
@@ -78,7 +78,7 @@ smarthistory search [QUERY] [flags]     # print matching rows
 smarthistory next  <COMMAND>            # most-probable next command
 smarthistory clean [QUERY] [flags]      # bulk-delete matching entries
 smarthistory prune <DAYS> [-f]          # delete entries older than N days
-smarthistory prune-directories [-f]     # remove session.<id> entries whose directory no longer exists
+smarthistory prune-directories [-f]     # remove session.<key> entries whose directory no longer exists
 smarthistory tui   [options]            # launch the TUI
 smarthistory init  zsh                  # emit the zsh init snippet
 smarthistory pane-exec                  # reconnect the current tmux/herdr session (see below)
@@ -235,33 +235,35 @@ multiplexer=herdr
 
 ### Named hosts (config + `~/.ssh/config` merge)
 
-Hosts are configured with `host.<id>` keys in `~/.config/smarthistory/hosts` (a dedicated file, read only by the TUI) — or in the main `~/.config/smarthistory/config` file, or split across both. The first field (`host.<id>.host`) is the SSH config `Host` alias (also used as the connection target when no `.hostname` is set). Every other field is optional and inherits from the matching `~/.ssh/config` block when unset.
+Hosts are configured with `host.<key>` keys in `~/.config/smarthistory/hosts` (a dedicated file, read only by the TUI) — or in the main `~/.config/smarthistory/config` file, or split across both. The first field (`host.<key>.host`) is the SSH config `Host` alias (also used as the connection target when no `.hostname` is set). Every other field is optional and inherits from the matching `~/.ssh/config` block when unset.
 
 ```ini
 # ~/.config/smarthistory/hosts
-host.1 = "Proxmox"
-host.1.host = "pve-1"
-host.1.user = "root"
-host.1.port = 22
-host.1.identity = "~/.ssh/id_ed25519"
-host.1.exec = "tmux a"
+host.proxmox = "Proxmox"
+host.proxmox.host = "pve-1"
+host.proxmox.user = "root"
+host.proxmox.port = 22
+host.proxmox.identity = "~/.ssh/id_ed25519"
+host.proxmox.exec = "tmux a"
 
-host.2 = "Documents"
-host.2.host = "documents"
+host.documents = "Documents"
+host.documents.host = "documents"
 ```
+
+`<key>` is picked automatically (slugified from the display name, `-2`/`-3`/… appended on collision) when the TUI writes a new entry — you rarely need to type it by hand. Older configs with numeric keys (`host.1`, …) keep working unmodified.
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `host.<id>` | Display name. | (alias) |
-| `host.<id>.host` | SSH config `Host` alias / connection target. | (required) |
-| `host.<id>.hostname` | Real `HostName` (overrides SSH config). | (alias) |
-| `host.<id>.user` | Login user. | `$USER` |
-| `host.<id>.port` | TCP port. | `22` |
-| `host.<id>.identity` | Path to private key. | (inherits from SSH config) |
-| `host.<id>.dir` | Display-only cwd. | (none) |
-| `host.<id>.exec` | Command to run after the `ssh` body. | (none) |
+| `host.<key>` | Display name. | (alias) |
+| `host.<key>.host` | SSH config `Host` alias / connection target. | (required) |
+| `host.<key>.hostname` | Real `HostName` (overrides SSH config). | (alias) |
+| `host.<key>.user` | Login user. | `$USER` |
+| `host.<key>.port` | TCP port. | `22` |
+| `host.<key>.identity` | Path to private key. | (inherits from SSH config) |
+| `host.<key>.dir` | Display-only cwd. | (none) |
+| `host.<key>.exec` | Command to run after the `ssh` body. | (none) |
 
-`~/.ssh/config` entries without a `host.<id>` companion are auto-appended. SSH config `Host *` blocks are treated as defaults (matching OpenSSH's own semantics) and contribute their `User` / `IdentityFile` / `Port` to subsequent explicit blocks but are not themselves listed as host rows.
+`~/.ssh/config` entries without a `host.<key>` companion are auto-appended. SSH config `Host *` blocks are treated as defaults (matching OpenSSH's own semantics) and contribute their `User` / `IdentityFile` / `Port` to subsequent explicit blocks but are not themselves listed as host rows.
 
 Selecting a host row:
 
@@ -270,7 +272,7 @@ Selecting a host row:
 
 #### Reconnecting a new pane: `smarthistory pane-exec`
 
-A tmux session / herdr workspace created from a `session.<id>`/`host.<id>` entry is already named after it — no separate registration is needed. But a pane/window opened *inside* it directly (e.g. `Ctrl-b c`), not through smarthistory's own `*` panes picker, starts a plain local shell with no connection of its own. Run `smarthistory pane-exec` in that new pane to reconnect: it reads the current session name (or herdr workspace label) and re-runs whatever created it — a `session.<id>`'s `.exec`, or a `host.<id>`'s `ssh` connection (its `.exec` is not replayed, since that's meant to be typed into the remote shell after connecting, not run locally). It's a manual command only; nothing is auto-installed on pane/window creation.
+A tmux session / herdr workspace created from a `session.<key>`/`host.<key>` entry is already named after it — no separate registration is needed. But a pane/window opened *inside* it directly (e.g. `Ctrl-b c`), not through smarthistory's own `*` panes picker, starts a plain local shell with no connection of its own. Run `smarthistory pane-exec` in that new pane to reconnect: it reads the current session name (or herdr workspace label) and re-runs whatever created it — a `session.<key>`'s `.exec`, or a `host.<key>`'s `ssh` connection (its `.exec` is not replayed, since that's meant to be typed into the remote shell after connecting, not run locally). It's a manual command only; nothing is auto-installed on pane/window creation.
 
 ### Output capture (tmux + herdr)
 
