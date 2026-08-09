@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `Ctrl-z` (`CycleNavPrefix`) action: cycles directly between the
+  three navigation prefix modes — `*` (panes), `#` (directories), `~`
+  (zoxide) — without going through the full `PickPrefix` picker. Reads
+  the actual configured prefix chars, so a remapped `prefix.*` still
+  cycles correctly. From any other mode (plain history, another prefix,
+  or an empty query), jumps straight to panes rather than no-op-ing; the
+  typed body (if any) is preserved across the switch, same as
+  `PickPrefix`.
 - `session.<key>`/`host.<key>` (`~/.config/smarthistory/sessions`/`hosts`)
   no longer require a manually-numbered `<key>` (`session.1`, `session.2`,
   …) — error-prone to hand-edit, since inserting an entry meant

@@ -22418,6 +22418,71 @@ fn apply_prefix_strips_segments_and_codegraph_prefixes() {
     assert_eq!(app.query, "sym", "expected '&' prefix stripped");
 }
 
+// ===== Quick nav-prefix cycle (Ctrl-Z) =====
+
+/// `Ctrl-Z` cycles panes → directories → zoxide → panes, wrapping
+/// around, and preserves the typed body across each hop (same
+/// `apply_prefix` semantics `PickPrefix` itself uses).
+#[test]
+fn cycle_nav_prefix_cycles_panes_directories_zoxide_and_wraps() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+
+    app.query = format!("{}thing", p.panes);
+    app.cycle_nav_prefix();
+    assert_eq!(app.query, format!("{}thing", p.directories));
+
+    app.cycle_nav_prefix();
+    assert_eq!(app.query, format!("{}thing", p.zoxide));
+
+    app.cycle_nav_prefix();
+    assert_eq!(
+        app.query,
+        format!("{}thing", p.panes),
+        "must wrap back around to panes"
+    );
+}
+
+/// Pressing `Ctrl-Z` from any mode OTHER than the three nav
+/// prefixes (plain history, another prefix mode, or an empty
+/// query) jumps straight to panes — the first of the three —
+/// rather than no-op-ing or erroring.
+#[test]
+fn cycle_nav_prefix_from_unrelated_mode_jumps_to_panes() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+
+    app.query = String::new();
+    app.cycle_nav_prefix();
+    assert_eq!(app.query, p.panes.to_string());
+
+    app.query = format!("{}jql", p.jira);
+    app.cycle_nav_prefix();
+    assert_eq!(app.query, format!("{}jql", p.panes));
+
+    app.query = "plain history text".to_string();
+    app.cycle_nav_prefix();
+    assert_eq!(app.query, format!("{}plain history text", p.panes));
+}
+
+/// `Ctrl-Z` is the documented default binding for `CycleNavPrefix`,
+/// and it must actually dispatch to `cycle_nav_prefix` (not just be
+/// registered in the default-key table with nothing wired up).
+#[test]
+fn ctrl_z_dispatches_cycle_nav_prefix() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+    app.query = format!("{}thing", p.panes);
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('z'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert_eq!(app.query, format!("{}thing", p.directories));
+}
+
 #[test]
 fn prefix_picker_new_preselects_none_for_plain_query() {
     let app = global_test_app(&[("hello", 1)]);

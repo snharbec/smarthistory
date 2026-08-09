@@ -12,6 +12,15 @@ pub enum Action {
     Cancel,
     /// Cycle the search scope (SESS → DIR → GLOBAL → STATS → SESS).
     CycleMode,
+    /// Cycle directly between the three navigation prefix modes —
+    /// `*` (panes), `#` (directories), `~` (zoxide), in that order —
+    /// without going through the full [`Action::PickPrefix`] picker.
+    /// From any OTHER mode (plain history, another prefix, no query
+    /// yet), jumps straight to panes (the first of the three) rather
+    /// than erroring or no-opping. Reuses `App::apply_prefix`, so the
+    /// typed body (if any) is preserved across the switch exactly
+    /// like picking a new mode from `PickPrefix` does.
+    CycleNavPrefix,
     /// Toggle the duplicate filter.
     ToggleDuplicateFilter,
     /// Toggle between the active color scheme
@@ -662,6 +671,7 @@ impl Action {
         match self {
             Action::Cancel => "cancel",
             Action::CycleMode => "cycle-mode",
+            Action::CycleNavPrefix => "cycle-nav-prefix",
             Action::ToggleDuplicateFilter => "toggle-duplicate-filter",
             Action::ToggleColorScheme => "toggle-color-scheme",
             Action::EditComment => "edit-comment",
@@ -725,6 +735,7 @@ impl Action {
         match self {
             Action::Cancel => "Cancel",
             Action::CycleMode => "Cycle scope",
+            Action::CycleNavPrefix => "Cycle panes/directories/zoxide",
             Action::ToggleDuplicateFilter => "Toggle dedup",
             Action::ToggleColorScheme => "Toggle color scheme",
             Action::EditComment => "Edit comment",
@@ -803,6 +814,7 @@ impl Action {
             | Action::Backspace
             | Action::DeleteWordBackward => "navigation",
             Action::CycleMode
+            | Action::CycleNavPrefix
             | Action::ToggleDuplicateFilter
             | Action::CycleExitFilter
             | Action::CycleSortOrder
@@ -888,6 +900,7 @@ impl Action {
         match self {
             Action::Cancel => "C-c",
             Action::CycleMode => "C-g",
+            Action::CycleNavPrefix => "C-z",
             Action::ToggleDuplicateFilter => "none",
             // `C-l` (ASCII 0x0C, form feed) is a free
             // key and a natural mnemonic for "Light
@@ -1362,6 +1375,7 @@ impl KeyBindings {
 pub const ALL_ACTIONS: &[Action] = &[
     Action::Cancel,
     Action::CycleMode,
+    Action::CycleNavPrefix,
     Action::ToggleDuplicateFilter,
     Action::ToggleColorScheme,
     Action::EditComment,
