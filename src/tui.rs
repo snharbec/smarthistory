@@ -6058,6 +6058,30 @@ impl App {
         self.refresh();
     }
 
+    /// Cycle directly between the three navigation prefix modes —
+    /// `*` (panes), `#` (directories), `~` (zoxide) — in that fixed
+    /// order, reading the actual configured chars from
+    /// `query_prefixes` (not hardcoded, since `prefix.<name>=` can
+    /// remap any of them). From any OTHER mode (plain history,
+    /// another prefix, or no query yet), jumps straight to panes —
+    /// the first of the three — rather than no-op-ing. Delegates to
+    /// `apply_prefix`, the same query-mutation logic the `PickPrefix`
+    /// picker uses, so the typed body (if any) is preserved across
+    /// the switch exactly like picking a mode from that picker would.
+    fn cycle_nav_prefix(&mut self) {
+        let seq = [
+            self.query_prefixes.panes,
+            self.query_prefixes.directories,
+            self.query_prefixes.zoxide,
+        ];
+        let current = self.query.chars().next();
+        let next = match current.and_then(|c| seq.iter().position(|&p| p == c)) {
+            Some(idx) => seq[(idx + 1) % seq.len()],
+            None => seq[0],
+        };
+        self.apply_prefix(Some(next));
+    }
+
     /// Cycle the exit-code filter (All → Success → Failed → All).
     /// The current filter is also reflected in the badge rendered
     /// in the mode strip, so the user can see at a glance whether
@@ -12255,6 +12279,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CycleMode => {
             app.cycle_mode();
+            false
+        }
+        Action::CycleNavPrefix => {
+            app.cycle_nav_prefix();
             false
         }
         Action::ToggleDuplicateFilter => {

@@ -38,7 +38,7 @@ Actions are grouped in the command palette by their `category()`:
 | Category | Actions |
 | --- | --- |
 | [`navigation`](#navigation) | Cancel, Run, EditStart, EditEnd, Up, Down, MoveCursorLeft, MoveCursorRight, PageUp, PageDown, Home, End, Backspace, DeleteWordBackward, PreviousHistory, NextHistory, PreviousGlobalHistory, NextGlobalHistory |
-| [`search`](#search) | CycleMode, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix |
+| [`search`](#search) | CycleMode, CycleNavPrefix, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix |
 | [`todo`](#todo) | MarkTodoDone |
 | [`theme`](#theme) | CycleThemeNext, CycleThemePrev |
 | [`tools`](#tools) | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry |
@@ -295,6 +295,17 @@ Cycle the search scope (SESS → DIR → GLOBAL → STATS → SESS). Only meanin
 - `DIR` (directory) — only rows captured in the current working directory
 - `GLOBAL` — every row in the SQLite database
 - `STATS` — the frequency / successor-prediction view (no rows; the list is replaced by a stats report)
+
+### `CycleNavPrefix`
+
+| Field | Value |
+| --- | --- |
+| Config key | `cycle-nav-prefix` |
+| Display name | Cycle panes/directories/zoxide |
+| Default key | `C-z` |
+| Category | search |
+
+Cycle directly between the three navigation prefix modes — `*` (panes), `#` (directories), `~` (zoxide) — in that order, without going through the full `PickPrefix` picker. Reads the actual configured prefix chars (`prefix.panes`/`prefix.directories`/`prefix.zoxide`), so a remapped prefix still cycles correctly. From any OTHER mode (plain history, another prefix mode, or an empty query), jumps straight to panes — the first of the three — rather than no-op-ing. The typed body (if any) is preserved across the switch, same as picking a new mode from `PickPrefix` does.
 
 ### `ToggleDuplicateFilter`
 
