@@ -47,6 +47,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [`dropdown.limit`](#dropdownlimit)
   - [`dropdown.minchars`](#dropdownminchars)
   - [`dropdown.highlight`](#dropdownhighlight)
+  - [`dropdown.matchmode`](#dropdownmatchmode)
 - [Comment expansion](#comment-expansion)
   - [`commentexpand.enabled`](#commentexpandenabled)
 - [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion)
@@ -287,6 +288,21 @@ Off by default: it adds one `bat` subprocess call per dropdown render (all candi
 ```ini
 dropdown.enabled=on
 dropdown.highlight=on
+```
+
+### `dropdown.matchmode`
+
+| | |
+| --- | --- |
+| **Type** | `prefix` \| `substring` |
+| **Default** | `prefix` |
+| **Env override** | — |
+
+The dropdown's match mode a brand-new shell starts on: `prefix` matches only commands that START WITH what's typed (the historical, hardcoded behavior — a plain substring match made typing `ls` match `open "http://.../details"`, since that URL contains "ls"); `substring` matches anywhere in the command, the same broader match the `Up`/`Down` history-walk widget and the TUI's own search already use. `Ctrl-t` (`_smarthistory_cycle_matchmode`) toggles between the two at runtime regardless of this setting — it only picks the starting point for a new shell, same relationship [`zsh.mode`](#zshmode)/`Ctrl-g` has. When the dropdown is in `substring` mode, a `[~]` marker appears next to the RPROMPT scope label (`Ctrl-t` is a no-op with nothing to indicate when the dropdown itself is off, so the marker only shows while `dropdown.enabled=on`).
+
+```ini
+dropdown.enabled=on
+dropdown.matchmode=substring
 ```
 
 ---
@@ -890,6 +906,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `dropdown.limit` | positive int | `6` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.minchars` | non-negative int | `1` | [Live dropdown completion](#live-dropdown-completion) |
 | `dropdown.highlight` | `on` \| `off` | `off` | [Live dropdown completion](#live-dropdown-completion) |
+| `dropdown.matchmode` | `prefix` \| `substring` | `prefix` | [Live dropdown completion](#live-dropdown-completion) |
 | `commentexpand.enabled` | `on` \| `off` | `off` | [Comment expansion](#comment-expansion) |
 | `globcomplete.enabled` | `on` \| `off` | `off` | [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion) |
 | `tuicolor.bg` | color | theme's `bg` | [Theme](#theme) |
