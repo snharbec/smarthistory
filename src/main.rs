@@ -4926,8 +4926,15 @@ fn run_tui_command(
                 // with the raw glob word instead of a bare prefix
                 // char. `clap`'s `conflicts_with` already rules out
                 // `prefix`/`pid_complete` being set here.
+                //
+                // Trailing space: lands the cursor ready for an
+                // immediate extra narrowing word (`*.md jira`, see
+                // `FilesFilter::Glob`'s `extra_tokens`) without the
+                // user having to press space first. Harmless for the
+                // filter itself — `FilesState::current_pattern`
+                // trims the body before tokenizing either way.
                 let files_prefix = tui_cfg.query_prefixes().files;
-                (format!("{}{}", files_prefix, pattern), true)
+                (format!("{}{} ", files_prefix, pattern), true)
             }
             (None, Some(pattern), _, _, _) => {
                 // `--pid-complete <PATTERN>` implies the processes
@@ -4935,8 +4942,10 @@ fn run_tui_command(
                 // different target mode and no glob translation
                 // (the pattern is passed through verbatim; `%` mode
                 // does its own free-text substring matching).
+                // Trailing space for the same "ready to keep typing"
+                // reason as the glob-complete branch above.
                 let processes_prefix = tui_cfg.query_prefixes().processes;
-                (format!("{}{}", processes_prefix, pattern), true)
+                (format!("{}{} ", processes_prefix, pattern), true)
             }
             (None, None, Some(p), _, _) => {
                 // Take the first char of the prefix string

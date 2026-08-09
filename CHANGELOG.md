@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- The `--glob-complete[-dir]`/`--pid-complete` pickers (`vi a*<TAB>`,
+  `cd proj*<TAB>`, `kill sleep<TAB>`) now prefill the query with a
+  trailing space (`a* `, `proj* `, `sleep `) instead of no space —
+  ready to keep typing an extra narrowing word immediately, no need to
+  press space first.
 - `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
   `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment
   variables, kept in sync on every `Ctrl-g`/`Ctrl-t` toggle
