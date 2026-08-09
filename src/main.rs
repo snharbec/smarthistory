@@ -318,7 +318,7 @@ enum Commands {
         /// staging an `$EDITOR` command. `Ctrl-A` marks every
         /// visible row. Mutually exclusive with `--prefix` (this
         /// flag already implies the files prefix).
-        #[arg(long, value_name = "PATTERN", conflicts_with_all = ["prefix", "glob_complete_dir"])]
+        #[arg(long, value_name = "PATTERN", conflicts_with_all = ["prefix", "glob_complete_dir", "pid_complete"])]
         glob_complete: Option<String>,
         /// Same as `--glob-complete`, but locked into a DIRECTORY
         /// picker instead of a file picker — every behavior is
@@ -333,14 +333,30 @@ enum Commands {
         /// when the command being completed is `cd` (see
         /// `_smarthistory_globcomplete_is_cd` in `init.zsh`).
         /// Mutually exclusive with `--prefix` and `--glob-complete`.
-        #[arg(long, value_name = "PATTERN", conflicts_with = "prefix")]
+        #[arg(long, value_name = "PATTERN", conflicts_with_all = ["prefix", "pid_complete"])]
         glob_complete_dir: Option<String>,
+        /// Launch the TUI locked into the process-completion picker
+        /// (the processes `%` prefix, pre-filtered to `PATTERN` —
+        /// matched against name/cmdline/cwd/exe exactly like typing
+        /// it into `%` mode interactively; no glob syntax involved,
+        /// `PATTERN` is free text). Multi-select IS available here
+        /// (unlike `--glob-complete-dir`) — `Ctrl-A` marks every
+        /// visible row, and Enter returns every marked (or just the
+        /// selected) process's PID, space-joined, instead of opening
+        /// the normal `%` mode signal-confirmation dialog. Produced
+        /// by the zsh widget when the command being completed is
+        /// `kill` (see `_smarthistory_globcomplete_is_kill` in
+        /// `init.zsh`) — no glob-syntax trigger required, unlike
+        /// `--glob-complete[-dir]`, since PIDs have no glob concept.
+        /// Mutually exclusive with `--prefix`.
+        #[arg(long, value_name = "PATTERN", conflicts_with = "prefix")]
+        pid_complete: Option<String>,
         /// Override the base directory used to resolve relative
         /// walk roots — both the ordinary `/` mode's cwd-rooted
         /// walk and `--glob-complete`/`--glob-complete-dir`'s
         /// root-scoping. Defaults to the process's actual current
-        /// directory. Not files-specific infrastructure — reusable
-        /// by a future process-completion phase.
+        /// directory. Unused by `--pid-complete` (the process picker
+        /// has no filesystem walk to root).
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         /// Execute the selected command directly (via `sh -c`)
@@ -4728,14 +4744,27 @@ fn migrate_history_mode_column(conn: &Connection) -> anyhow::Result<()> {
 /// kept as `-> anyhow::Result<()>` so the one early-return validation
 /// error (`--pane-height`) can use `?` at the call site like every
 /// other fallible command.
+/// The CLI flags that launch a locked completion picker
+/// (`--glob-complete[-dir]`/`--pid-complete`) plus the
+/// `--root` they scope against. Bundled into one struct so
+/// `run_tui_command`'s signature doesn't carry four
+/// separate same-typed positional parameters that a future
+/// edit could silently transpose — see `CliOverrides` for
+/// the same rationale applied to the persistence-override
+/// flags.
+struct CompletionPickerArgs {
+    glob_complete: Option<String>,
+    glob_complete_dir: Option<String>,
+    pid_complete: Option<String>,
+    root: Option<PathBuf>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tui_command(
     conn: Connection,
     mode: Option<String>,
     prefix: Option<String>,
-    glob_complete: Option<String>,
-    glob_complete_dir: Option<String>,
-    root: Option<PathBuf>,
+    picker: CompletionPickerArgs,
     exec: bool,
     query: Option<String>,
     pane: Option<String>,
@@ -4744,6 +4773,12 @@ fn run_tui_command(
     create_note: bool,
     create_note_prefill: Option<(String, String)>,
 ) -> anyhow::Result<()> {
+    let CompletionPickerArgs {
+        glob_complete,
+        glob_complete_dir,
+        pid_complete,
+        root,
+    } = picker;
     // `--create-note` defaults to `--exec`: without it, a
     // bare `smarthistory tui --create-note` just prints the
     // staged `note_search create-note ...` command and exits
@@ -4840,22 +4875,24 @@ fn run_tui_command(
         .map(|p| (p, tui::FilePickerKind::Files))
         .or_else(|| glob_complete_dir.as_deref().map(|p| (p, tui::FilePickerKind::Directories)));
     let cli_query_override = glob_complete_effective.is_some()
+        || pid_complete.is_some()
         || prefix.is_some()
         || query.is_some()
         || env_query.is_some();
     // Loaded early (moved ahead of its original position, just
-    // below) so `--glob-complete`/`--glob-complete-dir` can read the
-    // configured files prefix character before the `initial_query`
-    // match runs.
+    // below) so `--glob-complete`/`--glob-complete-dir`/
+    // `--pid-complete` can read the configured prefix characters
+    // before the `initial_query` match runs.
     let tui_cfg = Config::load();
     let (initial_query, override_session_query) =
         match (
             glob_complete_effective,
+            pid_complete.as_deref(),
             prefix.as_deref(),
             query.as_deref(),
             env_query.as_deref(),
         ) {
-            (Some((pattern, _kind)), _, _, _) => {
+            (Some((pattern, _kind)), _, _, _, _) => {
                 // `--glob-complete[-dir] <PATTERN>` implies the
                 // files prefix REGARDLESS of kind — a directory
                 // picker still drives the exact same underlying `/`
@@ -4865,11 +4902,20 @@ fn run_tui_command(
                 // persist" treatment `--prefix` gets, just pre-filled
                 // with the raw glob word instead of a bare prefix
                 // char. `clap`'s `conflicts_with` already rules out
-                // `prefix` being `Some` here.
+                // `prefix`/`pid_complete` being set here.
                 let files_prefix = tui_cfg.query_prefixes().files;
                 (format!("{}{}", files_prefix, pattern), true)
             }
-            (None, Some(p), _, _) => {
+            (None, Some(pattern), _, _, _) => {
+                // `--pid-complete <PATTERN>` implies the processes
+                // prefix — same shape as `--glob-complete`, just a
+                // different target mode and no glob translation
+                // (the pattern is passed through verbatim; `%` mode
+                // does its own free-text substring matching).
+                let processes_prefix = tui_cfg.query_prefixes().processes;
+                (format!("{}{}", processes_prefix, pattern), true)
+            }
+            (None, None, Some(p), _, _) => {
                 // Take the first char of the prefix string
                 // (it's always a single char by construction;
                 // we accept multi-char input defensively for
@@ -4877,9 +4923,9 @@ fn run_tui_command(
                 let first_char = p.chars().next().unwrap_or_default().to_string();
                 (first_char, true)
             }
-            (None, None, Some(q), _) => (q.to_string(), false),
-            (None, None, None, Some(q)) => (q.to_string(), false),
-            (None, None, None, None) => (String::new(), false),
+            (None, None, None, Some(q), _) => (q.to_string(), false),
+            (None, None, None, None, Some(q)) => (q.to_string(), false),
+            (None, None, None, None, None) => (String::new(), false),
         };
     // Build the LLM client up front so the TUI entry
     // point doesn't need to know about config parsing.
@@ -4956,6 +5002,7 @@ fn run_tui_command(
         create_note,
         create_note_prefill,
         glob_complete_effective.map(|(_, kind)| kind),
+        pid_complete.is_some(),
         root,
     )? {
         Some((command, pick_mode)) => {
@@ -5492,9 +5539,12 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 None,
                 None,
-                None,
-                None,
-                None,
+                CompletionPickerArgs {
+                    glob_complete: None,
+                    glob_complete_dir: None,
+                    pid_complete: None,
+                    root: None,
+                },
                 true,
                 None,
                 None,
@@ -5725,6 +5775,7 @@ fn main() -> anyhow::Result<()> {
             prefix,
             glob_complete,
             glob_complete_dir,
+            pid_complete,
             root,
             exec,
             query,
@@ -5737,9 +5788,12 @@ fn main() -> anyhow::Result<()> {
                 conn,
                 mode,
                 prefix,
-                glob_complete,
-                glob_complete_dir,
-                root,
+                CompletionPickerArgs {
+                    glob_complete,
+                    glob_complete_dir,
+                    pid_complete,
+                    root,
+                },
                 exec,
                 query,
                 pane,

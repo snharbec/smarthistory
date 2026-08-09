@@ -270,63 +270,94 @@ _smarthistory_globcomplete_word() {
 _smarthistory_globcomplete_is_cd() {
     [[ "${LBUFFER%% *}" == "cd" ]]
 }
-# Tab handler for the glob-completion picker. When enabled and the
-# trailing word looks like a glob, launches `smarthistory tui
-# --glob-complete <word>` (a locked file-completion picker — see
-# `docs/configuration.md`'s "Glob-triggered Tab file completion"
-# section) as a blocking subprocess, exactly like `_smarthistory_select`
-# (`^R`) does for the main history picker: the TUI renders to
-# stderr, only its final printed result hits stdout, so `$(...)`
-# captures cleanly with no `zle -I`/`stty` dance needed. A non-empty
-# result (already shell-quoted and space-joined by the Rust side)
-# replaces just the matched word — `LBUFFER` minus its trailing
-# `$word` — leaving everything before it (and all of `RBUFFER`,
-# always empty per the end-of-buffer-only check above) untouched. An
-# empty result (Esc/Ctrl-C inside the picker) leaves `BUFFER`
-# completely unmodified — we never write to it in that case. Any
-# other case (disabled, or the trailing word isn't glob-like) falls
-# straight through to normal completion, so this is always safe to
-# bind as the sole `^I` handler.
+# True iff the command being completed is `kill` — REQUIRES a
+# trailing space after the command word (`kill `, not bare `kill`),
+# so plain command-name completion (`kill` vs e.g. `killall`) still
+# works normally when nothing has been typed after it yet. Unlike
+# `_smarthistory_globcomplete_is_cd`, this does NOT require the
+# trailing word to look glob-ish — PIDs have no glob concept, so
+# `kill <TAB>` should open the process picker even with nothing (or
+# plain non-glob text) typed after it. Same compound-command scope
+# limitation as `_smarthistory_globcomplete_is_cd`: only a simple
+# leading `kill` is recognized.
+_smarthistory_globcomplete_is_kill() {
+    [[ "$LBUFFER" == "kill "* ]]
+}
+# Tab handler for the glob-completion picker. Two independent
+# triggers, checked in order:
+#
+#   1. `kill <TAB>` (see `_smarthistory_globcomplete_is_kill`) — ALWAYS
+#      opens the process picker (`--pid-complete`), with whatever's
+#      typed after `kill ` (possibly nothing) as the search filter.
+#      No glob syntax required or interpreted.
+#   2. A glob-looking trailing word (see `_smarthistory_globcomplete_word`)
+#      — opens the file picker (`--glob-complete`), or the directory
+#      picker (`--glob-complete-dir`) when the command is `cd`.
+#
+# Either path launches `smarthistory tui <flag> <pattern>` as a
+# blocking subprocess, exactly like `_smarthistory_select` (`^R`)
+# does for the main history picker: the TUI renders to stderr, only
+# its final printed result hits stdout, so `$(...)` captures cleanly
+# with no `zle -I`/`stty` dance needed. An empty result (Esc/Ctrl-C
+# inside the picker) leaves `BUFFER` completely unmodified in both
+# paths — we never write to it in that case. Neither trigger firing
+# falls straight through to normal completion, so this is always
+# safe to bind as the sole `^I` handler.
 _smarthistory_globcomplete_accept() {
     local word result glob_flag
-    if [[ "$_smarthistory_globcomplete_enabled" = "1" ]] && _smarthistory_globcomplete_word; then
-        word="$REPLY"
-        # `cd`'s argument is always a directory, never a file — open
-        # the directory picker instead (`--glob-complete-dir`), which
-        # shows only directory entries and has no multi-select (you
-        # can only `cd` into one place). See
-        # `_smarthistory_globcomplete_is_cd`.
-        if _smarthistory_globcomplete_is_cd; then
-            glob_flag="--glob-complete-dir"
-        else
-            glob_flag="--glob-complete"
+    if [[ "$_smarthistory_globcomplete_enabled" = "1" ]]; then
+        if [[ -z "$RBUFFER" ]] && _smarthistory_globcomplete_is_kill; then
+            # Replaces the ENTIRE argument portion after `kill `
+            # (not just a trailing word) — the picker's returned PID
+            # list is the full desired argument set, same as the
+            # cd/file pickers replacing their whole matched glob word.
+            result=$(smarthistory tui --pid-complete "${LBUFFER#kill }")
+            if [[ -n "$result" ]]; then
+                LBUFFER="kill ${result}"
+            fi
+            return
         fi
-        # NO stderr redirect here — unlike the data-fetching
-        # `smarthistory search`/`config get` calls elsewhere in this
-        # file, this subprocess is an interactive full-screen TUI
-        # that draws to stderr specifically so `$(...)` can capture
-        # its stdout result cleanly (see `_smarthistory_select`/`^R`,
-        # the same pattern, also un-redirected). Piping stderr to
-        # /dev/null would discard the entire picker UI while the
-        # process stays alive waiting for input — invisible, not
-        # actually hung, but indistinguishable from a frozen shell.
-        result=$(smarthistory tui "$glob_flag" "$word")
-        if [[ -n "$result" ]]; then
-            # `$word` is glob-detected precisely because it contains
-            # `* ? [` — quoting it here is load-bearing, not
-            # cosmetic: zsh's `%` suffix-removal treats an UNQUOTED
-            # parameter as an active glob pattern, so `${LBUFFER%$word}`
-            # would let `word`'s own `*` match "zero or more
-            # characters" and strip too little (the shortest-match
-            # semantics of `%` would find a shorter satisfying suffix
-            # and leave the literal trailing glob characters behind
-            # in `LBUFFER`). Quoting `"$word"` inside the pattern
-            # position forces a literal (non-glob) match instead —
-            # documented zsh behavior, unlike bash where quoting
-            # doesn't affect `%`/`##` pattern interpretation.
-            LBUFFER="${LBUFFER%"${word}"}${result}"
+        if _smarthistory_globcomplete_word; then
+            word="$REPLY"
+            # `cd`'s argument is always a directory, never a file —
+            # open the directory picker instead (`--glob-complete-dir`),
+            # which shows only directory entries and has no
+            # multi-select (you can only `cd` into one place). See
+            # `_smarthistory_globcomplete_is_cd`.
+            if _smarthistory_globcomplete_is_cd; then
+                glob_flag="--glob-complete-dir"
+            else
+                glob_flag="--glob-complete"
+            fi
+            # NO stderr redirect here — unlike the data-fetching
+            # `smarthistory search`/`config get` calls elsewhere in
+            # this file, this subprocess is an interactive full-screen
+            # TUI that draws to stderr specifically so `$(...)` can
+            # capture its stdout result cleanly (see
+            # `_smarthistory_select`/`^R`, the same pattern, also
+            # un-redirected). Piping stderr to /dev/null would discard
+            # the entire picker UI while the process stays alive
+            # waiting for input — invisible, not actually hung, but
+            # indistinguishable from a frozen shell.
+            result=$(smarthistory tui "$glob_flag" "$word")
+            if [[ -n "$result" ]]; then
+                # `$word` is glob-detected precisely because it
+                # contains `* ? [` — quoting it here is load-bearing,
+                # not cosmetic: zsh's `%` suffix-removal treats an
+                # UNQUOTED parameter as an active glob pattern, so
+                # `${LBUFFER%$word}` would let `word`'s own `*` match
+                # "zero or more characters" and strip too little (the
+                # shortest-match semantics of `%` would find a
+                # shorter satisfying suffix and leave the literal
+                # trailing glob characters behind in `LBUFFER`).
+                # Quoting `"$word"` inside the pattern position forces
+                # a literal (non-glob) match instead — documented zsh
+                # behavior, unlike bash where quoting doesn't affect
+                # `%`/`##` pattern interpretation.
+                LBUFFER="${LBUFFER%"${word}"}${result}"
+            fi
+            return
         fi
-        return
     fi
     zle expand-or-complete
 }

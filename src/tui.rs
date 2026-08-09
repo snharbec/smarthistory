@@ -2063,6 +2063,38 @@ pub(crate) struct App {
     /// `FilePickerLock`'s own doc comment and the `handle_key` guard
     /// clauses gated on `app.file_picker_lock.is_some()`.
     file_picker_lock: Option<FilePickerLock>,
+    /// `Some` for the whole lifetime of a `smarthistory tui
+    /// --pid-complete <PATTERN>` session (the locked process-
+    /// completion picker launched from the zsh Tab widget when the
+    /// command being completed is `kill`) — `None` for every other
+    /// TUI session. A separate field from `file_picker_lock` rather
+    /// than a third `FilePickerKind` variant: this locks onto the
+    /// PROCESSES (`%`) prefix, not files, and needs none of
+    /// `FilePickerLock`'s filesystem-walk machinery (root-scoping,
+    /// glob/substring matching) — `mode::processes::fetch` already
+    /// does its own matching, unmodified. See `ProcessPickerLock`'s
+    /// own doc comment and the `handle_key` guard clauses gated on
+    /// `app.process_picker_lock.is_some()`.
+    process_picker_lock: Option<ProcessPickerLock>,
+}
+
+/// State for a locked process-completion picker session
+/// (`app.process_picker_lock`). Carries just the prefix character
+/// (`query_prefixes.processes`) needed to clamp the query — unlike
+/// `FilePickerLock`, there's no root/kind to track, since
+/// `mode::processes::fetch` (a synchronous `sysinfo` snapshot, not a
+/// debounced background walk) already does its own name/cmdline/
+/// cwd/exe substring matching against the query body untouched.
+/// Multi-select IS meaningful here (unlike the `cd` directory
+/// picker) — `kill` can legitimately target more than one PID at
+/// once — so this reuses `picker_select_all` and
+/// `smart_action_targets()` exactly like the `Files`-kind file
+/// picker does, just returning PIDs (`row.id`) instead of paths.
+#[derive(Clone)]
+struct ProcessPickerLock {
+    /// `query_prefixes.processes` at construction — the one prefix
+    /// character a locked session may never leave.
+    prefix: char,
 }
 
 /// State for a locked file-completion picker session
@@ -4945,6 +4977,7 @@ impl App {
             files_ignores,
             files_root,
             file_picker_lock: None,
+            process_picker_lock: None,
             jira_rows: Vec::new(),
             jira_request: None,
             jira_in_flight: false,
@@ -10328,13 +10361,27 @@ impl App {
     }
 
     /// Mark every currently-visible row (`Ctrl-A` inside a locked
-    /// file-completion picker session — see `file_picker_lock`).
-    /// No general "select all" action exists outside the picker;
-    /// this is intentionally picker-only (see the `handle_key` guard
-    /// that intercepts `Ctrl-A` before it would otherwise reach the
-    /// default `Action::OpenHelp` binding).
-    fn file_picker_select_all(&mut self) {
+    /// completion picker session — see `file_picker_lock` /
+    /// `process_picker_lock`, both of which use this same generic
+    /// helper). No general "select all" action exists outside a
+    /// picker; this is intentionally picker-only (see the
+    /// `handle_key` guards that intercept `Ctrl-A` before it would
+    /// otherwise reach the default `Action::OpenHelp` binding).
+    fn picker_select_all(&mut self) {
         self.marked_ids = self.merged_rows.iter().map(mark_key).collect();
+    }
+
+    /// True iff a locked `--glob-complete-dir` (directory) picker
+    /// session is active, as opposed to a `--glob-complete` (file)
+    /// session or no lock at all. Single source of truth for the
+    /// `file_picker_lock.kind` check, shared with `render.rs`'s
+    /// list-title override and `mode::files::fetch`'s row-kind
+    /// filter.
+    pub(crate) fn is_directory_picker(&self) -> bool {
+        matches!(
+            self.file_picker_lock.as_ref().map(|l| l.kind),
+            Some(FilePickerKind::Directories)
+        )
     }
 
     /// Confirm the locked file-completion picker's selection
@@ -10365,10 +10412,7 @@ impl App {
     /// (dialog stays open) when nothing is selected, same silent-
     /// no-op convention `smart_open_for_file` already uses.
     fn file_picker_confirm_selection(&mut self) {
-        let is_dirs = matches!(
-            self.file_picker_lock.as_ref().map(|l| l.kind),
-            Some(FilePickerKind::Directories)
-        );
+        let is_dirs = self.is_directory_picker();
         let targets: Vec<HistoryRow> = if is_dirs {
             self.selected_row().cloned().into_iter().collect()
         } else {
@@ -10389,6 +10433,35 @@ impl App {
                 });
                 crate::util::shell_quote(relative.as_deref().unwrap_or(&r.directory))
             })
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.selection = Some(joined);
+        self.pick_mode = Some(PickMode::EditEnd);
+    }
+
+    /// Confirm the locked process-completion picker's selection
+    /// (Enter/Left/Right, all treated identically — see the
+    /// `handle_key` guard). Reuses `smart_action_targets()` (marked
+    /// rows if any, else just the selected row) exactly like the
+    /// `Files`-kind file picker — `kill` can legitimately target
+    /// more than one PID at once, unlike `cd`. Each target's PID
+    /// (`row.id`, set by `mode::processes::fetch`) is space-joined
+    /// into `self.selection` — no shell-quoting needed, PIDs are
+    /// always plain integers. `pick_mode` is always `EditEnd`
+    /// (insert-only, cursor at end) — never `Run` — so accepting a
+    /// completion never submits/executes the line, and critically
+    /// never opens the normal processes-mode signal-confirmation
+    /// dialog (that path is bypassed entirely by the `handle_key`
+    /// guard, not reached from here at all). A no-op (dialog stays
+    /// open) when nothing is selected.
+    fn process_picker_confirm_selection(&mut self) {
+        let targets = self.smart_action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let joined = targets
+            .iter()
+            .map(|r| r.id.to_string())
             .collect::<Vec<_>>()
             .join(" ");
         self.selection = Some(joined);
@@ -10834,11 +10907,18 @@ pub fn run_tui_to_stdout(
     // of kind; this is just "also install the lock (with this
     // kind)," not "also seed the query."
     file_picker_kind: Option<FilePickerKind>,
+    // `true` when `--pid-complete <PATTERN>` was given — locks the
+    // whole session into the process-completion picker (see
+    // `ProcessPickerLock`). `initial_query` has already been set to
+    // `<processes-prefix><PATTERN>` by the caller by the time this
+    // reaches here.
+    lock_process_picker: bool,
     // `smarthistory tui --root <DIR>` — overrides the base
     // directory `files_root` (plain `/` mode) and, when
     // `file_picker_kind` is set, `FilePickerLock::base_root`
     // (`--glob-complete[-dir]`'s root-scoping) both resolve relative
-    // roots against. Defaults to `current_dir()` when `None`.
+    // roots against. Defaults to `current_dir()` when `None`. Unused
+    // when `lock_process_picker` is set (no filesystem walk).
     root: Option<std::path::PathBuf>,
 ) -> Result<Option<(String, i32)>> {
     let mode = Mode::parse(&initial_mode).ok_or_else(|| {
@@ -11041,6 +11121,16 @@ pub fn run_tui_to_stdout(
         // walk with no keystroke required.
         app.files_touch();
     }
+    if lock_process_picker {
+        // No debounce-arming needed here (unlike the files picker
+        // above) — `mode::processes::fetch` is a synchronous
+        // `sysinfo` snapshot taken directly on every `refresh()`,
+        // not a debounced background walk, so results appear on the
+        // very first frame with no extra wiring.
+        app.process_picker_lock = Some(ProcessPickerLock {
+            prefix: app.query_prefixes.processes,
+        });
+    }
     // Stash the `sessiondirs=...` roots and mark them unwalked (see
     // the `session_subdirs`/`session_dirs_roots`/`session_subdirs_walked`
     // field doc comments) — the actual walk happens lazily on first
@@ -11206,18 +11296,19 @@ pub fn run_tui_to_stdout(
         // [`maybe_prefix_selection_with_space`] for the
         // full rationale.
         //
-        // A locked file-completion picker (`file_picker_lock`) is
-        // the one exception: its result isn't a standalone command
-        // line at all — it's a fragment the calling zsh widget
-        // splices into the MIDDLE of the buffer, in place of the
-        // glob word (`_smarthistory_globcomplete_accept`,
-        // `LBUFFER="${LBUFFER%"${word}"}${result}"`). Prepending a
-        // space here would land as a stray double space at the
+        // A locked file- or process-completion picker
+        // (`file_picker_lock` / `process_picker_lock`) is the one
+        // exception: its result isn't a standalone command line at
+        // all — it's a fragment the calling zsh widget splices into
+        // the MIDDLE of the buffer, in place of the glob word or the
+        // `kill`/`cd` argument (`_smarthistory_globcomplete_accept`,
+        // e.g. `LBUFFER="${LBUFFER%"${word}"}${result}"`). Prepending
+        // a space here would land as a stray double space at the
         // splice point (`vi ` + ` /path/file.md` = `vi  /path/file.md`),
         // not a meaningful "don't record this" signal — that
         // convention only makes sense for a result printed and used
         // as a whole line.
-        let sel = if app.file_picker_lock.is_some() {
+        let sel = if app.file_picker_lock.is_some() || app.process_picker_lock.is_some() {
             sel
         } else {
             maybe_prefix_selection_with_space(sel, mode_char)
@@ -11830,6 +11921,67 @@ fn run_loop(
     }
 }
 
+/// Shared key-handling for a locked completion picker session
+/// (`file_picker_lock` / `process_picker_lock` — see `handle_key`'s
+/// two call sites). Both picker kinds intercept the same three
+/// things ahead of normal dispatch: a hardcoded `Ctrl-A`
+/// "select all visible" shortcut (or, per `ctrl_a_swallow_message`,
+/// a swallow-with-status-message instead — used by the directory
+/// picker, where multi-selecting doesn't mean anything), Enter/
+/// Left/Right confirming the selection via `confirm_selection`
+/// (insert-only, never "run"), and `PickPrefix`/`SmartOpen` being
+/// swallowed since a locked session may never switch modes. Any
+/// other action dispatches normally, then the query is clamped
+/// back to the bare `prefix` if it fell victim to Backspace/
+/// ClearQuery/etc., so the locked prefix character can never be
+/// deleted.
+///
+/// Returns `Some(terminate)` if the key was handled by the picker
+/// (the caller should return `terminate` from `handle_key`
+/// immediately), or `None` if the key didn't resolve to a bound
+/// action at all (the caller should fall through to whatever
+/// follows the picker check).
+fn handle_picker_lock_key(
+    app: &mut App,
+    key: KeyEvent,
+    prefix: char,
+    ctrl_a_swallow_message: Option<&'static str>,
+    confirm_selection: impl FnOnce(&mut App),
+) -> Option<bool> {
+    if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(message) = ctrl_a_swallow_message {
+            app.set_status_message(message.to_string());
+        } else {
+            app.picker_select_all();
+        }
+        return Some(false);
+    }
+    let action = action_for_key(&app.bindings, &key)?;
+    match action {
+        Action::Run | Action::EditStart | Action::EditEnd => {
+            confirm_selection(app);
+            return Some(app.selection.is_some());
+        }
+        Action::PickPrefix | Action::SmartOpen => {
+            app.set_status_message("Not available in the completion picker".to_string());
+            return Some(false);
+        }
+        _ => {}
+    }
+    let terminate = dispatch_action(app, action);
+    // A plain keystroke can't cause this: `push_char` always
+    // inserts at the END of the query in every non-LLM mode, never
+    // before position 0. This only clamps Backspace / DeleteWordBackward
+    // / ClearQuery (or any other query-mutating action) back to the
+    // bare prefix instead of silently falling through to History mode.
+    if !app.query.starts_with(prefix) {
+        app.query = prefix.to_string();
+        app.query_cursor = 1;
+        app.refresh();
+    }
+    Some(terminate)
+}
+
 /// Returns `true` if the app should exit (selection made or cancelled).
 /// The captured-output overlay is handled directly in the run loop
 /// so that it can launch an external editor.
@@ -12025,63 +12177,47 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     // Locked file-completion picker session (`smarthistory tui
     // --glob-complete <word>`, launched from the new zsh Tab
-    // widget) — two guard clauses, both gated on
-    // `file_picker_lock.is_some()` so every other session sees
-    // byte-for-byte identical `handle_key` behavior.
+    // widget) — gated on `file_picker_lock.is_some()` so every
+    // other session sees byte-for-byte identical `handle_key`
+    // behavior. Files-only: multi-selecting directories doesn't
+    // mean anything (you can only `cd` into one at a time), so a
+    // directory-picker session swallows `Ctrl-A` with a status
+    // message instead of `picker_select_all()` — see
+    // `handle_picker_lock_key`'s `ctrl_a_swallow_message`.
     if let Some(lock) = app.file_picker_lock.clone() {
-        // `Ctrl-A` is a hardcoded picker-only "select all visible"
-        // shortcut, checked on the raw key (not through
-        // `action_for_key`) so it works regardless of whatever the
-        // user has `Action::OpenHelp` (its normal default binding)
-        // rebound to elsewhere. Files-only: multi-selecting
-        // directories doesn't mean anything (you can only `cd` into
-        // one at a time), so a directory-picker session swallows it
-        // with a status message instead.
-        if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if lock.kind == FilePickerKind::Directories {
-                app.set_status_message(
-                    "Select a single directory with Enter".to_string(),
-                );
-            } else {
-                app.file_picker_select_all();
-            }
-            return false;
-        }
-        if let Some(action) = action_for_key(&app.bindings, &key) {
-            match action {
-                // Enter/Left/Right all mean the same thing here:
-                // confirm the picker's selection, insert-only,
-                // never "run" — see `file_picker_confirm_selection`.
-                Action::Run | Action::EditStart | Action::EditEnd => {
-                    app.file_picker_confirm_selection();
-                    return app.selection.is_some();
-                }
-                // Mode-switching entry points: swallowed rather
-                // than dispatched, since a locked picker session
-                // may never leave files mode.
-                Action::PickPrefix | Action::SmartOpen => {
-                    app.set_status_message(
-                        "Not available in the completion picker".to_string(),
-                    );
-                    return false;
-                }
-                _ => {}
-            }
-            let terminate = dispatch_action(app, action);
-            // Backspace / DeleteWordBackward / ClearQuery (or any
-            // other query-mutating action) must never be able to
-            // delete the locked prefix character — clamp back to
-            // the bare prefix instead of silently falling through
-            // to History mode. A plain keystroke can't cause this:
-            // `push_char` always inserts at the END of the query in
-            // every non-LLM mode, never before position 0.
-            if !app.query.starts_with(lock.prefix) {
-                app.query = lock.prefix.to_string();
-                app.query_cursor = 1;
-                app.refresh();
-            }
+        let ctrl_a_swallow_message = (lock.kind == FilePickerKind::Directories)
+            .then_some("Select a single directory with Enter");
+        if let Some(terminate) = handle_picker_lock_key(
+            app,
+            key,
+            lock.prefix,
+            ctrl_a_swallow_message,
+            |app| app.file_picker_confirm_selection(),
+        ) {
             return terminate;
         }
+    }
+
+    // Locked process-completion picker session (`smarthistory tui
+    // --pid-complete <PATTERN>`, launched from the zsh Tab widget
+    // when the command being completed is `kill`) — same shape as
+    // the file-completion picker guard above, but simpler: no
+    // root-scoping, and `Ctrl-A` always marks (multi-select IS
+    // meaningful for `kill`, unlike the `cd` directory picker).
+    // Enter/Left/Right confirming here crucially never reaches
+    // `dispatch_action`/`select_for_run`, so it can never open the
+    // normal processes-mode signal-confirmation dialog
+    // (`stage_process_signal_prompt`).
+    if let Some(lock) = app.process_picker_lock.clone()
+        && let Some(terminate) = handle_picker_lock_key(
+            app,
+            key,
+            lock.prefix,
+            None,
+            |app| app.process_picker_confirm_selection(),
+        )
+    {
+        return terminate;
     }
 
     // Action-based dispatch: look up the user-configured binding

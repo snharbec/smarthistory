@@ -28267,7 +28267,7 @@ fn file_picker_select_all_marks_every_visible_row() {
         file_picker_row(-2, "/tmp/b.txt"),
         file_picker_row(-3, "/tmp/c.txt"),
     ];
-    app.file_picker_select_all();
+    app.picker_select_all();
     assert_eq!(app.marked_ids.len(), 3);
 }
 
@@ -28519,6 +28519,74 @@ fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
         vec!["jira-notes.md"],
         "expected only jira-notes.md (matches *.md AND contains \"jira\"), got {names:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Regression test: glob syntax must ALSO work in plain, unlocked
+/// interactive `/` mode (typed by the user, not launched via
+/// `--glob-complete`), not just inside the locked picker — a real
+/// bug reported after the picker shipped: typing `* tui` in normal
+/// `/` mode was falling through to the OLD literal-substring
+/// matcher, which requires a literal `*` character in the filename
+/// (never happens), so it matched nothing and never narrowed. The
+/// first word containing `* ? [` must be glob-matched (recursively,
+/// against basenames) exactly like the picker does; a query with NO
+/// glob-looking first word is completely unaffected.
+#[test]
+fn spawn_files_walk_unlocked_glob_first_word_narrows_by_extra_substring() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_unlocked_glob_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub").join("tui.rs"), "x").unwrap();
+    std::fs::write(dir.join("other.rs"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.files_root = dir.clone();
+    assert!(app.file_picker_lock.is_none(), "sanity: this is the UNLOCKED path");
+    app.spawn_files_walk("* tui".to_string());
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    let rows = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("walk did not complete within 5s (hang or panic)");
+    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["sub/tui.rs"],
+        "expected only sub/tui.rs (basename matches `*`, path contains \"tui\"), got {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A query with no glob-looking first word is completely unaffected
+/// by the glob-detection change — plain text still goes through the
+/// original AND-of-substring-tokens matcher.
+#[test]
+fn spawn_files_walk_unlocked_plain_text_still_uses_substring_matcher() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_unlocked_plain_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("apple.txt"), "x").unwrap();
+    std::fs::write(dir.join("banana.txt"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.files_root = dir.clone();
+    app.spawn_files_walk("apple".to_string());
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    let rows = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("walk did not complete within 5s (hang or panic)");
+    let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+    assert_eq!(names, vec!["apple.txt"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -28777,5 +28845,144 @@ fn file_picker_directories_ensure_selected_context_empty_dir_leaves_output_untou
     crate::tui::mode::files::ensure_selected_context(&mut app);
     assert!(app.merged_rows[0].output.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Process picker (`--pid-complete`, `kill <TAB>`) ----
+
+/// Build a minimal process-mode `HistoryRow` for the picker tests
+/// below — `mode == "process"`, `id` is the PID.
+fn process_picker_row(pid: i64, command: &str) -> HistoryRow {
+    HistoryRow {
+        id: pid,
+        command: command.to_string(),
+        directory: String::new(),
+        session_id: pid.to_string(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "process".to_string(),
+        ..Default::default()
+    }
+}
+
+/// Build a locked PROCESS-picker `App`: `process_picker_lock` set, a
+/// single process row selected, `OpenHelp` left at its real default
+/// `Ctrl-A` binding so the picker-only intercept can be proven to
+/// win over it.
+fn process_picker_locked_test_app() -> App {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![process_picker_row(4242, "firefox")];
+    app.list_state.select(Some(0));
+    app.query = "%firefox".to_string();
+    app.query_cursor = app.query.chars().count();
+    app.process_picker_lock = Some(ProcessPickerLock {
+        prefix: app.query_prefixes.processes,
+    });
+    app
+}
+
+/// `Ctrl-A` inside a locked process picker marks every visible row
+/// (unlike the directory picker, multi-select IS meaningful for
+/// `kill`) — NOT the default `Action::OpenHelp` behavior.
+#[test]
+fn process_picker_ctrl_a_selects_all_not_help() {
+    let mut app = process_picker_locked_test_app();
+    app.merged_rows.push(process_picker_row(9999, "chrome"));
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    );
+    assert_eq!(app.marked_ids.len(), 2, "Ctrl-A should mark both visible rows");
+    assert!(!app.is_help_viewing(), "Ctrl-A must not open the help overlay while locked");
+}
+
+/// With nothing marked, Enter returns just the selected row's PID —
+/// NOT the normal processes-mode behavior of opening the signal-
+/// confirmation dialog.
+#[test]
+fn process_picker_enter_returns_single_pid_not_signal_dialog() {
+    let mut app = process_picker_locked_test_app();
+    let action = crate::tui::bindings::action_for_key(
+        &app.bindings,
+        &crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+    );
+    assert_eq!(action, Some(Action::Run), "sanity: Enter must resolve to Action::Run for this test to be meaningful");
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+    );
+    assert_eq!(app.selection.as_deref(), Some("4242"));
+    assert_eq!(app.pick_mode, Some(PickMode::EditEnd));
+    assert!(app.confirm_signal.is_none(), "must NOT open the normal signal-confirmation dialog");
+}
+
+/// With marks present, Enter returns every marked row's PID space-
+/// joined, in `merged_rows` order — regardless of which row is
+/// currently selected, mirroring `smart_action_targets`'s "marks win
+/// over selection" contract, same as the files picker.
+#[test]
+fn process_picker_enter_returns_marked_pids_space_joined() {
+    let mut app = process_picker_locked_test_app();
+    app.merged_rows.push(process_picker_row(1111, "chrome"));
+    app.merged_rows.push(process_picker_row(2222, "slack"));
+    app.marked_ids.insert(mark_key(&app.merged_rows[0]));
+    app.marked_ids.insert(mark_key(&app.merged_rows[2]));
+    app.list_state.select(Some(1)); // selected row (chrome) is NOT marked
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+    );
+    assert_eq!(app.selection.as_deref(), Some("4242 2222"));
+    assert_eq!(app.pick_mode, Some(PickMode::EditEnd));
+}
+
+/// `PickPrefix` (F1) and `SmartOpen` (`Ctrl-]`) are swallowed inside
+/// a locked process picker — it may never leave processes mode, and
+/// SmartOpen's wildcard fallback must not reach the signal dialog
+/// either.
+#[test]
+fn process_picker_pick_prefix_and_smart_open_are_swallowed() {
+    let mut app = process_picker_locked_test_app();
+    handle_key(&mut app, crossterm::event::KeyEvent::new(crossterm::event::KeyCode::F(1), crossterm::event::KeyModifiers::NONE));
+    assert!(app.prefix_picker.is_none(), "F1 (PickPrefix) must be swallowed while locked");
+    assert!(app.confirm_signal.is_none());
+}
+
+/// Backspacing cannot delete the locked `%` prefix character — the
+/// query clamps back to the bare prefix.
+#[test]
+fn process_picker_backspace_cannot_delete_locked_prefix() {
+    let mut app = process_picker_locked_test_app();
+    let prefix = app.query_prefixes.processes;
+    assert_eq!(app.query, format!("{prefix}firefox"));
+    for _ in 0..8 {
+        handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Backspace, crossterm::event::KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(
+        app.query,
+        prefix.to_string(),
+        "query must clamp back to the bare locked prefix, never go fully empty"
+    );
+}
+
+/// Confirming with no row selected and nothing marked is a silent
+/// no-op — the dialog stays open.
+#[test]
+fn process_picker_confirm_selection_empty_is_noop() {
+    let mut app = directories_test_app(&[]);
+    app.process_picker_lock = Some(ProcessPickerLock {
+        prefix: app.query_prefixes.processes,
+    });
+    app.merged_rows = vec![];
+    app.process_picker_confirm_selection();
+    assert!(app.selection.is_none());
+    assert!(app.pick_mode.is_none());
 }
 

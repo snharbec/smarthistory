@@ -7,8 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - New `globcomplete.enabled` zsh feature (off by default): replaces fzf-tab-style
-  file completion, phase 1 of a planned fzf replacement (process/directory
-  completion are future work). Pressing `Tab` on a word containing shell-glob
+  completion for files, directories, and processes. Pressing `Tab` on a word containing shell-glob
   syntax (`* ? [`) — e.g. `vi a*<TAB>` or `vi foo/a*<TAB>` — launches
   `smarthistory tui --glob-complete <word>`, the TUI locked into a
   file-completion picker instead of running normal zsh completion; anything
@@ -32,10 +31,17 @@ All notable changes to this project will be documented in this file.
   always returns just the single highlighted directory) since cd-ing into
   more than one directory doesn't mean anything. Selecting a directory row
   shows its immediate contents (directories first, then files, hidden entries
-  excluded) in the output preview pane. New `smarthistory tui --glob-complete
-  <PATTERN>`, `--glob-complete-dir <PATTERN>`, and `--root <DIR>` CLI flags
-  (the last also usable to override the base directory for plain `/` mode's
-  walk).
+  excluded) in the output preview pane. When the command being completed is
+  `kill`, Tab opens the processes (`%`) mode picker instead — with or without
+  glob syntax, since PIDs have no glob concept (`kill <TAB>` shows every
+  process, `kill firefox<TAB>` narrows by name/cmdline/cwd/exe). Multi-select
+  IS available here (`Ctrl-A` marks every visible row); `Enter` returns every
+  marked (or just the selected) process's PID, space-joined, instead of
+  opening `%` mode's normal signal-confirmation dialog. New `smarthistory tui
+  --glob-complete <PATTERN>`, `--glob-complete-dir <PATTERN>`, `--pid-complete
+  <PATTERN>`, and `--root <DIR>` CLI flags (the last also usable to override
+  the base directory for plain `/` mode's walk; unused by `--pid-complete`,
+  which has no filesystem walk to root).
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
   users), via the new `sysinfo` dependency. The typed body filters by
   substring against the process's name/cmdline, working directory, and
@@ -189,6 +195,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word
+  now actually works in plain interactive use, not just inside the
+  `--glob-complete` picker — `docs/modes/files.md` already documented
+  `/*.toml` and `*<glob>` path segments as supported, but the walker only
+  ever did literal AND-of-substring matching, so a query like `* tui`
+  required a literal `*` character in the filename (never happens) and
+  matched nothing, forever. The first word is now glob-matched (root-scoped,
+  recursive, basename-only) exactly like the picker; every word after it
+  still narrows further by substring, and a query with no glob-looking
+  first word is completely unaffected.
 - Preview-pane markdown renderer: an unclosed italic marker that was
   actually a literal underscore (e.g. a directory or file name like
   `alpha_sub`) was silently rewritten to an asterisk on render
