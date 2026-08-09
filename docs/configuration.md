@@ -902,7 +902,7 @@ The table above is env vars you set to configure smarthistory; these two go the 
 {
   "type": "text",
   "style": "plain",
-  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | toUpper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}]"
+  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | upper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}]"
 }
 ```
 
