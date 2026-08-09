@@ -4,14 +4,17 @@
     /// End-to-end regression test of the REAL background-thread path
     /// (`spawn_walk` + its `std::thread::spawn` closure + the mpsc
     /// channel), not just the synchronous `walk_dir` call other
-    /// tests in this file exercise directly. This is the exact path
-    /// `App::spawn_files_walk` drives for a locked `--glob-complete`
-    /// session; a bug here would otherwise only surface through
-    /// manual interactive testing.
+    /// tests in this file exercise directly. `spawn_walk` itself is
+    /// pattern-agnostic now (see the module-level doc comment) — it
+    /// walks EVERYTHING once; filtering (`filter_rows`, tested
+    /// separately below) happens afterward, in memory. This is the
+    /// exact walk `App::spawn_files_walk` drives, once per session;
+    /// a bug here would otherwise only surface through manual
+    /// interactive testing.
     #[test]
-    fn spawn_walk_glob_finds_files_via_real_background_thread() {
+    fn spawn_walk_finds_every_file_via_real_background_thread() {
         let dir = std::env::temp_dir().join(format!(
-            "smarthistory_spawn_walk_glob_test_{}",
+            "smarthistory_spawn_walk_test_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -20,22 +23,16 @@
         std::fs::write(dir.join("notes.md"), "y").unwrap();
         std::fs::write(dir.join("other.txt"), "z").unwrap();
 
-        let re = glob_to_regex("*.md").expect("regex build");
         let ignore = IgnoreSet::new(&[]);
-        let request = spawn_walk(
-            "*.md".to_string(),
-            ignore,
-            dir.clone(),
-            FilesFilterSpec::Glob { basename: re, extra_tokens: Vec::new() },
-        );
+        let request = spawn_walk(dir.clone(), ignore);
         let result = request
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("walk did not complete within 5s (hang or panic)");
         assert_eq!(
             result.len(),
-            2,
-            "expected exactly 2 .md files, got {:?}",
+            3,
+            "expected all 3 files (walk is unfiltered), got {:?}",
             result.iter().map(|r| &r.command).collect::<Vec<_>>()
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -145,15 +142,12 @@
         let _ = std::fs::create_dir_all(&nested);
         let path = nested.join("target.txt");
         std::fs::write(&path, "x").unwrap();
-        let tokens: Vec<String> = vec!["target.txt".into()];
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(&dir, &dir, &FilesFilter::Substring(&tokens), &ignore, &mut next_id, &mut rows);
-        // The file should be in the result. The
-        // intermediate `a/` and `a/b/` directories
-        // should NOT match the filter but should NOT
-        // prevent the recursion from reaching
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        // The nested file should be in the (unfiltered)
+        // result, proving recursion reaches
         // `a/b/target.txt`.
         assert!(
             rows.iter().any(|r| r.command == "a/b/target.txt"),
@@ -173,11 +167,10 @@
         let target = dir.join("target");
         let _ = std::fs::create_dir_all(&target);
         std::fs::write(target.join("artifact.txt"), "x").unwrap();
-        let tokens: Vec<String> = vec![];
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(&dir, &dir, &FilesFilter::Substring(&tokens), &ignore, &mut next_id, &mut rows);
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
         // The `target/` directory itself should be
         // skipped at the entry level, and so should
         // its `artifact.txt` child.
@@ -190,10 +183,14 @@
     }
 
     #[test]
-    fn walk_dir_recurses_through_non_matching_directories() {
-        // The bug we fixed earlier: `~main.rs` must
-        // still find `src/main.rs` even though `src/`
-        // doesn't match.
+    fn filter_rows_finds_match_through_non_matching_ancestor_directory() {
+        // The bug we fixed earlier: `~main.rs` must still find
+        // `src/main.rs` even though the intermediate `src/` entry
+        // itself doesn't match the filter. `walk_dir` collects
+        // both unconditionally now (it doesn't filter at all), so
+        // this is really testing that `filter_rows` correctly
+        // excludes the non-matching `src` row while keeping the
+        // matching `src/main.rs` row.
         let dir = std::env::temp_dir().join(format!(
             "smarthistory_walk_test_{}_{}",
             std::process::id(),
@@ -202,18 +199,20 @@
         let src = dir.join("src");
         let _ = std::fs::create_dir_all(&src);
         std::fs::write(src.join("main.rs"), "x").unwrap();
-        let tokens: Vec<String> = vec!["main.rs".into()];
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(&dir, &dir, &FilesFilter::Substring(&tokens), &ignore, &mut next_id, &mut rows);
-        // The intermediate `src/` does NOT match the
-        // filter but we should still recurse and find
-        // `src/main.rs`.
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        let tokens: Vec<String> = vec!["main.rs".into()];
+        let filtered = filter_rows(&rows, "", &FilesFilter::Substring(&tokens));
         assert!(
-            rows.iter().any(|r| r.command == "src/main.rs"),
+            filtered.iter().any(|r| r.command == "src/main.rs"),
             "expected `src/main.rs`, got {:?}",
-            rows.iter().map(|r| &r.command).collect::<Vec<_>>()
+            filtered.iter().map(|r| &r.command).collect::<Vec<_>>()
+        );
+        assert!(
+            !filtered.iter().any(|r| r.command == "src"),
+            "the non-matching `src` directory row must be excluded"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -239,7 +238,7 @@
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(&dir, &dir, &FilesFilter::Substring(&[]), &ignore, &mut next_id, &mut rows);
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
 
         let row = rows
             .iter()
@@ -419,9 +418,11 @@
     /// The glob filter matches recursively against basenames only —
     /// per the feature's explicit "fzf-style, not literal single-
     /// level glob semantics" design: a pattern with no `/` still
-    /// finds arbitrarily deeply nested files.
+    /// finds arbitrarily deeply nested files. Exercised via
+    /// `filter_rows` (in-memory, post-walk) now, not `walk_dir`
+    /// itself — see the module-level doc comment.
     #[test]
-    fn walk_dir_glob_filter_matches_recursively_by_basename() {
+    fn filter_rows_glob_filter_matches_recursively_by_basename() {
         let dir = std::env::temp_dir().join(format!(
             "smarthistory_walk_glob_test_{}_{}",
             std::process::id(),
@@ -431,25 +432,19 @@
         let _ = std::fs::create_dir_all(&nested);
         std::fs::write(nested.join("apple.txt"), "x").unwrap();
         std::fs::write(dir.join("banana.txt"), "x").unwrap();
-        let re = glob_to_regex("a*").unwrap();
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(
-            &dir,
-            &dir,
-            &FilesFilter::Glob { basename: &re, extra_tokens: &[] },
-            &ignore,
-            &mut next_id,
-            &mut rows,
-        );
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        let re = glob_to_regex("a*").unwrap();
+        let filtered = filter_rows(&rows, "", &FilesFilter::Glob { basename: &re, extra_tokens: &[] });
         assert!(
-            rows.iter().any(|r| r.command == "a/b/apple.txt"),
+            filtered.iter().any(|r| r.command == "a/b/apple.txt"),
             "expected a/b/apple.txt (matches basename glob a*) in {:?}",
-            rows.iter().map(|r| &r.command).collect::<Vec<_>>()
+            filtered.iter().map(|r| &r.command).collect::<Vec<_>>()
         );
         assert!(
-            !rows.iter().any(|r| r.command == "banana.txt"),
+            !filtered.iter().any(|r| r.command == "banana.txt"),
             "banana.txt's basename doesn't match a*, must be excluded"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -460,7 +455,7 @@
     /// path — e.g. `*.md jira` matches every markdown file whose
     /// path contains "jira", not just its basename.
     #[test]
-    fn walk_dir_glob_filter_with_extra_substring_tokens() {
+    fn filter_rows_glob_filter_with_extra_substring_tokens() {
         let dir = std::env::temp_dir().join(format!(
             "smarthistory_walk_glob_extra_test_{}",
             std::process::id()
@@ -469,20 +464,18 @@
         std::fs::write(dir.join("jira-notes.md"), "x").unwrap();
         std::fs::write(dir.join("readme.md"), "x").unwrap();
         std::fs::write(dir.join("jira-summary.txt"), "x").unwrap();
-        let re = glob_to_regex("*.md").unwrap();
-        let extra_tokens = vec!["jira".to_string()];
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(
-            &dir,
-            &dir,
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        let re = glob_to_regex("*.md").unwrap();
+        let extra_tokens = vec!["jira".to_string()];
+        let filtered = filter_rows(
+            &rows,
+            "",
             &FilesFilter::Glob { basename: &re, extra_tokens: &extra_tokens },
-            &ignore,
-            &mut next_id,
-            &mut rows,
         );
-        let names: Vec<&str> = rows.iter().map(|r| r.command.as_str()).collect();
+        let names: Vec<&str> = filtered.iter().map(|r| r.command.as_str()).collect();
         assert_eq!(
             names,
             vec!["jira-notes.md"],
@@ -495,7 +488,7 @@
     /// filter — every basename match passes through, matching
     /// `Substring`'s own empty-tokens convention.
     #[test]
-    fn walk_dir_glob_filter_empty_extra_tokens_matches_everything_the_glob_matches() {
+    fn filter_rows_glob_filter_empty_extra_tokens_matches_everything_the_glob_matches() {
         let dir = std::env::temp_dir().join(format!(
             "smarthistory_walk_glob_no_extra_test_{}",
             std::process::id()
@@ -503,27 +496,21 @@
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.md"), "x").unwrap();
         std::fs::write(dir.join("b.md"), "x").unwrap();
-        let re = glob_to_regex("*.md").unwrap();
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(
-            &dir,
-            &dir,
-            &FilesFilter::Glob { basename: &re, extra_tokens: &[] },
-            &ignore,
-            &mut next_id,
-            &mut rows,
-        );
-        assert_eq!(rows.len(), 2);
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        let re = glob_to_regex("*.md").unwrap();
+        let filtered = filter_rows(&rows, "", &FilesFilter::Glob { basename: &re, extra_tokens: &[] });
+        assert_eq!(filtered.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Regression guard: refactoring `walk_dir`'s filter parameter
-    /// into the `FilesFilter` enum must not change
+    /// Regression guard: moving the filter check out of `walk_dir`
+    /// and into `filter_rows` must not change
     /// `FilesFilter::Substring`'s existing AND-of-tokens behavior.
     #[test]
-    fn walk_dir_substring_filter_unchanged_by_refactor() {
+    fn filter_rows_substring_filter_unchanged_by_refactor() {
         let dir = std::env::temp_dir().join(format!(
             "smarthistory_walk_substr_test_{}_{}",
             std::process::id(),
@@ -532,12 +519,43 @@
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("apple.txt"), "x").unwrap();
         std::fs::write(dir.join("banana.txt"), "x").unwrap();
-        let tokens: Vec<String> = vec!["apple".into()];
         let mut rows = Vec::new();
         let mut next_id: i64 = -1;
         let ignore = IgnoreSet::new(&[]);
-        walk_dir(&dir, &dir, &FilesFilter::Substring(&tokens), &ignore, &mut next_id, &mut rows);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].command, "apple.txt");
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        let tokens: Vec<String> = vec!["apple".into()];
+        let filtered = filter_rows(&rows, "", &FilesFilter::Substring(&tokens));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].command, "apple.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `filter_rows`'s `root_suffix` scoping: rows outside it are
+    /// excluded, and surviving rows' `command` is rewritten relative
+    /// to it — matching how `walk_dir` used to behave when it was
+    /// itself scoped to the narrower root (before the walk-once
+    /// refactor moved root-scoping into the post-walk filter).
+    #[test]
+    fn filter_rows_root_suffix_scopes_and_trims_display_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory_filter_root_suffix_test_{}",
+            std::process::id()
+        ));
+        let foo_bar = dir.join("foo").join("bar");
+        let _ = std::fs::create_dir_all(&foo_bar);
+        std::fs::write(foo_bar.join("banana.txt"), "x").unwrap();
+        std::fs::write(dir.join("sibling.txt"), "x").unwrap();
+        let mut rows = Vec::new();
+        let mut next_id: i64 = -1;
+        let ignore = IgnoreSet::new(&[]);
+        walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+        let tokens: Vec<String> = Vec::new();
+        let filtered = filter_rows(&rows, "foo/bar", &FilesFilter::Substring(&tokens));
+        let names: Vec<&str> = filtered.iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["banana.txt"],
+            "expected only the scoped file, displayed relative to the root_suffix, got {names:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }

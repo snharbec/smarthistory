@@ -1,12 +1,34 @@
 //! Files-mode directory walker.
 //!
-//! Walks the current directory tree on a background thread, filters
-//! by the user's pattern, and returns rows the TUI can render. The
-//! background-thread pattern mirrors the JIRA search path (see
-//! `src/jira.rs`): a `std::thread::spawn` does the actual work, an
-//! `mpsc::Sender<Vec<HistoryRow>>` reports the result, and
-//! an `Arc<AtomicBool>` cancellation flag lets the run loop abort a
-//! stale walk when the pattern changes mid-flight.
+//! Walks the current directory tree **once**, on a background
+//! thread, and caches every entry. Each keystroke after that
+//! filters the cached list in memory (`filter_rows`) — it does NOT
+//! re-walk the filesystem. This mirrors how `fzf` (piped from
+//! `fd`/`find`) actually works: build the candidate list once, then
+//! do fast in-memory filtering per keystroke, rather than re-running
+//! the expensive part on every character typed. The background-
+//! thread pattern otherwise mirrors the JIRA search path (see
+//! `src/jira.rs`): a `std::thread::spawn` does the actual work and
+//! an `mpsc::Sender<Vec<HistoryRow>>` reports the result — but
+//! unlike JIRA (and unlike this module's own earlier per-pattern-walk
+//! design), there's no cancellation flag: the walk isn't tied to any
+//! particular pattern, so a later keystroke never makes the in-flight
+//! walk stale.
+//!
+//! **This wasn't always the design.** The walk used to re-run (fresh
+//! `read_dir` + `metadata()` calls for every entry, filtered inline
+//! via `FilesFilter`) on every debounced keystroke. Fine for a small
+//! tree, but scales badly with depth/size: typing a 5-character
+//! filter in a large repo triggered 5 full filesystem re-walks
+//! instead of 1 walk + 5 cheap in-memory filters. Splitting "walk"
+//! (`walk_dir`, I/O-bound, runs once) from "filter" (`filter_rows`,
+//! CPU-only, runs on every keystroke against the cached result) is
+//! the fix — see `App::files_touch` / `crate::tui::mode::files::fetch`
+//! for how the two halves connect. `FilesFilter`'s glob-vs-substring
+//! split (and the `--glob-complete` picker's root-scoping via
+//! `split_glob_root`) is unchanged in spirit — it just runs against
+//! the cached tree in `filter_rows` instead of gating what `walk_dir`
+//! collects.
 //!
 //! ## Why a separate module
 //!
@@ -19,6 +41,9 @@
 //!
 //! ## Performance characteristics
 //!
+//! - **Walk once, filter many:** see the module-level note above —
+//!   this is the dominant perf win for deep/large trees, well ahead
+//!   of anything below.
 //! - **Skip-list:** `DEFAULT_IGNORES` skips common artifact
 //!   directories (`target/`, `node_modules/`, etc.) at the entry
 //!   level, so the walker never visits them. This is the single
@@ -31,9 +56,12 @@
 //!   4 KiB per file via `read()` (not `read_to_string`), and
 //!   detects binary files (null bytes) to avoid UTF-8 validation
 //!   on megabytes of binary data.
-//! - **No parallelism:** this is a single-threaded walk. A
-//!   parallel walker (via the `ignore` or `walkdir` crate) would
-//!   be faster on large trees but adds a dependency.
+//! - **No parallelism:** the one-shot walk is still single-threaded.
+//!   A parallel walker (via the `ignore` or `walkdir` crate) would
+//!   shave more time off that one walk on very large trees, but
+//!   isn't needed to fix the "typing is slow" problem, since that
+//!   was dominated by walking repeatedly, not by any one walk being
+//!   slow in isolation.
 
 use crate::tui::state::HistoryRow;
 use crate::util::format_size;
@@ -41,16 +69,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
-
-/// How long the files-mode walk waits after the last keystroke
-/// before spawning the background thread. Matches the JIRA
-/// search debounce (400 ms) — both are local/cheap relative to
-/// LLM calls, and the user expects fast feedback.
-pub const FILES_DEBOUNCE: Duration = Duration::from_millis(400);
 
 /// Default directory basenames to skip during the walk. Hardcoded
 /// because almost every project has them; project-specific
@@ -111,69 +130,51 @@ impl IgnoreSet {
     }
 }
 
-/// An in-flight files-mode walk. The background thread sends the
-/// result over `receiver`; the run loop polls it. `cancelled`
-/// lets the run loop abort a stale walk when the user types more
-/// characters (the thread checks the flag just before sending
-/// the result, so a walk that completes between the user's edit
-/// and the flag check is dropped, not delivered).
+/// The one-shot background walk. The background thread sends the
+/// full (unfiltered) tree over `receiver`; the run loop polls it.
+/// No cancellation handle: unlike the old per-keystroke design, the
+/// walk isn't tied to any particular pattern, so a later keystroke
+/// never makes an in-flight walk stale.
 pub struct FilesRequest {
     pub receiver: mpsc::Receiver<Vec<HistoryRow>>,
-    pub cancelled: Arc<AtomicBool>,
-    /// The pattern that was being searched for. Stashed so the
-    /// result-processing step can discard stale results (the
-    /// user typed more characters while the walk was running).
-    pub pattern: String,
 }
 
 /// Aggregated files-mode state. The TUI holds one of these and
 /// reads it from the run loop's idle tick to decide whether to
-/// spawn a background walk.
-///
-/// `FilesState` doesn't own the `FilesRequest` — it does, but
-/// the `Receiver` is moved out by the run loop on poll and
-/// the `Request` is moved into `process_files_result`. The
-/// `cancelled` flag stays on the request so the run loop
-/// can flip it without taking the request out of state.
+/// spawn the one-shot background walk.
 pub struct FilesState {
-    /// When the user last typed in files mode. The debounce
-    /// window must elapse before the background walk fires.
-    /// `None` means the user hasn't typed anything in files
-    /// mode yet (first entry).
-    pub debounce_started: Option<std::time::Instant>,
-    /// pattern is the same, the walk is not re-triggered
-    /// (the cached rows are still fresh).
-    pub last_pattern: Option<String>,
-    /// Whether a walk is currently in flight (background
-    /// thread). Prevents queueing a second walk on every
-    /// keystroke.
+    /// The full, unfiltered directory-tree walk result — every
+    /// file and directory the walk found under the session's
+    /// walk root (`files_root`, or `file_picker_lock.base_root`
+    /// for a locked picker). `None` until the one-shot background
+    /// walk completes (see `App::files_touch`); populated exactly
+    /// once per TUI session. Every keystroke after that filters
+    /// THIS list in memory (`crate::tui::mode::files::fetch` →
+    /// `filter_rows`) instead of re-walking the filesystem.
+    pub all_rows: Option<Vec<HistoryRow>>,
+    /// Whether the one-shot walk is currently running. Prevents
+    /// `files_touch` from spawning a second one while the first
+    /// is still in flight.
     pub in_flight: bool,
     /// In-flight walk (background thread). Polled by the run
     /// loop similarly to the JIRA request polls.
     pub request: Option<FilesRequest>,
-    /// Cached results of the most recent walk. Populated by
-    /// `process_files_result` when the background thread
-    /// completes. Empty on first entry (before the first
-    /// background walk completes).
-    pub rows: Vec<HistoryRow>,
 }
 
 impl FilesState {
-    /// Empty state — no walk in flight, no debounce armed, no
-    /// cached rows.
+    /// Empty state — no walk in flight, no cached tree yet.
     pub fn new() -> Self {
         FilesState {
-            debounce_started: None,
-            last_pattern: None,
+            all_rows: None,
             in_flight: false,
             request: None,
-            rows: Vec::new(),
         }
     }
 
-    /// Compute the canonical pattern for "is this the same
-    /// pattern we just walked?" comparisons. The trim keeps
-    /// trailing spaces from re-triggering walks.
+    /// Strip the files-mode prefix (`/` by default) and
+    /// surrounding whitespace from `query`, giving the raw filter
+    /// text typed after it. Used to derive the token/glob filter
+    /// `crate::tui::mode::files::fetch` matches against.
     pub fn current_pattern(query: &str, prefix: char) -> String {
         let body = if query.starts_with(prefix) {
             &query[prefix.len_utf8()..]
@@ -181,12 +182,6 @@ impl FilesState {
             query
         };
         body.trim().to_string()
-    }
-
-    /// True if the given pattern matches what we have cached
-    /// (or what's currently walking).
-    pub fn has_results_for(&self, pattern: &str) -> bool {
-        self.last_pattern.as_deref() == Some(pattern)
     }
 }
 
@@ -196,59 +191,26 @@ impl Default for FilesState {
     }
 }
 
-impl crate::debounce::Cancellable for FilesRequest {
-    fn cancelled_flag(&self) -> &Arc<AtomicBool> {
-        &self.cancelled
-    }
-}
-
-impl crate::debounce::Debounced for FilesState {
-    type Request = FilesRequest;
-    fn debounce_started(&mut self) -> &mut Option<std::time::Instant> {
-        &mut self.debounce_started
-    }
-    fn last_pattern(&mut self) -> &mut Option<String> {
-        &mut self.last_pattern
-    }
-    fn in_flight(&mut self) -> &mut bool {
-        &mut self.in_flight
-    }
-    fn request(&mut self) -> &mut Option<FilesRequest> {
-        &mut self.request
-    }
-}
-
-/// Recursively walk a directory, adding matching files and
-/// directories to `rows`. Hidden entries (names starting with
-/// `.`) and `ignore.contains(...)` matches are skipped at the
-/// entry level. Permission errors are silently swallowed so a
-/// single unreadable subdirectory doesn't abort the whole
-/// walk.
+/// Recursively walk a directory, adding every file and directory
+/// entry to `rows`. Hidden entries (names starting with `.`) and
+/// `ignore.contains(...)` matches are skipped at the entry level.
+/// Permission errors are silently swallowed so a single unreadable
+/// subdirectory doesn't abort the whole walk.
 ///
 /// `next_id` is a monotonically-decreasing counter used to
 /// generate the synthetic row ids (negative integers so they
 /// can't collide with the SQLite-allocated positive history
 /// ids; same convention as the directories and todo modes).
 ///
-/// **Filter semantics:** the filter check only controls whether
-/// the *current* entry is added to the result list. Directory
-/// recursion is unconditional, so `~main.rs` still finds
-/// `src/main.rs` even though `src/` itself doesn't match.
-/// True iff every token in `tokens` is a case-insensitive
-/// substring of `display`. Empty `tokens` always matches — used
-/// by both `FilesFilter::Substring` (the whole filter) and
-/// `FilesFilter::Glob`'s `extra_tokens` (narrowing on top of the
-/// basename regex match).
-fn matches_all_tokens(display: &str, tokens: &[String]) -> bool {
-    tokens
-        .iter()
-        .all(|tok| display.to_lowercase().contains(tok))
-}
-
+/// **No pattern filtering here.** This walks and collects
+/// EVERYTHING (subject only to the hidden-entry / ignore-list
+/// skips above) — the user's typed filter is applied afterward, in
+/// memory, by [`filter_rows`]. Keeping the walk pattern-agnostic is
+/// what lets it run exactly once per session instead of once per
+/// keystroke; see the module-level doc comment.
 pub fn walk_dir(
     root: &Path,
     dir: &Path,
-    filter: &FilesFilter,
     ignore: &IgnoreSet,
     next_id: &mut i64,
     rows: &mut Vec<HistoryRow>,
@@ -286,103 +248,141 @@ pub fn walk_dir(
         // Compute the display path relative to root.
         let path = entry.path();
         let display = compute_display(root, &path, &name);
-        // Apply the filter — either the default AND-of-substring-
-        // tokens match (against the display path relative to root),
-        // or a full-match glob-derived regex against the entry's
-        // basename only (`FilesFilter::Glob`, used exclusively by
-        // the `--glob-complete` picker).
-        let matches_filter = match filter {
-            FilesFilter::Substring(tokens) => matches_all_tokens(&display, tokens),
-            FilesFilter::Glob { basename, extra_tokens } => {
-                basename.is_match(&name.to_string_lossy())
-                    && matches_all_tokens(&display, extra_tokens)
-            }
+        let id = *next_id;
+        *next_id -= 1;
+        let mode = if is_dir { "directory" } else { "file" };
+        let comment = if is_dir {
+            String::new()
+        } else {
+            format_size(meta.len())
         };
-        if matches_filter {
-            let id = *next_id;
-            *next_id -= 1;
-            let mode = if is_dir { "directory" } else { "file" };
-            let comment = if is_dir {
-                String::new()
-            } else {
-                format_size(meta.len())
-            };
-            let abs_path = if path.is_absolute() {
-                path.to_string_lossy().into_owned()
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(&path)
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            // The row's `timestamp` is the file's modification
-            // time (not "when this row was created" — every row is
-            // created at walk time). This is both the value shown
-            // in the list's age/time column (`render_row` reads
-            // `row.timestamp` uniformly across every mode) and the
-            // sort key `spawn_walk` uses to show recently-modified
-            // files first. `0` (Unix epoch) on any failure to read
-            // it — same convention `directories.rs`/`todo.rs` use
-            // for "no meaningful timestamp available" — sorts the
-            // row to the bottom rather than erroring the whole walk.
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            // The preview is left empty here. Loading a 4KB
-            // snippet of every file in the walk would dominate
-            // the runtime on large directories. The render
-            // layer populates the preview for the currently-
-            // selected row (and a small look-ahead window) on
-            // demand. See `read_preview_bytes` for the
-            // bounded-read implementation.
-            rows.push(HistoryRow {
-                id,
-                command: display,
-                directory: abs_path,
-                session_id: String::new(),
-                exit_code: 0,
-                timestamp: mtime,
-                comment,
-                output: String::new(),
-                mode: mode.to_string(),
-                source: String::new(),
-                ..Default::default()
-            });
-        }
-        // Always recurse into directories so deep files
-        // are found even when the ancestor doesn't match
-        // the filter pattern.
+        let abs_path = if path.is_absolute() {
+            path.to_string_lossy().into_owned()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join(&path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        // The row's `timestamp` is the file's modification
+        // time (not "when this row was created" — every row is
+        // created at walk time). This is both the value shown
+        // in the list's age/time column (`render_row` reads
+        // `row.timestamp` uniformly across every mode) and the
+        // sort key `sort_rows_newest_modified_first` uses to
+        // show recently-modified files first. `0` (Unix epoch)
+        // on any failure to read it — same convention
+        // `directories.rs`/`todo.rs` use for "no meaningful
+        // timestamp available" — sorts the row to the bottom
+        // rather than erroring the whole walk.
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // The preview is left empty here. Loading a 4KB
+        // snippet of every file in the walk would dominate
+        // the runtime on large directories. The render
+        // layer populates the preview for the currently-
+        // selected row (and a small look-ahead window) on
+        // demand. See `read_preview_bytes` for the
+        // bounded-read implementation.
+        rows.push(HistoryRow {
+            id,
+            command: display,
+            directory: abs_path,
+            session_id: String::new(),
+            exit_code: 0,
+            timestamp: mtime,
+            comment,
+            output: String::new(),
+            mode: mode.to_string(),
+            source: String::new(),
+            ..Default::default()
+        });
+        // Always recurse into directories — the walk is
+        // pattern-agnostic now, so there's no "ancestor didn't
+        // match" case to worry about anymore (that concern only
+        // existed when filtering happened during the walk).
         if is_dir {
-            walk_dir(root, &path, filter, ignore, next_id, rows);
+            walk_dir(root, &path, ignore, next_id, rows);
         }
     }
 }
 
-/// The two filtering strategies `walk_dir` supports. `Substring` is
-/// the original, default `/` mode behavior (AND of case-insensitive
-/// substring tokens against the display path relative to `root`);
-/// `Glob` is new, used exclusively by the `--glob-complete` picker
-/// (`App::spawn_files_walk`) — a full-match regex (built by
+/// The two filtering strategies [`filter_rows`] supports, applied
+/// in memory against the cached full-tree walk (`FilesState::all_rows`)
+/// — NOT during `walk_dir` itself, which is pattern-agnostic (see the
+/// module-level doc comment). `Substring` is the original, default `/`
+/// mode behavior (AND of case-insensitive substring tokens against the
+/// display path); `Glob` is used by the `--glob-complete` picker
+/// (`crate::tui::mode::files::fetch`) — a full-match regex (built by
 /// `glob_to_regex`) against the entry's basename, AND (if any)
-/// case-insensitive substring tokens against the display path
-/// relative to `root`. The picker's typed body is split on
-/// whitespace: the FIRST word is always the glob (root-scoped via
-/// `split_glob_root`), every word after it narrows further as a
+/// case-insensitive substring tokens against the display path relative
+/// to the glob's own root-scoping prefix. The picker's typed body is
+/// split on whitespace: the FIRST word is always the glob (root-scoped
+/// via `split_glob_root`), every word after it narrows further as a
 /// plain substring — e.g. `*.md jira` matches every markdown file
-/// whose relative path contains "jira". The picker's walk root is
-/// already scoped to the literal-prefix directory from the first
-/// word, so `basename` only needs to check the entry itself;
-/// recursion handles "search everywhere under that root."
+/// whose relative path contains "jira".
 pub enum FilesFilter<'a> {
     Substring(&'a [String]),
     Glob {
         basename: &'a regex::Regex,
         extra_tokens: &'a [String],
     },
+}
+
+/// True iff every token in `tokens` is a case-insensitive substring
+/// of `display`. Empty `tokens` always matches — used by both
+/// `FilesFilter::Substring` (the whole filter) and
+/// `FilesFilter::Glob`'s `extra_tokens` (narrowing on top of the
+/// basename regex match).
+fn matches_all_tokens(display: &str, tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .all(|tok| display.to_lowercase().contains(tok))
+}
+
+/// Filter `all_rows` (the cached, full-tree `walk_dir` result) by
+/// `filter` — the fast, in-memory counterpart to the (expensive,
+/// I/O-bound) walk. Called on every keystroke against the cached
+/// tree instead of re-walking the filesystem each time (see the
+/// module-level doc comment).
+///
+/// `root_suffix` is `FilesFilter::Glob`'s root-scoping prefix (from
+/// `split_glob_root`, e.g. `"foo/bar"` for a typed `foo/bar/a*`) —
+/// rows outside it are excluded, and the surviving rows' `command`
+/// is rewritten relative to it (e.g. `banana.txt` instead of
+/// `foo/bar/banana.txt`), matching how the picker displayed results
+/// when `walk_dir` itself used to be scoped to that narrower root.
+/// Always empty for `FilesFilter::Substring` (plain `/` mode has no
+/// root-scoping concept), in which case this is a no-op passthrough.
+pub fn filter_rows(all_rows: &[HistoryRow], root_suffix: &str, filter: &FilesFilter) -> Vec<HistoryRow> {
+    let prefix = if root_suffix.is_empty() { None } else { Some(format!("{root_suffix}/")) };
+    all_rows
+        .iter()
+        .filter_map(|r| {
+            let trimmed = match &prefix {
+                Some(p) => r.command.strip_prefix(p.as_str())?,
+                None => r.command.as_str(),
+            };
+            let matches = match filter {
+                FilesFilter::Substring(tokens) => matches_all_tokens(trimmed, tokens),
+                FilesFilter::Glob { basename, extra_tokens } => {
+                    let name = Path::new(&r.command).file_name().unwrap_or_default().to_string_lossy();
+                    basename.is_match(&name) && matches_all_tokens(trimmed, extra_tokens)
+                }
+            };
+            if !matches {
+                return None;
+            }
+            let mut row = r.clone();
+            row.command = trimmed.to_string();
+            Some(row)
+        })
+        .collect()
 }
 
 /// Translate a shell glob pattern (`*`, `?`, `[...]`, and `**`,
@@ -540,86 +540,56 @@ pub fn read_preview_bytes(path: &Path) -> Option<String> {
 /// (identical mtime, or both `0` because the metadata read failed)
 /// fall back to path order for a deterministic display. Directories
 /// don't get a first-class grouping here — `mode::files::fetch`
-/// filters them out of what's actually shown, so sorting them in
-/// with the files instead of segregating them first means
-/// `spawn_walk`'s `truncate(1000)` quota is spent on the files that
-/// will actually be visible, not eaten by directories that never
-/// render. Extracted from `spawn_walk` as a pure function so the
-/// ordering can be unit-tested directly.
+/// filters them out of what's actually shown, and does so BEFORE
+/// this sort + its own `truncate(1000)` run (on the per-keystroke
+/// filtered set, not the raw walk — see the module-level doc
+/// comment), so the 1000-row display cap is spent entirely on
+/// files, never diluted by directories that were never going to
+/// render anyway. Extracted as a pure function so the ordering can
+/// be unit-tested directly.
 pub(crate) fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
     rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.command.cmp(&b.command)));
 }
 
-/// Owned counterpart of `FilesFilter`, for crossing the
-/// `spawn_walk` thread boundary (`FilesFilter` borrows a token slice
-/// or `Regex` reference, neither of which can be moved into a
-/// spawned closure with a `'static` bound). `Substring` re-derives
-/// its tokens from `spawn_walk`'s `pattern` argument internally
-/// (unchanged from before this type existed); `Glob` carries a
-/// precompiled regex from `glob_to_regex` plus the extra substring
-/// tokens (everything after the first whitespace-separated word —
-/// see `FilesFilter::Glob`'s doc comment).
+/// Owned counterpart of `FilesFilter`, for building a filter locally
+/// out of pieces (a freshly-compiled `Regex`, a freshly-tokenized
+/// pattern) before borrowing them into `filter_rows` — `FilesFilter`
+/// itself just borrows a token slice or `Regex` reference, so
+/// something has to own them first. Used by
+/// `crate::tui::mode::files::fetch`, which recomputes the filter
+/// fresh on every keystroke (cheap: just a regex compile + a
+/// whitespace split, not a filesystem walk).
 pub enum FilesFilterSpec {
-    Substring,
+    Substring(Vec<String>),
     Glob {
         basename: regex::Regex,
         extra_tokens: Vec<String>,
     },
 }
 
-/// Spawn a background thread that walks `root`, filters by
-/// `pattern` (tokenized per `filter_spec`), and sends the result
-/// over `tx`. Used by `App::spawn_files_walk`.
+/// Spawn a background thread that walks `root` ONCE, unfiltered,
+/// and sends the raw (unsorted, untruncated) result over `tx`. Used
+/// by `App::spawn_files_walk`, exactly once per TUI session:
+/// sorting/truncating/filtering by pattern all happen afterward, per
+/// keystroke, against the cached result (see
+/// `crate::tui::mode::files::fetch`), not here.
 ///
 /// **The walk happens on a worker thread, not the main
 /// thread**, so the TUI never blocks on filesystem I/O.
-/// Cancellation is cooperative: the run loop flips
-/// `cancelled` to abort a stale walk; the worker checks
-/// the flag just before sending.
-pub fn spawn_walk(
-    pattern: String,
-    ignore: IgnoreSet,
-    root: PathBuf,
-    filter_spec: FilesFilterSpec,
-) -> FilesRequest {
+pub fn spawn_walk(root: PathBuf, ignore: IgnoreSet) -> FilesRequest {
     let (tx, rx) = mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancelled_clone = cancelled.clone();
-    let tokens: Vec<String> = pattern
-        .split_whitespace()
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect();
     std::thread::spawn(move || {
         let mut rows: Vec<HistoryRow> = Vec::new();
         let mut next_id: i64 = -1;
-        let filter = match &filter_spec {
-            FilesFilterSpec::Substring => FilesFilter::Substring(&tokens),
-            FilesFilterSpec::Glob { basename, extra_tokens } => {
-                FilesFilter::Glob { basename, extra_tokens }
-            }
-        };
-        walk_dir(&root, &root, &filter, &ignore, &mut next_id, &mut rows);
-        sort_rows_newest_modified_first(&mut rows);
-        rows.truncate(1000);
-        if !cancelled_clone.load(Ordering::Relaxed) {
-            // The walker is
-            // infallible: permission
-            // errors and missing
-            // directories are
-            // swallowed at the
-            // `read_dir` boundary.
-            // Errors don't need to
-            // flow through the
-            // channel.
-            let _ = tx.send(rows);
-        }
+        walk_dir(&root, &root, &ignore, &mut next_id, &mut rows);
+        // The walker is infallible: permission errors and missing
+        // directories are swallowed at the `read_dir` boundary.
+        // Errors don't need to flow through the channel. A `send`
+        // failure just means the receiver (the TUI) was dropped —
+        // nothing to do about that.
+        let _ = tx.send(rows);
     });
-    FilesRequest {
-        receiver: rx,
-        cancelled,
-        pattern,
-    }
+    FilesRequest { receiver: rx }
 }
 
 #[cfg(test)]
