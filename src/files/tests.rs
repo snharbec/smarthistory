@@ -251,6 +251,89 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn walk_dir_uses_git_commit_timestamp_when_available() {
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory_walk_git_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+
+        let git_init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["init"])
+            .output();
+        if git_init.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["config", "user.email", "test@example.com"])
+                .output();
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["config", "user.name", "Test User"])
+                .output();
+
+            let file_path = dir.join("committed.txt");
+            std::fs::write(&file_path, "content").unwrap();
+
+            let _ = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["add", "committed.txt"])
+                .output();
+
+            let commit_res = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["commit", "-m", "test commit"])
+                .env("GIT_COMMITTER_DATE", "1577836800 +0000")
+                .env("GIT_AUTHOR_DATE", "1577836800 +0000")
+                .output();
+
+            if commit_res.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+                let untracked_path = dir.join("untracked.txt");
+                std::fs::write(&untracked_path, "untracked").unwrap();
+
+                let mut rows = Vec::new();
+                let mut next_id: i64 = -1;
+                let ignore = IgnoreSet::new(&[]);
+                walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
+
+                let committed_row = rows
+                    .iter()
+                    .find(|r| r.command == "committed.txt")
+                    .expect("committed.txt row");
+                assert_eq!(
+                    committed_row.timestamp, 1577836800,
+                    "committed.txt row timestamp should match git commit timestamp"
+                );
+
+                let untracked_row = rows
+                    .iter()
+                    .find(|r| r.command == "untracked.txt")
+                    .expect("untracked.txt row");
+                let untracked_mtime = std::fs::metadata(&untracked_path)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                assert_eq!(
+                    untracked_row.timestamp, untracked_mtime,
+                    "untracked.txt row timestamp should fall back to mtime"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `sort_rows_newest_modified_first` is `spawn_walk`'s ordering,
     /// extracted so it can be tested directly without spawning a
     /// thread. Newest `timestamp` first; ties fall back to path

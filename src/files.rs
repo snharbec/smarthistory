@@ -65,7 +65,7 @@
 
 use crate::tui::state::HistoryRow;
 use crate::util::format_size;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -191,6 +191,79 @@ impl Default for FilesState {
     }
 }
 
+/// Map of relative file paths to their last Git commit timestamp.
+pub struct GitTimestamps {
+    pub repo_root: PathBuf,
+    pub timestamps: HashMap<PathBuf, i64>,
+}
+
+impl GitTimestamps {
+    /// Attempt to load Git commit timestamps for tracked files under `root`.
+    /// Returns `None` if `root` is not in a Git repo, `git` isn't available,
+    /// or `git log` fails.
+    pub fn load(root: &Path) -> Option<Self> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let repo_root_str = std::str::from_utf8(&output.stdout).ok()?.trim();
+        if repo_root_str.is_empty() {
+            return None;
+        }
+        let repo_root = PathBuf::from(repo_root_str);
+
+        let log_output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_root)
+            .args(["log", "--name-only", "--no-renames", "--format=COMMIT:%ct"])
+            .output()
+            .ok()?;
+
+        if !log_output.status.success() {
+            return None;
+        }
+
+        let log_str = std::str::from_utf8(&log_output.stdout).ok()?;
+        let mut timestamps: HashMap<PathBuf, i64> = HashMap::new();
+        let mut current_ts: Option<i64> = None;
+
+        for line in log_str.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(ts_str) = line.strip_prefix("COMMIT:") {
+                current_ts = ts_str.parse::<i64>().ok();
+            } else if let Some(ts) = current_ts {
+                let rel_path = PathBuf::from(line);
+                timestamps.entry(rel_path).or_insert(ts);
+            }
+        }
+
+        Some(GitTimestamps {
+            repo_root,
+            timestamps,
+        })
+    }
+
+    /// Look up the Git last modified timestamp for a file given its `path`
+    /// (which may be relative to `root`) or `abs_path`.
+    pub fn get(&self, path: &Path, abs_path: &Path) -> Option<i64> {
+        let rel = path
+            .strip_prefix(&self.repo_root)
+            .ok()
+            .or_else(|| abs_path.strip_prefix(&self.repo_root).ok())?;
+        self.timestamps.get(rel).copied()
+    }
+}
+
 /// Recursively walk a directory, adding every file and directory
 /// entry to `rows`. Hidden entries (names starting with `.`) and
 /// `ignore.contains(...)` matches are skipped at the entry level.
@@ -214,6 +287,22 @@ pub fn walk_dir(
     ignore: &IgnoreSet,
     next_id: &mut i64,
     rows: &mut Vec<HistoryRow>,
+) {
+    let git_timestamps = if root == dir {
+        GitTimestamps::load(root)
+    } else {
+        None
+    };
+    walk_dir_impl(root, dir, ignore, next_id, rows, git_timestamps.as_ref());
+}
+
+fn walk_dir_impl(
+    root: &Path,
+    dir: &Path,
+    ignore: &IgnoreSet,
+    next_id: &mut i64,
+    rows: &mut Vec<HistoryRow>,
+    git_timestamps: Option<&GitTimestamps>,
 ) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -271,17 +360,23 @@ pub fn walk_dir(
         // in the list's age/time column (`render_row` reads
         // `row.timestamp` uniformly across every mode) and the
         // sort key `sort_rows_newest_modified_first` uses to
-        // show recently-modified files first. `0` (Unix epoch)
-        // on any failure to read it — same convention
-        // `directories.rs`/`todo.rs` use for "no meaningful
-        // timestamp available" — sorts the row to the bottom
-        // rather than erroring the whole walk.
+        // show recently-modified files first.
+        //
+        // If the file is tracked in Git, the last Git commit timestamp
+        // is used; otherwise falls back to filesystem `mtime`
+        // (or `0` on error).
         let mtime = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        let timestamp = if let Some(git_ts) = git_timestamps.and_then(|gt| gt.get(&path, Path::new(&abs_path))) {
+            git_ts
+        } else {
+            mtime
+        };
+
         // The preview is left empty here. Loading a 4KB
         // snippet of every file in the walk would dominate
         // the runtime on large directories. The render
@@ -295,7 +390,7 @@ pub fn walk_dir(
             directory: abs_path,
             session_id: String::new(),
             exit_code: 0,
-            timestamp: mtime,
+            timestamp,
             comment,
             output: String::new(),
             mode: mode.to_string(),
@@ -307,7 +402,7 @@ pub fn walk_dir(
         // match" case to worry about anymore (that concern only
         // existed when filtering happened during the walk).
         if is_dir {
-            walk_dir(root, &path, ignore, next_id, rows);
+            walk_dir_impl(root, &path, ignore, next_id, rows, git_timestamps);
         }
     }
 }
