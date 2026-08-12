@@ -2233,6 +2233,13 @@ bindkey '<Up>' _smarthistory_up_history
 bindkey '<Down>' _smarthistory_down_history
 bindkey '^[[A' _smarthistory_up_history
 bindkey '^[[B' _smarthistory_down_history
+# Ctrl-N / Ctrl-P: mirror Down/Up exactly (same widgets), so the
+# dropdown can also be navigated with emacs-style keys. Behavior is
+# identical to the arrows in both states: dropdown visible → move the
+# highlight (Ctrl-N next / Ctrl-P prev, wraparound); dropdown hidden
+# → walk smarthistory's match list like the arrows do.
+bindkey '^N' _smarthistory_down_history
+bindkey '^P' _smarthistory_up_history
 # Same terminfo + symbolic + raw redundancy for the dropdown's
 # Right/Left widgets (registered earlier, in the dropdown-enabled
 # block above, via plain `zle -N` — only the actual key bindings live
