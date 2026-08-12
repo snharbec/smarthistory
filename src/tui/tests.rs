@@ -22512,9 +22512,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_nineteen_entries() {
+fn prefix_picker_has_twenty_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 19);
+    assert_eq!(picker.options.len(), 20);
 }
 
 #[test]
@@ -22599,7 +22599,7 @@ fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
         .prefix_picker
         .as_ref()
         .expect("bare ' + Tab should open a picker");
-    assert_eq!(picker.options.len(), 19, "bare ' + Tab should show every mode");
+    assert_eq!(picker.options.len(), 20, "bare ' + Tab should show every mode");
 }
 
 /// A partial name matching nothing sets a status message and does
@@ -22724,7 +22724,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 18);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 19);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);

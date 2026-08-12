@@ -1383,6 +1383,13 @@ pub struct QueryPrefixes {
     /// signaling one the user doesn't own fails with a status-line
     /// message rather than crashing.
     pub processes: char,
+    /// Prefix for the pass password-manager mode (default `)`).
+    /// Lists every entry in `$PASSWORD_STORE_DIR` (defaults to
+    /// `~/.password-store`). Selecting a row stages
+    /// `pass show --clip <entry>` as the shell command, which copies
+    /// the first line of the entry (the password) to the clipboard
+    /// via `pass`'s built-in clipboard support.
+    pub pass: char,
     /// Prefix for the meta-prefix mode (default `'`). Not a search
     /// mode itself — typing `'` then a partial mode name (e.g.
     /// `'jir`) and pressing Tab expands to that mode's real prefix
@@ -1415,6 +1422,7 @@ impl Default for QueryPrefixes {
             browser: '^',
             zoxide: '~',
             processes: '%',
+            pass: ')',
             meta: '\'',
         }
     }
@@ -1431,7 +1439,7 @@ impl QueryPrefixes {
     /// (missing `paperless` in two of the three) as fields were
     /// added over time. Add a new prefix field here too when one is
     /// added to the struct.
-    pub(crate) fn all_chars(&self) -> [char; 19] {
+    pub(crate) fn all_chars(&self) -> [char; 20] {
         [
             self.output,
             self.llm,
@@ -1451,6 +1459,7 @@ impl QueryPrefixes {
             self.browser,
             self.zoxide,
             self.processes,
+            self.pass,
             self.meta,
         ]
     }
@@ -3504,7 +3513,7 @@ impl Config {
     const KNOWN_PREFIX_NAMES: &[&str] = &[
         "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
         "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
-        "processes", "meta",
+        "processes", "pass", "meta",
     ];
 
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
@@ -3537,6 +3546,7 @@ impl Config {
             "browser" => prefixes.browser = c,
             "zoxide" => prefixes.zoxide = c,
             "processes" => prefixes.processes = c,
+            "pass" => prefixes.pass = c,
             "meta" => prefixes.meta = c,
             _ => {}
         }

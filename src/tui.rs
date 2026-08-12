@@ -4500,6 +4500,12 @@ impl PrefixPicker {
                 label: "Processes",
                 description: "list running processes (all users); Enter opens a signal-confirmation dialog",
             },
+            PrefixOption {
+                prefix: Some(prefixes.pass),
+                name: "pass",
+                label: "Pass",
+                description: "search pass entries; Enter stages `pass show --clip <entry>` to copy the password",
+            },
         ]
     }
 
@@ -5547,6 +5553,12 @@ impl App {
         if self.is_processes_query() {
             return self.rows.clone();
         }
+        // Pass mode (`)`) rows are password-store entries — each
+        // entry has a unique name (the relative path without `.gpg`),
+        // so there's nothing to dedup and no labeled-row concept.
+        if self.is_pass_query() {
+            return self.rows.clone();
+        }
         // Directories / JIRA / files
         // modes are completely
         // different views that must NOT
@@ -5811,6 +5823,7 @@ impl App {
             crate::tui::mode::ModeKind::Browser => return crate::tui::mode::browser::fetch(self),
             crate::tui::mode::ModeKind::Zoxide => return crate::tui::mode::zoxide::fetch(self),
             crate::tui::mode::ModeKind::Processes => return crate::tui::mode::processes::fetch(self),
+            crate::tui::mode::ModeKind::Pass => return crate::tui::mode::pass::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6308,6 +6321,10 @@ impl App {
             return;
         }
         if self.is_processes_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_pass_query() {
             self.select_for_run_impl();
             return;
         }

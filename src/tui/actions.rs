@@ -236,6 +236,13 @@ impl App {
                 // instead. See `stage_process_signal_prompt`.
                 self.stage_process_signal_prompt();
             }
+            crate::tui::mode::ModeKind::Pass => {
+                // `)...` queries are pass password-store entries.
+                // Selecting a row stages `pass show --clip <entry>`
+                // so the parent shell copies the password to the
+                // clipboard via pass's built-in support.
+                self.stage_pass_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for
@@ -244,6 +251,32 @@ impl App {
                 self.stage_history_selection();
             }
         }
+    }
+
+    /// Stage the pass (`)`) mode selection.
+    ///
+    /// Reads the entry name from the selected row's `directory`
+    /// field (which holds the raw entry path relative to the store
+    /// root, without the `.gpg` extension) and stages
+    /// `pass show --clip <entry>` for the parent shell to execute.
+    /// `pass` will copy the first line of the entry (the password)
+    /// to the clipboard and clear it after 45 seconds.
+    fn stage_pass_selection(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if row.mode != "pass" {
+            return;
+        }
+        let entry = row.directory.clone();
+        if entry.is_empty() {
+            return;
+        }
+        self.selection = Some(format!(
+            "pass show --clip {}",
+            crate::util::shell_quote(&entry)
+        ));
+        self.pick_mode = Some(PickMode::Run);
     }
 
     /// Stage the todo (`!`) mode selection.

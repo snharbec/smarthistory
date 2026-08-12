@@ -110,6 +110,12 @@ pub enum ModeKind {
     /// SIGHUP / SIGINT with Tab/Shift-Tab). Not `dedup_eligible`
     /// (every PID is unique, same reasoning as `Panes`).
     Processes,
+    /// `)` (default). `pass` password manager. Lists every entry
+    /// in `$PASSWORD_STORE_DIR` (defaults to `~/.password-store`).
+    /// Selecting a row stages `pass show --clip <entry>` so the
+    /// parent shell copies the first line (the password) to the
+    /// clipboard via `pass`'s built-in clipboard support.
+    Pass,
 }
 
 impl ModeKind {
@@ -137,6 +143,7 @@ impl ModeKind {
             ModeKind::Browser => '^',
             ModeKind::Zoxide => '~',
             ModeKind::Processes => '%',
+            ModeKind::Pass => ')',
         }
     }
 
@@ -164,6 +171,7 @@ impl ModeKind {
             ModeKind::Browser => "browser",
             ModeKind::Zoxide => "zoxide",
             ModeKind::Processes => "processes",
+            ModeKind::Pass => "pass",
         }
     }
 
@@ -200,6 +208,7 @@ impl ModeKind {
             ModeKind::Browser => "Browser",
             ModeKind::Zoxide => "Zoxide",
             ModeKind::Processes => "Processes",
+            ModeKind::Pass => "Pass",
         }
     }
 
@@ -229,6 +238,7 @@ impl ModeKind {
             ModeKind::Browser => prefixes.browser,
             ModeKind::Zoxide => prefixes.zoxide,
             ModeKind::Processes => prefixes.processes,
+            ModeKind::Pass => prefixes.pass,
         }
     }
 
@@ -302,6 +312,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Zoxide
     } else if c == p.processes {
         ModeKind::Processes
+    } else if c == p.pass {
+        ModeKind::Pass
     } else {
         ModeKind::History
     }
@@ -309,6 +321,7 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
 
 pub mod ag;
 pub mod browser;
+pub mod pass;
 pub mod codegraph;
 pub mod directories;
 pub mod segments;
@@ -376,6 +389,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Browser => Some(Theme::success()),
         ModeKind::Zoxide => Some(Theme::accent()),
         ModeKind::Processes => Some(Theme::warning()),
+        ModeKind::Pass => Some(Theme::success()),
         ModeKind::History => None,
     }
 }
@@ -414,6 +428,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Browser => ("^".to_string(), format!(" browser{} ", algo)),
         ModeKind::Zoxide => ("~".to_string(), format!(" zoxide{} ", algo)),
         ModeKind::Processes => ("%".to_string(), format!(" processes{} ", algo)),
+        ModeKind::Pass => (")".to_string(), format!(" pass{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -629,6 +644,7 @@ pub fn run_all_checks(
             ModeKind::Browser => crate::tui::mode::browser::check(app),
             ModeKind::Zoxide => crate::tui::mode::zoxide::check(app),
             ModeKind::Processes => crate::tui::mode::processes::check(app),
+            ModeKind::Pass => crate::tui::mode::pass::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -660,6 +676,7 @@ impl ModeKind {
             ModeKind::Browser,
             ModeKind::Zoxide,
             ModeKind::Processes,
+            ModeKind::Pass,
         ]
     }
 }
