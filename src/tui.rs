@@ -3585,7 +3585,9 @@ impl App {
                     LlmRequestType::Generate { .. } => llm.generate(&prompt),
                     LlmRequestType::Describe { command } => llm.describe(command),
                     LlmRequestType::Correct { original_command } => llm.correct(original_command),
-                    LlmRequestType::Question { question } => llm.question(question),
+                    LlmRequestType::Question { question, context } => {
+                        llm.question(question, context.as_ref())
+                    }
                 };
                 let request = LlmRequest {
                     request_type,
@@ -4106,8 +4108,18 @@ enum LlmRequestType {
     Describe { command: String },
     /// A `Ctrl-T` correct request.
     Correct { original_command: String },
-    /// A `%...` general question request.
-    Question { question: String },
+    /// A `%...` general question request. `context` is the
+    /// last command run in the session, if any (see
+    /// `crate::llm::LastCommandContext`) — carried on the
+    /// request so the synchronous fallback path (used by
+    /// `FakeLlm` in tests, and whenever no real ollama
+    /// config is present) can rebuild the same
+    /// context-aware prompt the threaded path already
+    /// baked into `prompt` at spawn time.
+    Question {
+        question: String,
+        context: Option<crate::llm::LastCommandContext>,
+    },
 }
 
 /// An in-flight LLM request. The receiver is polled by the
@@ -6435,7 +6447,7 @@ impl App {
                     corrected_command,
                 });
             }
-            LlmRequestType::Question { question } => {
+            LlmRequestType::Question { question, .. } => {
                 let answer = raw.trim().to_string();
                 self.stage_question(question.clone(), answer.clone());
                 self.question_view = Some(QuestionView {
@@ -12687,24 +12699,39 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // handles its own Tab as
             // field-next INSIDE the
             // dialog, so the paths never
-            // collide.
+            // collide. In question mode
+            // (`?`) Tab isn't completion
+            // at all — it submits the
+            // question to the LLM, same
+            // as `Action::Run` (Enter)
+            // already does, so the user
+            // can send a question without
+            // reaching for Enter.
             if app.is_jira_query() {
                 app.jira_field_complete_at_cursor();
+                false
             } else if app.is_notes_query()
                 || app.is_todo_query()
                 || app.is_segments_query()
                 || app.is_similar_query()
             {
                 app.notes_tab_complete_at_cursor();
+                false
             } else if app.is_paperless_query() {
                 app.paperless_tab_complete_at_cursor();
+                false
             } else if app.is_meta_query() {
                 app.meta_tab_complete_at_cursor();
+                false
+            } else if app.is_question_query() {
+                app.select_for_run();
+                app.selection.is_some()
+            } else {
+                // Outside all these
+                // modes, Tab is a
+                // no-op.
+                false
             }
-            // Outside all six
-            // modes, Tab is a
-            // no-op.
-            false
         }
         Action::PickPrefix => {
             // Open the prefix picker.
