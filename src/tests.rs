@@ -1819,6 +1819,13 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(groups[1].command, "aaa");
     }
 
+    #[test]
+    fn escape_md_table_cell_escapes_pipes_and_strips_newlines() {
+        assert_eq!(escape_md_table_cell("grep foo | wc -l"), "grep foo \\| wc -l");
+        assert_eq!(escape_md_table_cell("line1\nline2"), "line1 line2");
+        assert_eq!(escape_md_table_cell("plain text"), "plain text");
+    }
+
     // --- Time tracking: project report ------------------------------
 
     #[test]
