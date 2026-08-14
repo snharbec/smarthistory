@@ -52,20 +52,26 @@ synchronously, and prints the answer straight to the console:
 $ git status
 # (git reports a conflict)
 $ ?why did that fail
-[LLM] The command failed because ...
+Thinking…
+LLM Answer
+The command failed because ...
 ```
 
-The answer is tagged `[LLM]` and colorized (magenta tag) when the terminal
-supports it; on a non-TTY it's plain text. Same automatic last-command context
-as the TUI path above — `?why did that fail` right after a failing command works
-without repeating the command.
+While the request is in flight, a transient `Thinking…` line lets you know it's
+working (a local model typically takes 1-5 seconds). The answer itself is headed
+by `LLM Answer` on its own line, colorized (magenta header, dim `Thinking…`)
+when the terminal supports it; on a non-TTY both are plain text. Same automatic
+last-command context as the TUI path above — `?why did that fail` right after a
+failing command works without repeating the command.
 
 If the answer includes one or more suggested commands, they're offered as a
 numbered pick list:
 
 ```
 $ ?how do I undo that
-[LLM] You can undo the last commit without losing your changes.
+Thinking…
+LLM Answer
+You can undo the last commit without losing your changes.
 1) git reset --soft HEAD~1
 Choose [1-1], Enter to skip: 1
 $ git reset --soft HEAD~1

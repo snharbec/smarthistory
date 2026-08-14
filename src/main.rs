@@ -4495,26 +4495,44 @@ fn stderr_is_tty() -> bool {
     std::io::stderr().is_terminal()
 }
 
-/// Build the colorized `[LLM] <prose>` answer line and the
-/// numbered suggestion lines for `smarthistory ask`. Colorized only
-/// when `color` is true (the caller gates this on `stderr_is_tty()`
-/// — plain ANSI on a non-terminal stderr would just be noise for
-/// whatever's consuming it). `suggestion_lines[i]` is `suggestions[i]`
-/// prefixed with its 1-based pick-list index, matching what the
-/// `Choose [1-N]` prompt expects the user to type.
+/// The transient "the LLM is working" line `smarthistory ask` prints
+/// to stderr right before the blocking HTTP call — otherwise the
+/// console just sits there for the 1-5s a local model typically
+/// takes, indistinguishable from a hang. Colorized dim (matching the
+/// `\x1b[2m` convention `highlight_full` already uses elsewhere in
+/// this file) when `color` is true; plain text otherwise.
+fn format_thinking_message(color: bool) -> String {
+    if color {
+        "\x1b[2mThinking…\x1b[0m".to_string()
+    } else {
+        "Thinking…".to_string()
+    }
+}
+
+/// Build the colorized `LLM Answer` header + answer block, and the
+/// numbered suggestion lines, for `smarthistory ask`. The header
+/// sits on its own line, with the prose answer starting on the line
+/// after it — distinguishes "here's the LLM's answer" from the
+/// preceding `Thinking…` line and any `Choose [1-N]` prompt that
+/// follows. Colorized only when `color` is true (the caller gates
+/// this on `stderr_is_tty()` — plain ANSI on a non-terminal stderr
+/// would just be noise for whatever's consuming it).
+/// `suggestion_lines[i]` is `suggestions[i]` prefixed with its
+/// 1-based pick-list index, matching what the `Choose [1-N]` prompt
+/// expects the user to type.
 fn format_ask_output(prose: &str, suggestions: &[String], color: bool) -> (String, Vec<String>) {
-    let (tag_open, tag_close, num_open, num_close) = if color {
+    let (header_open, header_close, num_open, num_close) = if color {
         ("\x1b[1;35m", "\x1b[0m", "\x1b[1;36m", "\x1b[0m")
     } else {
         ("", "", "", "")
     };
-    let answer_line = format!("{tag_open}[LLM]{tag_close} {prose}");
+    let answer_block = format!("{header_open}LLM Answer{header_close}\n{prose}");
     let suggestion_lines = suggestions
         .iter()
         .enumerate()
         .map(|(i, cmd)| format!("{num_open}{}){num_close} {cmd}", i + 1))
         .collect();
-    (answer_line, suggestion_lines)
+    (answer_block, suggestion_lines)
 }
 
 /// Build the open/close markers for the matched prefix in
@@ -6630,6 +6648,9 @@ fn main() -> anyhow::Result<()> {
             let context = llm::last_command_context(&conn, &session_id);
             let prompt = llm::build_question_console_prompt(question, context.as_ref());
 
+            let color = stderr_is_tty();
+            eprintln!("{}", format_thinking_message(color));
+
             let client = llm::OllamaClient::new(llm_cfg);
             let raw = match client.prompt(&prompt) {
                 Ok(r) => r,
@@ -6639,9 +6660,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             let (prose, suggestions) = llm::split_question_answer(&raw);
-            let color = stderr_is_tty();
-            let (answer_line, suggestion_lines) = format_ask_output(&prose, &suggestions, color);
-            eprintln!("{}", answer_line);
+            let (answer_block, suggestion_lines) = format_ask_output(&prose, &suggestions, color);
+            eprintln!("{}", answer_block);
 
             let mut chosen: Option<&str> = None;
             if !suggestions.is_empty() {
