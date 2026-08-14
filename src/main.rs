@@ -5590,6 +5590,52 @@ fn format_duration_secs(secs: i64) -> String {
 /// total and directories breakdown intentionally use every row
 /// (`min_duration` only trims the commands table itself — see
 /// `ProjectAction::Report`'s `min_duration` doc comment).
+/// One collapsed line in the report's Commands table: every row
+/// sharing the same `(command, directory)` pair, folded into a
+/// single entry with a total duration and an occurrence count.
+/// `timestamp` is only meaningful (and only printed) when `count ==
+/// 1` — see `print_project_report_section`.
+struct CommandGroup<'a> {
+    command: &'a str,
+    directory: &'a str,
+    timestamp: i64,
+    total_secs: i64,
+    count: usize,
+}
+
+/// Collapse repeated `(command, directory)` pairs into one
+/// [`CommandGroup`] each, in first-appearance order, summing
+/// `active_secs` and counting occurrences. `history`'s dedup upsert
+/// (`idx_history_dedup`, keyed on `(command, directory, session_id)`)
+/// already collapses repeats *within one shell session*, so a
+/// `count > 1` here specifically means the same command ran in the
+/// same directory across two or more *different* sessions (panes) —
+/// without this, a command run across ten panes over the day would
+/// print as ten near-identical lines, reading as noise (or looking
+/// like a duplicate-row bug) rather than "this happened a lot".
+fn group_command_rows<'a>(rows: &[&'a ReportCommandRow]) -> Vec<CommandGroup<'a>> {
+    let mut groups: Vec<CommandGroup> = Vec::new();
+    for r in rows {
+        match groups
+            .iter_mut()
+            .find(|g| g.command == r.command && g.directory == r.directory)
+        {
+            Some(g) => {
+                g.total_secs += r.active_secs;
+                g.count += 1;
+            }
+            None => groups.push(CommandGroup {
+                command: &r.command,
+                directory: &r.directory,
+                timestamp: r.timestamp,
+                total_secs: r.active_secs,
+                count: 1,
+            }),
+        }
+    }
+    groups
+}
+
 fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_duration: i64) {
     let total: i64 = rows.iter().map(|r| r.active_secs).sum();
     println!("\n## {slug}");
@@ -5611,26 +5657,42 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
     }
 
     println!("\n### Commands");
-    let filtered: Vec<&&ReportCommandRow> =
-        rows.iter().filter(|r| r.active_secs >= min_duration).collect();
+    let filtered: Vec<&ReportCommandRow> = rows
+        .iter()
+        .filter(|r| r.active_secs >= min_duration)
+        .copied()
+        .collect();
     if filtered.is_empty() {
         println!("(none)");
     } else {
-        for r in filtered {
-            let ts = chrono::DateTime::from_timestamp(r.timestamp, 0)
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local)
-                        .format("%H:%M:%S")
-                        .to_string()
-                })
-                .unwrap_or_else(|| r.timestamp.to_string());
-            println!(
-                "- {}  {}  ({})  {}",
-                ts,
-                format_duration_secs(r.active_secs),
-                r.directory,
-                r.command
-            );
+        // A single-occurrence command keeps the original
+        // `<time> <duration> (<dir>) <command>` layout unchanged — the
+        // timestamp column only makes sense when there's exactly one.
+        for g in &group_command_rows(&filtered) {
+            if g.count > 1 {
+                println!(
+                    "- {}x  {}  ({})  {}",
+                    g.count,
+                    format_duration_secs(g.total_secs),
+                    g.directory,
+                    g.command
+                );
+            } else {
+                let ts = chrono::DateTime::from_timestamp(g.timestamp, 0)
+                    .map(|dt| {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%H:%M:%S")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| g.timestamp.to_string());
+                println!(
+                    "- {}  {}  ({})  {}",
+                    ts,
+                    format_duration_secs(g.total_secs),
+                    g.directory,
+                    g.command
+                );
+            }
         }
     }
 }

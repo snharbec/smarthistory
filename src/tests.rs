@@ -1765,6 +1765,60 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(), None);
     }
 
+    // --- Time tracking: report Commands-table grouping ("Nx" counter) --
+
+    fn command_row(command: &str, directory: &str, timestamp: i64, active_secs: i64) -> ReportCommandRow {
+        ReportCommandRow {
+            command: command.to_string(),
+            directory: directory.to_string(),
+            project_slug: None,
+            timestamp,
+            active_secs,
+        }
+    }
+
+    #[test]
+    fn group_command_rows_collapses_same_command_and_directory_across_sessions() {
+        // `history`'s own dedup upsert (`idx_history_dedup`) already
+        // collapses repeats within one shell session, so this
+        // fixture models what a report actually sees: the same
+        // command in the same directory at three different
+        // timestamps (three different panes/sessions during the
+        // day) — three separate `ReportCommandRow`s, not one.
+        let a = command_row("git status", "/work", 1000, 2);
+        let b = command_row("git status", "/work", 2000, 3);
+        let c = command_row("git status", "/work", 3000, 1);
+        let rows = vec![&a, &b, &c];
+        let groups = group_command_rows(&rows);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].count, 3);
+        assert_eq!(groups[0].total_secs, 6, "durations must sum, not just count occurrences");
+        assert_eq!(groups[0].command, "git status");
+    }
+
+    #[test]
+    fn group_command_rows_keeps_different_commands_and_directories_separate() {
+        let a = command_row("git status", "/work", 1000, 2);
+        let b = command_row("cargo build", "/work", 2000, 3);
+        let c = command_row("git status", "/other", 3000, 1);
+        let rows = vec![&a, &b, &c];
+        let groups = group_command_rows(&rows);
+        assert_eq!(groups.len(), 3, "same command in a different directory is a different group");
+        assert!(groups.iter().all(|g| g.count == 1));
+    }
+
+    #[test]
+    fn group_command_rows_preserves_first_appearance_order() {
+        let a = command_row("zzz", "/work", 1000, 1);
+        let b = command_row("aaa", "/work", 2000, 1);
+        let c = command_row("zzz", "/work", 3000, 1);
+        let rows = vec![&a, &b, &c];
+        let groups = group_command_rows(&rows);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].command, "zzz", "first-seen command stays first, not alphabetized");
+        assert_eq!(groups[1].command, "aaa");
+    }
+
     // --- Time tracking: project report ------------------------------
 
     #[test]
