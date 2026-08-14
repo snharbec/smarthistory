@@ -63,6 +63,13 @@ pub struct JiraIssue {
     ///
     /// [adf]: https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/
     pub description: String,
+    /// The issue's JIRA labels, verbatim (JIRA labels have no
+    /// separate display-name vs. value distinction, unlike
+    /// `status`/`priority`/`issuetype`). Empty when the issue has no
+    /// labels. Used by time tracking's `jiralabel.<slug>.match`
+    /// resolution tier — see `resolve_project_by_label` in
+    /// `src/main.rs`.
+    pub labels: Vec<String>,
 }
 
 /// A single JIRA comment, flattened to the fields
@@ -423,7 +430,7 @@ impl JiraClient for RestJiraClient {
         // `MAX_DESCRIPTION_CHARS` so a large body doesn't
         // blow out the preview pane.
         let url = format!(
-            "{}/rest/api/2/search?jql={}&maxResults={}&fields=key,summary,status,issuetype,priority,assignee,updated,duedate,description",
+            "{}/rest/api/2/search?jql={}&maxResults={}&fields=key,summary,status,issuetype,priority,assignee,updated,duedate,description,labels",
             self.config.server,
             // `jql` must be URL-encoded. `reqwest`'s
             // `query` form would do this, but the JIRA v2
@@ -866,6 +873,13 @@ struct ApiFields {
     /// tree without round-tripping through JSON.
     #[serde(default)]
     description: Option<serde_json::Value>,
+    /// JIRA's `labels` field is a flat JSON array of strings —
+    /// unlike `status`/`priority`/`issuetype`, there's no `{name:
+    /// ...}` wrapper object to unwrap. Absent (not requested, or a
+    /// server that omits empty arrays) degrades to no labels via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -989,6 +1003,7 @@ impl From<ApiIssue> for JiraIssue {
             updated: f.updated.unwrap_or_default(),
             due: f.duedate.unwrap_or_default(),
             description,
+            labels: f.labels,
         }
     }
 }
@@ -2333,6 +2348,64 @@ fn date_cutoff(alias: DateAlias, now_epoch: i64) -> String {
     });
     let cutoff = now - chrono::Duration::days(days);
     cutoff.format("%Y-%m-%d").to_string()
+}
+
+/// Find the first JIRA issue key embedded anywhere in `text` — e.g.
+/// a browse URL (`https://jira.example.com/browse/PROJ-123`) or a
+/// staged shell command (`open "https://.../browse/PROJ-123"`).
+/// Unlike `build_jql`'s `key_re` (which is *anchored* — it classifies
+/// a whole token as "is this JQL query text a bare issue key?"),
+/// this is deliberately unanchored: it scans for the pattern
+/// anywhere in an arbitrary string. The two must stay separate
+/// regexes — anchoring `key_re` would break `build_jql`'s token
+/// classification (a token like `foo-PROJ-123` is free text, not a
+/// key, but would match an unanchored search).
+///
+/// Pattern: one or more uppercase letters/digits starting with a
+/// letter, a hyphen, then one or more digits (JIRA's own project-key
+/// convention: `[A-Z][A-Z0-9]*-[0-9]+`, e.g. `PROJ-123`, `AB2C-7`).
+/// Returns `None` when no match is found.
+#[allow(dead_code)] // wired into browser/history JIRA-URL scanning in Phase 5
+pub(crate) fn extract_issue_key(text: &str) -> Option<&str> {
+    let re = regex::Regex::new(r"[A-Z][A-Z0-9]*-[0-9]+").expect("static regex");
+    re.find(text).map(|m| m.as_str())
+}
+
+/// Resolve an issue key's labels, via a small session-lifetime
+/// cache keyed by issue key — same "`HashMap`, lazy-populated, no
+/// eviction" shape `App::tags_source_cache` / segments mode's
+/// `context_cache` use elsewhere in this codebase. A cache hit
+/// avoids a REST round-trip for an issue key seen earlier in the
+/// same report/session (a project's history routinely references
+/// the same ticket across many commands/visits).
+///
+/// Implemented via `JiraClient::search` (`key = "<key>"`) rather
+/// than a dedicated single-issue GET endpoint — `search` already
+/// returns full `JiraIssue` rows (labels included, as of this
+/// change) and is the one method every `JiraClient` impl (including
+/// test mocks) already provides, so this needs no new trait method
+/// or REST-request boilerplate. Returns an empty `Vec` (and caches
+/// it) on a lookup error or a key JIRA doesn't recognize — a label
+/// lookup failure degrades to "no label match", not a hard error,
+/// consistent with time tracking's fallback-tier design.
+#[allow(dead_code)] // wired into `project report`'s website resolution in Phase 5
+pub(crate) fn labels_for_issue(
+    client: &dyn JiraClient,
+    key: &str,
+    cache: &mut std::collections::HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    if let Some(labels) = cache.get(key) {
+        return labels.clone();
+    }
+    let jql = format!("key = {}", escape_jql_string(key));
+    let labels = client
+        .search(&jql)
+        .ok()
+        .and_then(|issues| issues.into_iter().next())
+        .map(|issue| issue.labels)
+        .unwrap_or_default();
+    cache.insert(key.to_string(), labels.clone());
+    labels
 }
 
 /// Quote a string for use as a JQL string literal: wrap in

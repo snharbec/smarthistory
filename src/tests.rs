@@ -1854,3 +1854,57 @@ tmuxpaneoutputdir=~/custom-tmux
         let sessions = project_sessions_in_range(&conn, 2000, 3000, 3500).expect("query");
         assert!(sessions.is_empty());
     }
+
+    // --- Time tracking: jiralabel config + resolve_project_by_label -----
+
+    #[test]
+    fn jiralabel_config_parses_and_resolves() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "jiralabel.acme.match = acme-corp\n\
+             jiralabel.beta.match = beta-team\n",
+        ]);
+        assert_eq!(
+            resolve_project_by_label(&cfg, &["acme-corp".to_string(), "urgent".to_string()]),
+            Some("acme".to_string())
+        );
+        assert_eq!(
+            resolve_project_by_label(&cfg, &["beta-team".to_string()]),
+            Some("beta".to_string())
+        );
+        assert_eq!(resolve_project_by_label(&cfg, &["unrelated".to_string()]), None);
+        assert_eq!(resolve_project_by_label(&cfg, &[]), None);
+    }
+
+    /// When a ticket carries labels matching more than one
+    /// configured project, the earliest-declared `jiralabel.<slug>.match`
+    /// wins — same "first in file order" tie-break `session.<key>`/
+    /// `host.<key>` use elsewhere.
+    #[test]
+    fn jiralabel_resolution_prefers_first_declared_on_multi_match() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "jiralabel.acme.match = shared-label\n\
+             jiralabel.beta.match = other-label\n",
+        ]);
+        assert_eq!(
+            resolve_project_by_label(&cfg, &["other-label".to_string(), "shared-label".to_string()]),
+            Some("acme".to_string()),
+            "acme was declared first in the config, regardless of label order in the ticket"
+        );
+    }
+
+    #[test]
+    fn jiralabel_match_is_case_sensitive() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["jiralabel.acme.match = Acme-Corp\n"]);
+        assert_eq!(
+            resolve_project_by_label(&cfg, &["acme-corp".to_string()]),
+            None,
+            "JIRA labels are case-sensitive; a lowercase mismatch should not match"
+        );
+        assert_eq!(
+            resolve_project_by_label(&cfg, &["Acme-Corp".to_string()]),
+            Some("acme".to_string())
+        );
+    }

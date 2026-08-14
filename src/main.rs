@@ -1914,6 +1914,17 @@ pub struct Config {
     /// branch special-cases this one key before falling through to
     /// slug parsing). Default 1800 (30 minutes).
     project_idle_threshold_secs: i64,
+    /// JIRA-label-to-project bindings parsed from `jiralabel.<slug>.match
+    /// = "<label>"` config keys — the first (and, for Phase 4, only)
+    /// tier of time tracking's website-project resolution priority: a
+    /// JIRA ticket carrying this label is attributed to `<slug>`
+    /// regardless of which directory or explicit selection was active
+    /// at visit time. `<slug>` matches the same `type: project` note
+    /// slug `project.<slug>.dir` uses. One label per project slug —
+    /// unlike `project.<slug>.dir`'s longest-prefix match, label
+    /// matching is exact-string, so only the last `jiralabel.<slug>.match`
+    /// for a given slug wins if the config sets it twice.
+    jira_labels: Vec<(String, String)>,
     /// Host entries parsed from
     /// `host.<key> = "name"` /
     /// `host.<key>.host = "alias"` /
@@ -2064,6 +2075,7 @@ impl Config {
             sessions: Vec::new(),
             projects: Vec::new(),
             project_idle_threshold_secs: 1800,
+            jira_labels: Vec::new(),
             hosts: Vec::new(),
             browsers: Vec::new(),
             // Empty by default — populated from
@@ -2629,6 +2641,35 @@ impl Config {
                             // typo for `project.<slug>.dir`.
                             eprintln!(
                                 "warning: `project.{}` has no meaning on its own; did you mean `project.{}.dir`?",
+                                rest, rest
+                            );
+                        }
+                    } else if let Some(rest) = other.strip_prefix("jiralabel.") {
+                        // `jiralabel.<slug>.match = "<label>"` — the
+                        // JIRA-label tier of website-project
+                        // resolution. Same single-field find-or-insert
+                        // shape as `project.<slug>.dir` above; the
+                        // only recognized sub-field is `match`.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if let Some((slug, field)) = rest.split_once('.') {
+                            let pos = self.jira_labels.iter().position(|(k, _)| k == slug);
+                            match (field, pos) {
+                                ("match", Some(idx)) => {
+                                    self.jira_labels[idx].1 = unquoted.to_string();
+                                }
+                                ("match", None) => {
+                                    self.jira_labels.push((slug.to_string(), unquoted.to_string()));
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "warning: unknown jiralabel field {:?} in jiralabel.{}; ignoring",
+                                        field, slug
+                                    );
+                                }
+                            }
+                        } else {
+                            eprintln!(
+                                "warning: `jiralabel.{}` has no meaning on its own; did you mean `jiralabel.{}.match`?",
                                 rest, rest
                             );
                         }
@@ -4905,6 +4946,26 @@ fn resolve_project_dir(cfg: &Config, pwd: &str) -> Option<String> {
         })
         .max_by_key(|(_, len)| *len)
         .map(|(slug, _)| slug)
+}
+
+/// Resolve a project slug from a JIRA issue's labels — the first
+/// (highest-priority) tier of time tracking's website-project
+/// resolution (see `jiralabel.<slug>.match` on `Config`). Exact
+/// string match, case-sensitive (JIRA labels are themselves
+/// case-sensitive and typically lowercase-with-hyphens by
+/// convention, so this matches how the user would configure
+/// `jiralabel.<slug>.match` against them). Returns the first
+/// configured slug whose label appears in `labels`; when more than
+/// one configured label matches (a ticket carrying two labels that
+/// each map to a different project), the earliest-declared
+/// `jiralabel.<slug>.match` entry wins — same "first in file order"
+/// tie-break `session.<key>`/`host.<key>` use elsewhere.
+#[allow(dead_code)] // wired into `project report`'s website resolution in Phase 5
+fn resolve_project_by_label(cfg: &Config, labels: &[String]) -> Option<String> {
+    cfg.jira_labels
+        .iter()
+        .find(|(_, label)| labels.iter().any(|l| l == label))
+        .map(|(slug, _)| slug.clone())
 }
 
 /// Walk upward from `pwd` looking for an in-repo marker file
