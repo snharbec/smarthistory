@@ -458,6 +458,12 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Time tracking: report on project sessions, or (in later
+    /// phases) select the active project explicitly.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
     /// Delete entries matching the given filter.
     ///
     /// With no filter, deletes every entry in the database. Prompts
@@ -690,6 +696,37 @@ enum ConfigAction {
     Check,
     /// Print every known configuration key with its resolved value.
     List,
+}
+
+/// Sub-commands of `smarthistory project`. `Report` rolls up a
+/// day's tracked time per project (directories, commands, notes —
+/// websites are added in a later phase). `Select` (added in a
+/// later phase) sets the explicit "current project" fallback.
+#[derive(clap::Subcommand, Debug)]
+enum ProjectAction {
+    /// Print a per-project time-tracking report for a single day.
+    ///
+    /// Joins `project_sessions` against `history` (directories,
+    /// commands and their derived durations) and, when
+    /// `notes.database` is configured, notes created during a
+    /// tracked window. Commands run with no project active at all
+    /// are grouped under "untracked".
+    Report {
+        /// Day to report on: `YYYY-MM-DD`, `today`, or `yesterday`.
+        /// Defaults to `today`.
+        #[arg(long)]
+        day: Option<String>,
+        /// Restrict the report to a single project slug. Omit to
+        /// report every project active that day, plus "untracked".
+        #[arg(long)]
+        project: Option<String>,
+        /// Only list commands whose derived active duration is at
+        /// least this many seconds. Does not affect the per-project
+        /// total or the directories breakdown. Defaults to 0 (list
+        /// everything).
+        #[arg(long)]
+        min_duration: Option<i64>,
+    },
 }
 
 /// A single history entry for JSON export/import.
@@ -4981,6 +5018,224 @@ fn switch_project(
     Ok(())
 }
 
+/// Resolve a `smarthistory project report --day` value (`YYYY-MM-DD`,
+/// `today`, `yesterday`, or omitted) to the `[start, end)` Unix
+/// timestamp range covering that local calendar day, plus the
+/// resolved `NaiveDate` (used only for the report header).
+fn parse_project_report_day(
+    day: &Option<String>,
+) -> anyhow::Result<(i64, i64, chrono::NaiveDate)> {
+    use chrono::{Duration, Local, NaiveDate, TimeZone};
+    let today = Local::now().date_naive();
+    let date = match day.as_deref() {
+        None | Some("today") => today,
+        Some("yesterday") => today - Duration::days(1),
+        Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+            anyhow::anyhow!(
+                "invalid --day value {:?}; expected YYYY-MM-DD, \"today\", or \"yesterday\"",
+                s
+            )
+        })?,
+    };
+    let start_naive = date.and_hms_opt(0, 0, 0).unwrap();
+    let end_naive = (date + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap();
+    // `.single()` can fail across a DST transition; fall back to
+    // treating the naive wall-clock time as UTC rather than erroring
+    // out of the report for what is, at worst, an hour of skew on
+    // two days a year.
+    let start_ts = Local
+        .from_local_datetime(&start_naive)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or_else(|| start_naive.and_utc().timestamp());
+    let end_ts = Local
+        .from_local_datetime(&end_naive)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or_else(|| end_naive.and_utc().timestamp());
+    Ok((start_ts, end_ts, date))
+}
+
+/// A `project_sessions` row overlapping the report's day range, with
+/// its still-open end clamped to `now` so interval-membership checks
+/// (directories/commands/notes) never need to special-case `NULL`.
+struct ProjectSessionInterval {
+    slug: String,
+    start_ts: i64,
+    effective_end: i64,
+}
+
+/// Every `project_sessions` row whose interval overlaps
+/// `[range_start, range_end)`, ordered by `start_ts`. A session can
+/// extend past the report's day boundary on either end — callers
+/// that need to clip to the day range do so themselves; this just
+/// answers "which sessions were open at some point during the day".
+fn project_sessions_in_range(
+    conn: &Connection,
+    range_start: i64,
+    range_end: i64,
+    now: i64,
+) -> anyhow::Result<Vec<ProjectSessionInterval>> {
+    let mut stmt = conn.prepare(
+        "SELECT project_slug, start_ts, end_ts FROM project_sessions
+         WHERE start_ts < ?1 AND (end_ts IS NULL OR end_ts > ?2)
+         ORDER BY start_ts ASC",
+    )?;
+    let rows = stmt.query_map(params![range_end, range_start], |row| {
+        let slug: String = row.get(0)?;
+        let start_ts: i64 = row.get(1)?;
+        let end_ts: Option<i64> = row.get(2)?;
+        Ok((slug, start_ts, end_ts))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (slug, start_ts, end_ts) = r?;
+        let effective_end = end_ts.unwrap_or(now).min(now);
+        out.push(ProjectSessionInterval {
+            slug,
+            start_ts,
+            effective_end,
+        });
+    }
+    Ok(out)
+}
+
+/// One `history` row within the report's day range, joined against
+/// whichever `project_sessions` interval (if any) was open at its
+/// timestamp, with its active duration already derived and capped —
+/// see [`switch_project`]'s module-level doc for why the cap exists.
+struct ReportCommandRow {
+    command: String,
+    directory: String,
+    project_slug: Option<String>,
+    timestamp: i64,
+    active_secs: i64,
+}
+
+/// Fetch every `history` command row timestamped within
+/// `[range_start, range_end)`, each paired with its resolved project
+/// (via the same `project_sessions` timestamp-range join
+/// [`switch_project`] writes) and its derived active duration:
+/// `min(next_command_in_session_ts - ts, idle_threshold)`, falling
+/// back to the session's own end (or "now") for a session's last
+/// command. Partitioned by `session_id` so a gap in one pane's
+/// activity never inflates a command's duration in another —
+/// deliberately different from [`Commands::Next`]'s "next command"
+/// predictor query, which isn't session-scoped.
+fn report_command_rows(
+    conn: &Connection,
+    range_start: i64,
+    range_end: i64,
+    idle_threshold_secs: i64,
+) -> anyhow::Result<Vec<ReportCommandRow>> {
+    let sql = "
+        WITH pairs AS (
+            SELECT h.command, h.directory, h.timestamp,
+                   LEAD(h.timestamp) OVER (
+                       PARTITION BY h.session_id ORDER BY h.timestamp ASC, h.id ASC
+                   ) AS next_ts,
+                   ps.project_slug, ps.end_ts AS session_end
+            FROM history h
+            LEFT JOIN project_sessions ps
+              ON h.timestamp >= ps.start_ts
+             AND (ps.end_ts IS NULL OR h.timestamp < ps.end_ts)
+            WHERE h.mode = 'command'
+        )
+        SELECT command, directory, project_slug, timestamp,
+               MIN(COALESCE(next_ts, session_end, strftime('%s', 'now')) - timestamp, ?1) AS active_secs
+        FROM pairs
+        WHERE timestamp >= ?2 AND timestamp < ?3
+        ORDER BY timestamp ASC
+    ";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(
+        params![idle_threshold_secs, range_start, range_end],
+        |row| {
+            Ok(ReportCommandRow {
+                command: row.get(0)?,
+                directory: row.get(1)?,
+                project_slug: row.get(2)?,
+                timestamp: row.get(3)?,
+                active_secs: row.get(4)?,
+            })
+        },
+    )?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Format a duration in seconds as `HhMMm` / `Mm` / `Ss`, matching
+/// the compactness of this project's other plain-text CLI output
+/// (no table/color crate dependency — see `Commands::Export`'s and
+/// `Commands::List`'s handlers for the established style).
+fn format_duration_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Print one project's (or "untracked"'s) section of `project
+/// report`: a heading, total active time, a directories breakdown,
+/// and a commands table filtered to `>= min_duration` seconds. The
+/// total and directories breakdown intentionally use every row
+/// (`min_duration` only trims the commands table itself — see
+/// `ProjectAction::Report`'s `min_duration` doc comment).
+fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_duration: i64) {
+    let total: i64 = rows.iter().map(|r| r.active_secs).sum();
+    println!("\n## {slug}");
+    println!("Total active time: {}", format_duration_secs(total));
+
+    let mut by_dir: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+    for r in rows {
+        *by_dir.entry(r.directory.as_str()).or_insert(0) += r.active_secs;
+    }
+    println!("\n### Directories");
+    if by_dir.is_empty() {
+        println!("(none)");
+    } else {
+        let mut dirs: Vec<(&str, i64)> = by_dir.into_iter().collect();
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.1));
+        for (dir, secs) in dirs {
+            println!("- {} ({})", dir, format_duration_secs(secs));
+        }
+    }
+
+    println!("\n### Commands");
+    let filtered: Vec<&&ReportCommandRow> =
+        rows.iter().filter(|r| r.active_secs >= min_duration).collect();
+    if filtered.is_empty() {
+        println!("(none)");
+    } else {
+        for r in filtered {
+            let ts = chrono::DateTime::from_timestamp(r.timestamp, 0)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| r.timestamp.to_string());
+            println!(
+                "- {}  {}  ({})  {}",
+                ts,
+                format_duration_secs(r.active_secs),
+                r.directory,
+                r.command
+            );
+        }
+    }
+}
+
 /// If the `history` table still has a per-row `comment` column (from
 /// an earlier schema), copy the first non-empty comment for each
 /// command into `command_comments`, then remove the column.
@@ -6052,6 +6307,127 @@ fn main() -> anyhow::Result<()> {
             let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
+        Commands::Project { action } => match action {
+            ProjectAction::Report {
+                day,
+                project,
+                min_duration,
+            } => {
+                let cfg = Config::load();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let (range_start, range_end, date) = parse_project_report_day(&day)?;
+                let min_duration = min_duration.unwrap_or(0);
+
+                let sessions =
+                    project_sessions_in_range(&conn, range_start, range_end, now)?;
+                let commands = report_command_rows(
+                    &conn,
+                    range_start,
+                    range_end,
+                    cfg.project_idle_threshold_secs,
+                )?;
+
+                // Notes created during a tracked window, bucketed by
+                // whichever project's interval contains their
+                // `created` timestamp. Notes outside every interval
+                // (or with no `created` timestamp) aren't shown —
+                // "untracked" is a bucket for command time, not for
+                // notes with no project to attribute them to.
+                let mut notes_by_slug: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                if let Some(db_path) = cfg.notes_database() {
+                    let service = note_search::database_service::DatabaseService::new(
+                        &db_path.display().to_string(),
+                    );
+                    let criteria = note_search::SearchCriteria {
+                        list_only: true,
+                        ..Default::default()
+                    };
+                    match service.search_notes(&criteria) {
+                        Ok(notes) => {
+                            for note in notes {
+                                let Some(created) = note.created else {
+                                    continue;
+                                };
+                                if created < range_start || created >= range_end {
+                                    continue;
+                                }
+                                let hit = sessions.iter().find(|s| {
+                                    created >= s.start_ts && created < s.effective_end
+                                });
+                                if let Some(session) = hit {
+                                    notes_by_slug
+                                        .entry(session.slug.clone())
+                                        .or_default()
+                                        .push(note.filename);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warning: notes lookup failed, skipping notes section: {e}");
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "warning: notes.database is not configured; skipping notes section"
+                    );
+                }
+
+                // Slugs to report on, in a stable order: explicit
+                // `--project` narrows to just that one; otherwise
+                // every slug seen in either the session intervals or
+                // the command rows, plus a trailing "untracked"
+                // bucket for command rows with no resolved project.
+                let mut slugs: Vec<String> = Vec::new();
+                if let Some(p) = project.as_ref() {
+                    slugs.push(p.clone());
+                } else {
+                    let mut seen = std::collections::BTreeSet::new();
+                    for s in &sessions {
+                        seen.insert(s.slug.clone());
+                    }
+                    for c in &commands {
+                        if let Some(slug) = &c.project_slug {
+                            seen.insert(slug.clone());
+                        }
+                    }
+                    slugs.extend(seen);
+                }
+
+                println!("# Project Report — {}", date.format("%Y-%m-%d"));
+
+                for slug in &slugs {
+                    let rows: Vec<&ReportCommandRow> = commands
+                        .iter()
+                        .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
+                        .collect();
+                    print_project_report_section(slug, &rows, min_duration);
+                    if let Some(notes) = notes_by_slug.get(slug) {
+                        println!("\n### Notes created");
+                        for n in notes {
+                            println!("- {n}");
+                        }
+                    }
+                    println!("\n### Websites");
+                    println!("(pending — added in a later phase)");
+                    println!();
+                }
+
+                if project.is_none() {
+                    let untracked: Vec<&ReportCommandRow> = commands
+                        .iter()
+                        .filter(|c| c.project_slug.is_none())
+                        .collect();
+                    if !untracked.is_empty() {
+                        print_project_report_section("untracked", &untracked, min_duration);
+                        println!();
+                    }
+                }
+            }
+        },
         Commands::Config { action } => match action {
             ConfigAction::Get { key } => {
                 let cfg = Config::load();

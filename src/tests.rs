@@ -1705,3 +1705,152 @@ tmuxpaneoutputdir=~/custom-tmux
             .expect("row");
         assert_eq!(end_ts, Some(1050));
     }
+
+    // --- Time tracking: project report ------------------------------
+
+    #[test]
+    fn parse_project_report_day_defaults_to_today_spanning_exactly_one_day() {
+        let (start, end, date) = parse_project_report_day(&None).expect("parse");
+        assert_eq!(date, chrono::Local::now().date_naive());
+        assert_eq!(end - start, 86400, "a calendar day is exactly 24h wide");
+    }
+
+    #[test]
+    fn parse_project_report_day_parses_explicit_date() {
+        let (_start, _end, date) =
+            parse_project_report_day(&Some("2024-01-15".to_string())).expect("parse");
+        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+    }
+
+    #[test]
+    fn parse_project_report_day_yesterday_is_one_day_before_today() {
+        let (_s1, _e1, today) = parse_project_report_day(&None).expect("parse");
+        let (_s2, _e2, yesterday) =
+            parse_project_report_day(&Some("yesterday".to_string())).expect("parse");
+        assert_eq!(yesterday, today - chrono::Duration::days(1));
+    }
+
+    #[test]
+    fn parse_project_report_day_rejects_garbage() {
+        assert!(parse_project_report_day(&Some("not-a-date".to_string())).is_err());
+    }
+
+    #[test]
+    fn format_duration_secs_picks_the_coarsest_useful_unit() {
+        assert_eq!(format_duration_secs(0), "0s");
+        assert_eq!(format_duration_secs(45), "45s");
+        assert_eq!(format_duration_secs(90), "1m30s");
+        assert_eq!(format_duration_secs(3600), "1h00m");
+        assert_eq!(format_duration_secs(3665), "1h01m");
+    }
+
+    /// Fixture matching the subset of `history`'s real schema
+    /// `report_command_rows` reads, plus `project_sessions` — a
+    /// superset of `project_lifecycle_test_conn`'s history table
+    /// (adds `command`/`directory`/`session_id`/`mode`, needed for
+    /// the report's per-command duration query).
+    fn report_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE history (
+                 id INTEGER PRIMARY KEY,
+                 command TEXT NOT NULL,
+                 directory TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 exit_code INTEGER,
+                 timestamp INTEGER NOT NULL,
+                 mode TEXT NOT NULL DEFAULT 'command'
+             );
+             CREATE TABLE project_sessions (
+                 id INTEGER PRIMARY KEY,
+                 project_slug TEXT NOT NULL,
+                 start_ts INTEGER NOT NULL,
+                 end_ts INTEGER,
+                 end_reason TEXT
+             );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    fn insert_history(conn: &Connection, command: &str, directory: &str, session_id: &str, ts: i64) {
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, timestamp) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![command, directory, session_id, ts],
+        )
+        .expect("insert history");
+    }
+
+    /// The core correctness case from the spec: a command's derived
+    /// duration is `min(gap to the next event, idle_threshold)`, and
+    /// that gap is computed *within its own session/pane* — a long
+    /// gap in one pane must not inflate a command's duration in a
+    /// different, concurrently-active pane.
+    #[test]
+    fn report_command_rows_caps_duration_and_partitions_by_session() {
+        let conn = report_test_conn();
+        conn.execute(
+            "INSERT INTO project_sessions (project_slug, start_ts, end_ts) VALUES ('demo', 1000, 2000)",
+            [],
+        )
+        .expect("insert session");
+        // paneA: a 600s gap between its two commands.
+        insert_history(&conn, "build", "/repo", "paneA", 1000);
+        insert_history(&conn, "test", "/repo", "paneA", 1600);
+        // paneB: a single command with no successor in its own
+        // partition — falls back to the session's end_ts (2000).
+        insert_history(&conn, "watch", "/repo", "paneB", 1100);
+
+        let rows = report_command_rows(&conn, 500, 2500, 300).expect("query");
+        assert_eq!(rows.len(), 3);
+        for r in &rows {
+            assert_eq!(r.project_slug.as_deref(), Some("demo"));
+            assert_eq!(
+                r.active_secs, 300,
+                "command {:?}: gap capped at the 300s idle threshold regardless of which pane produced it",
+                r.command
+            );
+        }
+    }
+
+    #[test]
+    fn report_command_rows_leaves_project_slug_none_outside_any_session() {
+        let conn = report_test_conn();
+        conn.execute(
+            "INSERT INTO project_sessions (project_slug, start_ts, end_ts) VALUES ('demo', 1000, 2000)",
+            [],
+        )
+        .expect("insert session");
+        insert_history(&conn, "later", "/other", "paneC", 3000);
+
+        let rows = report_command_rows(&conn, 2500, 3500, 300).expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].project_slug, None, "3000 falls after the session's end_ts=2000");
+    }
+
+    #[test]
+    fn project_sessions_in_range_clamps_still_open_session_to_now() {
+        let conn = report_test_conn();
+        conn.execute(
+            "INSERT INTO project_sessions (project_slug, start_ts, end_ts) VALUES ('demo', 1000, NULL)",
+            [],
+        )
+        .expect("insert session");
+
+        let sessions = project_sessions_in_range(&conn, 0, 5000, 1500).expect("query");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].effective_end, 1500, "an open session clamps to `now`, not the range end");
+    }
+
+    #[test]
+    fn project_sessions_in_range_excludes_sessions_entirely_outside_the_window() {
+        let conn = report_test_conn();
+        conn.execute(
+            "INSERT INTO project_sessions (project_slug, start_ts, end_ts) VALUES ('demo', 1000, 1100)",
+            [],
+        )
+        .expect("insert session");
+
+        let sessions = project_sessions_in_range(&conn, 2000, 3000, 3500).expect("query");
+        assert!(sessions.is_empty());
+    }
