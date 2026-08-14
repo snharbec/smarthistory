@@ -7057,26 +7057,21 @@ fn main() -> anyhow::Result<()> {
 
                 println!("# Project Report — {}", date.format("%Y-%m-%d"));
 
-                for slug in &slugs {
-                    let rows: Vec<&ReportCommandRow> = commands
-                        .iter()
-                        .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
-                        .collect();
-                    print_project_report_section(slug, &rows, min_duration);
-                    if let Some(notes) = notes_by_slug.get(slug) {
-                        println!("\n### Notes created");
-                        for n in notes {
-                            println!("- {n}");
-                        }
-                    }
-                    println!("\n### Websites");
-                    match websites_by_slug.get(&Some(slug.clone())) {
-                        Some(items) if !items.is_empty() => print_website_section(items),
-                        _ => println!("(none)"),
-                    }
-                    println!();
-                }
-
+                // One (slug, rows) pair per section — `None` is the
+                // trailing "untracked" bucket. Built once, up front,
+                // so the summary table below and each section's own
+                // total (`print_project_report_section` re-sums the
+                // same `rows` slice) can never drift apart.
+                let mut sections: Vec<(Option<String>, Vec<&ReportCommandRow>)> = slugs
+                    .iter()
+                    .map(|slug| {
+                        let rows: Vec<&ReportCommandRow> = commands
+                            .iter()
+                            .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
+                            .collect();
+                        (Some(slug.clone()), rows)
+                    })
+                    .collect();
                 if project.is_none() {
                     let untracked: Vec<&ReportCommandRow> = commands
                         .iter()
@@ -7084,14 +7079,38 @@ fn main() -> anyhow::Result<()> {
                         .collect();
                     let untracked_websites = websites_by_slug.get(&None);
                     if !untracked.is_empty() || untracked_websites.is_some_and(|v| !v.is_empty()) {
-                        print_project_report_section("untracked", &untracked, min_duration);
-                        println!("\n### Websites");
-                        match untracked_websites {
-                            Some(items) if !items.is_empty() => print_website_section(items),
-                            _ => println!("(none)"),
-                        }
-                        println!();
+                        sections.push((None, untracked));
                     }
+                }
+
+                println!("\n## Summary");
+                println!("| Project | Active Time |");
+                println!("| --- | --- |");
+                for (slug, rows) in &sections {
+                    let label = slug.as_deref().unwrap_or("untracked");
+                    let total: i64 = rows.iter().map(|r| r.active_secs).sum();
+                    println!(
+                        "| {} | {} |",
+                        escape_md_table_cell(label),
+                        format_duration_secs(total)
+                    );
+                }
+
+                for (slug, rows) in &sections {
+                    let label = slug.as_deref().unwrap_or("untracked");
+                    print_project_report_section(label, rows, min_duration);
+                    if let Some(notes) = slug.as_ref().and_then(|s| notes_by_slug.get(s)) {
+                        println!("\n### Notes created");
+                        for n in notes {
+                            println!("- {n}");
+                        }
+                    }
+                    println!("\n### Websites");
+                    match websites_by_slug.get(slug) {
+                        Some(items) if !items.is_empty() => print_website_section(items),
+                        _ => println!("(none)"),
+                    }
+                    println!();
                 }
             }
             ProjectAction::Select { slug } => {
