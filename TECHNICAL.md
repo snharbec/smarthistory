@@ -738,6 +738,7 @@ smarthistory project report [--day <YYYY-MM-DD>|today|yesterday] [--project <slu
 smarthistory project select <slug>
 smarthistory project current
 smarthistory project pause
+smarthistory project files
 smarthistory file viewed <path>
 smarthistory file modified <path>
 smarthistory file created <path>
@@ -848,6 +849,14 @@ smarthistory file created <path>
   (`end_reason = "switch"` on the reopened session), not whatever the current
   directory resolves to. For a lunch break or a meeting where the time shouldn't
   be attributed to anything.
+- `project files` prints the files viewed/modified/created since the
+  currently-open `project_sessions` row started — a "what have I touched right
+  now" view, scoped to the live session rather than a whole calendar day like
+  `report`. Reads the open row directly (`end_ts IS NULL`) rather than
+  re-resolving the project from the cwd, so it reflects whatever session
+  `smarthistory add`/`file` actually has open. Prints "no active project
+  session" (exit 1) when nothing is open, including while paused (pausing closes
+  the open session).
 - `file viewed|modified|created <path>` records one row in `file_events` — meant
   to be called from an editor hook (a Vim `autocmd`, an LSP client), not typed
   by hand. `path` is canonicalized to absolute (stored as given if it no longer

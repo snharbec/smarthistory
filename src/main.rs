@@ -775,6 +775,19 @@ enum ProjectAction {
     /// whatever the current directory would resolve to on its own.
     /// Prints which state it switched to.
     Pause,
+    /// Print the files viewed, modified, and created since the
+    /// currently-open project session started — a quick "what have I
+    /// touched right now" view, unlike `report` (which is a whole
+    /// calendar day, across every project). Reads the open
+    /// `project_sessions` row directly (`end_ts IS NULL`) rather than
+    /// re-resolving the project from the current directory, so it
+    /// reflects the session `smarthistory add`/`file` actually has
+    /// open right now, not what the cwd would resolve to if a
+    /// directory change hasn't triggered a switch yet. Prints "no
+    /// active project session" (exit code 1) when nothing is open —
+    /// including while paused, since pausing closes the open
+    /// session.
+    Files,
 }
 
 /// Sub-commands of `smarthistory file`. Each records one row in
@@ -7502,6 +7515,41 @@ fn main() -> anyhow::Result<()> {
                         None => eprintln!("smarthistory: project tracking paused (no project was active)"),
                     }
                 }
+            }
+            ProjectAction::Files => {
+                use rusqlite::OptionalExtension;
+                let open: Option<(String, i64)> = conn
+                    .query_row(
+                        "SELECT project_slug, start_ts FROM project_sessions WHERE end_ts IS NULL",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((slug, start_ts)) = open else {
+                    eprintln!("smarthistory: no active project session");
+                    std::process::exit(1);
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                // `report_file_events`'s range is a half-open
+                // `[start, end)` — `now + 1` so an event recorded in
+                // this same second is still included.
+                let by_slug = report_file_events(&conn, start_ts, now + 1)?;
+                let empty = FileEventGroups::default();
+                let groups = by_slug.get(&Some(slug.clone())).unwrap_or(&empty);
+                let started = chrono::DateTime::from_timestamp(start_ts, 0)
+                    .map(|dt| {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%H:%M:%S")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| start_ts.to_string());
+                println!("# {slug} — session started {started}");
+                print_file_events_section("viewed", &groups.viewed);
+                print_file_events_section("modified", &groups.modified);
+                print_file_events_section("created", &groups.created);
             }
         },
         Commands::File { action } => {

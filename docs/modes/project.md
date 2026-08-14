@@ -167,6 +167,36 @@ the moment you paused (`end_reason = "switch"` on the reopened session), not
 whatever the directory you're currently in would resolve to. Useful for a lunch
 break or a meeting where you don't want the time attributed to anything.
 
+## Current session's files
+
+```sh
+smarthistory project files
+```
+
+Prints the files viewed/modified/created since the currently-open project
+session started — a quick "what have I touched right now" view, scoped to the
+live session rather than a whole calendar day the way `report` is. Reads the
+open `project_sessions` row directly (`end_ts IS NULL`) rather than re-resolving
+the project from the current directory, so it reflects whatever session
+`smarthistory add`/`file` actually has open right now.
+
+```
+# acme — session started 09:14:02
+
+### Files viewed
+- ~/work/acme/src/main.rs (3x)
+
+### Files modified
+- ~/work/acme/src/main.rs
+
+### Files created
+(none)
+```
+
+Prints "no active project session" (exit code 1) when nothing is currently open
+— including while [paused](#pausing-tracking), since pausing closes the open
+session.
+
 ## `smarthistory project report`
 
 ```sh
