@@ -1706,6 +1706,65 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(end_ts, Some(1050));
     }
 
+    // --- Time tracking: resolve_current_project (`project current`) ----
+
+    /// Fixture for `resolve_current_project`: needs `project_current`
+    /// on top of `project_lifecycle_test_conn`'s schema (the marker-
+    /// file tier is exercised separately by the
+    /// `find_project_marker_*` tests — no filesystem fixture needed
+    /// here since these tests use a `pwd` with no marker file).
+    fn resolve_current_project_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE project_current (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 project_slug TEXT NOT NULL,
+                 set_ts INTEGER NOT NULL
+             );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    #[test]
+    fn resolve_current_project_prefers_dir_match_over_project_current() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'other', 1000)",
+            [],
+        )
+        .expect("insert");
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/work\n"]);
+        assert_eq!(
+            resolve_current_project(&conn, &cfg, "/tmp/work/subdir").unwrap(),
+            Some("demo".to_string()),
+            "a directory match must win over the explicit project_current fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_current_project_falls_back_to_project_current_when_no_dir_match() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'other', 1000)",
+            [],
+        )
+        .expect("insert");
+        let cfg = Config::default();
+        assert_eq!(
+            resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(),
+            Some("other".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_current_project_returns_none_when_nothing_resolves() {
+        let conn = resolve_current_project_test_conn();
+        let cfg = Config::default();
+        assert_eq!(resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(), None);
+    }
+
     // --- Time tracking: project report ------------------------------
 
     #[test]

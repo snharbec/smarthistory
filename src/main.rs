@@ -744,6 +744,16 @@ enum ProjectAction {
         /// and the report's `--project` filter use).
         slug: String,
     },
+    /// Print the project the current directory resolves to, using
+    /// the exact same priority `smarthistory add` uses: an in-repo
+    /// `.smarthistory-project` marker file, then the longest
+    /// `project.<slug>.dir` prefix match, then the last explicit
+    /// `smarthistory project select` (i.e. `.`-mode) choice, falling
+    /// back to "no project" when none apply. Prints just the slug on
+    /// stdout (no trailing decoration) so it's easy to embed in a
+    /// shell prompt or script; prints nothing (exit code 1) when
+    /// unresolved.
+    Current,
 }
 
 /// A single history entry for JSON export/import.
@@ -6949,6 +6959,17 @@ fn main() -> anyhow::Result<()> {
                     Some("switch"),
                 )?;
                 eprintln!("smarthistory: current project set to {slug:?}");
+            }
+            ProjectAction::Current => {
+                let cfg = Config::load();
+                let pwd = crate::util::current_directory_for_storage();
+                match resolve_current_project(&conn, &cfg, &pwd)? {
+                    Some(slug) => println!("{slug}"),
+                    None => {
+                        eprintln!("smarthistory: no active project");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
         Commands::Config { action } => match action {
