@@ -5688,7 +5688,11 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
         let mut dirs: Vec<(&str, i64)> = by_dir.into_iter().collect();
         dirs.sort_by_key(|d| std::cmp::Reverse(d.1));
         for (dir, secs) in dirs {
-            println!("- {} ({})", dir, format_duration_secs(secs));
+            println!(
+                "- {} ({})",
+                crate::util::expand_home(dir),
+                format_duration_secs(secs)
+            );
         }
     }
 
@@ -5725,7 +5729,7 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
                 "| {} | {} | {} | {} |",
                 time_cell,
                 format_duration_secs(g.total_secs),
-                escape_md_table_cell(g.directory),
+                escape_md_table_cell(&crate::util::expand_home(g.directory)),
                 escape_md_table_cell(g.command)
             );
         }
