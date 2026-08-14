@@ -1467,3 +1467,241 @@ tmuxpaneoutputdir=~/custom-tmux
         let ids: std::collections::HashSet<String> = ["1".to_string()].into_iter().collect();
         assert_eq!(remove_session_lines(&path, &ids).expect("remove"), 0);
     }
+
+    // --- Time tracking: project resolution + session lifecycle -----
+
+    /// The most specific (longest) matching `project.<slug>.dir`
+    /// wins over a broader ancestor's binding — a sub-project nested
+    /// inside a monorepo's own binding should resolve to itself, not
+    /// the monorepo.
+    #[test]
+    fn resolve_project_dir_prefers_longest_match() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "project.monorepo.dir = /tmp/work\n\
+             project.subproj.dir = /tmp/work/subproj\n",
+        ]);
+        assert_eq!(
+            resolve_project_dir(&cfg, "/tmp/work/subproj/src"),
+            Some("subproj".to_string())
+        );
+        assert_eq!(
+            resolve_project_dir(&cfg, "/tmp/work/other"),
+            Some("monorepo".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_project_dir_no_match_returns_none() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\n"]);
+        assert_eq!(resolve_project_dir(&cfg, "/tmp/unrelated"), None);
+    }
+
+    /// A directory that is EXACTLY a configured project's dir (not
+    /// just a descendant of it) still matches — the prefix check
+    /// must not require a trailing path segment.
+    #[test]
+    fn resolve_project_dir_matches_exact_directory() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\n"]);
+        assert_eq!(
+            resolve_project_dir(&cfg, "/tmp/demo"),
+            Some("demo".to_string())
+        );
+        // A sibling directory with the same prefix as a STRING (but
+        // not as a path) must not falsely match.
+        assert_eq!(resolve_project_dir(&cfg, "/tmp/demo-other"), None);
+    }
+
+    /// A marker file's first non-blank line is the slug, found from
+    /// a directory several levels below it.
+    #[test]
+    fn find_project_marker_finds_file_n_levels_up() {
+        let root = std::env::temp_dir().join(format!(
+            "smarthistory-marker-test-{}",
+            generate_uuid_v4()
+        ));
+        let nested = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(root.join(".smarthistory-project"), "\n  demo-slug  \n").expect("write");
+        assert_eq!(find_project_marker(&nested), Some("demo-slug".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_project_marker_no_file_returns_none() {
+        let root = std::env::temp_dir().join(format!(
+            "smarthistory-marker-none-test-{}",
+            generate_uuid_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir");
+        assert_eq!(find_project_marker(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Build an in-memory `Connection` with just the `history` +
+    /// `project_sessions` columns `switch_project` reads/writes —
+    /// test fixtures don't inherit `init_db`'s schema automatically.
+    fn project_lifecycle_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE history (id INTEGER PRIMARY KEY, timestamp INTEGER);
+             CREATE TABLE project_sessions (
+                 id INTEGER PRIMARY KEY,
+                 project_slug TEXT NOT NULL,
+                 start_ts INTEGER NOT NULL,
+                 end_ts INTEGER,
+                 end_reason TEXT
+             );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    #[test]
+    fn switch_project_opens_new_session_when_none_open() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        let (slug, start_ts, end_ts): (String, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT project_slug, start_ts, end_ts FROM project_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(slug, "demo");
+        assert_eq!(start_ts, 1000);
+        assert_eq!(end_ts, None);
+    }
+
+    /// A resolved project different from the currently-open one
+    /// closes it IMMEDIATELY (not after the idle threshold) with
+    /// `end_reason = 'directory_change'` by default, and opens a
+    /// fresh session for the new project.
+    #[test]
+    fn switch_project_closes_on_directory_change_and_opens_new() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        switch_project(&conn, Some("other"), 1050, 1800, None).expect("switch");
+
+        let mut stmt = conn
+            .prepare("SELECT project_slug, start_ts, end_ts, end_reason FROM project_sessions ORDER BY id")
+            .expect("prepare");
+        let rows: Vec<(String, i64, Option<i64>, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("demo".to_string(), 1000, Some(1050), Some("directory_change".to_string())));
+        assert_eq!(rows[1].0, "other");
+        assert_eq!(rows[1].2, None, "the new session must still be open");
+    }
+
+    /// The same project, with a command observed WITHIN the idle
+    /// window, stays open — `switch_project` is a no-op.
+    #[test]
+    fn switch_project_stays_open_when_same_project_and_not_idle() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        conn.execute(
+            "INSERT INTO history (timestamp) VALUES (1100)",
+            [],
+        )
+        .expect("insert");
+        switch_project(&conn, Some("demo"), 1200, 1800, None).expect("switch");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_sessions", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "must not open a second session for the same project");
+        let end_ts: Option<i64> = conn
+            .query_row("SELECT end_ts FROM project_sessions", [], |r| r.get(0))
+            .expect("row");
+        assert_eq!(end_ts, None, "must still be open");
+    }
+
+    /// The same project, with the gap since the last observed
+    /// command exceeding the idle threshold, closes with
+    /// `end_reason = 'idle'` and `end_ts` BACKDATED to
+    /// `last_activity + idle_threshold` — not the wall-clock `now`
+    /// this function happened to run at.
+    #[test]
+    fn switch_project_closes_on_idle_gap_with_backdated_end_ts() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 100, None).expect("switch");
+        conn.execute("INSERT INTO history (timestamp) VALUES (1010)", [])
+            .expect("insert");
+        // Gap since last activity (1010) exceeds the 100s idle
+        // threshold by the time this runs at 1500.
+        switch_project(&conn, Some("demo"), 1500, 100, None).expect("switch");
+
+        let (end_ts, end_reason): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT end_ts, end_reason FROM project_sessions WHERE project_slug = 'demo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(end_reason, Some("idle".to_string()));
+        assert_eq!(end_ts, Some(1110), "backdated to last_activity(1010) + idle_threshold(100), not now(1500)");
+    }
+
+    /// A session with NO commands observed yet (freshly opened, no
+    /// `history` row landed in it) still idles out correctly relative
+    /// to its own `start_ts`, not an earlier unrelated command.
+    #[test]
+    fn switch_project_idles_out_from_start_ts_when_no_activity_recorded() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 100, None).expect("switch");
+        switch_project(&conn, Some("demo"), 1200, 100, None).expect("switch");
+
+        let (end_ts, end_reason): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT end_ts, end_reason FROM project_sessions WHERE project_slug = 'demo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(end_reason, Some("idle".to_string()));
+        assert_eq!(end_ts, Some(1100), "backdated to start_ts(1000) + idle_threshold(100)");
+    }
+
+    /// `smarthistory project select`'s explicit switch uses
+    /// `forced_reason = Some("switch")`, overriding the default
+    /// `"directory_change"` even though the underlying trigger
+    /// (a project mismatch) is structurally identical.
+    #[test]
+    fn switch_project_forced_reason_used_for_explicit_switch() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        switch_project(&conn, Some("other"), 1050, 1800, Some("switch")).expect("switch");
+
+        let end_reason: Option<String> = conn
+            .query_row(
+                "SELECT end_reason FROM project_sessions WHERE project_slug = 'demo'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(end_reason, Some("switch".to_string()));
+    }
+
+    /// A resolved project of `None` (moved to an untracked directory)
+    /// closes the open session without opening a replacement.
+    #[test]
+    fn switch_project_none_closes_without_opening_new() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        switch_project(&conn, None, 1050, 1800, None).expect("switch");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_sessions", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "no new session opened for an unresolved directory");
+        let end_ts: Option<i64> = conn
+            .query_row("SELECT end_ts FROM project_sessions", [], |r| r.get(0))
+            .expect("row");
+        assert_eq!(end_ts, Some(1050));
+    }

@@ -1478,6 +1478,21 @@ struct SessionDef {
     exec: String,
 }
 
+/// A directory-to-project binding from the config file.
+/// Syntax: `project.<slug>.dir = "~/path"`. `<slug>` is the same
+/// identifier used to derive the binding's owning note (see
+/// `crate::util::slugify`, same convention `session.<key>`/
+/// `host.<key>` use) — there is no separate display-name field here,
+/// unlike `SessionDef`/`HostDef`, since a project's name lives on its
+/// `type: project` note, not in this config entry. `dir` is
+/// tilde-expanded and matched by longest-prefix against the current
+/// working directory to resolve "which project is this shell in"
+/// (`resolve_project_dir`).
+#[derive(Debug, Clone)]
+struct ProjectDef {
+    dir: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory containing per-pane tmux output log files.
@@ -1823,6 +1838,19 @@ pub struct Config {
     /// entry becomes a row in the panes (`*`)
     /// view, in file declaration order.
     sessions: Vec<(String, SessionDef)>,
+    /// Directory-to-project bindings parsed from `project.<slug>.dir
+    /// = "~/path"` config keys — see `ProjectDef`. `<slug>` matches
+    /// the slug of a `type: project` note; entries are matched by
+    /// longest-`dir`-prefix against the shell's cwd (`resolve_project_dir`)
+    /// to resolve which project a command belongs to.
+    projects: Vec<(String, ProjectDef)>,
+    /// How long (seconds) a project session stays open with no
+    /// commands before it's considered idle and closed. Set via
+    /// `project.idlethreshold=<seconds>` (a top-level scalar, NOT a
+    /// `project.<slug>.*` sub-key — `parse_multi`'s `project.`
+    /// branch special-cases this one key before falling through to
+    /// slug parsing). Default 1800 (30 minutes).
+    project_idle_threshold_secs: i64,
     /// Host entries parsed from
     /// `host.<key> = "name"` /
     /// `host.<key>.host = "alias"` /
@@ -1971,6 +1999,8 @@ impl Config {
             session_dirs: Vec::new(),
             multiplexer: crate::multiplexer::MultiplexerKind::default(),
             sessions: Vec::new(),
+            projects: Vec::new(),
+            project_idle_threshold_secs: 1800,
             hosts: Vec::new(),
             browsers: Vec::new(),
             // Empty by default — populated from
@@ -2483,6 +2513,61 @@ impl Config {
                             if !name.is_empty() {
                                 self.files_ignores.push(name.to_string());
                             }
+                        }
+                    } else if let Some(rest) = other.strip_prefix("project.") {
+                        // `project.idlethreshold = <seconds>` is a
+                        // top-level scalar (no `<slug>.` join key),
+                        // so it's special-cased before falling
+                        // through to the `project.<slug>.dir` slug
+                        // parsing below — same idea as `dropdown.*`
+                        // being distinct from `session.<key>.*`
+                        // despite both starting with letters that
+                        // could otherwise be confused for a slug.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if rest == "idlethreshold" {
+                            match unquoted.parse::<i64>() {
+                                Ok(n) if n > 0 => self.project_idle_threshold_secs = n,
+                                _ => eprintln!(
+                                    "warning: project.idlethreshold={:?} is not a positive integer; keeping the previous value",
+                                    value
+                                ),
+                            }
+                        } else if let Some((slug, field)) = rest.split_once('.') {
+                            // `project.<slug>.dir = "~/path"` — the
+                            // only recognized sub-field today (no
+                            // display-name field: a project's name
+                            // lives on its `type: project` note, not
+                            // in this config entry — see `ProjectDef`'s
+                            // doc comment).
+                            let pos = self.projects.iter().position(|(k, _)| k == slug);
+                            match (field, pos) {
+                                ("dir", Some(idx)) => {
+                                    self.projects[idx].1.dir = unquoted.to_string();
+                                }
+                                ("dir", None) => {
+                                    self.projects.push((
+                                        slug.to_string(),
+                                        ProjectDef { dir: unquoted.to_string() },
+                                    ));
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "warning: unknown project field {:?} in project.{}; ignoring",
+                                        field, slug
+                                    );
+                                }
+                            }
+                        } else {
+                            // `project.<slug> = "..."` (no
+                            // sub-field) has no defined meaning —
+                            // unlike `session.<key>`/`host.<key>`,
+                            // there's no display-name field to set
+                            // here, so this is almost certainly a
+                            // typo for `project.<slug>.dir`.
+                            eprintln!(
+                                "warning: `project.{}` has no meaning on its own; did you mean `project.{}.dir`?",
+                                rest, rest
+                            );
                         }
                     } else if let Some(rest) = other.strip_prefix("session.") {
                         // Parse `session.<key> = "name"`,
@@ -4683,6 +4768,46 @@ fn init_db() -> anyhow::Result<Connection> {
          ON history (command, directory, session_id)",
         [],
     )?;
+    // Time-tracking: each row is a span of time attributed to one
+    // project. `end_ts IS NULL` marks the currently-open session —
+    // enforced as an application-level invariant (at most one open
+    // row at a time), not a schema constraint, since SQLite has no
+    // clean way to express "at most one NULL" directly. See
+    // `switch_project` for the only code path that opens/closes rows.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS project_sessions (
+            id INTEGER PRIMARY KEY,
+            project_slug TEXT NOT NULL,
+            start_ts INTEGER NOT NULL,
+            end_ts INTEGER,
+            end_reason TEXT
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_project_sessions_slug
+         ON project_sessions (project_slug)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_project_sessions_range
+         ON project_sessions (start_ts, end_ts)",
+        [],
+    )?;
+    // The last EXPLICITLY selected project (via `smarthistory project
+    // select`, see the `.` picker) — the fallback used when neither
+    // an in-repo marker file nor a `project.<slug>.dir` entry
+    // resolves the current directory. A singleton row: the CHECK
+    // constraint plus `INSERT ... ON CONFLICT(id) DO UPDATE` (see
+    // `switch_project`) keeps exactly one row, ever.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS project_current (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            project_slug TEXT NOT NULL,
+            set_ts INTEGER NOT NULL
+        )",
+        [],
+    )?;
     // If an older database still has the per-row comment column from
     // a previous schema, migrate those comments into the global
     // command_comments table and then drop the column.
@@ -4690,6 +4815,170 @@ fn init_db() -> anyhow::Result<Connection> {
     // If an older database is missing the `mode` column, add it.
     migrate_history_mode_column(&conn)?;
     Ok(conn)
+}
+
+/// Longest-`dir`-prefix match: which configured project's directory
+/// binding is `pwd` nested under (or equal to)? The most specific
+/// (longest) matching `project.<slug>.dir` wins over a broader
+/// ancestor's binding, mirroring how nested directory bindings are
+/// expected to behave (e.g. a sub-project inside a monorepo with its
+/// own binding). Same tilde-expansion helper `Config::sessions()`/
+/// `session_directories()` already use.
+fn resolve_project_dir(cfg: &Config, pwd: &str) -> Option<String> {
+    let home_list: Vec<String> = std::iter::once(std::env::var("HOME").unwrap_or_default())
+        .filter(|s| !s.is_empty())
+        .collect();
+    cfg.projects
+        .iter()
+        .filter_map(|(slug, def)| {
+            let expanded = crate::util::expand_home_to_absolute(&def.dir, &home_list);
+            let expanded = expanded.trim_end_matches('/');
+            if pwd == expanded || pwd.starts_with(&format!("{expanded}/")) {
+                Some((slug.clone(), expanded.len()))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(_, len)| *len)
+        .map(|(slug, _)| slug)
+}
+
+/// Walk upward from `pwd` looking for an in-repo marker file
+/// (`.smarthistory-project`) whose first non-blank line names the
+/// project slug directly — lets a portable/shared checkout pin its
+/// project without every user needing a matching `project.<slug>.dir`
+/// entry in their own config (whose absolute paths differ per
+/// machine). Bounded at `$HOME` (or `MAX_LEVELS`, whichever comes
+/// first) since this runs on every `smarthistory add` call — an
+/// unbounded walk to `/` would make every shell prompt pay for a
+/// stat-storm on a deeply nested or oddly-rooted cwd. A marker file
+/// that exists but has no non-blank line stops the walk (the marker
+/// establishes this directory as the project root, even if
+/// malformed) rather than deferring to a grandparent's marker.
+fn find_project_marker(pwd: &std::path::Path) -> Option<String> {
+    const MARKER_NAME: &str = ".smarthistory-project";
+    const MAX_LEVELS: usize = 25;
+    let home = std::env::var("HOME").ok();
+    let mut dir = pwd;
+    for _ in 0..MAX_LEVELS {
+        let marker = dir.join(MARKER_NAME);
+        if let Ok(contents) = std::fs::read_to_string(&marker) {
+            return contents
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string());
+        }
+        if home.as_deref() == Some(&dir.to_string_lossy()) {
+            break;
+        }
+        match dir.parent() {
+            Some(p) => dir = p,
+            None => break,
+        }
+    }
+    None
+}
+
+/// Resolve which project (if any) owns the current directory/context,
+/// in priority order: in-repo marker file, longest `project.<slug>.dir`
+/// prefix match, the last explicitly-selected project
+/// (`project_current`, set by `smarthistory project select` — see the
+/// `.` picker), then `None` (untracked).
+fn resolve_current_project(conn: &Connection, cfg: &Config, pwd: &str) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    if let Some(slug) = find_project_marker(std::path::Path::new(pwd)) {
+        return Ok(Some(slug));
+    }
+    if let Some(slug) = resolve_project_dir(cfg, pwd) {
+        return Ok(Some(slug));
+    }
+    let current: Option<String> = conn
+        .query_row("SELECT project_slug FROM project_current WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(current)
+}
+
+/// Close the currently-open `project_sessions` row (if any) and open
+/// a new one for `resolved_slug`, implementing the unified
+/// directory/idle/explicit-switch lifecycle — deliberately ONE
+/// algorithm rather than separate code paths for each trigger:
+///
+/// - No open row, `resolved_slug` is `Some`: open a new row.
+/// - Open row's project differs from `resolved_slug` (including
+///   `resolved_slug = None`, i.e. moved to an unresolvable
+///   directory): close immediately, `end_ts = now`. `forced_reason`
+///   (used by `smarthistory project select`, an explicit switch)
+///   overrides the default `"directory_change"` end_reason — leaving
+///   a mismatched session open until the idle timeout would
+///   misattribute every command run in the new context during that
+///   window, so this case never waits.
+/// - Open row's project matches `resolved_slug`: close only if the
+///   gap since the last command observed in this session exceeds
+///   `idle_threshold_secs`. `end_ts` backdates to
+///   `last_activity + idle_threshold_secs` (when activity actually
+///   stopped being observed), not `now` (when this function happened
+///   to run) — same "duration reflects real activity, not wall-clock
+///   luck" principle the per-command duration query uses.
+///
+/// "Last activity" is derived from `history.timestamp` (not tracked
+/// as a separate mutable column, to avoid an extra write on every
+/// `Add`), bounded below by the session's own `start_ts` so a
+/// freshly-opened session with no commands yet still idles out
+/// correctly relative to when it opened, not some earlier command.
+fn switch_project(
+    conn: &Connection,
+    resolved_slug: Option<&str>,
+    now: i64,
+    idle_threshold_secs: i64,
+    forced_reason: Option<&str>,
+) -> anyhow::Result<()> {
+    use rusqlite::OptionalExtension;
+    let open: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT id, project_slug, start_ts FROM project_sessions WHERE end_ts IS NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+
+    let mut still_open = open.is_some();
+    if let Some((id, slug, start_ts)) = open {
+        if resolved_slug != Some(slug.as_str()) {
+            let reason = forced_reason.unwrap_or("directory_change");
+            conn.execute(
+                "UPDATE project_sessions SET end_ts = ?1, end_reason = ?2 WHERE id = ?3",
+                params![now, reason, id],
+            )?;
+            still_open = false;
+        } else {
+            let last_activity: Option<i64> = conn.query_row(
+                "SELECT MAX(timestamp) FROM history WHERE timestamp >= ?1",
+                params![start_ts],
+                |row| row.get(0),
+            )?;
+            let last_activity = last_activity.unwrap_or(start_ts);
+            if now - last_activity > idle_threshold_secs {
+                conn.execute(
+                    "UPDATE project_sessions SET end_ts = ?1, end_reason = 'idle' WHERE id = ?2",
+                    params![last_activity + idle_threshold_secs, id],
+                )?;
+                still_open = false;
+            }
+        }
+    }
+
+    if !still_open
+        && let Some(slug) = resolved_slug
+    {
+        conn.execute(
+            "INSERT INTO project_sessions (project_slug, start_ts, end_ts, end_reason)
+             VALUES (?1, ?2, NULL, NULL)",
+            params![slug, now],
+        )?;
+    }
+    Ok(())
 }
 
 /// If the `history` table still has a per-row `comment` column (from
@@ -5099,6 +5388,30 @@ fn main() -> anyhow::Result<()> {
             let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+
+            // Time tracking: resolve which project (if any) this
+            // command belongs to and open/close `project_sessions`
+            // rows accordingly, BEFORE recording the command itself
+            // — a directory change or idle gap must close the prior
+            // session using ITS last real activity, not a timestamp
+            // that already reflects the command about to be
+            // inserted. `Config::load()` here is the same cheap
+            // single-file read/parse every other hot-path CLI
+            // command already pays (e.g. the dropdown widget's
+            // `smarthistory search` call on every keystroke).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let project_cfg = Config::load();
+            let resolved_project = resolve_current_project(&conn, &project_cfg, &pwd)?;
+            switch_project(
+                &conn,
+                resolved_project.as_deref(),
+                now,
+                project_cfg.project_idle_threshold_secs,
+                None,
+            )?;
 
             // Atomic upsert: if (command, directory, session_id) already
             // exists, refresh its timestamp and exit_code; otherwise
