@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Time tracking**: attributes directories, commands, notes created, and
+  websites visited to a project — a `type: project` note in `notes.database`
+  — resolved by directory (`project.<slug>.dir`, longest-prefix match, or an
+  in-repo `.smarthistory-project` marker file) or by explicit selection via
+  the new `.` prefix mode. No daemon: sessions open/close lazily, piggybacked
+  on the existing `smarthistory add` command-recording path — a directory
+  change closes the prior session immediately, an idle gap (`project.idlethreshold`,
+  default 30 minutes) closes it backdated to the last real activity, and an
+  explicit switch always closes it. New `smarthistory project report [--day
+  ...] [--project <slug>] [--min-duration <secs>]` prints a per-project daily
+  rollup (directories, commands with duration derived at query time and
+  capped at the idle threshold, notes created during a tracked window, and
+  websites). Websites — browser bookmarks/history plus JIRA REST-mode visits
+  — resolve through a 3-tier priority (`jiralabel.<slug>.match` → `weburl.<slug>.match`
+  → a time-based fallback against whichever project session was open) and
+  cluster for display via `weburlgroup.<name>.match`/`.label`, independent of
+  assignment. `smarthistory config check` cross-references
+  `project.<slug>.dir`/`jiralabel.<slug>.match`/`weburl.<slug>.match` against
+  `type: project` note slugs and warns on either side having no match. See
+  [`docs/modes/project.md`](docs/modes/project.md) for the full reference.
 - New `Ctrl-z` (`CycleNavPrefix`) action: cycles directly between the
   three navigation prefix modes — `*` (panes), `#` (directories), `~`
   (zoxide) — without going through the full `PickPrefix` picker. Reads

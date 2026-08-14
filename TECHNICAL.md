@@ -244,6 +244,12 @@ Supported keys:
 | `paperless.token=<token>` | Paperless-ngx API token, sent as `Authorization: Token <token>`. Must be paired with `paperless.url`. | (feature disabled) |
 | `browser.<id>.type=chrome\|firefox\|safari` | Registers a browser source for the `^` mode. `<id>` is any numeric index; order doesn't matter. | (auto-detected) |
 | `browser.<id>.profile=~/path` | Optional profile-directory override for the matching `browser.<id>.type` entry (Chrome: dir containing `Bookmarks`/`History`; Firefox: dir containing `places.sqlite`; Safari: dir containing `Bookmarks.plist`/`History.db`, normally `~/Library/Safari`). | (platform default for that browser) |
+| `project.<slug>.dir=~/path` | Directory-to-project binding for time tracking. `<slug>` matches a `type: project` note's slug (not enforced — `config check` warns on a mismatch either direction). Longest-prefix matched against the shell's cwd on every `smarthistory add`. | (no directory binding) |
+| `project.idlethreshold=<seconds>` | How long (seconds) a project session stays open with no commands before it's considered idle and closed (`end_reason = "idle"`). Must be a positive integer. | `1800` |
+| `jiralabel.<slug>.match=<label>` | A JIRA label that maps to project `<slug>` — the first (highest-priority) tier of `project report`'s website-project resolution. Requires `JIRA_SERVER`/`JIRA_API_TOKEN`. | (no label binding) |
+| `weburl.<slug>.match=<substring>` | A URL host+path substring that maps to project `<slug>` — the second tier of website-project resolution, for domains that are structurally single-project. | (no URL binding) |
+| `weburlgroup.<name>.match=<substring>` | A URL host+path substring for display-only clustering in `project report`'s websites section — independent of project assignment. | (no clustering) |
+| `weburlgroup.<name>.label=<label>` | The label printed for visits matching `weburlgroup.<name>.match` (e.g. `JIRA tickets (3 visits)`). | (no clustering) |
 | `notes.database=~/path` | Path to a [note_search](https://github.com/snharbec/note_search) SQLite database. When set, the `@` prefix searches notes instead of shell history. Can also be set via the `NOTE_SEARCH_DATABASE` environment variable. | (feature disabled) |
 | `notes.dir=~/path` | Path to the directory containing note files. Used to read note content for the preview pane and to resolve filenames when opening a note in the editor. Can also be set via the `NOTE_SEARCH_DIR` environment variable. | (feature disabled) |
 | `todo.line_option=+$LINE` | Template for the line-number option appended to the editor command when a todo line is selected. The literal `$LINE` is substituted with the 1-based line number. Default `+$LINE` works with `vim`, `nano`, `emacs -nw`, and most POSIX editors. Examples: `+LINE:$LINE`, `:$LINE`. | `+$LINE` |
@@ -804,6 +810,8 @@ smarthistory next  <COMMAND> [--limit N]
 smarthistory tui   [--mode SESS|DIR|GLOBAL] [--prefix <char>] [QUERY]
 smarthistory import-atuin
 smarthistory init  zsh
+smarthistory project report [--day <YYYY-MM-DD>|today|yesterday] [--project <slug>] [--min-duration <secs>]
+smarthistory project select <slug>
 ```
 
 - `search` and `select` are similar; `select` exists primarily as a
@@ -890,6 +898,25 @@ smarthistory init  zsh
 
   The prefix character is the one in the user's config file (see
   `prefix.<mode>=...`); the list above shows the defaults.
+- `project report [--day ...] [--project <slug>] [--min-duration <secs>]`
+  prints a per-project time-tracking rollup for one calendar day
+  (local time, default `today`): total active time, a directories
+  breakdown, a commands table (each command's duration derived at
+  query time via a `LEAD() OVER (PARTITION BY session_id ...)`
+  window function, capped at `project.idlethreshold` and filtered by
+  `--min-duration`), notes created during a tracked window, and a
+  websites section (browser history/bookmarks plus JIRA REST-mode
+  visits, resolved through a 3-tier priority and clustered via
+  `weburlgroup.*`). Commands with no resolved project land in a
+  trailing `untracked` section. See
+  [`docs/modes/project.md`](docs/modes/project.md) for the full
+  session-lifecycle and resolution-priority reference.
+- `project select <slug>` sets the explicit "current project"
+  fallback (`project_current` table) and switches the active
+  `project_sessions` row to it, closing any previously-open session
+  with `end_reason = "switch"`. Staged by the `.` prefix-mode
+  picker as the shell command run after a `type: project` note is
+  selected; also runnable directly for scripting a project switch.
 
 ### Sample output
 

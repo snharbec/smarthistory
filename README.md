@@ -22,7 +22,8 @@ Smart History replaces the shell's native history with a single SQLite database 
 - **Match-algorithm toggle** (`C-f`): cycle between SUBSTRING → FUZZY → REGEX for the current search. The algorithm applies to all prefix modes (history, directories, panes, notes, todos, files, output) except JIRA.
 - **Context-aware picker** (`Ctrl+R`): a full-screen TUI for searching, picking, and editing. Supports multiple *scopes* (`SESS` → `DIR` → `GLOBAL` → `STATS`), each narrowing the same underlying database to a different slice. The list shows a live "position/total" indicator in its title and a scrollbar once the list is taller than the visible window.
 - **Multi-select** (`Ctrl+X` to toggle a mark): mark several rows and delete them all at once (`key.bulk-delete-marked=...`, unbound by default, with confirmation) instead of deleting one at a time.
-- **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`?`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`/`), tags (`$`), CodeGraph (`&`), ag content search (`,`), note-segment search (`:`), similar-phrase search (`"`, ranks note segments by embedding similarity), and browser bookmarks + history (`^`, merged from Chrome/Firefox/Safari, tagged `bookmark`/`history`). A meta-prefix mode (`'`) lets you pick any of these by typing a partial name and pressing Tab instead of memorizing the character.
+- **Multiple prefix modes** in the TUI, each selected by a leading character: history (default, no prefix), output search (`+`), LLM command generation (`=`), general question (`?`), note search (`@`), todo search (`!`), directory jump (`#`), panes (`*`), JIRA (`-`), files (`/`), tags (`$`), CodeGraph (`&`), ag content search (`,`), note-segment search (`:`), similar-phrase search (`"`, ranks note segments by embedding similarity), browser bookmarks + history (`^`, merged from Chrome/Firefox/Safari, tagged `bookmark`/`history`), and project picker (`.`, for time tracking). A meta-prefix mode (`'`) lets you pick any of these by typing a partial name and pressing Tab instead of memorizing the character.
+- **Time tracking**: attributes directories/commands/notes/websites to a project (a `type: project` note), resolved by directory or explicit `.`-mode selection, no daemon required. `smarthistory project report` prints a per-project daily rollup. See [Time tracking](#time-tracking) below.
 - **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate natural-language into a runnable command (`=`), describe a command in plain prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which directories are active in a tmux session or herdr workspace; the `*` mode lists all panes across all sessions/workspaces as a tree; selecting a row switches to that workspace or pane. A `# hosts` block in the same view lists every `host.<key>` from the config file (merged with `~/.ssh/config`); selecting a host row creates a new workspace and bootstraps an `ssh` connection inside it, or focuses an already-running one. See [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend selection, building with herdr, setup, troubleshooting).
@@ -186,6 +187,7 @@ The first character of the query selects the prefix mode. Each mode answers a di
 | ag | `,` | Search file contents with `ag` (The Silver Searcher). `*<glob>` tokens restrict file patterns; `@<lang>` filters by language. |
 | Zoxide | `~` | List directories from the local `zoxide` database (highest frecency score first). Selecting one creates a new tmux session / herdr workspace there — same staging as an unmarked Directories-mode row, including the `T`-marked "jump to an already-active pane" behavior. Requires the `zoxide` binary on `$PATH`. |
 | Processes | `%` | List every running OS process (macOS + Linux, all users). Selecting one opens a confirm dialog to send it a signal — SIGTERM by default, `Tab`/`Shift-Tab` cycles SIGKILL/SIGHUP/SIGINT. The preview pane shows the process's cwd, executable path, and full environment. |
+| Project | `.` | List `type: project` notes for time tracking. Selecting one runs `smarthistory project select <slug>`, setting the current project. See [Time tracking](#time-tracking) below. |
 
 **Detailed per-mode reference**: every mode has a long-form page in [`docs/modes/`](docs/modes/README.md) — example queries, special tokens, configuration, related actions, and cross-references to neighbouring modes. The TUI's `Ctrl-A` help overlay renders a live summary; the markdown files are the canonical long reference (and read well outside the TUI).
 
@@ -205,6 +207,28 @@ All three stage a `note_search create-note` command and require `notes.database`
 smarthistory create-note --title "Standup"
 smarthistory create-note --title "Standup" --content "Blocked on [[Project X]] #urgent"
 ```
+
+### Time tracking
+
+Attributes directories, commands, notes created, and websites visited to a project — a `type: project` note in your `notes.database` vault — resolved by directory (`project.<slug>.dir`, longest-prefix match, or an in-repo `.smarthistory-project` marker file) or by explicit selection via the `.` prefix mode. No daemon: sessions open/close lazily, piggybacked on the existing `smarthistory add` command-recording path.
+
+```bash
+# Configure a directory-based project:
+echo 'project.acme.dir=~/work/acme' >> ~/.config/smarthistory/config
+
+# Or select one explicitly (also stageable from `.` mode in the TUI):
+smarthistory project select acme
+
+# Print today's report:
+smarthistory project report
+
+# Yesterday, one project, only commands active for at least 30s:
+smarthistory project report --day yesterday --project acme --min-duration 30
+```
+
+Websites (bookmarks/history from `^` mode, plus JIRA REST-mode visits from `-` mode) resolve to a project through a 3-tier priority — a JIRA label match (`jiralabel.<slug>.match`), a sparse URL override (`weburl.<slug>.match`), then a time-based fallback against whichever project session was open — and cluster for display via `weburlgroup.<name>.match`/`.label`, independent of assignment.
+
+Full reference (session lifecycle, resolution priority, report format, all config keys): **[`docs/modes/project.md`](docs/modes/project.md)**.
 
 ### Multiplexer integration (tmux + herdr)
 
