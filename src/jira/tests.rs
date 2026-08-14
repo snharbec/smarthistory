@@ -2120,3 +2120,127 @@
         assert!(matches.contains(&"project".to_string()));
         assert!(matches.contains(&"projects".to_string()));
     }
+
+    // --- Time tracking: extract_issue_key / labels_for_issue ------------
+
+    #[test]
+    fn extract_issue_key_finds_key_in_browse_url() {
+        assert_eq!(
+            extract_issue_key("https://jira.example.com/browse/PROJ-123"),
+            Some("PROJ-123")
+        );
+    }
+
+    #[test]
+    fn extract_issue_key_finds_key_in_shell_command() {
+        assert_eq!(
+            extract_issue_key(r#"open "https://jira.example.com/browse/AB-42""#),
+            Some("AB-42")
+        );
+    }
+
+    #[test]
+    fn extract_issue_key_returns_none_for_plain_text() {
+        assert_eq!(extract_issue_key("just some free text, no ticket here"), None);
+    }
+
+    #[test]
+    fn extract_issue_key_returns_none_for_lowercase_key_like_text() {
+        // The anchored `key_re` in `build_jql` is also
+        // case-sensitive (JIRA keys are always uppercase); this
+        // confirms `extract_issue_key` shares that constraint rather
+        // than loosely matching a lowercase look-alike.
+        assert_eq!(extract_issue_key("proj-123"), None);
+    }
+
+    #[test]
+    fn extract_issue_key_requires_a_digit_suffix() {
+        assert_eq!(extract_issue_key("PROJ-"), None);
+        assert_eq!(extract_issue_key("PROJ-abc"), None);
+    }
+
+    #[test]
+    fn extract_issue_key_finds_first_match_when_multiple() {
+        assert_eq!(extract_issue_key("PROJ-1 and PROJ-2"), Some("PROJ-1"));
+    }
+
+    /// A `JiraClient` fake for `labels_for_issue`'s cache tests.
+    /// Records how many times `search` was actually called, so the
+    /// cache-hit test can assert the REST round-trip is skipped on
+    /// the second lookup.
+    struct FakeLabelClient {
+        labels: Vec<String>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl JiraClient for FakeLabelClient {
+        fn search(&self, _jql: &str) -> Result<Vec<JiraIssue>, JiraError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![JiraIssue {
+                key: "PROJ-1".to_string(),
+                labels: self.labels.clone(),
+                ..Default::default()
+            }])
+        }
+        fn fetch_comments(&self, _key: &str) -> Result<Vec<JiraComment>, JiraError> {
+            Ok(Vec::new())
+        }
+        fn add_comment(&self, _key: &str, _body: &str) -> Result<(), JiraError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn labels_for_issue_fetches_and_caches_on_miss() {
+        let client = FakeLabelClient {
+            labels: vec!["acme".to_string(), "urgent".to_string()],
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let mut cache = std::collections::HashMap::new();
+        let labels = labels_for_issue(&client, "PROJ-1", &mut cache);
+        assert_eq!(labels, vec!["acme".to_string(), "urgent".to_string()]);
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(cache.contains_key("PROJ-1"));
+    }
+
+    #[test]
+    fn labels_for_issue_reuses_cache_without_a_second_search() {
+        let client = FakeLabelClient {
+            labels: vec!["acme".to_string()],
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let mut cache = std::collections::HashMap::new();
+        let _ = labels_for_issue(&client, "PROJ-1", &mut cache);
+        let labels = labels_for_issue(&client, "PROJ-1", &mut cache);
+        assert_eq!(labels, vec!["acme".to_string()]);
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1, "second lookup must hit the cache, not the client");
+    }
+
+    /// A search error (network failure, issue not found, etc.)
+    /// degrades to "no labels" rather than propagating — a label
+    /// lookup failure falls through to the next resolution tier, it
+    /// doesn't hard-fail the whole report/mode.
+    struct FailingClient;
+
+    impl JiraClient for FailingClient {
+        fn search(&self, _jql: &str) -> Result<Vec<JiraIssue>, JiraError> {
+            Err(JiraError::Http("boom".to_string()))
+        }
+        fn fetch_comments(&self, _key: &str) -> Result<Vec<JiraComment>, JiraError> {
+            Ok(Vec::new())
+        }
+        fn add_comment(&self, _key: &str, _body: &str) -> Result<(), JiraError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn labels_for_issue_degrades_to_empty_on_search_error() {
+        let mut cache = std::collections::HashMap::new();
+        let labels = labels_for_issue(&FailingClient, "PROJ-1", &mut cache);
+        assert!(labels.is_empty());
+        // The empty result is still cached — a failing lookup
+        // shouldn't retry the network on every subsequent reference
+        // to the same key within one report/session.
+        assert_eq!(cache.get("PROJ-1"), Some(&Vec::new()));
+    }
