@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory file viewed|modified|created <path>`: records a file
+  view/edit/creation event, meant to be called from an editor hook (a Vim
+  `autocmd`, an LSP client, a file-watcher script). Stored in a new
+  `file_events` table, attributed to a project using the same
+  marker-file/`project.<slug>.dir`/last-explicit-selection resolution
+  directories already use, but resolved from the file's own directory rather
+  than the caller's cwd (an editor process's cwd isn't necessarily the file's
+  directory). `smarthistory project report` gains Files viewed/modified/created
+  sections per project, deduplicated by path with an occurrence count.
 - New `smarthistory project pause`: a toggle to manually stop project time
   tracking (e.g. for a lunch break or a meeting) and resume it later. The first
   call closes the open session (`end_reason = "paused"`) and suppresses all

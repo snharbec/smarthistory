@@ -737,6 +737,9 @@ smarthistory project report [--day <YYYY-MM-DD>|today|yesterday] [--project <slu
 smarthistory project select <slug>
 smarthistory project current
 smarthistory project pause
+smarthistory file viewed <path>
+smarthistory file modified <path>
+smarthistory file created <path>
 ```
 
 - `search` and `select` are similar; `select` exists primarily as a hook for
@@ -844,6 +847,15 @@ smarthistory project pause
   (`end_reason = "switch"` on the reopened session), not whatever the current
   directory resolves to. For a lunch break or a meeting where the time shouldn't
   be attributed to anything.
+- `file viewed|modified|created <path>` records one row in `file_events` — meant
+  to be called from an editor hook (a Vim `autocmd`, an LSP client), not typed
+  by hand. `path` is canonicalized to absolute (stored as given if it no longer
+  exists on disk). Project attribution uses the same marker-file →
+  `project.<slug>.dir` → last-explicit-selection priority as directories, but
+  resolved from the file's own directory, not the caller's cwd — an editor
+  process's cwd isn't necessarily the file's directory. `project report`'s Files
+  viewed/modified/created sections read from this table, deduplicated by path
+  with an occurrence count.
 
 ### Sample output
 

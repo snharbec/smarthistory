@@ -2325,6 +2325,81 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(note_basename("no-extension"), "no-extension");
     }
 
+    // --- Time tracking: file-tracking events (`smarthistory file ...`) --
+
+    fn file_events_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE file_events (
+                 id INTEGER PRIMARY KEY,
+                 path TEXT NOT NULL,
+                 event_kind TEXT NOT NULL,
+                 project_slug TEXT,
+                 timestamp INTEGER NOT NULL
+             );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    fn insert_file_event(conn: &Connection, path: &str, kind: &str, slug: Option<&str>, ts: i64) {
+        conn.execute(
+            "INSERT INTO file_events (path, event_kind, project_slug, timestamp) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![path, kind, slug, ts],
+        )
+        .expect("insert file_event");
+    }
+
+    #[test]
+    fn report_file_events_groups_by_project_and_kind() {
+        let conn = file_events_test_conn();
+        insert_file_event(&conn, "/work/acme/src/main.rs", "viewed", Some("acme"), 1000);
+        insert_file_event(&conn, "/work/acme/src/main.rs", "modified", Some("acme"), 1100);
+        insert_file_event(&conn, "/work/acme/README.md", "created", Some("acme"), 1200);
+        insert_file_event(&conn, "/tmp/scratch.txt", "viewed", None, 1300);
+
+        let by_slug = report_file_events(&conn, 500, 2000).expect("query");
+        assert_eq!(by_slug.len(), 2, "two distinct project buckets: acme and untracked");
+
+        let acme = by_slug.get(&Some("acme".to_string())).expect("acme bucket");
+        assert_eq!(acme.viewed.get("/work/acme/src/main.rs"), Some(&1));
+        assert_eq!(acme.modified.get("/work/acme/src/main.rs"), Some(&1));
+        assert_eq!(acme.created.get("/work/acme/README.md"), Some(&1));
+        assert!(!acme.modified.contains_key("/work/acme/README.md"));
+
+        let untracked = by_slug.get(&None).expect("untracked bucket");
+        assert_eq!(untracked.viewed.get("/tmp/scratch.txt"), Some(&1));
+    }
+
+    #[test]
+    fn report_file_events_dedupes_by_path_with_occurrence_count() {
+        let conn = file_events_test_conn();
+        insert_file_event(&conn, "/work/acme/src/main.rs", "viewed", Some("acme"), 1000);
+        insert_file_event(&conn, "/work/acme/src/main.rs", "viewed", Some("acme"), 1100);
+        insert_file_event(&conn, "/work/acme/src/main.rs", "viewed", Some("acme"), 1200);
+
+        let by_slug = report_file_events(&conn, 500, 2000).expect("query");
+        let acme = by_slug.get(&Some("acme".to_string())).expect("acme bucket");
+        assert_eq!(
+            acme.viewed.get("/work/acme/src/main.rs"),
+            Some(&3),
+            "three viewed events for the same path must collapse to one entry with count 3"
+        );
+    }
+
+    #[test]
+    fn report_file_events_respects_day_range() {
+        let conn = file_events_test_conn();
+        insert_file_event(&conn, "/work/acme/old.rs", "viewed", Some("acme"), 100);
+        insert_file_event(&conn, "/work/acme/in-range.rs", "viewed", Some("acme"), 1000);
+        insert_file_event(&conn, "/work/acme/future.rs", "viewed", Some("acme"), 5000);
+
+        let by_slug = report_file_events(&conn, 500, 2000).expect("query");
+        let acme = by_slug.get(&Some("acme".to_string())).expect("acme bucket");
+        assert_eq!(acme.viewed.len(), 1);
+        assert!(acme.viewed.contains_key("/work/acme/in-range.rs"));
+    }
+
     // --- Time tracking: `config check` validation -----------------------
 
     /// Write a config file under a fresh fake `$HOME` and run

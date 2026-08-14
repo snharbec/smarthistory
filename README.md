@@ -335,12 +335,12 @@ smarthistory create-note --title "Standup" --content "Blocked on [[Project X]] #
 
 ### Time tracking
 
-Attributes directories, commands, notes created, and websites visited to a
-project — a `type: project` note in your `notes.database` vault — resolved by
-directory (`project.<slug>.dir`, longest-prefix match, or an in-repo
-`.smarthistory-project` marker file) or by explicit selection via the `.` prefix
-mode. No daemon: sessions open/close lazily, piggybacked on the existing
-`smarthistory add` command-recording path.
+Attributes directories, commands, notes created, files viewed/modified/created,
+and websites visited to a project — a `type: project` note in your
+`notes.database` vault — resolved by directory (`project.<slug>.dir`,
+longest-prefix match, or an in-repo `.smarthistory-project` marker file) or by
+explicit selection via the `.` prefix mode. No daemon: sessions open/close
+lazily, piggybacked on the existing `smarthistory add` command-recording path.
 
 ```bash
 # Configure a directory-based project:
@@ -359,6 +359,12 @@ smarthistory project report --day yesterday --project acme --min-duration 30
 # project that was active when you paused:
 smarthistory project pause
 smarthistory project pause
+
+# Record editor file events (usually called from an editor hook, not by
+# hand) — attributed by the FILE's own directory, same priority as above:
+smarthistory file viewed ~/work/acme/src/main.rs
+smarthistory file modified ~/work/acme/src/main.rs
+smarthistory file created ~/work/acme/README.md
 ```
 
 Websites (bookmarks/history from `^` mode, plus JIRA REST-mode visits from `-`

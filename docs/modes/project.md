@@ -91,6 +91,41 @@ global command activity (`history.timestamp`), not per-pane — so running a bui
 in one pane and editing in another, both in the same project, count as one
 continuous session.
 
+## File tracking
+
+```sh
+smarthistory file viewed <path>
+smarthistory file modified <path>
+smarthistory file created <path>
+```
+
+Records that a file was viewed, modified, or created — meant to be called from
+an editor hook (a Vim `autocmd`, an LSP client, a file-watcher script), not
+typed by hand. Each call inserts one row in `file_events`: the path
+(canonicalized to absolute; a path that no longer exists on disk at call time is
+stored as given rather than dropping the event), the event kind, and the
+resolved project slug.
+
+Project attribution uses the **same resolution priority** as directories (marker
+file → `project.<slug>.dir` → last explicit selection), but resolved from the
+**file's own directory**, not the caller's current working directory — an editor
+process's cwd isn't necessarily the file's directory (a single long-running
+editor instance with files open from several projects, an LSP server with its
+own cwd, …), so resolution has to follow the file, not the shell that happens to
+have invoked the hook.
+
+Example Vim integration (`~/.vimrc`):
+
+```vim
+autocmd BufReadPost  * silent! call system('smarthistory file viewed '   . shellescape(expand('%:p')))
+autocmd BufWritePost * silent! call system('smarthistory file modified ' . shellescape(expand('%:p')))
+```
+
+(Distinguishing "modified" from "created" requires checking whether the file
+existed before the write — e.g. in a `BufWritePre` autocmd, via
+`filereadable(expand('%:p'))` — before deciding which of the two to call; the
+exact detection is editor-specific and left to the hook.)
+
 ## Pausing tracking
 
 ```sh
@@ -127,6 +162,10 @@ Prints a Markdown-ish report for one calendar day (local time, defaults to
 - **Notes created** during a tracked window (requires `notes.database`) — any
   note (not just `type: project` ones) whose `created` timestamp falls inside
   one of the project's open/close intervals for that day.
+- **Files viewed / modified / created** — from
+  `smarthistory file viewed`/`modified`/`created` (see
+  [File tracking](#file-tracking) above), deduplicated by path with an `(Nx)`
+  occurrence count when a file shows up more than once in a category.
 - **Websites**, resolved through a 3-tier priority (see below) and clustered for
   display via `weburlgroup`.
 
@@ -148,7 +187,16 @@ Total active time: 2h15m
 - 09:41:10  30s    (~/work/acme)  git commit -m "fix retry logic"
 
 ### Notes created
-- 2026-08-14-standup-notes.md
+- [[2026-08-14-standup-notes]]
+
+### Files viewed
+- ~/work/acme/src/main.rs (4x)
+
+### Files modified
+- ~/work/acme/src/main.rs
+
+### Files created
+(none)
 
 ### Websites
 - JIRA tickets (3 visits)
