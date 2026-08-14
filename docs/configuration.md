@@ -75,6 +75,7 @@ smarthistory config check     # exits non-zero on errors, prints warnings
   - [LLM (`=` mode)](#llm--mode)
   - [Paperless (`<` mode)](#paperless--mode)
   - [Browser (`^` mode)](#browser--mode)
+  - [Project (`.` mode)](#project--mode)
 - [Environment variables](#environment-variables)
   - [Published environment variables](#published-environment-variables)
 - [All keys at a glance](#all-keys-at-a-glance)
@@ -505,6 +506,7 @@ The first character the user types to enter a mode. The default keymap covers ev
 | `prefix.browser` | browser bookmarks + history | `^` | merged Chrome / Firefox / Safari bookmarks + history, tagged `bookmark` / `history` |
 | `prefix.zoxide` | zoxide directories | `~` | directories from the local `zoxide` database, highest frecency score first; selecting one creates a new tmux session / herdr workspace there (requires the `zoxide` binary on `$PATH`) |
 | `prefix.processes` | running processes | `%` | list every OS process (macOS + Linux, all users); selecting one opens a confirm dialog to send it a signal (SIGTERM by default, Tab/Shift-Tab cycles SIGKILL/SIGHUP/SIGINT) |
+| `prefix.project` | project picker | `.` | lists `type: project` notes for time tracking; selecting one sets the current project |
 | `prefix.meta` | meta-prefix (mode picker) | `'` | not a search mode itself — type a partial mode name then Tab to expand/activate; see below |
 
 ```ini
@@ -867,6 +869,30 @@ browser.3.type=safari
 
 Full reference: **[docs/modes/browser.md](modes/browser.md)**.
 
+### Project (`.` mode)
+
+Time tracking attributes directories/commands/notes/websites to a project — a `type: project` note in `notes.database` — resolved by directory (longest-`dir`-prefix match, or an in-repo `.smarthistory-project` marker file) or by explicit `.`-mode selection (`smarthistory project select <slug>`). Config is entirely optional: with none set, every command lands in the report's `untracked` bucket.
+
+| Key | Meaning |
+| --- | --- |
+| `project.<slug>.dir` | Directory-to-project binding, longest-prefix matched against the cwd. |
+| `project.idlethreshold` | Seconds of inactivity before an open project session closes. Default `1800`. Must be a positive integer. |
+| `jiralabel.<slug>.match` | A JIRA label that maps to `<slug>` — website-resolution tier 1 (requires `JIRA_SERVER`/`JIRA_API_TOKEN`). |
+| `weburl.<slug>.match` | A URL host+path substring that maps to `<slug>` — website-resolution tier 2. |
+| `weburlgroup.<name>.match` | A URL host+path substring for display-only clustering in the report (independent of project assignment). |
+| `weburlgroup.<name>.label` | The label printed for visits matching `weburlgroup.<name>.match`. |
+
+```ini
+project.acme.dir=~/work/acme
+project.idlethreshold=1800
+jiralabel.acme.match=acme-corp
+weburl.acme.match=docs.acme-corp.internal
+weburlgroup.jira.match=/browse/
+weburlgroup.jira.label=JIRA tickets
+```
+
+Full reference (session lifecycle, the 3-tier website resolution, report output): **[docs/modes/project.md](modes/project.md)**.
+
 ---
 
 ## Environment variables
@@ -977,6 +1003,7 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `prefix.browser` | char | `^` | [Query prefixes](#query-prefixes) |
 | `prefix.zoxide` | char | `~` | [Query prefixes](#query-prefixes) |
 | `prefix.processes` | char | `%` | [Query prefixes](#query-prefixes) |
+| `prefix.project` | char | `.` | [Query prefixes](#query-prefixes) |
 | `prefix.meta` | char | `'` | [Query prefixes](#query-prefixes) |
 | `multiplexer` | `tmux` \| `herdr` | `tmux` | [Multiplexer integration](#multiplexer-integration) |
 | `sessiondirs` | path list | — | [Multiplexer integration](#multiplexer-integration) |
@@ -1006,6 +1033,12 @@ A flat index of every config-file key. Use this as a quick "does this key exist?
 | `paperless.token` | API token | — (paperless disabled) | [Paperless (`<` mode)](#paperless--mode) |
 | `browser.<id>.type` | `chrome` \| `firefox` \| `safari` | — (auto-detected) | [Browser (`^` mode)](#browser--mode) |
 | `browser.<id>.profile` | path | — (platform default) | [Browser (`^` mode)](#browser--mode) |
+| `project.<slug>.dir` | path | — | [Project (`.` mode)](#project--mode) |
+| `project.idlethreshold` | positive int (seconds) | `1800` | [Project (`.` mode)](#project--mode) |
+| `jiralabel.<slug>.match` | JIRA label | — | [Project (`.` mode)](#project--mode) |
+| `weburl.<slug>.match` | URL substring | — | [Project (`.` mode)](#project--mode) |
+| `weburlgroup.<name>.match` | URL substring | — | [Project (`.` mode)](#project--mode) |
+| `weburlgroup.<name>.label` | string | — | [Project (`.` mode)](#project--mode) |
 
 ---
 
@@ -1040,5 +1073,8 @@ The `check` command builds the same `App` as the TUI startup (so it reads the sa
 - **Browser (`^`)**: at least one `browser.<id>.*` entry (or an auto-detected Chrome/Firefox/Safari install) resolves → each source's primary file (`Bookmarks` / `places.sqlite` / `Bookmarks.plist`) actually opens. A missing profile is a per-source `Warning` (the other configured sources still work); a permission error (the common case: Safari on macOS without Full Disk Access — see `docs/modes/browser.md`) is a per-source `Error` with the fix spelled out.
 - **Directories (`#`)**: SQL history DB is open (with a `COUNT(DISTINCT directory)` round-trip) → multiplexer backend is configured → each `sessiondirs` entry exists on disk.
 - **Panes (`*`)**: the user is inside a multiplexer session (`$TMUX` or `$HERDR_PANE_ID` is set) → the backend's `snapshot_current_panes` returns at least one pane.
+- **Project (`.`)**: `notes.database` is configured (same requirement as `@` mode) → the file exists → a `type: project`-filtered `search_notes` round-trip succeeds → row count (0 project notes is a `Warning`, not an `Error` — the mode still works, it just has nothing to list).
+
+Separately, `smarthistory config check` (not `check`) cross-references every `project.<slug>.dir`/`jiralabel.<slug>.match`/`weburl.<slug>.match` slug against `type: project` note slugs and warns on either side having no match, warns when `jiralabel.*` is configured without `JIRA_SERVER`/`JIRA_API_TOKEN`, and errors on a non-positive `project.idlethreshold`. See [`docs/modes/project.md`](modes/project.md#configuration).
 
 **Exit code**: 0 = all checks pass, 1 = one or more warnings, 2 = one or more errors.

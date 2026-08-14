@@ -25,6 +25,7 @@ The TUI is a multi-mode launcher. The first character of the query selects a *mo
 | Browser | `^` | [`browser.md`](browser.md) | Search browser bookmarks + history, merged from every configured/auto-detected Chrome or Firefox profile; type `bookmark` / `history` to narrow to one source. |
 | Zoxide | `~` | [`zoxide.md`](zoxide.md) | List directories from the local `zoxide` database, highest frecency score first; selecting one creates a new tmux session / herdr workspace there. |
 | Processes | `%` | [`processes.md`](processes.md) | List every running OS process (macOS + Linux, all users); selecting one opens a confirm dialog to send it a signal (SIGTERM by default, cycle to SIGKILL/SIGHUP/SIGINT). |
+| Project | `.` | [`project.md`](project.md) | List `type: project` notes for time tracking; selecting one sets the current project (`smarthistory project select <slug>`). See also `smarthistory project report`. |
 
 ## Cross-cutting topics
 
@@ -58,6 +59,7 @@ The first character of the query decides the mode. Examples:
 | `^bookmark rust` | Browser (only bookmarks matching "rust"). |
 | `~proj` | Zoxide (directories from `zoxide query -l` whose path contains "proj"). |
 | `%nginx` | Processes (rows whose name/cmdline, cwd, or executable path contains "nginx"). |
+| `.acme` | Project (`type: project` notes matching "acme"). |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me everything in this view".
 

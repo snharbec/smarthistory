@@ -2080,3 +2080,140 @@ tmuxpaneoutputdir=~/custom-tmux
         );
         assert_eq!(slug, None);
     }
+
+    // --- Time tracking: `config check` validation -----------------------
+
+    /// Write a config file under a fresh fake `$HOME` and run
+    /// `validate_config()` against it. Holds `ENV_LOCK` for the
+    /// duration since `$HOME` is process-global — same convention
+    /// `config_parses_user_file` above uses.
+    fn validate_project_config(body: &str) -> ConfigReport {
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("smarthistory-test-{}", generate_uuid_v4()));
+        let cfg_dir = dir.join(".config").join("smarthistory");
+        std::fs::create_dir_all(&cfg_dir).expect("mkdir");
+        std::fs::write(cfg_dir.join("config"), body).expect("write");
+        let prev_home = std::env::var("HOME").ok();
+        // `Config::notes_database()` also honors `NOTE_SEARCH_DATABASE`
+        // (see `Config::load`'s parse loop) — a real developer
+        // environment commonly has this set to a real, possibly
+        // large notes vault, which would make the project/note
+        // cross-check in `validate_config` query real data (slow,
+        // and non-deterministic across machines) instead of this
+        // test's isolated fixture. Cleared for the duration.
+        let prev_notes_db = std::env::var("NOTE_SEARCH_DATABASE").ok();
+        unsafe {
+            std::env::set_var("HOME", &dir);
+            std::env::remove_var("NOTE_SEARCH_DATABASE");
+        }
+        let report = validate_config();
+        match prev_home {
+            Some(p) => unsafe {
+                std::env::set_var("HOME", p);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+        match prev_notes_db {
+            Some(v) => unsafe {
+                std::env::set_var("NOTE_SEARCH_DATABASE", v);
+            },
+            None => unsafe {
+                std::env::remove_var("NOTE_SEARCH_DATABASE");
+            },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        report
+    }
+
+    #[test]
+    fn validate_config_flags_non_numeric_idlethreshold_as_error() {
+        let report = validate_project_config("project.idlethreshold = notanumber\n");
+        assert!(report.has_errors());
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == "project" && i.message.contains("idlethreshold")),
+            "issues: {:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn validate_config_flags_non_positive_idlethreshold_as_error() {
+        let report = validate_project_config("project.idlethreshold = 0\n");
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn validate_config_accepts_valid_idlethreshold() {
+        let report = validate_project_config("project.idlethreshold = 900\n");
+        assert!(
+            !report
+                .issues()
+                .iter()
+                .any(|i| i.category == "project" && i.message.contains("idlethreshold")),
+            "issues: {:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn validate_config_warns_on_jiralabel_without_jira_credentials() {
+        // No outer `ENV_LOCK` guard here: `validate_project_config`
+        // below acquires it internally, and `Mutex` isn't reentrant
+        // — locking it twice on the same thread deadlocks forever.
+        let prev_server = std::env::var("JIRA_SERVER").ok();
+        let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+        unsafe {
+            std::env::remove_var("JIRA_SERVER");
+            std::env::remove_var("JIRA_API_TOKEN");
+        }
+        let report = validate_project_config("jiralabel.acme.match = acme-label\n");
+        match prev_server {
+            Some(v) => unsafe { std::env::set_var("JIRA_SERVER", v) },
+            None => unsafe { std::env::remove_var("JIRA_SERVER") },
+        }
+        match prev_token {
+            Some(v) => unsafe { std::env::set_var("JIRA_API_TOKEN", v) },
+            None => unsafe { std::env::remove_var("JIRA_API_TOKEN") },
+        }
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|i| i.category == "jiralabel"),
+            "issues: {:?}",
+            report.issues()
+        );
+    }
+
+    #[test]
+    fn validate_config_no_jiralabel_warning_without_any_jiralabel_entries() {
+        // See the previous test's comment: no outer `ENV_LOCK` guard,
+        // `validate_project_config` already takes it internally.
+        let prev_server = std::env::var("JIRA_SERVER").ok();
+        let prev_token = std::env::var("JIRA_API_TOKEN").ok();
+        unsafe {
+            std::env::remove_var("JIRA_SERVER");
+            std::env::remove_var("JIRA_API_TOKEN");
+        }
+        let report = validate_project_config("project.idlethreshold = 900\n");
+        match prev_server {
+            Some(v) => unsafe { std::env::set_var("JIRA_SERVER", v) },
+            None => unsafe { std::env::remove_var("JIRA_SERVER") },
+        }
+        match prev_token {
+            Some(v) => unsafe { std::env::set_var("JIRA_API_TOKEN", v) },
+            None => unsafe { std::env::remove_var("JIRA_API_TOKEN") },
+        }
+        assert!(
+            !report.issues().iter().any(|i| i.category == "jiralabel"),
+            "no jiralabel.* configured, so there's nothing to warn about: {:?}",
+            report.issues()
+        );
+    }

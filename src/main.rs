@@ -1187,6 +1187,118 @@ pub fn validate_config() -> ConfigReport {
         }
     }
 
+    // --- project.idlethreshold validation ---
+    // Bad input here is already caught (and defaulted) at parse
+    // time with an `eprintln!` warning — see `parse_multi`'s
+    // `project.` branch — but `Config::load()` gives no way to
+    // distinguish "the file set a bad value, silently kept the old
+    // one" from "the file never mentioned this key at all". Re-scan
+    // the raw file text (same idiom the `key.*`/`prefix.*` checks
+    // above use) so `config check` can surface it as a real error
+    // rather than staying silent.
+    if let Some(ref p) = path
+        && p.is_file()
+        && let Ok(contents) = std::fs::read_to_string(p)
+    {
+        for raw in contents.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            if k.trim() != "project.idlethreshold" {
+                continue;
+            }
+            let v = v.trim().trim_matches('"').trim();
+            match v.parse::<i64>() {
+                Ok(n) if n > 0 => {}
+                _ => issues.push(ConfigIssue {
+                    level: ConfigIssueLevel::Error,
+                    category: "project".into(),
+                    message: format!(
+                        "project.idlethreshold = {:?} is not a positive integer; the previous value was kept at runtime, but this should be fixed",
+                        v
+                    ),
+                }),
+            }
+        }
+    }
+
+    // --- project.<slug>.dir / jiralabel.<slug>.match / weburl.<slug>.match
+    //     vs. `type: project` notes cross-check ---
+    // Both directions are legitimate on their own (a directory- or
+    // label-only project with no note yet; a note tracked purely by
+    // explicit `.`-mode selection with no directory/label binding) —
+    // see the time-tracking plan's design notes — so both surface as
+    // warnings, not errors. Skipped entirely when `notes.database`
+    // isn't configured (nothing to cross-check against).
+    {
+        let mut config_slugs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (slug, _) in &cfg.projects {
+            config_slugs.insert(slug.clone());
+        }
+        for (slug, _) in &cfg.jira_labels {
+            config_slugs.insert(slug.clone());
+        }
+        for (slug, _) in &cfg.web_urls {
+            config_slugs.insert(slug.clone());
+        }
+        if let Some(db_path) = cfg.notes_database() {
+            let service = note_search::database_service::DatabaseService::new(
+                &db_path.display().to_string(),
+            );
+            let criteria = note_search::SearchCriteria {
+                list_only: true,
+                query_expr: Some(note_search::QueryExpr::Attribute {
+                    key: "type".to_string(),
+                    value: Some("project".to_string()),
+                }),
+                ..Default::default()
+            };
+            if let Ok(notes) = service.search_notes(&criteria) {
+                let note_slugs: std::collections::BTreeSet<String> = notes
+                    .iter()
+                    .filter_map(|n| {
+                        std::path::Path::new(&n.filename)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                    })
+                    .map(|stem| crate::util::slugify(stem, "project"))
+                    .collect();
+                for slug in &config_slugs {
+                    if !note_slugs.contains(slug) {
+                        issues.push(ConfigIssue {
+                            level: ConfigIssueLevel::Warning,
+                            category: "project".into(),
+                            message: format!(
+                                "project.{slug}.dir / jiralabel.{slug}.match / weburl.{slug}.match is configured but no `type: project` note has a matching slug (fine for directory/label/URL-only tracking; check for a typo otherwise)"
+                            ),
+                        });
+                    }
+                }
+                for slug in &note_slugs {
+                    if !config_slugs.contains(slug) {
+                        issues.push(ConfigIssue {
+                            level: ConfigIssueLevel::Warning,
+                            category: "project".into(),
+                            message: format!(
+                                "`type: project` note slug {slug:?} has no project.{slug}.dir / jiralabel.{slug}.match / weburl.{slug}.match entry (fine for explicit-selection-only tracking; check for a typo otherwise)"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- jiralabel.* configured without JIRA credentials ---
+    if !cfg.jira_labels.is_empty() && crate::jira::JiraConfig::from_env().is_none() {
+        issues.push(ConfigIssue {
+            level: ConfigIssueLevel::Warning,
+            category: "jiralabel".into(),
+            message: "jiralabel.<slug>.match is configured but JIRA_SERVER/JIRA_API_TOKEN are not set; the JIRA-label resolution tier will be skipped for every report".into(),
+        });
+    }
+
     ConfigReport {
         cfg,
         issues,
