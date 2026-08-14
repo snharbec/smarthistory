@@ -2276,6 +2276,13 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(escape_md_link_text("plain title"), "plain title");
     }
 
+    #[test]
+    fn note_basename_strips_extension_only() {
+        assert_eq!(note_basename("Standup.md"), "Standup");
+        assert_eq!(note_basename("2026-08-14-notes.md"), "2026-08-14-notes");
+        assert_eq!(note_basename("no-extension"), "no-extension");
+    }
+
     // --- Time tracking: `config check` validation -----------------------
 
     /// Write a config file under a fresh fake `$HOME` and run

@@ -5754,6 +5754,24 @@ struct WebsiteLink {
     url: String,
 }
 
+/// The basename of a note's filename, stripped of its extension —
+/// `note_search`'s `[[link]]` wiki-link target (the same identity
+/// `stage_project_selection`'s slug derivation, and every other
+/// `[[...]]` reference in this codebase, uses; notes are always
+/// referenced by basename, not the frontmatter title — see
+/// `notes::fetch`'s doc comment). `filename` here is already a bare
+/// basename with extension (e.g. `Standup.md`), never a path with
+/// directory components — `NoteResult::filename`'s own contract —
+/// so this only ever strips the extension. Falls back to the input
+/// verbatim on the (unreachable in practice) case where
+/// `file_stem()` finds nothing to strip.
+fn note_basename(filename: &str) -> &str {
+    std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename)
+}
+
 /// Escape the handful of Markdown link syntax characters that could
 /// otherwise break `[title](url)`: `]` would close the link text
 /// early, and `(`/`)` inside a bare (parenthesized) link destination
@@ -7102,7 +7120,7 @@ fn main() -> anyhow::Result<()> {
                     if let Some(notes) = slug.as_ref().and_then(|s| notes_by_slug.get(s)) {
                         println!("\n### Notes created");
                         for n in notes {
-                            println!("- {n}");
+                            println!("- [[{}]]", note_basename(n));
                         }
                     }
                     println!("\n### Websites");
