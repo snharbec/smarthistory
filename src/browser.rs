@@ -302,14 +302,14 @@ fn mac_absolute_time_to_unix_secs(mac_time: f64) -> i64 {
 /// One bookmark or history entry read from a browser, before it's
 /// converted into a `HistoryRow`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BrowserEntry {
+pub(crate) struct BrowserEntry {
     /// `"bookmark"` or `"history"` — spliced into `HistoryRow::command`
     /// verbatim so the user can filter by typing the word.
-    tag: &'static str,
-    title: String,
-    url: String,
-    timestamp: i64,
-    kind: BrowserKind,
+    pub(crate) tag: &'static str,
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) timestamp: i64,
+    pub(crate) kind: BrowserKind,
 }
 
 /// Copy a SQLite database file (plus its `-wal` / `-shm` sidecars,
@@ -626,6 +626,21 @@ fn read_source(source: &BrowserSource) -> Vec<BrowserEntry> {
             entries
         }
     }
+}
+
+/// Read every entry from every given source, synchronously, on the
+/// calling thread. Used by the `project report` CLI subcommand,
+/// which runs once and exits — unlike [`spawn_fetch`] (built for the
+/// TUI's debounced, cancellable, background-thread search-as-you-type
+/// contract), a one-shot CLI command has no keystrokes to debounce
+/// and no UI thread to keep responsive, so the threading/channel/
+/// cancellation machinery would be pure overhead here.
+pub(crate) fn read_all_entries(sources: &[BrowserSource]) -> Vec<BrowserEntry> {
+    let mut entries = Vec::new();
+    for source in sources {
+        entries.extend(read_source(source));
+    }
+    entries
 }
 
 /// Convert one entry into a `HistoryRow`. `command` is `"<tag>

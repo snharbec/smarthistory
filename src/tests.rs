@@ -1840,6 +1840,7 @@ tmuxpaneoutputdir=~/custom-tmux
         let sessions = project_sessions_in_range(&conn, 0, 5000, 1500).expect("query");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].effective_end, 1500, "an open session clamps to `now`, not the range end");
+        assert!(sessions[0].still_open);
     }
 
     #[test]
@@ -1907,4 +1908,175 @@ tmuxpaneoutputdir=~/custom-tmux
             resolve_project_by_label(&cfg, &["Acme-Corp".to_string()]),
             Some("acme".to_string())
         );
+    }
+
+    // --- Time tracking: weburl/weburlgroup + 3-tier website resolution --
+
+    #[test]
+    fn url_host_and_path_strips_scheme_query_and_fragment() {
+        assert_eq!(
+            url_host_and_path("https://example.com/path?x=1#frag"),
+            "example.com/path"
+        );
+        assert_eq!(url_host_and_path("no-scheme.example.com/x"), "no-scheme.example.com/x");
+    }
+
+    #[test]
+    fn weburl_config_parses_and_resolves() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["weburl.acme.match = acme.example.com\n"]);
+        assert_eq!(
+            resolve_project_by_weburl(&cfg, "https://acme.example.com/docs?x=1"),
+            Some("acme".to_string())
+        );
+        assert_eq!(resolve_project_by_weburl(&cfg, "https://unrelated.com/x"), None);
+    }
+
+    #[test]
+    fn weburlgroup_config_parses_and_clusters_independently_of_assignment() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "weburlgroup.jira.match = /browse/\n\
+             weburlgroup.jira.label = JIRA tickets\n",
+        ]);
+        assert_eq!(
+            cluster_label_for_url(&cfg, "https://jira.example.com/browse/PROJ-1"),
+            Some("JIRA tickets".to_string())
+        );
+        assert_eq!(cluster_label_for_url(&cfg, "https://unrelated.com/x"), None);
+        // Clustering has nothing to do with project assignment — no
+        // `weburl`/`jiralabel` entries configured here at all, so
+        // assignment must stay `None` even though the URL clusters.
+        assert_eq!(resolve_project_by_weburl(&cfg, "https://jira.example.com/browse/PROJ-1"), None);
+    }
+
+    /// A `JiraClient` fake for `resolve_project_for_website_visit`'s
+    /// tier tests. Always returns the same fixed label set,
+    /// regardless of the JQL query — these tests only care about
+    /// resolution priority, not JQL construction (already covered by
+    /// `jira::tests::labels_for_issue_*`).
+    struct FixedLabelClient {
+        labels: Vec<String>,
+    }
+
+    impl crate::jira::JiraClient for FixedLabelClient {
+        fn search(&self, _jql: &str) -> Result<Vec<crate::jira::JiraIssue>, crate::jira::JiraError> {
+            Ok(vec![crate::jira::JiraIssue {
+                key: "PROJ-1".to_string(),
+                labels: self.labels.clone(),
+                ..Default::default()
+            }])
+        }
+        fn fetch_comments(&self, _key: &str) -> Result<Vec<crate::jira::JiraComment>, crate::jira::JiraError> {
+            Ok(Vec::new())
+        }
+        fn add_comment(&self, _key: &str, _body: &str) -> Result<(), crate::jira::JiraError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn resolve_project_for_website_visit_prefers_jira_label_over_weburl() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "jiralabel.acme.match = acme-label\n\
+             weburl.beta.match = jira.example.com\n",
+        ]);
+        let client = FixedLabelClient {
+            labels: vec!["acme-label".to_string()],
+        };
+        let mut cache = std::collections::HashMap::new();
+        let slug = resolve_project_for_website_visit(
+            &cfg,
+            Some(&client),
+            &mut cache,
+            "https://jira.example.com/browse/PROJ-1",
+            1000,
+            &[],
+        );
+        assert_eq!(
+            slug,
+            Some("acme".to_string()),
+            "the ticket's own label must win even though the domain also matches a weburl override for a different project"
+        );
+    }
+
+    #[test]
+    fn resolve_project_for_website_visit_falls_back_to_weburl_without_jira_client() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["weburl.beta.match = docs.example.com\n"]);
+        let mut cache = std::collections::HashMap::new();
+        let slug = resolve_project_for_website_visit(
+            &cfg,
+            None,
+            &mut cache,
+            "https://docs.example.com/guide",
+            1000,
+            &[],
+        );
+        assert_eq!(slug, Some("beta".to_string()));
+    }
+
+    #[test]
+    fn resolve_project_for_website_visit_falls_back_to_time_based_session() {
+        let cfg = Config::default();
+        let mut cache = std::collections::HashMap::new();
+        let sessions = vec![ProjectSessionInterval {
+            slug: "gamma".to_string(),
+            start_ts: 500,
+            effective_end: 1500,
+            still_open: false,
+        }];
+        let slug = resolve_project_for_website_visit(
+            &cfg,
+            None,
+            &mut cache,
+            "https://unrelated.example.com/x",
+            1000,
+            &sessions,
+        );
+        assert_eq!(slug, Some("gamma".to_string()));
+    }
+
+    /// Regression: a still-open session's `effective_end` is only a
+    /// clamp-to-`now` for display purposes, not a real boundary — a
+    /// visit timestamped in the same wall-clock second the report
+    /// runs (`timestamp == effective_end`) must still fall inside an
+    /// open session's window. A strict `timestamp < effective_end`
+    /// check would wrongly exclude it and misfile the visit as
+    /// "untracked".
+    #[test]
+    fn resolve_project_for_website_visit_matches_open_session_at_exact_now_boundary() {
+        let cfg = Config::default();
+        let mut cache = std::collections::HashMap::new();
+        let sessions = vec![ProjectSessionInterval {
+            slug: "acme".to_string(),
+            start_ts: 500,
+            effective_end: 1000,
+            still_open: true,
+        }];
+        let slug = resolve_project_for_website_visit(
+            &cfg,
+            None,
+            &mut cache,
+            "https://unrelated.example.com/x",
+            1000,
+            &sessions,
+        );
+        assert_eq!(slug, Some("acme".to_string()));
+    }
+
+    #[test]
+    fn resolve_project_for_website_visit_returns_none_when_nothing_matches() {
+        let cfg = Config::default();
+        let mut cache = std::collections::HashMap::new();
+        let slug = resolve_project_for_website_visit(
+            &cfg,
+            None,
+            &mut cache,
+            "https://unrelated.example.com/x",
+            1000,
+            &[],
+        );
+        assert_eq!(slug, None);
     }

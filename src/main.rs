@@ -1556,6 +1556,24 @@ struct ProjectDef {
     dir: String,
 }
 
+/// Display-only clustering for the `project report` website section:
+/// `weburlgroup.<name>.match = "<substring>"` / `weburlgroup.<name>.label
+/// = "<label>"`. `<name>` is an arbitrary opaque key (like
+/// `session.<key>`/`host.<key>`, order doesn't matter here); `match`
+/// is a plain substring tested against a visited URL's host+path, and
+/// `label` is what the report prints instead of the individual URLs
+/// when at least one matches. Independent of project *assignment*
+/// (`weburl.<slug>.match` / `jiralabel.<slug>.match`) — a URL's
+/// project and its display cluster are separate concerns, and a
+/// visit can belong to a project while also being clustered under an
+/// unrelated group label (e.g. every JIRA/docs URL bucketed together
+/// regardless of which project the ticket belongs to).
+#[derive(Debug, Clone, Default)]
+struct WebUrlGroupDef {
+    match_pattern: String,
+    label: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory containing per-pane tmux output log files.
@@ -1915,8 +1933,8 @@ pub struct Config {
     /// slug parsing). Default 1800 (30 minutes).
     project_idle_threshold_secs: i64,
     /// JIRA-label-to-project bindings parsed from `jiralabel.<slug>.match
-    /// = "<label>"` config keys — the first (and, for Phase 4, only)
-    /// tier of time tracking's website-project resolution priority: a
+    /// = "<label>"` config keys — the first (highest-priority) tier
+    /// of time tracking's website-project resolution priority: a
     /// JIRA ticket carrying this label is attributed to `<slug>`
     /// regardless of which directory or explicit selection was active
     /// at visit time. `<slug>` matches the same `type: project` note
@@ -1925,6 +1943,22 @@ pub struct Config {
     /// matching is exact-string, so only the last `jiralabel.<slug>.match`
     /// for a given slug wins if the config sets it twice.
     jira_labels: Vec<(String, String)>,
+    /// Sparse URL overrides parsed from `weburl.<slug>.match =
+    /// "<substring>"` — the second tier of website-project
+    /// resolution, for domains that are structurally single-project
+    /// (e.g. a project's own dedicated docs site). `match` is a
+    /// plain substring tested against a visited URL's host+path (no
+    /// regex dependency in this codebase for config-driven matching
+    /// — see `resolve_project_by_weburl`). Lower priority than
+    /// `jiralabel.<slug>.match` (a labeled JIRA ticket wins even on
+    /// a domain that also has a `weburl` override), higher priority
+    /// than the time-based fallback.
+    web_urls: Vec<(String, String)>,
+    /// Display-only URL clustering groups parsed from
+    /// `weburlgroup.<name>.match` / `weburlgroup.<name>.label` — see
+    /// `WebUrlGroupDef`'s doc comment. Independent of `web_urls`
+    /// (assignment vs. clustering are separate concerns).
+    web_url_groups: Vec<(String, WebUrlGroupDef)>,
     /// Host entries parsed from
     /// `host.<key> = "name"` /
     /// `host.<key>.host = "alias"` /
@@ -2076,6 +2110,8 @@ impl Config {
             projects: Vec::new(),
             project_idle_threshold_secs: 1800,
             jira_labels: Vec::new(),
+            web_urls: Vec::new(),
+            web_url_groups: Vec::new(),
             hosts: Vec::new(),
             browsers: Vec::new(),
             // Empty by default — populated from
@@ -2670,6 +2706,72 @@ impl Config {
                         } else {
                             eprintln!(
                                 "warning: `jiralabel.{}` has no meaning on its own; did you mean `jiralabel.{}.match`?",
+                                rest, rest
+                            );
+                        }
+                    } else if let Some(rest) = other.strip_prefix("weburlgroup.") {
+                        // `weburlgroup.<name>.match = "<substring>"` /
+                        // `weburlgroup.<name>.label = "<label>"` —
+                        // display-only clustering, checked before
+                        // `weburl.` below even though the two prefixes
+                        // can't actually collide (`weburlgroup.` and
+                        // `weburl.` diverge at the 7th character), for
+                        // readability: the more-specific prefix reads
+                        // first. Same two-field find-or-insert shape
+                        // as `host.<key>.*`.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if let Some((name, field)) = rest.split_once('.') {
+                            let pos = self.web_url_groups.iter().position(|(k, _)| k == name);
+                            let set = |group: &mut WebUrlGroupDef, field: &str, val: &str| match field
+                            {
+                                "match" => group.match_pattern = val.to_string(),
+                                "label" => group.label = val.to_string(),
+                                _ => {
+                                    eprintln!(
+                                        "warning: unknown weburlgroup field {:?} in weburlgroup.{}; ignoring",
+                                        field, name
+                                    );
+                                }
+                            };
+                            match pos {
+                                Some(idx) => set(&mut self.web_url_groups[idx].1, field, unquoted),
+                                None => {
+                                    let mut group = WebUrlGroupDef::default();
+                                    set(&mut group, field, unquoted);
+                                    self.web_url_groups.push((name.to_string(), group));
+                                }
+                            }
+                        } else {
+                            eprintln!(
+                                "warning: `weburlgroup.{}` has no meaning on its own; did you mean `weburlgroup.{}.match` or `.label`?",
+                                rest, rest
+                            );
+                        }
+                    } else if let Some(rest) = other.strip_prefix("weburl.") {
+                        // `weburl.<slug>.match = "<substring>"` — the
+                        // sparse-URL-override tier of website-project
+                        // resolution. Same single-field find-or-insert
+                        // shape as `jiralabel.<slug>.match` above.
+                        let unquoted = value.trim().trim_matches('"').trim();
+                        if let Some((slug, field)) = rest.split_once('.') {
+                            let pos = self.web_urls.iter().position(|(k, _)| k == slug);
+                            match (field, pos) {
+                                ("match", Some(idx)) => {
+                                    self.web_urls[idx].1 = unquoted.to_string();
+                                }
+                                ("match", None) => {
+                                    self.web_urls.push((slug.to_string(), unquoted.to_string()));
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "warning: unknown weburl field {:?} in weburl.{}; ignoring",
+                                        field, slug
+                                    );
+                                }
+                            }
+                        } else {
+                            eprintln!(
+                                "warning: `weburl.{}` has no meaning on its own; did you mean `weburl.{}.match`?",
                                 rest, rest
                             );
                         }
@@ -4960,12 +5062,89 @@ fn resolve_project_dir(cfg: &Config, pwd: &str) -> Option<String> {
 /// each map to a different project), the earliest-declared
 /// `jiralabel.<slug>.match` entry wins — same "first in file order"
 /// tie-break `session.<key>`/`host.<key>` use elsewhere.
-#[allow(dead_code)] // wired into `project report`'s website resolution in Phase 5
 fn resolve_project_by_label(cfg: &Config, labels: &[String]) -> Option<String> {
     cfg.jira_labels
         .iter()
         .find(|(_, label)| labels.iter().any(|l| l == label))
         .map(|(slug, _)| slug.clone())
+}
+
+/// Strip a URL down to `host+path` (no scheme, no query string, no
+/// fragment) for `weburl`/`weburlgroup` substring matching. Plain
+/// string slicing rather than a URL-parsing crate — this codebase
+/// has no such dependency and the config's `match` values are
+/// themselves plain substrings, so a parser would be more precision
+/// than the matching semantics need. Not meant to be a fully correct
+/// URL parser (e.g. userinfo `user:pass@host` isn't stripped) — just
+/// good enough that a query-string cache-buster or `#anchor` doesn't
+/// cause an otherwise-matching pattern to miss.
+fn url_host_and_path(url: &str) -> &str {
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let end = without_scheme.find(['?', '#']).unwrap_or(without_scheme.len());
+    &without_scheme[..end]
+}
+
+/// Resolve a project slug from a sparse URL override
+/// (`weburl.<slug>.match`) — the second tier of time tracking's
+/// website-project resolution, for domains that are structurally
+/// single-project. Plain substring match against `url`'s host+path.
+/// First configured match wins (same file-order tie-break as
+/// `resolve_project_by_label`).
+fn resolve_project_by_weburl(cfg: &Config, url: &str) -> Option<String> {
+    let haystack = url_host_and_path(url);
+    cfg.web_urls
+        .iter()
+        .find(|(_, pattern)| !pattern.is_empty() && haystack.contains(pattern.as_str()))
+        .map(|(slug, _)| slug.clone())
+}
+
+/// Resolve the display-only cluster label for a URL
+/// (`weburlgroup.<name>.match`/`.label`) — independent of project
+/// *assignment*, see `WebUrlGroupDef`'s doc comment. First
+/// configured match wins.
+fn cluster_label_for_url(cfg: &Config, url: &str) -> Option<String> {
+    let haystack = url_host_and_path(url);
+    cfg.web_url_groups
+        .iter()
+        .find(|(_, def)| !def.match_pattern.is_empty() && haystack.contains(def.match_pattern.as_str()))
+        .map(|(_, def)| def.label.clone())
+}
+
+/// The full 3-tier website-project resolution priority: (1) a JIRA
+/// label match (via `extract_issue_key` + `labels_for_issue` +
+/// `resolve_project_by_label` — skipped entirely when `jira_client`
+/// is `None`, i.e. JIRA isn't configured), (2) a sparse `weburl`
+/// override, (3) the time-based fallback — whichever `project_sessions`
+/// interval (if any) was open at `timestamp`. `text` is either a
+/// visited URL (browser mode) or a staged shell command that embeds
+/// one (`open "https://.../browse/KEY"` — see `extract_issue_key`'s
+/// doc comment on why REST-mode JIRA visits aren't a separate data
+/// source); both are valid input to every tier since each tier's
+/// match is itself just a substring/regex scan, indifferent to
+/// whether it's scanning a bare URL or a whole command line.
+fn resolve_project_for_website_visit(
+    cfg: &Config,
+    jira_client: Option<&dyn crate::jira::JiraClient>,
+    label_cache: &mut std::collections::HashMap<String, Vec<String>>,
+    text: &str,
+    timestamp: i64,
+    sessions: &[ProjectSessionInterval],
+) -> Option<String> {
+    if let Some(client) = jira_client
+        && let Some(key) = crate::jira::extract_issue_key(text)
+    {
+        let labels = crate::jira::labels_for_issue(client, key, label_cache);
+        if let Some(slug) = resolve_project_by_label(cfg, &labels) {
+            return Some(slug);
+        }
+    }
+    if let Some(slug) = resolve_project_by_weburl(cfg, text) {
+        return Some(slug);
+    }
+    sessions
+        .iter()
+        .find(|s| timestamp >= s.start_ts && (s.still_open || timestamp < s.effective_end))
+        .map(|s| s.slug.clone())
 }
 
 /// Walk upward from `pwd` looking for an in-repo marker file
@@ -5145,12 +5324,20 @@ fn parse_project_report_day(
 }
 
 /// A `project_sessions` row overlapping the report's day range, with
-/// its still-open end clamped to `now` so interval-membership checks
-/// (directories/commands/notes) never need to special-case `NULL`.
+/// its still-open end clamped to `now` so a caller that just wants
+/// *a* concrete upper bound (e.g. for display) never needs to
+/// special-case `NULL`. Interval-membership checks (notes/website
+/// resolution) must still branch on `still_open` rather than
+/// comparing straight against `effective_end`: a still-open
+/// session's clamp is only an artifact of "we needed some number",
+/// not a real boundary — a timestamp landing in the same
+/// wall-clock second the report runs would otherwise be excluded by
+/// a strict `<` against its own clamped-to-now value.
 struct ProjectSessionInterval {
     slug: String,
     start_ts: i64,
     effective_end: i64,
+    still_open: bool,
 }
 
 /// Every `project_sessions` row whose interval overlaps
@@ -5178,11 +5365,13 @@ fn project_sessions_in_range(
     let mut out = Vec::new();
     for r in rows {
         let (slug, start_ts, end_ts) = r?;
+        let still_open = end_ts.is_none();
         let effective_end = end_ts.unwrap_or(now).min(now);
         out.push(ProjectSessionInterval {
             slug,
             start_ts,
             effective_end,
+            still_open,
         });
     }
     Ok(out)
@@ -5321,6 +5510,37 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
                 r.command
             );
         }
+    }
+}
+
+/// Print one project's (or "untracked"'s) `### Websites` list.
+/// `items` is `(display_text, cluster_label)` pairs, already
+/// resolved by `resolve_project_for_website_visit`/
+/// `cluster_label_for_url`. Clustering is display-only: every item
+/// sharing a cluster label collapses into one `<label> (N visits)`
+/// line (count, not the individual titles/URLs — that's the point of
+/// a cluster, e.g. bucketing every JIRA/docs visit instead of
+/// listing each one); items with no matching `weburlgroup` are
+/// listed individually. Clustered lines print first (alphabetical by
+/// label), then individual visits (alphabetical by display text) —
+/// a stable order not dependent on visit timestamps, since websites
+/// aren't given a time column in this report (unlike commands).
+fn print_website_section(items: &[(String, Option<String>)]) {
+    let mut clustered: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut individual: Vec<&str> = Vec::new();
+    for (display, cluster) in items {
+        match cluster {
+            Some(label) => *clustered.entry(label.as_str()).or_insert(0) += 1,
+            None => individual.push(display.as_str()),
+        }
+    }
+    individual.sort_unstable();
+    for (label, count) in &clustered {
+        let noun = if *count == 1 { "visit" } else { "visits" };
+        println!("- {label} ({count} {noun})");
+    }
+    for display in individual {
+        println!("- {display}");
     }
 }
 
@@ -6444,7 +6664,8 @@ fn main() -> anyhow::Result<()> {
                                     continue;
                                 }
                                 let hit = sessions.iter().find(|s| {
-                                    created >= s.start_ts && created < s.effective_end
+                                    created >= s.start_ts
+                                        && (s.still_open || created < s.effective_end)
                                 });
                                 if let Some(session) = hit {
                                     notes_by_slug
@@ -6462,6 +6683,76 @@ fn main() -> anyhow::Result<()> {
                     eprintln!(
                         "warning: notes.database is not configured; skipping notes section"
                     );
+                }
+
+                // Website visits: browser bookmarks/history in range,
+                // plus `-` mode's JIRA REST visits (which land in
+                // `history.command` as `open "<browse_url>"`, not a
+                // separate table — see `resolve_project_for_website_visit`'s
+                // doc comment). Each visit is resolved through the
+                // full 3-tier priority and, independently, clustered
+                // for display via `weburlgroup`. The JIRA client is
+                // built once (`None` when JIRA isn't configured, in
+                // which case tier 1 is simply skipped for every
+                // visit) and the label cache is shared across every
+                // visit so a ticket referenced by multiple visits
+                // costs one REST round-trip, not one per visit.
+                let jira_client: Option<Box<dyn crate::jira::JiraClient>> =
+                    crate::jira::JiraConfig::from_env()
+                        .map(|c| Box::new(crate::jira::RestJiraClient::new(c)) as Box<_>);
+                let mut label_cache: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+
+                struct WebsiteVisit {
+                    display: String,
+                    text: String,
+                    timestamp: i64,
+                }
+                let mut visits: Vec<WebsiteVisit> = Vec::new();
+                let browser_sources = crate::browser::resolve_configured();
+                for entry in crate::browser::read_all_entries(&browser_sources) {
+                    if entry.timestamp < range_start || entry.timestamp >= range_end {
+                        continue;
+                    }
+                    let display = if entry.title.is_empty() {
+                        entry.url.clone()
+                    } else {
+                        entry.title.clone()
+                    };
+                    visits.push(WebsiteVisit {
+                        display,
+                        text: entry.url,
+                        timestamp: entry.timestamp,
+                    });
+                }
+                for c in &commands {
+                    if crate::jira::extract_issue_key(&c.command).is_some() {
+                        visits.push(WebsiteVisit {
+                            display: c.command.clone(),
+                            text: c.command.clone(),
+                            timestamp: c.timestamp,
+                        });
+                    }
+                }
+
+                let mut websites_by_slug: std::collections::BTreeMap<
+                    Option<String>,
+                    Vec<(String, Option<String>)>,
+                > = std::collections::BTreeMap::new();
+                for visit in &visits {
+                    let slug = resolve_project_for_website_visit(
+                        &cfg,
+                        jira_client.as_deref(),
+                        &mut label_cache,
+                        &visit.text,
+                        visit.timestamp,
+                        &sessions,
+                    );
+                    let cluster = cluster_label_for_url(&cfg, &visit.text);
+                    websites_by_slug
+                        .entry(slug)
+                        .or_default()
+                        .push((visit.display.clone(), cluster));
                 }
 
                 // Slugs to report on, in a stable order: explicit
@@ -6482,6 +6773,9 @@ fn main() -> anyhow::Result<()> {
                             seen.insert(slug.clone());
                         }
                     }
+                    for slug in websites_by_slug.keys().flatten() {
+                        seen.insert(slug.clone());
+                    }
                     slugs.extend(seen);
                 }
 
@@ -6500,7 +6794,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     println!("\n### Websites");
-                    println!("(pending — added in a later phase)");
+                    match websites_by_slug.get(&Some(slug.clone())) {
+                        Some(items) if !items.is_empty() => print_website_section(items),
+                        _ => println!("(none)"),
+                    }
                     println!();
                 }
 
@@ -6509,8 +6806,14 @@ fn main() -> anyhow::Result<()> {
                         .iter()
                         .filter(|c| c.project_slug.is_none())
                         .collect();
-                    if !untracked.is_empty() {
+                    let untracked_websites = websites_by_slug.get(&None);
+                    if !untracked.is_empty() || untracked_websites.is_some_and(|v| !v.is_empty()) {
                         print_project_report_section("untracked", &untracked, min_duration);
+                        println!("\n### Websites");
+                        match untracked_websites {
+                            Some(items) if !items.is_empty() => print_website_section(items),
+                            _ => println!("(none)"),
+                        }
                         println!();
                     }
                 }
