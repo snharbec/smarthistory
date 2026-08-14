@@ -5206,6 +5206,42 @@ fn url_host_and_path(url: &str) -> &str {
     &without_scheme[..end]
 }
 
+/// Extract just the host from a URL (strip scheme, userinfo, port,
+/// path/query/fragment) — the report's default website-clustering
+/// key when no `weburlgroup.<name>.match` override applies, so every
+/// `github.com` page (say) groups under one `github.com` cluster
+/// without needing per-domain config. A leading `www.` is stripped
+/// so `www.github.com` and `github.com` cluster together — the two
+/// are the same site to a human reading the report, even though
+/// they're technically different hostnames.
+fn url_host(url: &str) -> &str {
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let without_userinfo = without_scheme
+        .split_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_scheme);
+    let end = without_userinfo
+        .find(['/', '?', '#'])
+        .unwrap_or(without_userinfo.len());
+    let host_and_port = &without_userinfo[..end];
+    let host = host_and_port.split_once(':').map(|(h, _)| h).unwrap_or(host_and_port);
+    host.strip_prefix("www.").unwrap_or(host)
+}
+
+/// Pull the URL out of a staged `open "<url>"` / `xdg-open "<url>"`
+/// shell command — the exact, literal double-quoted format
+/// `stage_jira_selection` (`src/tui/actions.rs`) always uses, so a
+/// simple "text between the first pair of double quotes" scan is
+/// reliable here (unlike `stage_browser_selection`, which
+/// POSIX-shell-quotes with single quotes — but browser-mode visits
+/// are read directly from `BrowserEntry.url`, never scanned back out
+/// of `history.command`, so that format never needs parsing here).
+fn extract_quoted_url(command: &str) -> Option<&str> {
+    let start = command.find('"')? + 1;
+    let end = command[start..].find('"')? + start;
+    Some(&command[start..end])
+}
+
 /// Resolve a project slug from a sparse URL override
 /// (`weburl.<slug>.match`) — the second tier of time tracking's
 /// website-project resolution, for domains that are structurally
@@ -5705,34 +5741,61 @@ fn escape_md_table_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
-/// Print one project's (or "untracked"'s) `### Websites` list.
-/// `items` is `(display_text, cluster_label)` pairs, already
-/// resolved by `resolve_project_for_website_visit`/
-/// `cluster_label_for_url`. Clustering is display-only: every item
-/// sharing a cluster label collapses into one `<label> (N visits)`
-/// line (count, not the individual titles/URLs — that's the point of
-/// a cluster, e.g. bucketing every JIRA/docs visit instead of
-/// listing each one); items with no matching `weburlgroup` are
-/// listed individually. Clustered lines print first (alphabetical by
-/// label), then individual visits (alphabetical by display text) —
-/// a stable order not dependent on visit timestamps, since websites
-/// aren't given a time column in this report (unlike commands).
-fn print_website_section(items: &[(String, Option<String>)]) {
-    let mut clustered: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    let mut individual: Vec<&str> = Vec::new();
-    for (display, cluster) in items {
-        match cluster {
-            Some(label) => *clustered.entry(label.as_str()).or_insert(0) += 1,
-            None => individual.push(display.as_str()),
+/// One website visit, already resolved to a display cluster
+/// (`weburlgroup.<name>.match`/`.label`, or the visit's host when no
+/// override applies — see `print_website_section`'s call site).
+struct WebsiteLink {
+    cluster: String,
+    title: String,
+    url: String,
+}
+
+/// Escape the handful of Markdown link syntax characters that could
+/// otherwise break `[title](url)`: `]` would close the link text
+/// early, and `(`/`)` inside a bare (parenthesized) link destination
+/// would prematurely end the URL. Titles/URLs here are page titles
+/// and real URLs, not report-controlled strings, so this is a real
+/// risk, not just defensive.
+fn escape_md_link_text(s: &str) -> String {
+    s.replace('[', "(").replace(']', ")")
+}
+
+/// Group website links by cluster and deduplicate by URL within each
+/// group (the same page visited more than once in the day collapses
+/// to one entry, keeping the first title seen for it). Clusters and
+/// the URLs within them come out in alphabetical order — a stable
+/// order not dependent on visit timestamps, since websites aren't
+/// given a time column in this report (unlike commands). Pulled out
+/// of `print_website_section` as a pure function so the grouping/
+/// dedup logic is unit-testable without capturing stdout.
+fn group_website_links(items: &[WebsiteLink]) -> Vec<(&str, Vec<(&str, &str)>)> {
+    let mut by_cluster: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, &str>> =
+        std::collections::BTreeMap::new();
+    for link in items {
+        by_cluster
+            .entry(link.cluster.as_str())
+            .or_default()
+            .entry(link.url.as_str())
+            .or_insert(link.title.as_str());
+    }
+    by_cluster
+        .into_iter()
+        .map(|(cluster, links)| (cluster, links.into_iter().collect()))
+        .collect()
+}
+
+/// Print one project's (or "untracked"'s) `### Websites` list,
+/// grouped by cluster (a `weburlgroup.<name>.match` label, or —
+/// falling back automatically — the visit's own host, so every
+/// `github.com` page lands under one `github.com` group without
+/// needing per-domain config) via `group_website_links`. Each URL
+/// renders as a Markdown link, `[title](url)`.
+fn print_website_section(items: &[WebsiteLink]) {
+    for (cluster, links) in group_website_links(items) {
+        println!("- **{}**", escape_md_link_text(cluster));
+        for (url, title) in links {
+            println!("  - [{}]({})", escape_md_link_text(title), url);
         }
-    }
-    individual.sort_unstable();
-    for (label, count) in &clustered {
-        let noun = if *count == 1 { "visit" } else { "visits" };
-        println!("- {label} ({count} {noun})");
-    }
-    for display in individual {
-        println!("- {display}");
     }
 }
 
@@ -6895,9 +6958,17 @@ fn main() -> anyhow::Result<()> {
                 let mut label_cache: std::collections::HashMap<String, Vec<String>> =
                     std::collections::HashMap::new();
 
+                // `resolve_text` is what tier 1/2 resolution scans
+                // (a raw command still needs its embedded issue key
+                // / URL substring findable — see
+                // `resolve_project_for_website_visit`'s doc comment);
+                // `url`/`title` are the clean values used for
+                // display, clustering, and dedup, which a raw
+                // `open "<url>"` command string is not.
                 struct WebsiteVisit {
-                    display: String,
-                    text: String,
+                    resolve_text: String,
+                    url: String,
+                    title: String,
                     timestamp: i64,
                 }
                 let mut visits: Vec<WebsiteVisit> = Vec::new();
@@ -6906,45 +6977,54 @@ fn main() -> anyhow::Result<()> {
                     if entry.timestamp < range_start || entry.timestamp >= range_end {
                         continue;
                     }
-                    let display = if entry.title.is_empty() {
+                    let title = if entry.title.is_empty() {
                         entry.url.clone()
                     } else {
                         entry.title.clone()
                     };
                     visits.push(WebsiteVisit {
-                        display,
-                        text: entry.url,
+                        resolve_text: entry.url.clone(),
+                        url: entry.url,
+                        title,
                         timestamp: entry.timestamp,
                     });
                 }
                 for c in &commands {
-                    if crate::jira::extract_issue_key(&c.command).is_some() {
+                    if let Some(key) = crate::jira::extract_issue_key(&c.command)
+                        && let Some(url) = extract_quoted_url(&c.command)
+                    {
                         visits.push(WebsiteVisit {
-                            display: c.command.clone(),
-                            text: c.command.clone(),
+                            resolve_text: c.command.clone(),
+                            url: url.to_string(),
+                            title: key.to_string(),
                             timestamp: c.timestamp,
                         });
                     }
                 }
 
-                let mut websites_by_slug: std::collections::BTreeMap<
-                    Option<String>,
-                    Vec<(String, Option<String>)>,
-                > = std::collections::BTreeMap::new();
+                let mut websites_by_slug: std::collections::BTreeMap<Option<String>, Vec<WebsiteLink>> =
+                    std::collections::BTreeMap::new();
                 for visit in &visits {
                     let slug = resolve_project_for_website_visit(
                         &cfg,
                         jira_client.as_deref(),
                         &mut label_cache,
-                        &visit.text,
+                        &visit.resolve_text,
                         visit.timestamp,
                         &sessions,
                     );
-                    let cluster = cluster_label_for_url(&cfg, &visit.text);
-                    websites_by_slug
-                        .entry(slug)
-                        .or_default()
-                        .push((visit.display.clone(), cluster));
+                    // Auto-cluster by host (`github.com`, stripped of
+                    // a leading `www.`) when no `weburlgroup.<name>.match`
+                    // override applies — every visit ends up in some
+                    // cluster, not just the ones an admin thought to
+                    // configure ahead of time.
+                    let cluster = cluster_label_for_url(&cfg, &visit.url)
+                        .unwrap_or_else(|| url_host(&visit.url).to_string());
+                    websites_by_slug.entry(slug).or_default().push(WebsiteLink {
+                        cluster,
+                        title: visit.title.clone(),
+                        url: visit.url.clone(),
+                    });
                 }
 
                 // Slugs to report on, in a stable order: explicit

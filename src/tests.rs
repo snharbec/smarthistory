@@ -2201,6 +2201,81 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(slug, None);
     }
 
+    // --- Time tracking: website host-clustering, dedup, markdown links --
+
+    #[test]
+    fn url_host_strips_scheme_www_port_userinfo_and_path() {
+        assert_eq!(url_host("https://www.github.com/org/repo"), "github.com");
+        assert_eq!(url_host("https://github.com:8443/org/repo"), "github.com");
+        assert_eq!(url_host("https://user:pass@github.com/org/repo"), "github.com");
+        assert_eq!(url_host("github.com/org/repo?x=1#frag"), "github.com");
+    }
+
+    #[test]
+    fn extract_quoted_url_pulls_url_from_staged_open_command() {
+        assert_eq!(
+            extract_quoted_url(r#"open "https://jira.example.com/browse/PROJ-1""#),
+            Some("https://jira.example.com/browse/PROJ-1")
+        );
+        assert_eq!(
+            extract_quoted_url(r#"xdg-open "https://jira.example.com/browse/PROJ-1""#),
+            Some("https://jira.example.com/browse/PROJ-1")
+        );
+        assert_eq!(extract_quoted_url("no quotes here"), None);
+    }
+
+    #[test]
+    fn group_website_links_clusters_and_dedupes_by_url() {
+        let links = vec![
+            WebsiteLink {
+                cluster: "github.com".to_string(),
+                title: "Repo".to_string(),
+                url: "https://github.com/org/repo".to_string(),
+            },
+            // Same URL visited twice — must collapse to one entry,
+            // keeping the first title seen.
+            WebsiteLink {
+                cluster: "github.com".to_string(),
+                title: "Repo (again)".to_string(),
+                url: "https://github.com/org/repo".to_string(),
+            },
+            WebsiteLink {
+                cluster: "github.com".to_string(),
+                title: "Issue #4".to_string(),
+                url: "https://github.com/org/repo/issues/4".to_string(),
+            },
+            WebsiteLink {
+                cluster: "JIRA tickets".to_string(),
+                title: "BETA-42".to_string(),
+                url: "https://jira.example.com/browse/BETA-42".to_string(),
+            },
+        ];
+        let grouped = group_website_links(&links);
+        assert_eq!(grouped.len(), 2, "two distinct clusters");
+
+        // Clusters sort in plain byte order (uppercase before
+        // lowercase, same as every other BTreeMap-sorted list in
+        // this report), so "JIRA tickets" comes before "github.com".
+        let (cluster, jira_links) = &grouped[0];
+        assert_eq!(*cluster, "JIRA tickets");
+        assert_eq!(jira_links.len(), 1);
+
+        let (cluster2, github_links) = &grouped[1];
+        assert_eq!(*cluster2, "github.com");
+        assert_eq!(github_links.len(), 2, "the duplicate URL must collapse to one entry");
+        assert!(
+            github_links.contains(&("https://github.com/org/repo", "Repo")),
+            "first-seen title wins on a duplicate URL: {:?}",
+            github_links
+        );
+    }
+
+    #[test]
+    fn escape_md_link_text_neutralizes_bracket_and_paren_syntax() {
+        assert_eq!(escape_md_link_text("[urgent] fix"), "(urgent) fix");
+        assert_eq!(escape_md_link_text("plain title"), "plain title");
+    }
+
     // --- Time tracking: `config check` validation -----------------------
 
     /// Write a config file under a fresh fake `$HOME` and run
