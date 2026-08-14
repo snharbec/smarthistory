@@ -4506,6 +4506,12 @@ impl PrefixPicker {
                 label: "Pass",
                 description: "search pass entries; Enter stages `pass show --clip <entry>` to copy the password",
             },
+            PrefixOption {
+                prefix: Some(prefixes.project_pick),
+                name: "project",
+                label: "Project",
+                description: "pick the current project (`type: project` notes); Enter stages `smarthistory project select <slug>`",
+            },
         ]
     }
 
@@ -5559,6 +5565,12 @@ impl App {
         if self.is_pass_query() {
             return self.rows.clone();
         }
+        // Project-picker mode (`.`) rows are each a unique note
+        // filename (a `type: project` note) — same reasoning as
+        // Pass mode above, nothing to dedup.
+        if self.is_project_pick_query() {
+            return self.rows.clone();
+        }
         // Directories / JIRA / files
         // modes are completely
         // different views that must NOT
@@ -5824,6 +5836,9 @@ impl App {
             crate::tui::mode::ModeKind::Zoxide => return crate::tui::mode::zoxide::fetch(self),
             crate::tui::mode::ModeKind::Processes => return crate::tui::mode::processes::fetch(self),
             crate::tui::mode::ModeKind::Pass => return crate::tui::mode::pass::fetch(self),
+            crate::tui::mode::ModeKind::ProjectPick => {
+                return crate::tui::mode::project_pick::fetch(self);
+            }
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6325,6 +6340,10 @@ impl App {
             return;
         }
         if self.is_pass_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_project_pick_query() {
             self.select_for_run_impl();
             return;
         }

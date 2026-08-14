@@ -243,6 +243,13 @@ impl App {
                 // clipboard via pass's built-in support.
                 self.stage_pass_selection();
             }
+            crate::tui::mode::ModeKind::ProjectPick => {
+                // `.`-prefixed queries are `type: project` notes.
+                // Selecting one stages `smarthistory project select
+                // <slug>`, setting the explicit "current project"
+                // fallback. See `stage_project_selection`.
+                self.stage_project_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for
@@ -275,6 +282,34 @@ impl App {
         self.selection = Some(format!(
             "pass show --clip {}",
             crate::util::shell_quote(&entry)
+        ));
+        self.pick_mode = Some(PickMode::Run);
+    }
+
+    /// Stage the project-picker (`.`) mode selection.
+    ///
+    /// Slugs the selected note's filename stem the same way
+    /// `project.<slug>.dir` config keys are matched (see
+    /// `crate::util::slugify`) and stages `smarthistory project
+    /// select <slug>` for the parent shell to run — a fresh process
+    /// that upserts `project_current` and closes/opens the active
+    /// `project_sessions` row via the same `switch_project` helper
+    /// the directory-detection path uses.
+    fn stage_project_selection(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if row.mode != "project" {
+            return;
+        }
+        let stem = std::path::Path::new(&row.command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&row.command);
+        let slug = crate::util::slugify(stem, "project");
+        self.selection = Some(format!(
+            "smarthistory project select {}",
+            crate::util::shell_quote(&slug)
         ));
         self.pick_mode = Some(PickMode::Run);
     }
