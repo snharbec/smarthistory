@@ -256,11 +256,24 @@ impl GitTimestamps {
     /// Look up the Git last modified timestamp for a file given its `path`
     /// (which may be relative to `root`) or `abs_path`.
     pub fn get(&self, path: &Path, abs_path: &Path) -> Option<i64> {
-        let rel = path
+        let rel: PathBuf = path
             .strip_prefix(&self.repo_root)
             .ok()
-            .or_else(|| abs_path.strip_prefix(&self.repo_root).ok())?;
-        self.timestamps.get(rel).copied()
+            .map(PathBuf::from)
+            .or_else(|| abs_path.strip_prefix(&self.repo_root).ok().map(PathBuf::from))
+            .or_else(|| {
+                // `repo_root` comes from `git rev-parse --show-toplevel`,
+                // which resolves symlinks. `abs_path` doesn't, so on
+                // platforms where the walk root is itself a symlink (e.g.
+                // macOS's `std::env::temp_dir()` returning `/var/folders/...`
+                // instead of its canonical `/private/var/folders/...`), the
+                // two prefix-strips above silently fail. Canonicalize as a
+                // last resort before giving up.
+                fs::canonicalize(abs_path)
+                    .ok()
+                    .and_then(|canon| canon.strip_prefix(&self.repo_root).ok().map(PathBuf::from))
+            })?;
+        self.timestamps.get(&rel).copied()
     }
 }
 
