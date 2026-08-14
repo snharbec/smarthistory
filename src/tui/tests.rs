@@ -3861,6 +3861,233 @@ fn run_llm_query_surfaces_no_command_when_sanitizer_rejects() {
     assert!(msg.contains("no usable command"), "got: {:?}", msg);
 }
 
+// --- Question mode (`?`) ---------------------------------------
+
+/// Inserts a `mode = 'command'` history row (plus optional
+/// captured output) for `session_id`, used by the
+/// `last_command_context`/question-mode tests below to seed
+/// "the last command the user ran".
+fn insert_command_row(
+    conn: &rusqlite::Connection,
+    id: i64,
+    command: &str,
+    session_id: &str,
+    exit_code: i32,
+    timestamp: i64,
+    output: Option<&str>,
+) {
+    conn.execute(
+        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp, mode) \
+         VALUES (?1, ?2, '/tmp', ?3, ?4, ?5, 'command')",
+        rusqlite::params![id, command, session_id, exit_code, timestamp],
+    )
+    .expect("insert command row");
+    if let Some(output) = output {
+        conn.execute(
+            "INSERT INTO history_output (history_id, output) VALUES (?1, ?2)",
+            rusqlite::params![id, output],
+        )
+        .expect("insert output row");
+    }
+}
+
+#[test]
+fn last_command_context_returns_most_recent_session_command() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let app = make_llm_app(
+        "?what does that do",
+        FakeLlm {
+            response: String::new(),
+            error: None,
+            describe_response: String::new(),
+            correct_response: String::new(),
+        },
+    );
+    insert_command_row(&app.conn, 1, "git status", "sess-1", 0, 100, None);
+    insert_command_row(
+        &app.conn,
+        2,
+        "rsync -av foo bar",
+        "sess-1",
+        23,
+        200,
+        Some("rsync: some files vanished before they could be transferred"),
+    );
+    let prev = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "sess-1");
+    }
+    let ctx = app.last_command_context();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    let ctx = ctx.expect("session has command rows");
+    assert_eq!(ctx.command, "rsync -av foo bar", "should pick the newest row");
+    assert_eq!(ctx.exit_code, Some(23));
+    assert_eq!(
+        ctx.output.as_deref(),
+        Some("rsync: some files vanished before they could be transferred")
+    );
+}
+
+#[test]
+fn last_command_context_ignores_other_sessions() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let app = make_llm_app(
+        "?what does that do",
+        FakeLlm {
+            response: String::new(),
+            error: None,
+            describe_response: String::new(),
+            correct_response: String::new(),
+        },
+    );
+    insert_command_row(&app.conn, 1, "git status", "other-session", 0, 100, None);
+    let prev = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "sess-empty");
+    }
+    let ctx = app.last_command_context();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    assert!(
+        ctx.is_none(),
+        "a different session's command must not leak in as context"
+    );
+}
+
+#[test]
+fn last_command_context_maps_sentinel_exit_code_to_none() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let app = make_llm_app(
+        "?why did that fail",
+        FakeLlm {
+            response: String::new(),
+            error: None,
+            describe_response: String::new(),
+            correct_response: String::new(),
+        },
+    );
+    // -1 is `capture_command_output`'s "no exit code
+    // available" sentinel (process killed by a signal), not
+    // a real POSIX status.
+    insert_command_row(&app.conn, 1, "sleep 100", "sess-1", -1, 100, None);
+    let prev = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "sess-1");
+    }
+    let ctx = app.last_command_context();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    assert_eq!(ctx.expect("row present").exit_code, None);
+}
+
+#[test]
+fn last_command_context_truncates_long_output() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let app = make_llm_app(
+        "?why did that fail",
+        FakeLlm {
+            response: String::new(),
+            error: None,
+            describe_response: String::new(),
+            correct_response: String::new(),
+        },
+    );
+    let long_output = "x".repeat(5000);
+    insert_command_row(&app.conn, 1, "verbose-tool", "sess-1", 1, 100, Some(&long_output));
+    let prev = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "sess-1");
+    }
+    let ctx = app.last_command_context();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    let output = ctx.expect("row present").output.expect("output present");
+    assert!(
+        output.len() < long_output.len(),
+        "5000-char output should have been truncated"
+    );
+    assert!(output.ends_with("[truncated]"), "got: {:?}", output);
+}
+
+#[test]
+fn run_question_query_stages_answer_and_opens_overlay() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let mut app = make_llm_app(
+        "?what does that do",
+        FakeLlm {
+            response: "It lists files in the current directory.".to_string(),
+            error: None,
+            describe_response: String::new(),
+            correct_response: String::new(),
+        },
+    );
+    let prev = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "sess-1");
+    }
+    app.select_for_run();
+    app.process_pending_llm_request();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    let view = app.question_view.expect("question overlay should open");
+    assert_eq!(view.text, "It lists files in the current directory.");
+    assert!(app.selection.is_none(), "question mode stays in the TUI");
+}
+
+/// Tab (`Action::JiraFieldComplete`'s dispatch site) submits
+/// the question in `?` mode too, not just Enter — this is the
+/// new behaviour question.md asked for: "by pressing TAB the
+/// query towards the LLM is done".
+#[test]
+fn jira_field_complete_action_submits_question_in_question_mode() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let mut app = make_llm_app(
+        "?what does that do",
+        FakeLlm {
+            response: "It lists files in the current directory.".to_string(),
+            error: None,
+            describe_response: String::new(),
+            correct_response: String::new(),
+        },
+    );
+    let prev = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "sess-1");
+    }
+    let should_exit = dispatch_action(&mut app, Action::JiraFieldComplete);
+    app.process_pending_llm_request();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SMART_HISTORY_SESSION", v),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    assert!(!should_exit, "question mode stays in the TUI");
+    let view = app.question_view.expect("question overlay should open");
+    assert_eq!(view.text, "It lists files in the current directory.");
+}
+
 // --- Query cursor (LLM mode edit support) ---------------------
 
 /// The cursor is initialised to the end of the query

@@ -79,9 +79,12 @@ match standard workflow expectations. This project aims to provide:
   second round-trip. Opt-in via `ollama.url` and `ollama.model` in the config
   file; see the TUI search syntax section for details.
 - **General question mode on `?...`:** when you prefix a query with `?` and
-  press `Enter`, a local ollama instance answers the question (e.g.
+  press `Enter` or `Tab`, a local ollama instance answers the question (e.g.
   `?What is the capital of France?`) with a short response (at most 4
-  sentences). The answer opens in a full-screen overlay; press `Esc` / `Enter` /
+  sentences). The last command run in the session — its command line, exit code,
+  and captured output — is automatically included as context, so
+  `?what does that do` or `?why did that fail` work without retyping the
+  command. The answer opens in a full-screen overlay; press `Esc` / `Enter` /
   `q` to close, `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` to scroll.
   The question is saved to history with the answer stored as output (not as a
   comment), so typing `?` later shows all previous questions and selecting one
@@ -1402,12 +1405,20 @@ When the leading `=` is present the `LLM` chip appears in the mode strip
 (magenta when configured, red when not), and a green input border signals the
 LLM mode is active.
 
-### General question mode (`%...`)
+### General question mode (`?...`)
 
 Prefix a query with `?` followed by a natural-language question and press
-`Enter` to ask a local ollama instance for a short answer (at most 4 sentences).
-The answer opens in a full-screen overlay; press `Esc` / `Enter` / `q` to close,
-`↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` to scroll.
+`Enter` (or `Tab`) to ask a local ollama instance for a short answer (at most 4
+sentences). The answer opens in a full-screen overlay; press `Esc` / `Enter` /
+`q` to close, `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` to scroll.
+
+The question is automatically given the last command run in the current session
+as context — its command line, exit code, and captured output (if any) — so
+questions like `?what does that do`, `?why did this fail`, or
+`?how would you do this instead` resolve "that"/"this"/"it" without you having
+to retype the command. A question unrelated to any command
+(`?what is a symlink`) still works the same as before; the context is only there
+to be used when relevant.
 
 The question is saved to history with the answer stored as output (not as a
 comment). Typing just `?` (or `?` followed by search terms) filters the list to
@@ -1416,14 +1427,16 @@ stored answer. Selecting an old question row re-displays its answer in the
 overlay without making a new LLM call.
 
 ```
-> %What is the capital of France?
-# status bar shows: "Generating command via ollama…"
+> git status
+# (git reports a conflict)
+> ?why did that fail
+# status bar shows: "LLM request in progress…"
 # (the TUI blocks for the duration of the call; typically
 # 1-5 seconds for a local 7B model, bounded by a 30-second
 # timeout)
-# Answer opens in a full-screen overlay:
-# "Paris is the capital of France. It is located in the
-#  north-central part of the country, on the Seine river."
+# Answer opens in a full-screen overlay, using `git status`'s
+# captured output as context:
+# "The command failed because ..."
 # Press Esc/Enter/q to close the overlay.
 ```
 
@@ -1435,9 +1448,9 @@ ollama.model=llama3.2
 ```
 
 Both keys are required; if either is missing or empty, the question mode is
-disabled and pressing Enter on a `%...` query surfaces a "not configured" status
-message. The same `ollama.url` / `ollama.model` configuration as the `=...`
-command-generation mode applies.
+disabled and pressing Enter or Tab on a `?...` query surfaces a "not configured"
+status message. The same `ollama.url` / `ollama.model` configuration as the
+`=...` command-generation mode applies.
 
 When the leading `?` is present the input border is tinted magenta (same as the
 LLM mode) and the status bar shows a `QUESTION` chip (red when ollama is not

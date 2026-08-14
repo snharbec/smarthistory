@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Question mode (`?`): the last command run in the session — its command line,
+  exit code, and captured output, if any — is now automatically included as
+  context, so `?what does that do` or `?why did that fail` resolve "that"/"this"
+  without retyping the command; a question unrelated to any command still works
+  the same as before. `Tab` also submits the question now, same as `Enter`, so
+  you don't have to reach for Enter after typing.
 - New `smarthistory project files`: prints the files viewed/modified/created
   since the currently-open project session started — scoped to the live session
   rather than a whole calendar day like `project report`. Reads the open

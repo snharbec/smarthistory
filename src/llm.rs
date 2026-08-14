@@ -167,15 +167,21 @@ pub trait LlmClient: Send + Sync {
 
     /// Answer a general question in at most four sentences
     /// of plain prose. Used by the TUI's question mode
-    /// (prefixed with `?`).
+    /// (prefixed with `?`). `context`, when present, is the
+    /// last command run in the session — see
+    /// [`build_question_prompt`].
     ///
     /// Default implementation calls
     /// [`build_question_prompt`] and forwards to
     /// [`prompt`]. Tests can override this to return a
     /// canned answer without having to also stub
     /// the prompt construction.
-    fn question(&self, question: &str) -> Result<String, LlmError> {
-        self.prompt(&build_question_prompt(question))
+    fn question(
+        &self,
+        question: &str,
+        context: Option<&LastCommandContext>,
+    ) -> Result<String, LlmError> {
+        self.prompt(&build_question_prompt(question, context))
     }
 }
 
@@ -328,17 +334,63 @@ introductory text.\n\n{}",
     )
 }
 
+/// The most recently run shell command in the current
+/// session, gathered so a `?` question can refer to "that
+/// command"/"this"/"it" without the user having to repeat
+/// it. `output` is already truncated to a prompt-safe length
+/// by the caller (`App::last_command_context`) before this
+/// struct is built — this module only formats, it doesn't
+/// bound sizes.
+#[derive(Debug, Clone)]
+pub struct LastCommandContext {
+    pub command: String,
+    /// `None` when the command's exit code wasn't captured
+    /// (e.g. no shell hook ran) rather than a real 0/nonzero
+    /// status — omitted from the prompt in that case instead
+    /// of misleadingly showing 0.
+    pub exit_code: Option<i32>,
+    pub output: Option<String>,
+}
+
 /// The prompt template for the "general question"
 /// action (prefixed with `?`). The hard constraint is
 /// "maximum 4 sentences" so the response fits comfortably
 /// in a small overlay; the soft constraint is "plain prose,
 /// no markdown, no lists, no code blocks" so the user gets a
 /// readable answer instead of a wall of formatted text.
-pub fn build_question_prompt(question: &str) -> String {
+///
+/// `context`, when present, is the last command run in the
+/// session (see [`LastCommandContext`]) — it lets questions
+/// like "what does that command do" or "why did this fail"
+/// resolve "that"/"this" without the user retyping the
+/// command. Purely additive: a `None` context reproduces the
+/// original prompt verbatim, so a general question unrelated
+/// to any command still works the same as before this existed.
+pub fn build_question_prompt(question: &str, context: Option<&LastCommandContext>) -> String {
+    let context_block = match context {
+        Some(ctx) => {
+            let mut block = format!(
+                "For context, the user just ran this shell command:\n```\n{}\n```\n",
+                ctx.command
+            );
+            if let Some(code) = ctx.exit_code {
+                block.push_str(&format!("It exited with status {}.\n", code));
+            }
+            if let Some(output) = &ctx.output {
+                block.push_str(&format!("Its captured output was:\n```\n{}\n```\n", output));
+            }
+            block.push_str(
+                "If the question below refers to \"that command\", \"this\", or similar, \
+answer about the command above; otherwise just answer the question.\n\n",
+            );
+            block
+        }
+        None => String::new(),
+    };
     format!(
         "Give me a short answer with maximum 4 sentences of the following question. \
-Respond with plain prose only — no markdown, no lists, no code blocks, no preamble.\n\n{}",
-        question
+Respond with plain prose only — no markdown, no lists, no code blocks, no preamble.\n\n{}{}",
+        context_block, question
     )
 }
 
@@ -448,6 +500,50 @@ mod tests {
         assert!(p.contains("find yesterday's files"));
         // The system instructions must precede the user input.
         assert!(p.starts_with("You are a strict Bash command generator"));
+    }
+
+    #[test]
+    fn build_question_prompt_without_context_is_unchanged() {
+        let p = build_question_prompt("what is a symlink?", None);
+        assert!(p.contains("what is a symlink?"));
+        assert!(!p.contains("just ran this shell command"));
+    }
+
+    #[test]
+    fn build_question_prompt_with_context_includes_command_and_exit_code() {
+        let ctx = LastCommandContext {
+            command: "rsync -av foo bar".to_string(),
+            exit_code: Some(23),
+            output: None,
+        };
+        let p = build_question_prompt("why did that fail?", Some(&ctx));
+        assert!(p.contains("rsync -av foo bar"));
+        assert!(p.contains("exited with status 23"));
+        assert!(p.contains("why did that fail?"));
+    }
+
+    #[test]
+    fn build_question_prompt_omits_sentinel_exit_code_and_absent_output() {
+        let ctx = LastCommandContext {
+            command: "long-running-tool".to_string(),
+            exit_code: None,
+            output: None,
+        };
+        let p = build_question_prompt("what does that do?", Some(&ctx));
+        assert!(p.contains("long-running-tool"));
+        assert!(!p.contains("exited with status"));
+        assert!(!p.contains("captured output"));
+    }
+
+    #[test]
+    fn build_question_prompt_includes_output_when_present() {
+        let ctx = LastCommandContext {
+            command: "cat missing.txt".to_string(),
+            exit_code: Some(1),
+            output: Some("cat: missing.txt: No such file or directory".to_string()),
+        };
+        let p = build_question_prompt("why did that fail?", Some(&ctx));
+        assert!(p.contains("cat: missing.txt: No such file or directory"));
     }
 
     #[test]

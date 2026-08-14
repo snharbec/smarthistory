@@ -705,6 +705,10 @@ and
 [`docs/modes/README.md#meta-prefix-mode--pick-a-mode-by-name`](modes/README.md#meta-prefix-mode--pick-a-mode-by-name)
 for the full tables.
 
+In `?` (Question) mode there's nothing to complete, so the same key submits the
+question to the LLM instead — identical to pressing `Enter` (`Run`); see
+[General question mode](../TECHNICAL.md#general-question-mode).
+
 ### `SmartOpen`
 
 | Field        | Value                     |
