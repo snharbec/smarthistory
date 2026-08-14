@@ -735,6 +735,8 @@ smarthistory import-atuin
 smarthistory init  zsh
 smarthistory project report [--day <YYYY-MM-DD>|today|yesterday] [--project <slug>] [--min-duration <secs>]
 smarthistory project select <slug>
+smarthistory project current
+smarthistory project pause
 ```
 
 - `search` and `select` are similar; `select` exists primarily as a hook for
@@ -828,6 +830,20 @@ smarthistory project select <slug>
   it, closing any previously-open session with `end_reason = "switch"`. Staged
   by the `.` prefix-mode picker as the shell command run after a `type: project`
   note is selected; also runnable directly for scripting a project switch.
+- `project current` prints the project the current directory resolves to (marker
+  file → `project.<slug>.dir` → last explicit selection → nothing), the same
+  priority `smarthistory add` uses. Prints just the slug (no decoration, easy to
+  embed in a shell prompt or script); exits 1 with nothing on stdout when
+  unresolved.
+- `project pause` toggles project tracking off/on. First call pauses: closes the
+  open session (`end_reason = "paused"`) and suppresses all resolution until
+  resumed — a `project_pause` singleton row, checked first and unconditionally
+  by `resolve_current_project`, so `cd`-ing into a directory-bound project's
+  tree while paused doesn't quietly resume tracking. Second call resumes:
+  restores the exact project that was active at the moment of pausing
+  (`end_reason = "switch"` on the reopened session), not whatever the current
+  directory resolves to. For a lunch break or a meeting where the time shouldn't
+  be attributed to anything.
 
 ### Sample output
 

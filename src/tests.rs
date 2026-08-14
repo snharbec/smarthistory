@@ -1720,6 +1720,11 @@ tmuxpaneoutputdir=~/custom-tmux
                  id INTEGER PRIMARY KEY CHECK (id = 1),
                  project_slug TEXT NOT NULL,
                  set_ts INTEGER NOT NULL
+             );
+             CREATE TABLE project_pause (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 paused_slug TEXT,
+                 paused_at INTEGER NOT NULL
              );",
         )
         .expect("schema");
@@ -1762,6 +1767,43 @@ tmuxpaneoutputdir=~/custom-tmux
     fn resolve_current_project_returns_none_when_nothing_resolves() {
         let conn = resolve_current_project_test_conn();
         let cfg = Config::default();
+        assert_eq!(resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(), None);
+    }
+
+    // --- Time tracking: `project pause` ---------------------------------
+
+    #[test]
+    fn is_project_tracking_paused_reflects_project_pause_row() {
+        let conn = resolve_current_project_test_conn();
+        assert!(!is_project_tracking_paused(&conn).unwrap());
+        conn.execute(
+            "INSERT INTO project_pause (id, paused_slug, paused_at) VALUES (1, 'demo', 1000)",
+            [],
+        )
+        .expect("insert");
+        assert!(is_project_tracking_paused(&conn).unwrap());
+    }
+
+    /// The whole point of pausing: even a directory bound to a
+    /// project (which would normally win outright — see
+    /// `resolve_current_project_prefers_dir_match_over_project_current`)
+    /// must resolve to `None` while paused.
+    #[test]
+    fn resolve_current_project_ignores_directory_and_explicit_selection_while_paused() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'other', 1000)",
+            [],
+        )
+        .expect("insert");
+        conn.execute(
+            "INSERT INTO project_pause (id, paused_slug, paused_at) VALUES (1, 'demo', 1000)",
+            [],
+        )
+        .expect("insert");
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/work\n"]);
+        assert_eq!(resolve_current_project(&conn, &cfg, "/tmp/work/subdir").unwrap(), None);
         assert_eq!(resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(), None);
     }
 

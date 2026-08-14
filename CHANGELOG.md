@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory project pause`: a toggle to manually stop project time
+  tracking (e.g. for a lunch break or a meeting) and resume it later. The first
+  call closes the open session (`end_reason = "paused"`) and suppresses all
+  project resolution — directory, marker file, explicit selection — until
+  resumed, so `cd`-ing into a directory-bound project's tree while paused
+  doesn't quietly restart tracking. The second call restores the exact project
+  that was active at the moment of pausing, not whatever the current directory
+  resolves to.
+- New `smarthistory project current`: prints the project the current directory
+  resolves to (same priority `smarthistory add` uses), for scripting or
+  shell-prompt embedding.
 - **Time tracking**: attributes directories, commands, notes created, and
   websites visited to a project — a `type: project` note in `notes.database` —
   resolved by directory (`project.<slug>.dir`, longest-prefix match, or an
