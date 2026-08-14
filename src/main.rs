@@ -464,6 +464,13 @@ enum Commands {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// Time tracking: record a file view/edit/creation event, called
+    /// from an editor hook (a Vim autocmd, an LSP client, …). See the
+    /// `viewed` / `modified` / `created` sub-commands.
+    File {
+        #[command(subcommand)]
+        action: FileAction,
+    },
     /// Delete entries matching the given filter.
     ///
     /// With no filter, deletes every entry in the database. Prompts
@@ -768,6 +775,38 @@ enum ProjectAction {
     /// whatever the current directory would resolve to on its own.
     /// Prints which state it switched to.
     Pause,
+}
+
+/// Sub-commands of `smarthistory file`. Each records one row in
+/// `file_events` for the given path, attributed to a project using
+/// the exact same resolution `smarthistory add` uses for directories
+/// (`resolve_current_project`) — but resolved from the FILE's own
+/// directory, not the caller's cwd, since an editor hook usually
+/// runs with the editor process's cwd, not necessarily the file's
+/// directory (a background LSP server, a globally-running editor
+/// instance with files open from several projects, etc.).
+#[derive(clap::Subcommand, Debug)]
+enum FileAction {
+    /// Record that `path` was viewed (opened, read) in an editor.
+    Viewed {
+        /// Path to the file. Relative paths are resolved against the
+        /// current working directory and canonicalized; a path that
+        /// no longer exists on disk is stored as given (best effort
+        /// — a file viewed and then deleted before the hook fires is
+        /// an edge case, not a reason to drop the event).
+        path: String,
+    },
+    /// Record that `path` was modified (saved with changes) in an
+    /// editor.
+    Modified {
+        /// See `Viewed::path`.
+        path: String,
+    },
+    /// Record that `path` was newly created in an editor.
+    Created {
+        /// See `Viewed::path`.
+        path: String,
+    },
 }
 
 /// A single history entry for JSON export/import.
@@ -5166,6 +5205,28 @@ fn init_db() -> anyhow::Result<Connection> {
         )",
         [],
     )?;
+    // File-tracking events (`smarthistory file viewed/modified/created`).
+    // `project_slug` is resolved once, at record time, exactly like
+    // `history.directory` bakes in its project attribution only
+    // indirectly (via the timestamp-range join `project_sessions`
+    // does) — here it's stored directly on the row since a file
+    // event has no natural session-membership window of its own to
+    // join against; it's a point-in-time editor event, not a shell
+    // command bounded by "next command in this session".
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_events (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            event_kind TEXT NOT NULL CHECK (event_kind IN ('viewed', 'modified', 'created')),
+            project_slug TEXT,
+            timestamp INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_file_events_project_ts ON file_events (project_slug, timestamp)",
+        [],
+    )?;
     // If an older database still has the per-row comment column from
     // a previous schema, migrate those comments into the global
     // command_comments table and then drop the column.
@@ -5649,6 +5710,45 @@ fn report_command_rows(
     Ok(out)
 }
 
+/// Fetch every `file_events` row timestamped within `[range_start,
+/// range_end)` and group it by project (`None` = an event whose
+/// directory resolved to no project at record time — see
+/// `Commands::File`'s handler) and event kind, deduplicating by path
+/// with an occurrence count. Pulled out of `ProjectAction::Report`'s
+/// handler as its own function, the same stdout-free-testable-helper
+/// split `report_command_rows`/`group_command_rows` already use.
+fn report_file_events(
+    conn: &Connection,
+    range_start: i64,
+    range_end: i64,
+) -> anyhow::Result<std::collections::BTreeMap<Option<String>, FileEventGroups>> {
+    let mut by_slug: std::collections::BTreeMap<Option<String>, FileEventGroups> =
+        std::collections::BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT path, event_kind, project_slug FROM file_events \
+         WHERE timestamp >= ?1 AND timestamp < ?2",
+    )?;
+    let rows = stmt.query_map(params![range_start, range_end], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for r in rows {
+        let (path, kind, slug) = r?;
+        let groups = by_slug.entry(slug).or_default();
+        let bucket = match kind.as_str() {
+            "viewed" => &mut groups.viewed,
+            "modified" => &mut groups.modified,
+            "created" => &mut groups.created,
+            _ => continue,
+        };
+        *bucket.entry(path).or_insert(0) += 1;
+    }
+    Ok(by_slug)
+}
+
 /// Format a duration in seconds as `HhMMm` / `Mm` / `Ss`, matching
 /// the compactness of this project's other plain-text CLI output
 /// (no table/color crate dependency — see `Commands::Export`'s and
@@ -5790,6 +5890,38 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
 /// arbitrary shell text, not report-controlled strings.
 fn escape_md_table_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
+}
+
+/// One project's (or "untracked"'s) file-tracking events for the
+/// report's day range, already deduplicated by path with an
+/// occurrence count (`path -> count`) per event kind — see the
+/// `files_by_slug` construction in `ProjectAction::Report`'s handler.
+#[derive(Default)]
+struct FileEventGroups {
+    viewed: std::collections::BTreeMap<String, usize>,
+    modified: std::collections::BTreeMap<String, usize>,
+    created: std::collections::BTreeMap<String, usize>,
+}
+
+/// Print one `### Files <label>` list: each deduplicated path, with
+/// an `(Nx)` occurrence count when the file was viewed/modified/
+/// created more than once in the day (same convention the Commands
+/// table's `Nx` counter uses) — a single occurrence prints bare, no
+/// `(1x)` noise. Paths are `$HOME`-shortened to `~` like every other
+/// path in this report.
+fn print_file_events_section(label: &str, paths: &std::collections::BTreeMap<String, usize>) {
+    println!("\n### Files {label}");
+    if paths.is_empty() {
+        println!("(none)");
+        return;
+    }
+    for (path, count) in paths {
+        if *count > 1 {
+            println!("- {} ({}x)", crate::util::expand_home(path), count);
+        } else {
+            println!("- {}", crate::util::expand_home(path));
+        }
+    }
 }
 
 /// One website visit, already resolved to a display cluster
@@ -7096,6 +7228,8 @@ fn main() -> anyhow::Result<()> {
                     });
                 }
 
+                let files_by_slug = report_file_events(&conn, range_start, range_end)?;
+
                 // Slugs to report on, in a stable order: explicit
                 // `--project` narrows to just that one; otherwise
                 // every slug seen in either the session intervals or
@@ -7115,6 +7249,9 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     for slug in websites_by_slug.keys().flatten() {
+                        seen.insert(slug.clone());
+                    }
+                    for slug in files_by_slug.keys().flatten() {
                         seen.insert(slug.clone());
                     }
                     slugs.extend(seen);
@@ -7143,7 +7280,13 @@ fn main() -> anyhow::Result<()> {
                         .filter(|c| c.project_slug.is_none())
                         .collect();
                     let untracked_websites = websites_by_slug.get(&None);
-                    if !untracked.is_empty() || untracked_websites.is_some_and(|v| !v.is_empty()) {
+                    let untracked_files = files_by_slug.get(&None).is_some_and(|g| {
+                        !g.viewed.is_empty() || !g.modified.is_empty() || !g.created.is_empty()
+                    });
+                    if !untracked.is_empty()
+                        || untracked_websites.is_some_and(|v| !v.is_empty())
+                        || untracked_files
+                    {
                         sections.push((None, untracked));
                     }
                 }
@@ -7170,6 +7313,11 @@ fn main() -> anyhow::Result<()> {
                             println!("- [[{}]]", note_basename(n));
                         }
                     }
+                    let empty_file_groups = FileEventGroups::default();
+                    let file_groups = files_by_slug.get(slug).unwrap_or(&empty_file_groups);
+                    print_file_events_section("viewed", &file_groups.viewed);
+                    print_file_events_section("modified", &file_groups.modified);
+                    print_file_events_section("created", &file_groups.created);
                     println!("\n### Websites");
                     match websites_by_slug.get(slug) {
                         Some(items) if !items.is_empty() => print_website_section(items),
@@ -7268,6 +7416,32 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Commands::File { action } => {
+            let (kind, path) = match &action {
+                FileAction::Viewed { path } => ("viewed", path),
+                FileAction::Modified { path } => ("modified", path),
+                FileAction::Created { path } => ("created", path),
+            };
+            // Reused despite the name — `canonicalize_directory` is
+            // just `std::fs::canonicalize` with a same-string
+            // fallback on failure, which works identically for a
+            // file path as for a directory.
+            let canonical = crate::util::canonicalize_directory(path);
+            let dir = std::path::Path::new(&canonical)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let cfg = Config::load();
+            let project_slug = resolve_current_project(&conn, &cfg, &dir)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            conn.execute(
+                "INSERT INTO file_events (path, event_kind, project_slug, timestamp) VALUES (?1, ?2, ?3, ?4)",
+                params![canonical, kind, project_slug, now],
+            )?;
+        }
         Commands::Config { action } => match action {
             ConfigAction::Get { key } => {
                 let cfg = Config::load();
