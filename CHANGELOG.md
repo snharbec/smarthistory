@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `fileviewcommands` config key (default `less more bat tail head`):
+  `smarthistory add` now automatically records a `viewed` file event for these
+  commands' file argument — no editor hook needed for the common case of paging
+  through a file from the shell (`tail -f app.log`). The first non-flag argument
+  is taken as the file (`tail -f app.log` → `app.log`, flags before it are
+  skipped); a flag that takes a separate value (`head -n 20 file.csv`) isn't
+  understood and picks up the value instead — a known, accepted limitation for a
+  handful of pager-style commands, not worth a real argument parser. Setting the
+  config key replaces the default list entirely, same convention `ignorecapture`
+  uses.
 - New `smarthistory file viewed|modified|created <path>`: records a file
   view/edit/creation event, meant to be called from an editor hook (a Vim
   `autocmd`, an LSP client, a file-watcher script). Stored in a new

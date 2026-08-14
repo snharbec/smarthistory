@@ -365,6 +365,11 @@ smarthistory project pause
 smarthistory file viewed ~/work/acme/src/main.rs
 smarthistory file modified ~/work/acme/src/main.rs
 smarthistory file created ~/work/acme/README.md
+
+# ...or just page through a file — `less`/`more`/`bat`/`tail`/`head` (the
+# `fileviewcommands` list, configurable) automatically record a `viewed`
+# event for their file argument, no hook needed:
+tail -f ~/work/acme/app.log
 ```
 
 Websites (bookmarks/history from `^` mode, plus JIRA REST-mode visits from `-`
