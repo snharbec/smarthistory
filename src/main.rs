@@ -5665,36 +5665,44 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
     if filtered.is_empty() {
         println!("(none)");
     } else {
-        // A single-occurrence command keeps the original
-        // `<time> <duration> (<dir>) <command>` layout unchanged — the
-        // timestamp column only makes sense when there's exactly one.
+        println!("| Time | Duration | Directory | Command |");
+        println!("| --- | --- | --- | --- |");
+        // A single-occurrence command keeps its actual timestamp in
+        // the Time column; a repeated one (same command, same
+        // directory, run across two or more shell sessions during
+        // the day — see `group_command_rows`) shows a "Nx" count
+        // there instead, since there's no single timestamp left to
+        // show once the rows are folded together.
         for g in &group_command_rows(&filtered) {
-            if g.count > 1 {
-                println!(
-                    "- {}x  {}  ({})  {}",
-                    g.count,
-                    format_duration_secs(g.total_secs),
-                    g.directory,
-                    g.command
-                );
+            let time_cell = if g.count > 1 {
+                format!("{}x", g.count)
             } else {
-                let ts = chrono::DateTime::from_timestamp(g.timestamp, 0)
+                chrono::DateTime::from_timestamp(g.timestamp, 0)
                     .map(|dt| {
                         dt.with_timezone(&chrono::Local)
                             .format("%H:%M:%S")
                             .to_string()
                     })
-                    .unwrap_or_else(|| g.timestamp.to_string());
-                println!(
-                    "- {}  {}  ({})  {}",
-                    ts,
-                    format_duration_secs(g.total_secs),
-                    g.directory,
-                    g.command
-                );
-            }
+                    .unwrap_or_else(|| g.timestamp.to_string())
+            };
+            println!(
+                "| {} | {} | {} | {} |",
+                time_cell,
+                format_duration_secs(g.total_secs),
+                escape_md_table_cell(g.directory),
+                escape_md_table_cell(g.command)
+            );
         }
     }
+}
+
+/// Escape a value for embedding in a Markdown table cell: `|` would
+/// otherwise be parsed as a column separator, and an embedded
+/// newline would break the row onto its own (unterminated) table
+/// line — a real risk here since both `directory` and `command` are
+/// arbitrary shell text, not report-controlled strings.
+fn escape_md_table_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ")
 }
 
 /// Print one project's (or "untracked"'s) `### Websites` list.
