@@ -6,10 +6,12 @@
 
 Question mode sends the body of the query — plus context about the last command
 you ran, if any — to the configured ollama instance and shows the model's
-4-sentence answer in an overlay. Useful for short factual questions where you
-don't want a Bash command — you want a text reply you can read.
+4-sentence answer. Useful for short factual questions where you don't want a
+Bash command — you want a text reply you can read. Reachable two ways: from
+[the raw shell prompt](#from-the-shell-prompt-no-tui) (no TUI needed) or from
+inside the TUI, described below.
 
-## What it does
+## What it does (inside the TUI)
 
 - `?when was TCP invented` — a standalone factual question, no command context
   needed.
@@ -37,6 +39,53 @@ row.
 ## Cancelling
 
 `Ctrl-C` / `Esc` cancels an in-flight request without leaving the TUI.
+
+## From the shell prompt (no TUI)
+
+Type `?question text` directly at the normal zsh prompt — not inside the TUI's
+own input box — and press `Enter`. `smarthistory` intercepts the line at
+`accept-line` (before it would ever be handed to the real shell for execution —
+a `?...` line isn't a valid command and never runs one), calls the LLM
+synchronously, and prints the answer straight to the console:
+
+```
+$ git status
+# (git reports a conflict)
+$ ?why did that fail
+[LLM] The command failed because ...
+```
+
+The answer is tagged `[LLM]` and colorized (magenta tag) when the terminal
+supports it; on a non-TTY it's plain text. Same automatic last-command context
+as the TUI path above — `?why did that fail` right after a failing command works
+without repeating the command.
+
+If the answer includes one or more suggested commands, they're offered as a
+numbered pick list:
+
+```
+$ ?how do I undo that
+[LLM] You can undo the last commit without losing your changes.
+1) git reset --soft HEAD~1
+Choose [1-1], Enter to skip: 1
+$ git reset --soft HEAD~1
+```
+
+Typing a number and pressing `Enter` stages that command into the next prompt
+for you to review and run yourself — it is **never** run automatically, same
+convention as every other LLM-generated command in this project (`=` mode,
+`Ctrl-T` correct). Pressing `Enter` with no number skips the pick list and
+leaves the prompt empty.
+
+The question is recorded to the same `history` table as a TUI-asked question
+(`mode = 'question'`), so it shows up in `?`-mode search and
+`smarthistory project report` identically either way. The line is also added to
+zsh's own interactive history (`Ctrl-P`/Up-arrow recalls it, without having
+"run" it).
+
+Requires the same `ollama.url` + `ollama.model` configuration as the TUI path;
+without it, `?question<Enter>` prints a "not configured" message instead of the
+historical "command not found" shell error.
 
 ## Configuration
 

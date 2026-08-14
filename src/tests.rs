@@ -1131,6 +1131,48 @@ tmuxpaneoutputdir=~/custom-tmux
         );
     }
 
+    #[test]
+    fn format_ask_output_no_color_is_plain_text() {
+        let (answer, suggestions) = format_ask_output(
+            "It failed because of a permission error.",
+            &["chmod +x foo.sh".to_string()],
+            false,
+        );
+        assert_eq!(
+            answer,
+            "[LLM] It failed because of a permission error."
+        );
+        assert_eq!(suggestions, vec!["1) chmod +x foo.sh".to_string()]);
+        assert!(!answer.contains('\x1b'));
+        assert!(!suggestions[0].contains('\x1b'));
+    }
+
+    #[test]
+    fn format_ask_output_color_wraps_tag_and_indices() {
+        let (answer, suggestions) =
+            format_ask_output("It lists files.", &["ls -la".to_string()], true);
+        assert!(answer.contains("\x1b[1;35m[LLM]\x1b[0m"));
+        assert!(answer.ends_with("It lists files."));
+        assert!(suggestions[0].contains("\x1b[1;36m1)\x1b[0m"));
+        assert!(suggestions[0].ends_with("ls -la"));
+    }
+
+    #[test]
+    fn format_ask_output_numbers_multiple_suggestions_in_order() {
+        let suggestions = vec!["git stash".to_string(), "git stash pop".to_string()];
+        let (_answer, lines) = format_ask_output("Try one of these.", &suggestions, false);
+        assert_eq!(
+            lines,
+            vec!["1) git stash".to_string(), "2) git stash pop".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_ask_output_no_suggestions_is_empty() {
+        let (_answer, lines) = format_ask_output("Just a fact, no command.", &[], false);
+        assert!(lines.is_empty());
+    }
+
     /// `Config::theme_for` returns the user-configured
     /// `theme.<scheme>=` value when set, with a fallback
     /// to the OTHER scheme's value. The fallback is

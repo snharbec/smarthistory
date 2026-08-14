@@ -233,6 +233,22 @@ enum Commands {
         /// The comment text to resolve.
         text: String,
     },
+    /// Ask the LLM a question directly from the shell prompt — no
+    /// TUI. Called by the `accept-line` widget in `init.zsh` when
+    /// the typed line starts with the configured question prefix
+    /// (`?` by default); not normally invoked by hand.
+    ///
+    /// Prints a colorized answer to stderr (so it's visible on the
+    /// real terminal without being captured), tagged as coming
+    /// from the LLM. If the answer suggests one or more shell
+    /// commands, prompts the user to pick one (also on stderr,
+    /// reading the choice from stdin) and prints ONLY the chosen
+    /// command to stdout, so the zsh wrapper can stage it into the
+    /// next prompt for review — it is never run automatically.
+    Ask {
+        /// The question text (everything after the `?` prefix).
+        question: String,
+    },
     /// Search history and print matching rows, like `search` but
     /// with a 1000-row default limit.
     ///
@@ -4470,6 +4486,37 @@ fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// True if stderr is connected to a terminal. `smarthistory ask`
+/// writes its human-readable answer to stderr (stdout is reserved
+/// for the chosen command, captured by the zsh wrapper's `$()`), so
+/// it gates its own ANSI coloring on stderr's TTY-ness rather than
+/// stdout's.
+fn stderr_is_tty() -> bool {
+    std::io::stderr().is_terminal()
+}
+
+/// Build the colorized `[LLM] <prose>` answer line and the
+/// numbered suggestion lines for `smarthistory ask`. Colorized only
+/// when `color` is true (the caller gates this on `stderr_is_tty()`
+/// — plain ANSI on a non-terminal stderr would just be noise for
+/// whatever's consuming it). `suggestion_lines[i]` is `suggestions[i]`
+/// prefixed with its 1-based pick-list index, matching what the
+/// `Choose [1-N]` prompt expects the user to type.
+fn format_ask_output(prose: &str, suggestions: &[String], color: bool) -> (String, Vec<String>) {
+    let (tag_open, tag_close, num_open, num_close) = if color {
+        ("\x1b[1;35m", "\x1b[0m", "\x1b[1;36m", "\x1b[0m")
+    } else {
+        ("", "", "", "")
+    };
+    let answer_line = format!("{tag_open}[LLM]{tag_close} {prose}");
+    let suggestion_lines = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| format!("{num_open}{}){num_close} {cmd}", i + 1))
+        .collect();
+    (answer_line, suggestion_lines)
+}
+
 /// Build the open/close markers for the matched prefix in
 /// `AnsiMode::Bold` (the historical default) and `AnsiMode::Off`.
 /// `AnsiMode::Full` is handled by the dedicated `highlight_full`
@@ -6564,6 +6611,89 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", command);
             }
         }
+        Commands::Ask { question } => {
+            use llm::LlmClient;
+            use std::io::Write;
+
+            let question = question.trim();
+            if question.is_empty() {
+                eprintln!("Ask: provide a question after the question prefix");
+                std::process::exit(1);
+            }
+            let cfg = Config::load();
+            let Some(llm_cfg) = cfg.llm() else {
+                eprintln!("{}", llm::LlmError::NotConfigured);
+                std::process::exit(1);
+            };
+            let session_id =
+                env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+            let context = llm::last_command_context(&conn, &session_id);
+            let prompt = llm::build_question_console_prompt(question, context.as_ref());
+
+            let client = llm::OllamaClient::new(llm_cfg);
+            let raw = match client.prompt(&prompt) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            };
+            let (prose, suggestions) = llm::split_question_answer(&raw);
+            let color = stderr_is_tty();
+            let (answer_line, suggestion_lines) = format_ask_output(&prose, &suggestions, color);
+            eprintln!("{}", answer_line);
+
+            let mut chosen: Option<&str> = None;
+            if !suggestions.is_empty() {
+                for line in &suggestion_lines {
+                    eprintln!("{}", line);
+                }
+                eprint!("Choose [1-{}], Enter to skip: ", suggestions.len());
+                std::io::stderr().flush().ok();
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_ok()
+                    && let Ok(n) = input.trim().parse::<usize>()
+                    && n >= 1
+                    && n <= suggestions.len()
+                {
+                    chosen = Some(&suggestions[n - 1]);
+                }
+            }
+            if let Some(cmd) = chosen {
+                println!("{}", cmd);
+            }
+
+            // Persist the same way the TUI's `App::stage_question`
+            // does, so `?`-mode history search and
+            // `project report`'s question sections behave
+            // identically regardless of whether the question was
+            // asked from the console or the TUI.
+            let directory =
+                crate::util::canonicalize_directory(&env::var("PWD").unwrap_or_default());
+            let query_command = format!("{}{}", cfg.query_prefixes().question, question);
+            let insert_result: anyhow::Result<i64> = (|| {
+                conn.execute(
+                    "INSERT INTO history (command, directory, session_id, exit_code, mode) \
+                     VALUES (?1, ?2, ?3, -1, 'question') \
+                     ON CONFLICT (command, directory, session_id) DO UPDATE \
+                     SET timestamp = (strftime('%s', 'now')), mode = 'question'",
+                    params![&query_command, &directory, &session_id],
+                )?;
+                let id: i64 = conn.query_row(
+                    "SELECT id FROM history WHERE command = ?1 AND directory = ?2 AND session_id = ?3",
+                    params![&query_command, &directory, &session_id],
+                    |row| row.get(0),
+                )?;
+                Ok(id)
+            })();
+            if let Ok(history_id) = insert_result {
+                conn.execute(
+                    "INSERT INTO history_output (history_id, output) VALUES (?1, ?2) \
+                     ON CONFLICT (history_id) DO UPDATE SET output = excluded.output, captured_at = (strftime('%s', 'now'))",
+                    params![history_id, &raw.trim()],
+                )?;
+            }
+        }
         Commands::Search {
             query,
             directory,
@@ -7616,6 +7746,13 @@ fn main() -> anyhow::Result<()> {
                         println!("{}", if cfg.globcomplete_enabled { "on" } else { "off" })
                     }
                     "zsh.mode" => println!("{}", cfg.zsh_default_mode),
+                    // The resolved `?` question-mode prefix
+                    // character. Cached once at shell-init time so
+                    // the `accept-line` widget can recognize a
+                    // `?question<Enter>` line without a
+                    // `smarthistory config get` round-trip on every
+                    // keypress.
+                    "prefix.question" => println!("{}", cfg.query_prefixes().question),
                     // Resolved palette as a flat `key=value` block,
                     // one entry per `tuicolor.<field>` slot. The
                     // widget reads this once at init time and

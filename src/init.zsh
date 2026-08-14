@@ -170,6 +170,14 @@ case "$_smarthistory_mode" in
     *) _smarthistory_mode="sess" ;;
 esac
 
+# The `?` question-mode prefix character, cached once so the
+# accept-line widget below can recognize a `?question<Enter>` line
+# without a `smarthistory config get` round-trip on every keypress.
+# Falls back to the historical default `?` if the lookup fails (e.g.
+# an old binary without the `prefix.question` config-get case).
+_smarthistory_question_prefix=$(smarthistory config get prefix.question 2>/dev/null)
+[ -n "$_smarthistory_question_prefix" ] || _smarthistory_question_prefix="?"
+
 # ---- Live dropdown completion (opt-in, config file only) ----
 #
 # Shows a live, multi-candidate suggestion menu below the cursor as
@@ -2280,6 +2288,46 @@ bindkey '^S' _smarthistory_next_history
 # _smarthistory_index from the previous walk and lands on an
 # unexpected match.
 _smarthistory_reset_and_accept() {
+    # `?question<Enter>` at the raw prompt: ask the LLM directly
+    # from the console -- no TUI. Checked first, before the
+    # dropdown-commit / real accept-line path below, and returns
+    # unconditionally on a match. A `?...` line is never a real
+    # shell command and must not reach `preexec`/execution (unlike
+    # a space-prefixed "don't record" command, which still runs
+    # normally -- this one doesn't run at all). Requires non-blank
+    # text after the prefix, same gate the TUI's own `?` mode uses
+    # (`crate::tui::mode::question::matches`) -- a bare prefix falls
+    # through to the normal accept-line path below and just fails
+    # as an unknown command, same as today.
+    if [[ "$BUFFER" == "${_smarthistory_question_prefix}"* ]]; then
+        local question="${BUFFER#"$_smarthistory_question_prefix"}"
+        if [[ -n "${question//[[:space:]]/}" ]]; then
+            # Recall via Ctrl-P/Up, but don't execute -- `print -s`
+            # adds a line to zsh's own interactive history without
+            # running it, exactly what's needed here.
+            print -s -- "$BUFFER"
+            _smarthistory_reset_state
+            BUFFER=""
+            zle reset-prompt
+            # `smarthistory ask` writes its colorized answer (and
+            # any pick-list prompt) to stderr, so it lands on the
+            # real terminal immediately; only a chosen command (if
+            # any) comes back on stdout here, mirroring
+            # `_smarthistory_select`'s TUI-draws-to-stderr /
+            # chosen-command-on-stdout contract above. stdin is
+            # still the real terminal even under this `$()`
+            # capture -- same reason `smarthistory tui` can read
+            # real keypresses while its own stdout is captured.
+            local chosen
+            chosen=$(smarthistory ask "$question")
+            if [[ -n "$chosen" ]]; then
+                BUFFER="$chosen"
+                CURSOR=${#BUFFER}
+            fi
+            zle reset-prompt
+            return
+        fi
+    fi
     # If a dropdown candidate is currently SELECTED (the user
     # explicitly navigated to it with Up/Down — `_smarthistory_dropdown_chosen
     # == 1`), Enter commits it into BUFFER and runs it immediately,

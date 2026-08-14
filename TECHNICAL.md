@@ -1407,6 +1407,23 @@ LLM mode is active.
 
 ### General question mode (`?...`)
 
+Reachable two ways: inside the TUI (described below), or directly from the raw
+shell prompt with no TUI at all via `Commands::Ask`
+(`smarthistory ask <question>`) — `_smarthistory_reset_and_accept` in
+`src/init.zsh` intercepts a `?question<Enter>` line at `accept-line`, before it
+would reach `preexec`/real execution, and calls the CLI subcommand
+synchronously. The CLI path shares `crate::llm::last_command_context` and
+`crate::llm::build_question_prompt` with the TUI path (a separate
+`crate::llm::build_question_console_prompt` additionally invites the model to
+suggest commands as fenced code blocks, parsed back out by
+`crate::llm::split_question_answer` into a pick list); it does **not** use
+ratatui at all — the answer and pick list are plain colorized `stderr` output,
+and a chosen command comes back on `stdout` for the zsh wrapper to stage into
+`BUFFER`, mirroring `_smarthistory_select`'s existing TUI-draws-to-stderr /
+chosen-command-on-stdout contract. See
+[`docs/modes/question.md`](docs/modes/question.md#from-the-shell-prompt-no-tui)
+for the full user-facing walkthrough.
+
 Prefix a query with `?` followed by a natural-language question and press
 `Enter` (or `Tab`) to ask a local ollama instance for a short answer (at most 4
 sentences). The answer opens in a full-screen overlay; press `Esc` / `Enter` /
