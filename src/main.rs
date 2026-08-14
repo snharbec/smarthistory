@@ -4509,6 +4509,17 @@ fn format_thinking_message(color: bool) -> String {
     }
 }
 
+/// Erases the `Thinking…` line so the real result (the answer, or an
+/// error) can be printed in its place instead of appearing below it.
+/// `\r` + ANSI "clear to end of line" (`\x1b[2K`) when `color` is
+/// true (an interactive terminal); on a non-TTY there's no cursor to
+/// move, so this is just a newline — `Thinking…` stays as its own
+/// captured line and the result follows it, same as before this
+/// existed.
+fn clear_thinking_message(color: bool) -> &'static str {
+    if color { "\r\x1b[2K" } else { "\n" }
+}
+
 /// Build the colorized `LLM Answer` header + answer block, and the
 /// numbered suggestion lines, for `smarthistory ask`. The header
 /// sits on its own line, with the prose answer starting on the line
@@ -6649,18 +6660,26 @@ fn main() -> anyhow::Result<()> {
             let prompt = llm::build_question_console_prompt(question, context.as_ref());
 
             let color = stderr_is_tty();
-            eprintln!("{}", format_thinking_message(color));
+            // Leading blank line separates the answer from whatever
+            // was on screen before (the now-cleared prompt line) --
+            // `Thinking…` prints WITHOUT a trailing newline so
+            // `clear_thinking_message` can erase exactly this line
+            // once the real result is ready to take its place.
+            eprint!("\n{}", format_thinking_message(color));
+            std::io::stderr().flush().ok();
 
             let client = llm::OllamaClient::new(llm_cfg);
             let raw = match client.prompt(&prompt) {
                 Ok(r) => r,
                 Err(e) => {
+                    eprint!("{}", clear_thinking_message(color));
                     eprintln!("{}", e);
                     std::process::exit(1);
                 }
             };
             let (prose, suggestions) = llm::split_question_answer(&raw);
             let (answer_block, suggestion_lines) = format_ask_output(&prose, &suggestions, color);
+            eprint!("{}", clear_thinking_message(color));
             eprintln!("{}", answer_block);
 
             let mut chosen: Option<&str> = None;

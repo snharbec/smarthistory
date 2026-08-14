@@ -52,15 +52,19 @@ synchronously, and prints the answer straight to the console:
 $ git status
 # (git reports a conflict)
 $ ?why did that fail
-Thinking…
+
 LLM Answer
 The command failed because ...
 ```
 
-While the request is in flight, a transient `Thinking…` line lets you know it's
-working (a local model typically takes 1-5 seconds). The answer itself is headed
-by `LLM Answer` on its own line, colorized (magenta header, dim `Thinking…`)
-when the terminal supports it; on a non-TTY both are plain text. Same automatic
+A blank line, then a transient `Thinking…` line, lets you know the request is in
+flight (a local model typically takes 1-5 seconds). On an interactive terminal
+`Thinking…` is then **replaced in place** by the `LLM Answer` header and the
+answer text — it doesn't linger above the answer in your scrollback (the static
+example above can't show that "replace" motion, only the end result). On a
+non-TTY (piped/redirected output), there's no cursor to move, so `Thinking…`
+simply stays as its own line above the answer instead. Colorized (magenta
+header, dim `Thinking…`) when the terminal supports it. Same automatic
 last-command context as the TUI path above — `?why did that fail` right after a
 failing command works without repeating the command.
 
@@ -69,7 +73,7 @@ numbered pick list:
 
 ```
 $ ?how do I undo that
-Thinking…
+
 LLM Answer
 You can undo the last commit without losing your changes.
 1) git reset --soft HEAD~1

@@ -1182,6 +1182,16 @@ tmuxpaneoutputdir=~/custom-tmux
     }
 
     #[test]
+    fn clear_thinking_message_color_erases_line_in_place() {
+        assert_eq!(clear_thinking_message(true), "\r\x1b[2K");
+    }
+
+    #[test]
+    fn clear_thinking_message_no_color_is_just_a_newline() {
+        assert_eq!(clear_thinking_message(false), "\n");
+    }
+
+    #[test]
     fn format_ask_output_numbers_multiple_suggestions_in_order() {
         let suggestions = vec!["git stash".to_string(), "git stash pop".to_string()];
         let (_answer, lines) = format_ask_output("Try one of these.", &suggestions, false);
