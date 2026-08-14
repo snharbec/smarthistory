@@ -727,6 +727,23 @@ enum ProjectAction {
         #[arg(long)]
         min_duration: Option<i64>,
     },
+    /// Set the explicit "current project" fallback and switch the
+    /// active `project_sessions` row to it immediately.
+    ///
+    /// Staged by the `.` prefix-mode picker as the shell command run
+    /// after a Project note is selected; not normally invoked by
+    /// hand. Unlike a directory-detected switch (`end_reason =
+    /// "directory_change"`), an explicit switch closes any open
+    /// session with `end_reason = "switch"` — though when the
+    /// newly-resolved slug is the same as the one already open,
+    /// `switch_project` treats it as "reaffirming the current
+    /// project" and stays a no-op regardless of the forced reason.
+    Select {
+        /// The project's slug (`crate::util::slugify` of its note's
+        /// filename stem — the same identity `project.<slug>.dir`
+        /// and the report's `--project` filter use).
+        slug: String,
+    },
 }
 
 /// A single history entry for JSON export/import.
@@ -1427,6 +1444,13 @@ pub struct QueryPrefixes {
     /// the first line of the entry (the password) to the clipboard
     /// via `pass`'s built-in clipboard support.
     pub pass: char,
+    /// Prefix for the project picker mode (default `.`). Lists
+    /// `type: project` frontmatter notes from `notes.database`.
+    /// Selecting a row stages `smarthistory project select <slug>`
+    /// as the shell command, setting the explicit "current project"
+    /// fallback used by time tracking's directory-based resolution
+    /// (see `resolve_current_project`).
+    pub project_pick: char,
     /// Prefix for the meta-prefix mode (default `'`). Not a search
     /// mode itself — typing `'` then a partial mode name (e.g.
     /// `'jir`) and pressing Tab expands to that mode's real prefix
@@ -1460,6 +1484,7 @@ impl Default for QueryPrefixes {
             zoxide: '~',
             processes: '%',
             pass: ')',
+            project_pick: '.',
             meta: '\'',
         }
     }
@@ -1476,7 +1501,7 @@ impl QueryPrefixes {
     /// (missing `paperless` in two of the three) as fields were
     /// added over time. Add a new prefix field here too when one is
     /// added to the struct.
-    pub(crate) fn all_chars(&self) -> [char; 20] {
+    pub(crate) fn all_chars(&self) -> [char; 21] {
         [
             self.output,
             self.llm,
@@ -1497,6 +1522,7 @@ impl QueryPrefixes {
             self.zoxide,
             self.processes,
             self.pass,
+            self.project_pick,
             self.meta,
         ]
     }
@@ -3635,7 +3661,7 @@ impl Config {
     const KNOWN_PREFIX_NAMES: &[&str] = &[
         "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
         "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
-        "processes", "pass", "meta",
+        "processes", "pass", "project", "meta",
     ];
 
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
@@ -3669,6 +3695,7 @@ impl Config {
             "zoxide" => prefixes.zoxide = c,
             "processes" => prefixes.processes = c,
             "pass" => prefixes.pass = c,
+            "project" => prefixes.project_pick = c,
             "meta" => prefixes.meta = c,
             _ => {}
         }
@@ -6426,6 +6453,26 @@ fn main() -> anyhow::Result<()> {
                         println!();
                     }
                 }
+            }
+            ProjectAction::Select { slug } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                conn.execute(
+                    "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, ?1, ?2)
+                     ON CONFLICT (id) DO UPDATE SET project_slug = excluded.project_slug, set_ts = excluded.set_ts",
+                    params![slug, now],
+                )?;
+                let cfg = Config::load();
+                switch_project(
+                    &conn,
+                    Some(&slug),
+                    now,
+                    cfg.project_idle_threshold_secs,
+                    Some("switch"),
+                )?;
+                eprintln!("smarthistory: current project set to {slug:?}");
             }
         },
         Commands::Config { action } => match action {

@@ -22512,9 +22512,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_twenty_entries() {
+fn prefix_picker_has_twentyone_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 20);
+    assert_eq!(picker.options.len(), 21);
 }
 
 #[test]
@@ -22599,7 +22599,7 @@ fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
         .prefix_picker
         .as_ref()
         .expect("bare ' + Tab should open a picker");
-    assert_eq!(picker.options.len(), 20, "bare ' + Tab should show every mode");
+    assert_eq!(picker.options.len(), 21, "bare ' + Tab should show every mode");
 }
 
 /// A partial name matching nothing sets a status message and does
@@ -22724,7 +22724,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 19);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 20);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
@@ -29052,5 +29052,94 @@ fn process_picker_confirm_selection_empty_is_noop() {
     app.process_picker_confirm_selection();
     assert!(app.selection.is_none());
     assert!(app.pick_mode.is_none());
+}
+
+// --- Time tracking: project-picker (`.`) mode -----------------------
+
+/// The `.` prefix activates `ModeKind::ProjectPick` and strips
+/// cleanly, same contract every other prefix mode follows.
+#[test]
+fn project_pick_matches_and_strips_prefix() {
+    let mut app = directories_test_app(&[]);
+    app.query = ".acme".to_string();
+    assert!(app.is_project_pick_query());
+    assert_eq!(app.project_pick_pattern(), "acme");
+    assert_eq!(
+        crate::tui::mode::active_mode(&app),
+        crate::tui::mode::ModeKind::ProjectPick
+    );
+}
+
+/// `ModeKind::ProjectPick`'s list title and default prefix, checked
+/// directly rather than through the picker overlay — a regression
+/// here would silently mislabel the result-list border.
+#[test]
+fn project_pick_mode_kind_wiring() {
+    use crate::tui::mode::ModeKind;
+    assert_eq!(ModeKind::ProjectPick.list_title(), "Projects");
+    assert_eq!(ModeKind::ProjectPick.default_prefix(), '.');
+    assert_eq!(ModeKind::ProjectPick.prefix(&crate::QueryPrefixes::default()), '.');
+}
+
+/// Selecting a `type: project` note row stages `smarthistory
+/// project select <slug>`, where `<slug>` is
+/// `crate::util::slugify` of the note's filename stem — the same
+/// identity `project.<slug>.dir` config keys and the report's
+/// `--project` filter use. Rows are pushed directly into
+/// `app.rows`/`app.merged_rows` rather than via `refresh()`,
+/// since `project_pick::fetch` needs a real `notes.database`
+/// (same reasoning `pass` mode's tests would need a real password
+/// store — there are none in this suite for that mode either).
+#[test]
+fn select_for_run_in_project_pick_mode_stages_project_select_slug() {
+    let mut app = directories_test_app(&[]);
+    app.rows = vec![crate::tui::state::HistoryRow {
+        id: 0,
+        command: "My Great Project.md".to_string(),
+        directory: String::new(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: "My Great Project.md".to_string(),
+        output: String::new(),
+        mode: "project".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.merged_rows = app.rows.clone();
+    app.query = ".".to_string();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("smarthistory project select my-great-project")
+    );
+    assert_eq!(app.pick_mode, Some(PickMode::Run));
+}
+
+/// A row from a different mode is never staged as a project
+/// selection, even if `.` mode happens to be active (defensive
+/// guard against a stale `merged_rows` from a prior mode).
+#[test]
+fn select_for_run_in_project_pick_mode_ignores_non_project_row() {
+    let mut app = directories_test_app(&[]);
+    app.rows = vec![crate::tui::state::HistoryRow {
+        id: 0,
+        command: "git status".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "command".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }];
+    app.merged_rows = app.rows.clone();
+    app.query = ".".to_string();
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(app.selection, None);
 }
 

@@ -116,6 +116,12 @@ pub enum ModeKind {
     /// parent shell copies the first line (the password) to the
     /// clipboard via `pass`'s built-in clipboard support.
     Pass,
+    /// `.` (default). Project picker for time tracking — lists
+    /// `type: project` notes from `notes.database`. Selecting a row
+    /// stages `smarthistory project select <slug>`, setting the
+    /// explicit "current project" fallback and switching the active
+    /// `project_sessions` row.
+    ProjectPick,
 }
 
 impl ModeKind {
@@ -144,6 +150,7 @@ impl ModeKind {
             ModeKind::Zoxide => '~',
             ModeKind::Processes => '%',
             ModeKind::Pass => ')',
+            ModeKind::ProjectPick => '.',
         }
     }
 
@@ -172,6 +179,7 @@ impl ModeKind {
             ModeKind::Zoxide => "zoxide",
             ModeKind::Processes => "processes",
             ModeKind::Pass => "pass",
+            ModeKind::ProjectPick => "project",
         }
     }
 
@@ -209,6 +217,7 @@ impl ModeKind {
             ModeKind::Zoxide => "Zoxide",
             ModeKind::Processes => "Processes",
             ModeKind::Pass => "Pass",
+            ModeKind::ProjectPick => "Projects",
         }
     }
 
@@ -239,6 +248,7 @@ impl ModeKind {
             ModeKind::Zoxide => prefixes.zoxide,
             ModeKind::Processes => prefixes.processes,
             ModeKind::Pass => prefixes.pass,
+            ModeKind::ProjectPick => prefixes.project_pick,
         }
     }
 
@@ -314,6 +324,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Processes
     } else if c == p.pass {
         ModeKind::Pass
+    } else if c == p.project_pick {
+        ModeKind::ProjectPick
     } else {
         ModeKind::History
     }
@@ -333,6 +345,7 @@ pub mod output;
 pub mod paperless;
 pub mod panes;
 pub mod processes;
+pub mod project_pick;
 pub mod query_negation;
 pub mod question;
 pub mod similar;
@@ -390,6 +403,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Zoxide => Some(Theme::accent()),
         ModeKind::Processes => Some(Theme::warning()),
         ModeKind::Pass => Some(Theme::success()),
+        ModeKind::ProjectPick => Some(Theme::accent()),
         ModeKind::History => None,
     }
 }
@@ -429,6 +443,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Zoxide => ("~".to_string(), format!(" zoxide{} ", algo)),
         ModeKind::Processes => ("%".to_string(), format!(" processes{} ", algo)),
         ModeKind::Pass => (")".to_string(), format!(" pass{} ", algo)),
+        ModeKind::ProjectPick => (".".to_string(), format!(" project{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -645,6 +660,7 @@ pub fn run_all_checks(
             ModeKind::Zoxide => crate::tui::mode::zoxide::check(app),
             ModeKind::Processes => crate::tui::mode::processes::check(app),
             ModeKind::Pass => crate::tui::mode::pass::check(app),
+            ModeKind::ProjectPick => crate::tui::mode::project_pick::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -677,6 +693,7 @@ impl ModeKind {
             ModeKind::Zoxide,
             ModeKind::Processes,
             ModeKind::Pass,
+            ModeKind::ProjectPick,
         ]
     }
 }
