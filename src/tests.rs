@@ -2437,6 +2437,18 @@ tmuxpaneoutputdir=~/custom-tmux
         let _guard = crate::tui::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        validate_project_config_locked(body)
+    }
+
+    /// The guts of `validate_project_config`, minus the lock
+    /// acquisition — for callers that need to hold `ENV_LOCK` across
+    /// *more* than just this function (e.g. also mutating
+    /// `JIRA_SERVER`/`JIRA_API_TOKEN`, which `validate_config`'s
+    /// `jiralabel.*` check reads). `Mutex` isn't reentrant, so a
+    /// caller that already holds the lock must call this directly,
+    /// never `validate_project_config` (which would deadlock trying
+    /// to lock it again on the same thread).
+    fn validate_project_config_locked(body: &str) -> ConfigReport {
         let dir = std::env::temp_dir().join(format!("smarthistory-test-{}", generate_uuid_v4()));
         let cfg_dir = dir.join(".config").join("smarthistory");
         std::fs::create_dir_all(&cfg_dir).expect("mkdir");
@@ -2510,16 +2522,25 @@ tmuxpaneoutputdir=~/custom-tmux
 
     #[test]
     fn validate_config_warns_on_jiralabel_without_jira_credentials() {
-        // No outer `ENV_LOCK` guard here: `validate_project_config`
-        // below acquires it internally, and `Mutex` isn't reentrant
-        // — locking it twice on the same thread deadlocks forever.
+        // Hold `ENV_LOCK` for the JIRA env mutation too, not just
+        // `validate_project_config_locked`'s own $HOME/NOTE_SEARCH_DATABASE
+        // handling — otherwise a concurrently-running test (under real
+        // parallel `cargo test`, not just `--test-threads=1`) can set
+        // JIRA_SERVER/JIRA_API_TOKEN between this test clearing them
+        // and `validate_config` reading them, making the expected
+        // warning silently disappear. Calls the `_locked` variant
+        // directly (not `validate_project_config`, which would try to
+        // acquire this same non-reentrant lock again and deadlock).
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev_server = std::env::var("JIRA_SERVER").ok();
         let prev_token = std::env::var("JIRA_API_TOKEN").ok();
         unsafe {
             std::env::remove_var("JIRA_SERVER");
             std::env::remove_var("JIRA_API_TOKEN");
         }
-        let report = validate_project_config("jiralabel.acme.match = acme-label\n");
+        let report = validate_project_config_locked("jiralabel.acme.match = acme-label\n");
         match prev_server {
             Some(v) => unsafe { std::env::set_var("JIRA_SERVER", v) },
             None => unsafe { std::env::remove_var("JIRA_SERVER") },
@@ -2540,15 +2561,19 @@ tmuxpaneoutputdir=~/custom-tmux
 
     #[test]
     fn validate_config_no_jiralabel_warning_without_any_jiralabel_entries() {
-        // See the previous test's comment: no outer `ENV_LOCK` guard,
-        // `validate_project_config` already takes it internally.
+        // See the previous test's comment: holds `ENV_LOCK` across
+        // both the JIRA env mutation and the `_locked` validation
+        // call, so no concurrently-running test can interleave.
+        let _guard = crate::tui::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev_server = std::env::var("JIRA_SERVER").ok();
         let prev_token = std::env::var("JIRA_API_TOKEN").ok();
         unsafe {
             std::env::remove_var("JIRA_SERVER");
             std::env::remove_var("JIRA_API_TOKEN");
         }
-        let report = validate_project_config("project.idlethreshold = 900\n");
+        let report = validate_project_config_locked("project.idlethreshold = 900\n");
         match prev_server {
             Some(v) => unsafe { std::env::set_var("JIRA_SERVER", v) },
             None => unsafe { std::env::remove_var("JIRA_SERVER") },
