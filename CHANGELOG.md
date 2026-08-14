@@ -7,323 +7,312 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - **Time tracking**: attributes directories, commands, notes created, and
-  websites visited to a project — a `type: project` note in `notes.database`
-  — resolved by directory (`project.<slug>.dir`, longest-prefix match, or an
-  in-repo `.smarthistory-project` marker file) or by explicit selection via
-  the new `.` prefix mode. No daemon: sessions open/close lazily, piggybacked
-  on the existing `smarthistory add` command-recording path — a directory
-  change closes the prior session immediately, an idle gap (`project.idlethreshold`,
-  default 30 minutes) closes it backdated to the last real activity, and an
-  explicit switch always closes it. New `smarthistory project report [--day
-  ...] [--project <slug>] [--min-duration <secs>]` prints a per-project daily
-  rollup (directories, commands with duration derived at query time and
-  capped at the idle threshold, notes created during a tracked window, and
-  websites). Websites — browser bookmarks/history plus JIRA REST-mode visits
-  — resolve through a 3-tier priority (`jiralabel.<slug>.match` → `weburl.<slug>.match`
-  → a time-based fallback against whichever project session was open) and
-  cluster for display via `weburlgroup.<name>.match`/`.label`, independent of
-  assignment. `smarthistory config check` cross-references
+  websites visited to a project — a `type: project` note in `notes.database` —
+  resolved by directory (`project.<slug>.dir`, longest-prefix match, or an
+  in-repo `.smarthistory-project` marker file) or by explicit selection via the
+  new `.` prefix mode. No daemon: sessions open/close lazily, piggybacked on the
+  existing `smarthistory add` command-recording path — a directory change closes
+  the prior session immediately, an idle gap (`project.idlethreshold`, default
+  30 minutes) closes it backdated to the last real activity, and an explicit
+  switch always closes it. New
+  `smarthistory project report [--day ...] [--project <slug>] [--min-duration <secs>]`
+  prints a per-project daily rollup (directories, commands with duration derived
+  at query time and capped at the idle threshold, notes created during a tracked
+  window, and websites). Websites — browser bookmarks/history plus JIRA
+  REST-mode visits — resolve through a 3-tier priority (`jiralabel.<slug>.match`
+  → `weburl.<slug>.match` → a time-based fallback against whichever project
+  session was open) and cluster for display via
+  `weburlgroup.<name>.match`/`.label`, independent of assignment.
+  `smarthistory config check` cross-references
   `project.<slug>.dir`/`jiralabel.<slug>.match`/`weburl.<slug>.match` against
   `type: project` note slugs and warns on either side having no match. See
   [`docs/modes/project.md`](docs/modes/project.md) for the full reference.
-- New `Ctrl-z` (`CycleNavPrefix`) action: cycles directly between the
-  three navigation prefix modes — `*` (panes), `#` (directories), `~`
-  (zoxide) — without going through the full `PickPrefix` picker. Reads
-  the actual configured prefix chars, so a remapped `prefix.*` still
-  cycles correctly. From any other mode (plain history, another prefix,
-  or an empty query), jumps straight to panes rather than no-op-ing; the
-  typed body (if any) is preserved across the switch, same as
-  `PickPrefix`.
-- `session.<key>`/`host.<key>` (`~/.config/smarthistory/sessions`/`hosts`)
-  no longer require a manually-numbered `<key>` (`session.1`, `session.2`,
-  …) — error-prone to hand-edit, since inserting an entry meant
-  renumbering everything after it, and two entries could silently collide
-  on the same number. New entries written by the TUI (F5/F6, the `~`
-  Zoxide save prompt) now get a `<key>` slugified from the display name
-  instead (`session.monorepo`, `host.prod-db`), deduplicated with a
-  `-2`/`-3`/… suffix on collision (`crate::util::slugify`/`unique_slug`).
-  Display order is file declaration order either way — nothing to
-  renumber. Fully backward compatible: `<key>` was always just an opaque
-  join key to the parser, so existing numeric-keyed entries keep working
-  unmodified, no migration needed.
+- New `Ctrl-z` (`CycleNavPrefix`) action: cycles directly between the three
+  navigation prefix modes — `*` (panes), `#` (directories), `~` (zoxide) —
+  without going through the full `PickPrefix` picker. Reads the actual
+  configured prefix chars, so a remapped `prefix.*` still cycles correctly. From
+  any other mode (plain history, another prefix, or an empty query), jumps
+  straight to panes rather than no-op-ing; the typed body (if any) is preserved
+  across the switch, same as `PickPrefix`.
+- `session.<key>`/`host.<key>` (`~/.config/smarthistory/sessions`/`hosts`) no
+  longer require a manually-numbered `<key>` (`session.1`, `session.2`, …) —
+  error-prone to hand-edit, since inserting an entry meant renumbering
+  everything after it, and two entries could silently collide on the same
+  number. New entries written by the TUI (F5/F6, the `~` Zoxide save prompt) now
+  get a `<key>` slugified from the display name instead (`session.monorepo`,
+  `host.prod-db`), deduplicated with a `-2`/`-3`/… suffix on collision
+  (`crate::util::slugify`/`unique_slug`). Display order is file declaration
+  order either way — nothing to renumber. Fully backward compatible: `<key>` was
+  always just an opaque join key to the parser, so existing numeric-keyed
+  entries keep working unmodified, no migration needed.
 - The `--glob-complete[-dir]`/`--pid-complete` pickers (`vi a*<TAB>`,
-  `cd proj*<TAB>`, `kill sleep<TAB>`) now prefill the query with a
-  trailing space (`a* `, `proj* `, `sleep `) instead of no space —
-  ready to keep typing an extra narrowing word immediately, no need to
-  press space first.
+  `cd proj*<TAB>`, `kill sleep<TAB>`) now prefill the query with a trailing
+  space (`a* `, `proj* `, `sleep `) instead of no space — ready to keep typing
+  an extra narrowing word immediately, no need to press space first.
 - `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
-  `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment
-  variables, kept in sync on every `Ctrl-g`/`Ctrl-t` toggle
+  `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment variables,
+  kept in sync on every `Ctrl-g`/`Ctrl-t` toggle
   (`_smarthistory_sync_prompt_env`) — lets an external prompt system
-  (oh-my-posh, starship, …) show the current widget state itself, since
-  those run as a separate subprocess per prompt render and can't see
-  zsh-internal shell variables. See "Published environment variables" in
+  (oh-my-posh, starship, …) show the current widget state itself, since those
+  run as a separate subprocess per prompt render and can't see zsh-internal
+  shell variables. See "Published environment variables" in
   docs/configuration.md for oh-my-posh/starship segment examples.
 - New `dropdown.matchmode=prefix|substring` config key (default `prefix`,
   matching the historical hardcoded behavior): the live dropdown-completion
-  widget's match mode against history. `Ctrl-t` (`_smarthistory_cycle_matchmode`)
-  toggles between `prefix` (only commands STARTING WITH what's typed) and
-  `substring` (matches anywhere in the command, the same broader match
-  `Up`/`Down` and the TUI's own search already use) at runtime, same
-  relationship `zsh.mode`/`Ctrl-g` has to the search-scope cycle. Each
-  press confirms the new mode with a transient `zle -M` status message
-  ("smarthistory match set to substring"/"smarthistory mode set to DIR"
-  for `Ctrl-g` too), replacing the earlier RPROMPT-text approach entirely.
-- New `globcomplete.enabled` zsh feature (off by default): replaces fzf-tab-style
-  completion for files, directories, and processes. Pressing `Tab` on a word containing shell-glob
-  syntax (`* ? [`) — e.g. `vi a*<TAB>` or `vi foo/a*<TAB>` — launches
-  `smarthistory tui --glob-complete <word>`, the TUI locked into a
-  file-completion picker instead of running normal zsh completion; anything
-  else still falls through unchanged. The word is prefilled/expanded (not
-  replaced) as the filter, scoped to the directory before the last `/` when
-  one is given, and matched recursively against basenames (fzf-style fuzzy
-  find, not literal single-level glob semantics) via a new glob-to-regex
-  translator (`crate::files::glob_to_regex`). Typing a space then more text
-  inside the picker narrows further by plain substring against each file's
-  path (`*.md jira` matches every markdown file whose path contains "jira",
-  not just files literally named `jira*.md`). Inside the picker, mode-switching
-  is locked (the query can never leave files mode, `F1`/`Ctrl-]` are
-  disabled); `Ctrl-A` marks every visible row, and `Enter` returns every
-  marked row's path — relative to the shell's cwd (matching how a real shell
-  glob expansion reads), space-joined, shell-quoted — or just the current row
-  if nothing is marked, spliced into the command line in place of the typed
-  word (never runs the line). When the command being completed is `cd`, the
-  SAME glob/root-scoping/narrowing rules open a directory picker instead
-  (`smarthistory tui --glob-complete-dir <PATTERN>`) — only real directories
-  on disk are shown, and there's no multi-select (`Ctrl-A` is a no-op, Enter
-  always returns just the single highlighted directory) since cd-ing into
-  more than one directory doesn't mean anything. Selecting a directory row
-  shows its immediate contents (directories first, then files, hidden entries
-  excluded) in the output preview pane. When the command being completed is
-  `kill`, Tab opens the processes (`%`) mode picker instead — with or without
-  glob syntax, since PIDs have no glob concept (`kill <TAB>` shows every
-  process, `kill firefox<TAB>` narrows by name/cmdline/cwd/exe). Multi-select
-  IS available here (`Ctrl-A` marks every visible row); `Enter` returns every
-  marked (or just the selected) process's PID, space-joined, instead of
-  opening `%` mode's normal signal-confirmation dialog. New `smarthistory tui
-  --glob-complete <PATTERN>`, `--glob-complete-dir <PATTERN>`, `--pid-complete
-  <PATTERN>`, and `--root <DIR>` CLI flags (the last also usable to override
-  the base directory for plain `/` mode's walk; unused by `--pid-complete`,
-  which has no filesystem walk to root).
+  widget's match mode against history. `Ctrl-t`
+  (`_smarthistory_cycle_matchmode`) toggles between `prefix` (only commands
+  STARTING WITH what's typed) and `substring` (matches anywhere in the command,
+  the same broader match `Up`/`Down` and the TUI's own search already use) at
+  runtime, same relationship `zsh.mode`/`Ctrl-g` has to the search-scope cycle.
+  Each press confirms the new mode with a transient `zle -M` status message
+  ("smarthistory match set to substring"/"smarthistory mode set to DIR" for
+  `Ctrl-g` too), replacing the earlier RPROMPT-text approach entirely.
+- New `globcomplete.enabled` zsh feature (off by default): replaces
+  fzf-tab-style completion for files, directories, and processes. Pressing `Tab`
+  on a word containing shell-glob syntax (`* ? [`) — e.g. `vi a*<TAB>` or
+  `vi foo/a*<TAB>` — launches `smarthistory tui --glob-complete <word>`, the TUI
+  locked into a file-completion picker instead of running normal zsh completion;
+  anything else still falls through unchanged. The word is prefilled/expanded
+  (not replaced) as the filter, scoped to the directory before the last `/` when
+  one is given, and matched recursively against basenames (fzf-style fuzzy find,
+  not literal single-level glob semantics) via a new glob-to-regex translator
+  (`crate::files::glob_to_regex`). Typing a space then more text inside the
+  picker narrows further by plain substring against each file's path
+  (`*.md jira` matches every markdown file whose path contains "jira", not just
+  files literally named `jira*.md`). Inside the picker, mode-switching is locked
+  (the query can never leave files mode, `F1`/`Ctrl-]` are disabled); `Ctrl-A`
+  marks every visible row, and `Enter` returns every marked row's path —
+  relative to the shell's cwd (matching how a real shell glob expansion reads),
+  space-joined, shell-quoted — or just the current row if nothing is marked,
+  spliced into the command line in place of the typed word (never runs the
+  line). When the command being completed is `cd`, the SAME
+  glob/root-scoping/narrowing rules open a directory picker instead
+  (`smarthistory tui --glob-complete-dir <PATTERN>`) — only real directories on
+  disk are shown, and there's no multi-select (`Ctrl-A` is a no-op, Enter always
+  returns just the single highlighted directory) since cd-ing into more than one
+  directory doesn't mean anything. Selecting a directory row shows its immediate
+  contents (directories first, then files, hidden entries excluded) in the
+  output preview pane. When the command being completed is `kill`, Tab opens the
+  processes (`%`) mode picker instead — with or without glob syntax, since PIDs
+  have no glob concept (`kill <TAB>` shows every process, `kill firefox<TAB>`
+  narrows by name/cmdline/cwd/exe). Multi-select IS available here (`Ctrl-A`
+  marks every visible row); `Enter` returns every marked (or just the selected)
+  process's PID, space-joined, instead of opening `%` mode's normal
+  signal-confirmation dialog. New `smarthistory tui --glob-complete <PATTERN>`,
+  `--glob-complete-dir <PATTERN>`, `--pid-complete <PATTERN>`, and
+  `--root <DIR>` CLI flags (the last also usable to override the base directory
+  for plain `/` mode's walk; unused by `--pid-complete`, which has no filesystem
+  walk to root).
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
-  users), via the new `sysinfo` dependency. The typed body filters by
-  substring against the process's name/cmdline, working directory, and
-  executable path. `Enter` on a row does not stage/run the process name as a
-  shell command — it opens a confirmation dialog to send it a signal,
-  defaulting to SIGTERM with `Tab`/`Shift-Tab` cycling to SIGKILL/SIGHUP/
-  SIGINT before confirming with `y`; the dialog's message updates live as the
-  signal is cycled. Sending a signal to a process you don't own fails with a
-  status-line message rather than crashing, the same way `kill(1)` itself
-  would. The details/preview pane shows the process's working directory,
-  executable path, and (loaded lazily on first selection) its full
-  environment (`NAME=value`, one per line); a process whose environment can't
-  be read (permission denied, or it already exited) shows a graceful
-  placeholder instead of erroring. No `#[cfg(target_os = ...)]` needed
-  anywhere — `sysinfo` abstracts macOS vs. Linux for everything this mode
-  needs; the only platform-observable difference is permission behavior on
-  the environment read, which both platforms funnel into the same
-  placeholder text.
-- Live dropdown completion: each candidate row now shows a `✓`/`✗`
-  exit-status marker (green/red, same palette as `dropdown.highlight`'s
-  command-validity check) right after the selection marker, so a
-  previously-failed command can be spotted without opening the TUI or
-  re-running it. Backed by `smarthistory search`'s existing `exit_code`
-  field (no CLI/backend changes needed) — the row-parsing regex and
-  `marker_len` layout constant both grow to make room for it; a row whose
-  exit code couldn't be parsed draws a blank marker instead of guessing.
-- New curated theme: `luna` (from [luna.nvim](https://github.com/WTFox/luna.nvim)) —
-  a low-saturation, near-black dark theme with a blue accent and warm orange
-  secondary. Now 74 built-in themes ship in total (15 upstream + 59 curated).
-- README: noted that `cargo install --path .` needs `--locked` to avoid a
-  fresh dependency re-resolution that can pick a broken transitive version
-  (e.g. `zune-jpeg`, via `image`/`arboard`) instead of the tested
-  `Cargo.lock` versions `cargo build`/`cargo test`/CI already use.
-- The age column is now color-coded by recency — brightest for entries
-  from the last minute, fading through green (minutes), the previous flat
-  accent color (hours), dim (days), to dimmest (months or older) — a
-  glanceable freshness gradient on top of the existing text, reading the
-  bucket straight off the existing seconds/minutes/hours/days/months unit
-  ladder rather than adding a second time calculation.
-- The `[x]`/`[ ]` multi-select mark column now only appears in the modes
-  where marking a row actually has an effect — plain history and `+`
-  Output (real ids, `BulkDeleteMarked` works), `/` Files, `!` Todo, and
-  `-` JIRA (each has a `SmartOpen` handler that acts on every marked row).
-  Hidden everywhere else, where a mark would just be an inert checkbox
-  nothing ever reads.
-- `/` (files) mode: each row's displayed path (relative to the walked
-  root) is now shortened for display — every directory component
-  abbreviated to its first character, filename always shown in full —
-  same convention `,` (ag) mode uses. Search/filtering still matches
-  against the real, unabbreviated path; only the on-screen text changes.
-- Help overlay (`C-a` by default): new "Row indicators" section explains
-  what the `[x]`, `o`/`.`, `T`/`.`, and `✓`/`✗`/`~` row glyphs mean and
-  which mode(s) each one appears in.
+  users), via the new `sysinfo` dependency. The typed body filters by substring
+  against the process's name/cmdline, working directory, and executable path.
+  `Enter` on a row does not stage/run the process name as a shell command — it
+  opens a confirmation dialog to send it a signal, defaulting to SIGTERM with
+  `Tab`/`Shift-Tab` cycling to SIGKILL/SIGHUP/ SIGINT before confirming with
+  `y`; the dialog's message updates live as the signal is cycled. Sending a
+  signal to a process you don't own fails with a status-line message rather than
+  crashing, the same way `kill(1)` itself would. The details/preview pane shows
+  the process's working directory, executable path, and (loaded lazily on first
+  selection) its full environment (`NAME=value`, one per line); a process whose
+  environment can't be read (permission denied, or it already exited) shows a
+  graceful placeholder instead of erroring. No `#[cfg(target_os = ...)]` needed
+  anywhere — `sysinfo` abstracts macOS vs. Linux for everything this mode needs;
+  the only platform-observable difference is permission behavior on the
+  environment read, which both platforms funnel into the same placeholder text.
+- Live dropdown completion: each candidate row now shows a `✓`/`✗` exit-status
+  marker (green/red, same palette as `dropdown.highlight`'s command-validity
+  check) right after the selection marker, so a previously-failed command can be
+  spotted without opening the TUI or re-running it. Backed by
+  `smarthistory search`'s existing `exit_code` field (no CLI/backend changes
+  needed) — the row-parsing regex and `marker_len` layout constant both grow to
+  make room for it; a row whose exit code couldn't be parsed draws a blank
+  marker instead of guessing.
+- New curated theme: `luna` (from
+  [luna.nvim](https://github.com/WTFox/luna.nvim)) — a low-saturation,
+  near-black dark theme with a blue accent and warm orange secondary. Now 74
+  built-in themes ship in total (15 upstream + 59 curated).
+- README: noted that `cargo install --path .` needs `--locked` to avoid a fresh
+  dependency re-resolution that can pick a broken transitive version (e.g.
+  `zune-jpeg`, via `image`/`arboard`) instead of the tested `Cargo.lock`
+  versions `cargo build`/`cargo test`/CI already use.
+- The age column is now color-coded by recency — brightest for entries from the
+  last minute, fading through green (minutes), the previous flat accent color
+  (hours), dim (days), to dimmest (months or older) — a glanceable freshness
+  gradient on top of the existing text, reading the bucket straight off the
+  existing seconds/minutes/hours/days/months unit ladder rather than adding a
+  second time calculation.
+- The `[x]`/`[ ]` multi-select mark column now only appears in the modes where
+  marking a row actually has an effect — plain history and `+` Output (real ids,
+  `BulkDeleteMarked` works), `/` Files, `!` Todo, and `-` JIRA (each has a
+  `SmartOpen` handler that acts on every marked row). Hidden everywhere else,
+  where a mark would just be an inert checkbox nothing ever reads.
+- `/` (files) mode: each row's displayed path (relative to the walked root) is
+  now shortened for display — every directory component abbreviated to its first
+  character, filename always shown in full — same convention `,` (ag) mode uses.
+  Search/filtering still matches against the real, unabbreviated path; only the
+  on-screen text changes.
+- Help overlay (`C-a` by default): new "Row indicators" section explains what
+  the `[x]`, `o`/`.`, `T`/`.`, and `✓`/`✗`/`~` row glyphs mean and which mode(s)
+  each one appears in.
 - List rows now hide three fixed-width indicator columns (exit-status
-  `✓`/`✗`/`~`, output-capture `o`/`.`, and tmux-pane `T`/`.`) entirely in
-  modes where they never carry any information, instead of always
-  reserving their column width with a permanently-identical placeholder.
-  The exit-status column now only appears in modes whose rows can carry a
-  genuinely varying exit code — plain history, `+` Output, `=` LLM, `?`
-  Question (all backed by the shared history table), and `-` JIRA (which
-  repurposes it as a closed/open indicator) — hidden everywhere else,
-  where it hardcoded `exit_code: 0` and so was always the same `✓`. The
-  output-capture column now only appears in plain history mode; the
-  tmux-pane column only appears in `#` Directories and `~` Zoxide mode
-  (including no longer showing in `*` Panes mode itself, whose own rows
-  already are the live panes).
-- `,` (ag) mode: each row now shows the matched file's path first, shortened
-  as compactly as possible (every directory component abbreviated to its
-  first character, filename always shown in full — e.g. `~/w/p/src/main.rs`
-  for `~/work/project/src/main.rs`), followed by the matched line content.
-  New `util::shorten_path_dirs` helper backs it.
+  `✓`/`✗`/`~`, output-capture `o`/`.`, and tmux-pane `T`/`.`) entirely in modes
+  where they never carry any information, instead of always reserving their
+  column width with a permanently-identical placeholder. The exit-status column
+  now only appears in modes whose rows can carry a genuinely varying exit code —
+  plain history, `+` Output, `=` LLM, `?` Question (all backed by the shared
+  history table), and `-` JIRA (which repurposes it as a closed/open indicator)
+  — hidden everywhere else, where it hardcoded `exit_code: 0` and so was always
+  the same `✓`. The output-capture column now only appears in plain history
+  mode; the tmux-pane column only appears in `#` Directories and `~` Zoxide mode
+  (including no longer showing in `*` Panes mode itself, whose own rows already
+  are the live panes).
+- `,` (ag) mode: each row now shows the matched file's path first, shortened as
+  compactly as possible (every directory component abbreviated to its first
+  character, filename always shown in full — e.g. `~/w/p/src/main.rs` for
+  `~/work/project/src/main.rs`), followed by the matched line content. New
+  `util::shorten_path_dirs` helper backs it.
 - New `smarthistory prune-directories [-f]` CLI command: checks every
   `session.<id>.dir` (in `sessions` and the main `config` file) against the
   filesystem and removes the whole entry — name, `.dir`, `.exec`,
-  `.startup_command` — for any directory that no longer exists, after
-  listing what will be removed and asking for confirmation (`-f`/`--force`
-  skips it). Entries with no `.dir` set are left alone; `host.<id>` entries
-  are untouched.
-- `~` zoxide mode: selecting a directory not already saved as a
-  `session.<id>` entry now asks "Save directory?" first. `Enter`/`y` writes
-  a new `session.<id>` entry (name + `.dir` only, no `.exec`) before
-  jumping there; `n`/Cancel skips the save. Either answer still completes
-  the jump — the prompt never blocks it, and an already-saved directory
-  skips the prompt entirely.
+  `.startup_command` — for any directory that no longer exists, after listing
+  what will be removed and asking for confirmation (`-f`/`--force` skips it).
+  Entries with no `.dir` set are left alone; `host.<id>` entries are untouched.
+- `~` zoxide mode: selecting a directory not already saved as a `session.<id>`
+  entry now asks "Save directory?" first. `Enter`/`y` writes a new
+  `session.<id>` entry (name + `.dir` only, no `.exec`) before jumping there;
+  `n`/Cancel skips the save. Either answer still completes the jump — the prompt
+  never blocks it, and an already-saved directory skips the prompt entirely.
 - `^` browser mode: `Ctrl-]` (`SmartOpen`) now converts the selected
-  bookmark/history entry into a local markdown note (`note_search convert
-  <url>`) and opens it in `$EDITOR`, instead of the default "open the URL"
-  (still what plain `Enter` does). The target path is captured from
-  `note_search`'s own output, since `convert` names the file itself.
+  bookmark/history entry into a local markdown note
+  (`note_search convert <url>`) and opens it in `$EDITOR`, instead of the
+  default "open the URL" (still what plain `Enter` does). The target path is
+  captured from `note_search`'s own output, since `convert` names the file
+  itself.
 - `*` panes mode: `Enter` on the `# Sessions` / `# Directories` / `# hosts`
-  group header now collapses/expands it (`▾`/`▸` triangle) instead of
-  trying to focus something. In-memory for the current launch only; an
-  individual live workspace's own `## ` sub-heading is unaffected and still
-  stages its focus command as before.
-- `*` panes mode: every pane's name now renders bold, always — not just
-  panes that get the dominant `▶ ` running marker.
-- `*` panes mode: live tmux/herdr workspaces now wrap under a common
-  synthetic `# Sessions` heading, with each individual workspace rendered
-  as a `## ` sub-heading underneath (panes indented one level deeper) —
-  matching the `Directories`/`hosts` sections' own `# `-headed look.
-  Purely presentational: each workspace remains its own independently
-  filterable/group-scopable group, unchanged.
+  group header now collapses/expands it (`▾`/`▸` triangle) instead of trying to
+  focus something. In-memory for the current launch only; an individual live
+  workspace's own `## ` sub-heading is unaffected and still stages its focus
+  command as before.
+- `*` panes mode: every pane's name now renders bold, always — not just panes
+  that get the dominant `▶ ` running marker.
+- `*` panes mode: live tmux/herdr workspaces now wrap under a common synthetic
+  `# Sessions` heading, with each individual workspace rendered as a `## `
+  sub-heading underneath (panes indented one level deeper) — matching the
+  `Directories`/`hosts` sections' own `# `-headed look. Purely presentational:
+  each workspace remains its own independently filterable/group-scopable group,
+  unchanged.
 - `,` (ag) mode: each row's timestamp is now the matched file's real
   modification time (was always `0`/Unix-epoch), and results sort
-  newest-modified file first (was `ag`'s own arbitrary output order).
-  Matches within the same file keep their line-number order.
+  newest-modified file first (was `ag`'s own arbitrary output order). Matches
+  within the same file keep their line-number order.
 - `*` panes mode: a pane actually running something (not just an idle shell
-  prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so
-  busy panes stand out immediately in a long list.
+  prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so busy
+  panes stand out immediately in a long list.
 - `create-note` dialog: `Ctrl-A` selects the whole active field (Title or
   Content). While selected, `Ctrl-C` yanks it to the clipboard instead of
-  cancelling the dialog, and `Backspace` deletes the whole field instead of
-  one character; any other key drops the selection.
-- New `~` prefix mode: zoxide directories. Lists every directory in the
-  local `zoxide` database (`zoxide query -l`, highest frecency score first),
-  filtered by the typed query. Selecting a row creates a new tmux session /
-  herdr workspace rooted there — the same staging `#` Directories mode uses
-  for an unmarked row, including the `T`-marked "jump to an already-active
-  pane there" behavior. Requires the `zoxide` binary on `$PATH`; see
-  `docs/modes/zoxide.md`.
-- New `^` prefix mode: browser bookmarks + history, merged from every
-  configured (or auto-detected) Chrome / Firefox / Safari profile. Each row
-  is tagged `bookmark` / `history` so typing that word narrows the list to
-  one source; `Enter` opens the URL in the system browser. Configure via
-  `browser.<id>.type=chrome|firefox|safari` + `browser.<id>.profile=<path>`;
-  see `docs/modes/browser.md`.
+  cancelling the dialog, and `Backspace` deletes the whole field instead of one
+  character; any other key drops the selection.
+- New `~` prefix mode: zoxide directories. Lists every directory in the local
+  `zoxide` database (`zoxide query -l`, highest frecency score first), filtered
+  by the typed query. Selecting a row creates a new tmux session / herdr
+  workspace rooted there — the same staging `#` Directories mode uses for an
+  unmarked row, including the `T`-marked "jump to an already-active pane there"
+  behavior. Requires the `zoxide` binary on `$PATH`; see `docs/modes/zoxide.md`.
+- New `^` prefix mode: browser bookmarks + history, merged from every configured
+  (or auto-detected) Chrome / Firefox / Safari profile. Each row is tagged
+  `bookmark` / `history` so typing that word narrows the list to one source;
+  `Enter` opens the URL in the system browser. Configure via
+  `browser.<id>.type=chrome|firefox|safari` + `browser.<id>.profile=<path>`; see
+  `docs/modes/browser.md`.
 - `session.<id>` and `host.<id>` entries can now live in their own dedicated
   `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions` files
-  instead of (or split across, alongside) the main config file. Both are
-  read only by the TUI (`Config::load_tui`), not the plain CLI subcommands
-  (`search`, `add`, `capture-*`, …), since session/host data is exclusively
-  a `*`-mode (panes) concern. The in-TUI "add session" (`F5`) / "add host"
-  (`F6`) dialogs now write new entries to these dedicated files, creating
-  them if they don't exist yet.
-- New `'` meta-prefix mode: type `'` then a partial mode name (e.g. `'jir`)
-  and press Tab to jump straight into that mode by name instead of
-  memorizing its single-character prefix. A unique match activates
-  immediately (query becomes just the target prefix, e.g. `-`); an
-  ambiguous match, or bare `'` + Tab, opens the same picker `F1`
-  (`PickPrefix`) uses, pre-filtered to the matching names. Configurable via
-  `prefix.meta=<char>` (default `'`). Also fixes a pre-existing bug where
-  `apply_prefix` (the `F1` picker's commit path) didn't recognize the
-  paperless (`<`) or browser (`^`) prefixes as strippable when switching
-  modes.
-- `CreateNote` (the Title + Content dialog) now pre-fills from the row that
-  was selected when the action fired: a question row splits into Title
-  (the question) + Content (the LLM's answer); a note row inserts a
-  `[[wiki-link]]`; a JIRA row inserts a markdown link to the issue's browse
-  URL (bare key if JIRA isn't configured); every other row (plain history,
-  or any other mode) wraps the command text in a fenced ` ```bash ` block.
+  instead of (or split across, alongside) the main config file. Both are read
+  only by the TUI (`Config::load_tui`), not the plain CLI subcommands (`search`,
+  `add`, `capture-*`, …), since session/host data is exclusively a `*`-mode
+  (panes) concern. The in-TUI "add session" (`F5`) / "add host" (`F6`) dialogs
+  now write new entries to these dedicated files, creating them if they don't
+  exist yet.
+- New `'` meta-prefix mode: type `'` then a partial mode name (e.g. `'jir`) and
+  press Tab to jump straight into that mode by name instead of memorizing its
+  single-character prefix. A unique match activates immediately (query becomes
+  just the target prefix, e.g. `-`); an ambiguous match, or bare `'` + Tab,
+  opens the same picker `F1` (`PickPrefix`) uses, pre-filtered to the matching
+  names. Configurable via `prefix.meta=<char>` (default `'`). Also fixes a
+  pre-existing bug where `apply_prefix` (the `F1` picker's commit path) didn't
+  recognize the paperless (`<`) or browser (`^`) prefixes as strippable when
+  switching modes.
+- `CreateNote` (the Title + Content dialog) now pre-fills from the row that was
+  selected when the action fired: a question row splits into Title (the
+  question) + Content (the LLM's answer); a note row inserts a `[[wiki-link]]`;
+  a JIRA row inserts a markdown link to the issue's browse URL (bare key if JIRA
+  isn't configured); every other row (plain history, or any other mode) wraps
+  the command text in a fenced ` ```bash ` block.
 
 ### Fixed
 
-- `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word
-  now actually works in plain interactive use, not just inside the
-  `--glob-complete` picker — `docs/modes/files.md` already documented
-  `/*.toml` and `*<glob>` path segments as supported, but the walker only
-  ever did literal AND-of-substring matching, so a query like `* tui`
-  required a literal `*` character in the filename (never happens) and
-  matched nothing, forever. The first word is now glob-matched (root-scoped,
-  recursive, basename-only) exactly like the picker; every word after it
-  still narrows further by substring, and a query with no glob-looking
-  first word is completely unaffected.
-- Preview-pane markdown renderer: an unclosed italic marker that was
-  actually a literal underscore (e.g. a directory or file name like
-  `alpha_sub`) was silently rewritten to an asterisk on render
-  (`alpha_sub` → `alpha*sub`) — the fallback-to-plain-text path for an
-  unclosed marker reconstructed the marker from a fixed per-*kind*
-  string (`MarkerKind::Italic` always spelled `"*"`) instead of the
-  actual character that opened it, since `*` and `_` are both valid
-  italic openers but only one was ever remembered. Found via the new
-  glob-completion directory picker's content preview, but affects any
-  preview text containing a bare underscore in any mode.
+- `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word now
+  actually works in plain interactive use, not just inside the `--glob-complete`
+  picker — `docs/modes/files.md` already documented `/*.toml` and `*<glob>` path
+  segments as supported, but the walker only ever did literal AND-of-substring
+  matching, so a query like `* tui` required a literal `*` character in the
+  filename (never happens) and matched nothing, forever. The first word is now
+  glob-matched (root-scoped, recursive, basename-only) exactly like the picker;
+  every word after it still narrows further by substring, and a query with no
+  glob-looking first word is completely unaffected.
+- Preview-pane markdown renderer: an unclosed italic marker that was actually a
+  literal underscore (e.g. a directory or file name like `alpha_sub`) was
+  silently rewritten to an asterisk on render (`alpha_sub` → `alpha*sub`) — the
+  fallback-to-plain-text path for an unclosed marker reconstructed the marker
+  from a fixed per-_kind_ string (`MarkerKind::Italic` always spelled `"*"`)
+  instead of the actual character that opened it, since `*` and `_` are both
+  valid italic openers but only one was ever remembered. Found via the new
+  glob-completion directory picker's content preview, but affects any preview
+  text containing a bare underscore in any mode.
 - Line-editor live dropdown: `Enter` now commits AND runs a highlighted
   candidate in one press, same as before the Tab/Enter key-model rework —
-  navigate with `Up`/`Down`, then `Enter` alone accepts it. Previously
-  `Enter` only ever ran the raw typed text; committing a candidate
-  required pressing `Tab` first, then `Enter` separately. Gated on the
-  same "must be explicitly selected first" condition `Tab` already uses,
-  so this doesn't reopen the single-candidate auto-complete bug that
-  rework fixed — an unmodified `Enter` on a fresh, not-yet-navigated
-  dropdown still just runs what you typed.
+  navigate with `Up`/`Down`, then `Enter` alone accepts it. Previously `Enter`
+  only ever ran the raw typed text; committing a candidate required pressing
+  `Tab` first, then `Enter` separately. Gated on the same "must be explicitly
+  selected first" condition `Tab` already uses, so this doesn't reopen the
+  single-candidate auto-complete bug that rework fixed — an unmodified `Enter`
+  on a fresh, not-yet-navigated dropdown still just runs what you typed.
 - TUI startup: the `sessiondirs=...` walk (recursively listing every
-  subdirectory of each configured root) used to run unconditionally on
-  every launch, even for sessions that never visit `#` (Directories) or
-  `~` (Zoxide) mode. It's now lazy — deferred to the first actual entry
-  into one of those modes, and cached for the rest of the session, same
-  pattern already used for the tmux/herdr pane snapshot. `smarthistory
-  check` is unaffected (it still walks eagerly up front, since it's a
-  one-shot report with no interactive mode entry to defer to).
-- Help overlay: the `SmartOpen` row's summary said `~` opens the selected
-  file via the per-extension command — `~` is Zoxide; the Files-mode
-  prefix is `/`. Text corrected.
+  subdirectory of each configured root) used to run unconditionally on every
+  launch, even for sessions that never visit `#` (Directories) or `~` (Zoxide)
+  mode. It's now lazy — deferred to the first actual entry into one of those
+  modes, and cached for the rest of the session, same pattern already used for
+  the tmux/herdr pane snapshot. `smarthistory check` is unaffected (it still
+  walks eagerly up front, since it's a one-shot report with no interactive mode
+  entry to defer to).
+- Help overlay: the `SmartOpen` row's summary said `~` opens the selected file
+  via the per-extension command — `~` is Zoxide; the Files-mode prefix is `/`.
+  Text corrected.
 - Line-editor live dropdown (`dropdown.enabled`): reworked the key model so
-  history completion can never silently rewrite the command line to
-  something you didn't select. `Up`/`Down` are now the only way to select a
-  candidate; `Tab` copies the highlighted one into the command line (or
-  falls through to normal zsh completion when nothing's highlighted —
-  including when there's only a single matching candidate, which used to
-  auto-complete on the very first `Tab` press); `Enter` always runs
-  whatever's on the line and no longer substitutes a highlighted candidate
-  on its own. `Shift-Tab` is no longer a selection key (reverts to zsh's
-  default `reverse-menu-complete`) — `Up`/`Down` cover both directions.
+  history completion can never silently rewrite the command line to something
+  you didn't select. `Up`/`Down` are now the only way to select a candidate;
+  `Tab` copies the highlighted one into the command line (or falls through to
+  normal zsh completion when nothing's highlighted — including when there's only
+  a single matching candidate, which used to auto-complete on the very first
+  `Tab` press); `Enter` always runs whatever's on the line and no longer
+  substitutes a highlighted candidate on its own. `Shift-Tab` is no longer a
+  selection key (reverts to zsh's default `reverse-menu-complete`) — `Up`/`Down`
+  cover both directions.
 - `*` (panes) mode, herdr backend: the background per-pane process-command
-  lookup could respawn a full round of subprocess lookups (one per pane)
-  on every ~100ms run-loop tick, forever, as soon as the previous round
-  finished — instead of once per actual panes-list change. This made the
-  view painfully sluggish on a slow/high-latency connection. Now spawned
-  at most once per snapshot.
-- `/` (files) mode: rows now carry the file's real modification time (was
-  always `0`/Unix-epoch) and the list sorts newest-modified first (was
+  lookup could respawn a full round of subprocess lookups (one per pane) on
+  every ~100ms run-loop tick, forever, as soon as the previous round finished —
+  instead of once per actual panes-list change. This made the view painfully
+  sluggish on a slow/high-latency connection. Now spawned at most once per
+  snapshot.
+- `/` (files) mode: rows now carry the file's real modification time (was always
+  `0`/Unix-epoch) and the list sorts newest-modified first (was
   directories-first then alphabetical). Matches what `docs/modes/files.md`
   already documented.
 
 ### Security
 
-- Harden shell command staging throughout the TUI by consistently using
-  POSIX single-quote escaping (`util::shell_quote`) for user-provided paths,
-  note text, `.command` script arguments, and multiplexer labels/session names.
+- Harden shell command staging throughout the TUI by consistently using POSIX
+  single-quote escaping (`util::shell_quote`) for user-provided paths, note
+  text, `.command` script arguments, and multiplexer labels/session names.
 
 ### Changed
 
@@ -331,381 +320,196 @@ All notable changes to this project will be documented in this file.
   into a new `src/tui/actions.rs` module, shrinking `tui.rs` by ~2,500 lines.
 - Moved `parse_bool` into `src/util.rs` and removed the duplicate copy in
   `src/tui.rs`, so the CLI and TUI session parser share one implementation.
-- The symbols (`$`) prefix now supports an `@lang` token, mirroring the
-  `ag` (`,`) prefix. `$MyStruct @rust` filters the result set to symbols
-  defined in `.rs` files and pipes the per-row source-context preview
-  through `bat --language <lang>` so the output preview pane shows
-  syntax-highlighted code. The shared `parse_query_tokens` helper in the
-  new `src/highlight.rs` module backs both modes (and any future content
-  view that wants the same classification).
-- `DeleteWordBackward` now ships with two default bindings: the
-  readline-style `Ctrl-W` **and** the macOS / GUI-editor-style
-  `Alt-Backspace`. Both fire the same action, so users coming from
-  either muscle memory get the expected behaviour without remapping.
-  The action's `Action::default_keys()` API exposes the full list so
-  the command palette, help overlay, and config printer can render
-  both specs; either can be removed via `key.delete-word-backward=...`
-  in the config file.
-- The panes (`*`) prefix is now a properly-typed tree: every pane
-  row carries a `[<label>]` chip showing the session / workspace it
-  belongs to, and the filter is **group-aware**. Typing a token that
-  matches a workspace label keeps the whole workspace (header + every
-  child pane); typing a token that matches a pane's command / cwd
-  keeps that pane and its parent workspace header. The new
+- The symbols (`$`) prefix now supports an `@lang` token, mirroring the `ag`
+  (`,`) prefix. `$MyStruct @rust` filters the result set to symbols defined in
+  `.rs` files and pipes the per-row source-context preview through
+  `bat --language <lang>` so the output preview pane shows syntax-highlighted
+  code. The shared `parse_query_tokens` helper in the new `src/highlight.rs`
+  module backs both modes (and any future content view that wants the same
+  classification).
+- `DeleteWordBackward` now ships with two default bindings: the readline-style
+  `Ctrl-W` **and** the macOS / GUI-editor-style `Alt-Backspace`. Both fire the
+  same action, so users coming from either muscle memory get the expected
+  behaviour without remapping. The action's `Action::default_keys()` API exposes
+  the full list so the command palette, help overlay, and config printer can
+  render both specs; either can be removed via `key.delete-word-backward=...` in
+  the config file.
+- The panes (`*`) prefix is now a properly-typed tree: every pane row carries a
+  `[<label>]` chip showing the session / workspace it belongs to, and the filter
+  is **group-aware**. Typing a token that matches a workspace label keeps the
+  whole workspace (header + every child pane); typing a token that matches a
+  pane's command / cwd keeps that pane and its parent workspace header. The new
   `HistoryRow::workspace_label` field carries the label from
   `fetch_session_panes_impl` to the renderer.
-- New TUI action `Action::DownloadJiraIssue` (default key
-  `Ctrl-M-s`) downloads the selected JIRA issue as a local markdown
-  note by staging `note_search jira-issue <KEY>`. The action is
-  mode-gated to the JIRA search mode (`-...`); outside of JIRA mode
-  it's a no-op with a status message so the user understands why
-  their key did nothing. The bare command line is staged (no path,
-  no flags) so `note_search` writes the markdown into the
-  `notes.dir` configured in the same config file.
-- The status bar (the footer line at the bottom of the TUI) no
-  longer surfaces the two delete actions in its key-binding hints.
-  The `del` and `del all` chips have been replaced with a `palette`
-  chip showing the current `CommandAction` binding (default `:`).
-  The delete actions are still discoverable via the help overlay
-  (`Ctrl-H`) and the command palette itself, which lists every
-  action with its current binding.
-- The JIRA search-as-you-type now has two additional
-  trigger paths alongside the existing 400ms fast debounce:
-  1. **Space trigger** — typing a space inside the JIRA query body fires the search immediately, bypassing the debounce. This matches IDE autocomplete conventions (a space commits the current token to a search).
-  2. **3-second idle safety- net timer** — a new `jira_idle_started` field fires the search after 3 seconds of no keystroke activity, independent of the 400ms debounce. The user reported that the query "sometimes isn't executed"; the idle timer guarantees the search runs within 3 seconds of the last keystroke regardless of whether the fast debounce ever elapses (e.g. the user keeps typing slowly, or the run loop is temporarily blocked on background work). The two timers are armed in lock-step by `jira_touch`; either can fire the search when its respective window elapses.
-- The TUI's default key bindings now mirror the project config file (`~/.config/smarthistory/config`). Actions that the user has explicitly rebound in the config (e.g. `C-a` for `open-help`, `C-q` for `command-action`, `C-v` for `edit-file-reference`, `C-o` for `show-output`, `C-s` for `cycle-directory-source`, `F5` / `F6` / `F10` for the panes actions, `C-c` + `Esc` for `cancel`) now ship with those bindings as the default so a fresh checkout behaves the same as a configured install. Actions that the user has explicitly unbound (`toggle-duplicate-filter` and `delete-matching`) ship unbound by default (the `none` sentinel is now a valid default-key value; the help overlay and command palette render those actions as `(unbound)`). The `Cancel` action is the second action to ship with two default bindings (alongside `DeleteWordBackward`): `C-c` and `Esc` — both fire the same action so users from the bash / readline tradition (`C-c`) and the GUI-editor tradition (`Esc`) both get the
-  expected behaviour
-  without remapping.
-- The JIRA search mode now
-  supports **tab-completion
-  of JQL field names**.
-  Inside `-` mode, pressing
-  `Tab` expands the
-  field-name prefix
-  immediately before the
-  cursor:
-  - `proj<TAB>` → `project=`
-    (single match; cursor
-    lands right after the
-    `=`)
-  - `lab<TAB>` → `label`
-    (multiple matches —
-    `label` and `labels`;
-    extends to the longest
-    common prefix with no
-    `=`, then a second
-    Tab on `labels<TAB>`
-    → `labels=`)
-  - `xyz<TAB>` → no-op +
-    status message
-    (no match; query
-    unchanged)
-  The completion list is
-  the standard JQL system
-  field set (`assignee`,
-  `reporter`, `status`,
-  `priority`, `labels`,
-  `summary`, …) plus a few
-  common custom-field
-  conventions (`sprint`,
-  `epic`, `parent`,
-  `storyPoints`, `rank`).
-  Outside of JIRA mode
-  `Tab` is a no-op, so the
-  key doesn't interfere
-  with any other mode. The
-  action is the new
-  `Action::JiraFieldComplete`
-  (default key `Tab`); the
-  core completion logic
-  lives in
-  `crate::jira::jira_field_complete`
-  / `jira_field_complete_with_value`,
-  both unit-tested.
-- **JIRA `@` alias tab-completion**
-  — the same `Tab` key
-  also expands `@`
-  aliases and user-
-  defined fragments
-  inside `-` mode:
-  - `@mo<TAB>` →
-    `@month` (built-in
-    alias with trailing
-    space)
-  - `@sp<TAB>` →
-    `@sprint` (user-
-    defined fragment
-    from
+- New TUI action `Action::DownloadJiraIssue` (default key `Ctrl-M-s`) downloads
+  the selected JIRA issue as a local markdown note by staging
+  `note_search jira-issue <KEY>`. The action is mode-gated to the JIRA search
+  mode (`-...`); outside of JIRA mode it's a no-op with a status message so the
+  user understands why their key did nothing. The bare command line is staged
+  (no path, no flags) so `note_search` writes the markdown into the `notes.dir`
+  configured in the same config file.
+- The status bar (the footer line at the bottom of the TUI) no longer surfaces
+  the two delete actions in its key-binding hints. The `del` and `del all` chips
+  have been replaced with a `palette` chip showing the current `CommandAction`
+  binding (default `:`). The delete actions are still discoverable via the help
+  overlay (`Ctrl-H`) and the command palette itself, which lists every action
+  with its current binding.
+- The JIRA search-as-you-type now has two additional trigger paths alongside the
+  existing 400ms fast debounce:
+  1. **Space trigger** — typing a space inside the JIRA query body fires the
+     search immediately, bypassing the debounce. This matches IDE autocomplete
+     conventions (a space commits the current token to a search).
+  2. **3-second idle safety- net timer** — a new `jira_idle_started` field fires
+     the search after 3 seconds of no keystroke activity, independent of the
+     400ms debounce. The user reported that the query "sometimes isn't
+     executed"; the idle timer guarantees the search runs within 3 seconds of
+     the last keystroke regardless of whether the fast debounce ever elapses
+     (e.g. the user keeps typing slowly, or the run loop is temporarily blocked
+     on background work). The two timers are armed in lock-step by `jira_touch`;
+     either can fire the search when its respective window elapses.
+- The TUI's default key bindings now mirror the project config file
+  (`~/.config/smarthistory/config`). Actions that the user has explicitly
+  rebound in the config (e.g. `C-a` for `open-help`, `C-q` for `command-action`,
+  `C-v` for `edit-file-reference`, `C-o` for `show-output`, `C-s` for
+  `cycle-directory-source`, `F5` / `F6` / `F10` for the panes actions, `C-c` +
+  `Esc` for `cancel`) now ship with those bindings as the default so a fresh
+  checkout behaves the same as a configured install. Actions that the user has
+  explicitly unbound (`toggle-duplicate-filter` and `delete-matching`) ship
+  unbound by default (the `none` sentinel is now a valid default-key value; the
+  help overlay and command palette render those actions as `(unbound)`). The
+  `Cancel` action is the second action to ship with two default bindings
+  (alongside `DeleteWordBackward`): `C-c` and `Esc` — both fire the same action
+  so users from the bash / readline tradition (`C-c`) and the GUI-editor
+  tradition (`Esc`) both get the expected behaviour without remapping.
+- The JIRA search mode now supports **tab-completion of JQL field names**.
+  Inside `-` mode, pressing `Tab` expands the field-name prefix immediately
+  before the cursor:
+  - `proj<TAB>` → `project=` (single match; cursor lands right after the `=`)
+  - `lab<TAB>` → `label` (multiple matches — `label` and `labels`; extends to
+    the longest common prefix with no `=`, then a second Tab on `labels<TAB>` →
+    `labels=`)
+  - `xyz<TAB>` → no-op + status message (no match; query unchanged) The
+    completion list is the standard JQL system field set (`assignee`,
+    `reporter`, `status`, `priority`, `labels`, `summary`, …) plus a few common
+    custom-field conventions (`sprint`, `epic`, `parent`, `storyPoints`,
+    `rank`). Outside of JIRA mode `Tab` is a no-op, so the key doesn't interfere
+    with any other mode. The action is the new `Action::JiraFieldComplete`
+    (default key `Tab`); the core completion logic lives in
+    `crate::jira::jira_field_complete` / `jira_field_complete_with_value`, both
+    unit-tested.
+- **JIRA `@` alias tab-completion** — the same `Tab` key also expands `@`
+  aliases and user- defined fragments inside `-` mode:
+  - `@mo<TAB>` → `@month` (built-in alias with trailing space)
+  - `@sp<TAB>` → `@sprint` (user- defined fragment from
     `jira.search.sprint=...`)
-  - `@me<TAB>` → `@me`
-    (exact match)
-  - `@xyz<TAB>` → no-op +
-    status message (no
-    match)
-  The alias list is the
-  four built-ins (`me`,
-  `today`, `week`,
-  `month`) plus every
-  `jira.search.<name>`
-  entry from the config
-  file. The same LCP
-  logic as field
-  completion applies to
-  ambiguous prefixes.
-  The completion code
-  detects the `@`
-  character immediately
-  before the cursor and
-  routes to
-  `jira_alias_complete`
-  / `jira_alias_complete_with_space`
-  (both unit-tested).
-- The search now fires
-  immediately on every
-  text-mutating action in
-  every mode except JIRA.
-  The user reported that
-  the JIRA search
-  "sometimes isn't
-  executed" (which we
-  fixed with the 400ms
-  debounce / 3s idle
-  safety-net / space
-  trigger) and the
-  corresponding complaint
-  for the in-process
-  search modes is "the
-  list lags my typing".
-  The new
-  `App::trigger_text_change_search`
-  helper is called from
-  `push_char`,
-  `backspace`,
-  `delete_word_backward`,
-  `clear_query`, and the
-  JIRA tab-completion
-  path. Behaviour by mode:
-  - **Synchronous modes**
-    (SESS, DIR, GLOBAL,
-    STATS, panes `*`,
-    directories `#`,
-    symbols `$`, todos
-    `!`, notes `@`,
-    tags `$`, ag `,`,
-    files `~`): the
-    helper calls
-    `self.refresh()`
-    directly, so the
-    row set is
-    re-fetched on the
-    same frame as
-    the keystroke.
-    The SQL fetch is
-    a constant-time
-    operation, so
-    there's no
-    frame-budget
-    concern.
-  - **LLM (`=`)**: the
-    helper bypasses
-    the 1s LLM
-    debounce by
-    temporarily
-    setting
-    `llm_debounce_started`
-    to a past value
-    and calling
-    `llm_maybe_autocall()`.
-    The user has
-    typed a
-    description; they
-    want a preview
-    now, not after
-    1s of typing
-    latency. (The
-    `llm_in_flight`
-    short-circuit
-    still prevents
-    duplicate
-    concurrent
-    LLM calls.)
-  - **JIRA (`-`)**: the
-    helper is a
-    no-op for JIRA
-    mode. The JIRA-
-    specific
-    debounce/idle
-    /space-trigger
-    paths remain in
-    effect; mixing
-    in a per-
-    keystroke fire
-    would defeat the
-    debounce and
-    re-introduce the
-    JIRA-server spam
-    the debounce was
-    designed to
-    prevent.
-- **Empty queries**
-    (just-cleared
-    box): the
-    helper short-
-    circuits before
-    reaching the
-    fetch path, so
-    we don't waste
-    time re-running
-    the same all-
-    rows query the
-    user just had
-    on screen.
-- Replaced `CyclePrefix` with `PickPrefix` (`F1`). Instead of cycling
-    blindly through prefixes, the action now opens a **prefix picker**
-    overlay — a centred list of every configured mode (History, Output,
-    LLM, Question, Notes, Todos, Directories, Panes, JIRA, Files, Tags,
-    ag).
-    The list pre-selects the entry that matches the current query's
-    leading char (or "History" for a plain text query), so pressing
-    `Enter` with no movement is a no-op. `Up` / `Down` (or `Ctrl-N` /
-    `Ctrl-P`) navigate the list; `Enter` applies the selected prefix
-    (body preserved); `Esc` / the user's `Cancel` binding dismisses
-    the picker without changing the query. The new `PrefixPicker` /
-    `PrefixOption` structs and `handle_prefix_picker_key` /
-    `draw_prefix_picker` functions are modelled on the command palette
-    and theme picker so muscle memory transfers across all overlays.
-    15 new unit tests cover `apply_prefix`, `PrefixPicker::new`, and
-    picker key handling.
-- The notes (`@`) and todos (`!`) prefixes now
-  support **tag and link search** in addition
-  to plain text. The query parser recognizes
-  three token shapes:
-  - `#TAG` → passed through to the
-    `note_search` query parser as a tag
-    filter. The parser already supports
-    `#tagname` syntax, so no conversion is
-    needed.
-  - `@LINK` → converted to `[[LINK]]` (the
-    `note_search` wiki-link syntax) for link
-    search. The link name preserves the
-    user's original casing (link targets are
-    case-sensitive in Obsidian).
-  - `TEXT` → passed through as a plain text
-    term (AND-matched against the note/todo
-    body).
-  All three are AND-joined: `#TAG1 #TAG2 @LINK TEXT`
-  finds notes that are tagged `TAG1` and
-  `TAG2`, have a link to `LINK`, and contain
-  `TEXT` in their body. The date aliases
-  (`@today`, `@week`, `@month`, `@year`) are
-  still extracted as a filter and applied
-  post-query. The `@` prefix for link search
-  replaces the old behavior where `@foo` was
-  stripped to plain text — that stripping
-  was a workaround for the `note_search`
-  link-tokenizer, but it prevented users
-  from actually searching by link. Users who
-  want to search for the literal word
-  `@foo` in note text can now do so (the
-  token is no longer silently rewritten).
-  The change is implemented in
-  `parse_notes_query` in `src/tui.rs`; two
-  new unit tests cover the tag and link
-  tokenization, and the existing
-  `fetch_todos_at_prefix_matches_text` test
-  was updated to use plain text (without
-  `@`) since `@` now means link search.
-- The notes (`@`) and todos (`!`) prefixes
-  now support **tab-completion of tags
-  and links** sourced from the
-  `note_search` database. Pressing
-  `Tab` after `#feat` expands to
-  `#feature` (unique tag match, trailing
-  space); `@Neo` expands to `@NeovimNote`
-  (unique link match). Ambiguous prefixes
-  extend to the longest common prefix so
-  the user can keep typing to
-  disambiguate. The completion list is
-  queried via
-  `note_search::commands::metadata::get_unique_values`,
-  which reads the union of tags and
-  links from every indexed note. The
-  `Action::JiraFieldComplete` action (bound
-  to `Tab` by default) now routes to
-  `notes_tab_complete_at_cursor` when the
-  query is in notes or todos mode — the
-  same `Tab` key serves JQL field
-  completion in JIRA mode and tag / link
-  completion in notes / todos mode. Two
-  helper functions in `src/jira.rs`
-  (`notes_tag_complete` /
-  `notes_link_complete`) provide the pure
-  completion logic, unit-tested with
-  in-memory `note_search` databases. Seven
-  TUI-level tests cover the end-to-end
-  behaviour (unique match, LCP, no-match,
-  todos mode, no-op outside notes/todos).
-- Link expansion now wraps the link
-  target in `[[...]]` syntax (the
-  Obsidian wiki-link form) instead of
-  the `@` shorthand, and strips the
-  `.md` extension from the target.
-  The `[[...]]` syntax is required
-  because the `@` tokenizer in
-  `note_search` only accepts
-  alphanumeric / underscore / slash
-  / hyphen / period characters and
-  cannot represent link names with
-  spaces. `@Neo<TAB>` now expands to
-  `[[NeovimNote]]` (the `@` is
-  consumed as the notes-mode prefix
-  and the `@Neo` word is replaced
-  with the full `[[...]]` form);
-  `@my<TAB>` expands to
-  `[[my note]]` for link names that
-  contain spaces — the `[[...]]`
-  brackets serve as the delimiter
-  so no additional quoting is
-  needed. The `.md` suffix is
-  stripped from every link before
-  matching (matching Obsidian's
-  bare-name reference convention);
-  non-`.md` extensions are preserved
-  since those are actual reference
-  targets (e.g. `.org` notes).
-  `notes_link_complete` in `src/jira.rs`
-  returns the full `[[...]]`
-  expansion; the TUI uses the result
+  - `@me<TAB>` → `@me` (exact match)
+  - `@xyz<TAB>` → no-op + status message (no match) The alias list is the four
+    built-ins (`me`, `today`, `week`, `month`) plus every `jira.search.<name>`
+    entry from the config file. The same LCP logic as field completion applies
+    to ambiguous prefixes. The completion code detects the `@` character
+    immediately before the cursor and routes to `jira_alias_complete` /
+    `jira_alias_complete_with_space` (both unit-tested).
+- The search now fires immediately on every text-mutating action in every mode
+  except JIRA. The user reported that the JIRA search "sometimes isn't executed"
+  (which we fixed with the 400ms debounce / 3s idle safety-net / space trigger)
+  and the corresponding complaint for the in-process search modes is "the list
+  lags my typing". The new `App::trigger_text_change_search` helper is called
+  from `push_char`, `backspace`, `delete_word_backward`, `clear_query`, and the
+  JIRA tab-completion path. Behaviour by mode:
+  - **Synchronous modes** (SESS, DIR, GLOBAL, STATS, panes `*`, directories `#`,
+    symbols `$`, todos `!`, notes `@`, tags `$`, ag `,`, files `~`): the helper
+    calls `self.refresh()` directly, so the row set is re-fetched on the same
+    frame as the keystroke. The SQL fetch is a constant-time operation, so
+    there's no frame-budget concern.
+  - **LLM (`=`)**: the helper bypasses the 1s LLM debounce by temporarily
+    setting `llm_debounce_started` to a past value and calling
+    `llm_maybe_autocall()`. The user has typed a description; they want a
+    preview now, not after 1s of typing latency. (The `llm_in_flight`
+    short-circuit still prevents duplicate concurrent LLM calls.)
+  - **JIRA (`-`)**: the helper is a no-op for JIRA mode. The JIRA- specific
+    debounce/idle /space-trigger paths remain in effect; mixing in a per-
+    keystroke fire would defeat the debounce and re-introduce the JIRA-server
+    spam the debounce was designed to prevent.
+- **Empty queries** (just-cleared box): the helper short- circuits before
+  reaching the fetch path, so we don't waste time re-running the same all- rows
+  query the user just had on screen.
+- Replaced `CyclePrefix` with `PickPrefix` (`F1`). Instead of cycling blindly
+  through prefixes, the action now opens a **prefix picker** overlay — a centred
+  list of every configured mode (History, Output, LLM, Question, Notes, Todos,
+  Directories, Panes, JIRA, Files, Tags, ag). The list pre-selects the entry
+  that matches the current query's leading char (or "History" for a plain text
+  query), so pressing `Enter` with no movement is a no-op. `Up` / `Down` (or
+  `Ctrl-N` / `Ctrl-P`) navigate the list; `Enter` applies the selected prefix
+  (body preserved); `Esc` / the user's `Cancel` binding dismisses the picker
+  without changing the query. The new `PrefixPicker` / `PrefixOption` structs
+  and `handle_prefix_picker_key` / `draw_prefix_picker` functions are modelled
+  on the command palette and theme picker so muscle memory transfers across all
+  overlays. 15 new unit tests cover `apply_prefix`, `PrefixPicker::new`, and
+  picker key handling.
+- The notes (`@`) and todos (`!`) prefixes now support **tag and link search**
+  in addition to plain text. The query parser recognizes three token shapes:
+  - `#TAG` → passed through to the `note_search` query parser as a tag filter.
+    The parser already supports `#tagname` syntax, so no conversion is needed.
+  - `@LINK` → converted to `[[LINK]]` (the `note_search` wiki-link syntax) for
+    link search. The link name preserves the user's original casing (link
+    targets are case-sensitive in Obsidian).
+  - `TEXT` → passed through as a plain text term (AND-matched against the
+    note/todo body). All three are AND-joined: `#TAG1 #TAG2 @LINK TEXT` finds
+    notes that are tagged `TAG1` and `TAG2`, have a link to `LINK`, and contain
+    `TEXT` in their body. The date aliases (`@today`, `@week`, `@month`,
+    `@year`) are still extracted as a filter and applied post-query. The `@`
+    prefix for link search replaces the old behavior where `@foo` was stripped
+    to plain text — that stripping was a workaround for the `note_search`
+    link-tokenizer, but it prevented users from actually searching by link.
+    Users who want to search for the literal word `@foo` in note text can now do
+    so (the token is no longer silently rewritten). The change is implemented in
+    `parse_notes_query` in `src/tui.rs`; two new unit tests cover the tag and
+    link tokenization, and the existing `fetch_todos_at_prefix_matches_text`
+    test was updated to use plain text (without `@`) since `@` now means link
+    search.
+- The notes (`@`) and todos (`!`) prefixes now support **tab-completion of tags
+  and links** sourced from the `note_search` database. Pressing `Tab` after
+  `#feat` expands to `#feature` (unique tag match, trailing space); `@Neo`
+  expands to `@NeovimNote` (unique link match). Ambiguous prefixes extend to the
+  longest common prefix so the user can keep typing to disambiguate. The
+  completion list is queried via
+  `note_search::commands::metadata::get_unique_values`, which reads the union of
+  tags and links from every indexed note. The `Action::JiraFieldComplete` action
+  (bound to `Tab` by default) now routes to `notes_tab_complete_at_cursor` when
+  the query is in notes or todos mode — the same `Tab` key serves JQL field
+  completion in JIRA mode and tag / link completion in notes / todos mode. Two
+  helper functions in `src/jira.rs` (`notes_tag_complete` /
+  `notes_link_complete`) provide the pure completion logic, unit-tested with
+  in-memory `note_search` databases. Seven TUI-level tests cover the end-to-end
+  behaviour (unique match, LCP, no-match, todos mode, no-op outside
+  notes/todos).
+- Link expansion now wraps the link target in `[[...]]` syntax (the Obsidian
+  wiki-link form) instead of the `@` shorthand, and strips the `.md` extension
+  from the target. The `[[...]]` syntax is required because the `@` tokenizer in
+  `note_search` only accepts alphanumeric / underscore / slash / hyphen / period
+  characters and cannot represent link names with spaces. `@Neo<TAB>` now
+  expands to `[[NeovimNote]]` (the `@` is consumed as the notes-mode prefix and
+  the `@Neo` word is replaced with the full `[[...]]` form); `@my<TAB>` expands
+  to `[[my note]]` for link names that contain spaces — the `[[...]]` brackets
+  serve as the delimiter so no additional quoting is needed. The `.md` suffix is
+  stripped from every link before matching (matching Obsidian's bare-name
+  reference convention); non-`.md` extensions are preserved since those are
+  actual reference targets (e.g. `.org` notes). `notes_link_complete` in
+  `src/jira.rs` returns the full `[[...]]` expansion; the TUI uses the result
   directly without re-wrapping.
-- New TUI actions `Action::MoveCursorLeft`
-  (default key `Left`) and
-  `Action::MoveCursorRight` (default key
-  `Right`) move the cursor one
-  character at a time inside the
-  search query. The query string is
-  unchanged; only the cursor position
-  moves. The cursor saturates at
-  position 0 (Left) and at the end of
-  the query (Right), and is measured
-  in UTF-8 characters so multi-byte
-  characters are stepped over as
-  single units. The new actions work
-  in every mode (LLM, JIRA, notes,
-  todos, or plain text search) since
-  the cursor lives on `self.query`
-  in all of them. To make room for the
-  new default bindings, `EditStart`
-  and `EditEnd` ship unbound by
-  default (the `"none"` sentinel) —
-  users who want the old "stage row
-  for editing at cursor start/end"
-  behaviour can rebind via
-  `key.edit-start=...` /
-  `key.edit-end=...` in their config.
-  Five new unit tests cover the
-  cursor-movement helpers
-  (one-step, saturation at boundaries,
-  multi-byte handling).
+- New TUI actions `Action::MoveCursorLeft` (default key `Left`) and
+  `Action::MoveCursorRight` (default key `Right`) move the cursor one character
+  at a time inside the search query. The query string is unchanged; only the
+  cursor position moves. The cursor saturates at position 0 (Left) and at the
+  end of the query (Right), and is measured in UTF-8 characters so multi-byte
+  characters are stepped over as single units. The new actions work in every
+  mode (LLM, JIRA, notes, todos, or plain text search) since the cursor lives on
+  `self.query` in all of them. To make room for the new default bindings,
+  `EditStart` and `EditEnd` ship unbound by default (the `"none"` sentinel) —
+  users who want the old "stage row for editing at cursor start/end" behaviour
+  can rebind via `key.edit-start=...` / `key.edit-end=...` in their config. Five
+  new unit tests cover the cursor-movement helpers (one-step, saturation at
+  boundaries, multi-byte handling).
 
 ### Fixed
 
@@ -714,8 +518,8 @@ All notable changes to this project will be documented in this file.
 
 ### Repository hygiene
 
-- Expanded `.gitignore` to cover `.codegraph/`, `.pi-loop.json.lock`,
-  generated `TAGS`, and local scratch files.
+- Expanded `.gitignore` to cover `.codegraph/`, `.pi-loop.json.lock`, generated
+  `TAGS`, and local scratch files.
 
 ## 1.1.0
 
