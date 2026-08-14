@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory project files`: prints the files viewed/modified/created
+  since the currently-open project session started — scoped to the live session
+  rather than a whole calendar day like `project report`. Reads the open
+  `project_sessions` row directly (`end_ts IS NULL`) instead of re-resolving the
+  project from the cwd. Prints "no active project session" (exit 1) when nothing
+  is open, including while paused.
 - New `fileviewcommands` config key (default `less more bat tail head`):
   `smarthistory add` now automatically records a `viewed` file event for these
   commands' file argument — no editor hook needed for the common case of paging

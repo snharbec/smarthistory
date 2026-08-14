@@ -360,6 +360,9 @@ smarthistory project report --day yesterday --project acme --min-duration 30
 smarthistory project pause
 smarthistory project pause
 
+# What have I touched in the current (still-open) session?
+smarthistory project files
+
 # Record editor file events (usually called from an editor hook, not by
 # hand) — attributed by the FILE's own directory, same priority as above:
 smarthistory file viewed ~/work/acme/src/main.rs
