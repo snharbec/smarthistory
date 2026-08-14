@@ -5735,7 +5735,11 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
         let mut dirs: Vec<(&str, i64)> = by_dir.into_iter().collect();
         dirs.sort_by_key(|d| std::cmp::Reverse(d.1));
         for (dir, secs) in dirs {
-            println!("- {} ({})", dir, format_duration_secs(secs));
+            println!(
+                "- {} ({})",
+                crate::util::expand_home(dir),
+                format_duration_secs(secs)
+            );
         }
     }
 
@@ -5772,7 +5776,7 @@ fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_dura
                 "| {} | {} | {} | {} |",
                 time_cell,
                 format_duration_secs(g.total_secs),
-                escape_md_table_cell(g.directory),
+                escape_md_table_cell(&crate::util::expand_home(g.directory)),
                 escape_md_table_cell(g.command)
             );
         }
@@ -5795,6 +5799,24 @@ struct WebsiteLink {
     cluster: String,
     title: String,
     url: String,
+}
+
+/// The basename of a note's filename, stripped of its extension —
+/// `note_search`'s `[[link]]` wiki-link target (the same identity
+/// `stage_project_selection`'s slug derivation, and every other
+/// `[[...]]` reference in this codebase, uses; notes are always
+/// referenced by basename, not the frontmatter title — see
+/// `notes::fetch`'s doc comment). `filename` here is already a bare
+/// basename with extension (e.g. `Standup.md`), never a path with
+/// directory components — `NoteResult::filename`'s own contract —
+/// so this only ever strips the extension. Falls back to the input
+/// verbatim on the (unreachable in practice) case where
+/// `file_stem()` finds nothing to strip.
+fn note_basename(filename: &str) -> &str {
+    std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename)
 }
 
 /// Escape the handful of Markdown link syntax characters that could
@@ -7100,26 +7122,21 @@ fn main() -> anyhow::Result<()> {
 
                 println!("# Project Report — {}", date.format("%Y-%m-%d"));
 
-                for slug in &slugs {
-                    let rows: Vec<&ReportCommandRow> = commands
-                        .iter()
-                        .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
-                        .collect();
-                    print_project_report_section(slug, &rows, min_duration);
-                    if let Some(notes) = notes_by_slug.get(slug) {
-                        println!("\n### Notes created");
-                        for n in notes {
-                            println!("- {n}");
-                        }
-                    }
-                    println!("\n### Websites");
-                    match websites_by_slug.get(&Some(slug.clone())) {
-                        Some(items) if !items.is_empty() => print_website_section(items),
-                        _ => println!("(none)"),
-                    }
-                    println!();
-                }
-
+                // One (slug, rows) pair per section — `None` is the
+                // trailing "untracked" bucket. Built once, up front,
+                // so the summary table below and each section's own
+                // total (`print_project_report_section` re-sums the
+                // same `rows` slice) can never drift apart.
+                let mut sections: Vec<(Option<String>, Vec<&ReportCommandRow>)> = slugs
+                    .iter()
+                    .map(|slug| {
+                        let rows: Vec<&ReportCommandRow> = commands
+                            .iter()
+                            .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
+                            .collect();
+                        (Some(slug.clone()), rows)
+                    })
+                    .collect();
                 if project.is_none() {
                     let untracked: Vec<&ReportCommandRow> = commands
                         .iter()
@@ -7127,14 +7144,38 @@ fn main() -> anyhow::Result<()> {
                         .collect();
                     let untracked_websites = websites_by_slug.get(&None);
                     if !untracked.is_empty() || untracked_websites.is_some_and(|v| !v.is_empty()) {
-                        print_project_report_section("untracked", &untracked, min_duration);
-                        println!("\n### Websites");
-                        match untracked_websites {
-                            Some(items) if !items.is_empty() => print_website_section(items),
-                            _ => println!("(none)"),
-                        }
-                        println!();
+                        sections.push((None, untracked));
                     }
+                }
+
+                println!("\n## Summary");
+                println!("| Project | Active Time |");
+                println!("| --- | --- |");
+                for (slug, rows) in &sections {
+                    let label = slug.as_deref().unwrap_or("untracked");
+                    let total: i64 = rows.iter().map(|r| r.active_secs).sum();
+                    println!(
+                        "| {} | {} |",
+                        escape_md_table_cell(label),
+                        format_duration_secs(total)
+                    );
+                }
+
+                for (slug, rows) in &sections {
+                    let label = slug.as_deref().unwrap_or("untracked");
+                    print_project_report_section(label, rows, min_duration);
+                    if let Some(notes) = slug.as_ref().and_then(|s| notes_by_slug.get(s)) {
+                        println!("\n### Notes created");
+                        for n in notes {
+                            println!("- [[{}]]", note_basename(n));
+                        }
+                    }
+                    println!("\n### Websites");
+                    match websites_by_slug.get(slug) {
+                        Some(items) if !items.is_empty() => print_website_section(items),
+                        _ => println!("(none)"),
+                    }
+                    println!();
                 }
             }
             ProjectAction::Select { slug } => {
