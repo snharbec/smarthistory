@@ -647,6 +647,33 @@ file2
     }
 
     #[test]
+    fn config_default_contains_file_view_commands() {
+        let cfg = Config::default();
+        for cmd in DEFAULT_FILE_VIEW_COMMANDS {
+            assert!(cfg.is_file_view_command(cmd), "default {cmd} missing");
+        }
+        assert!(!cfg.is_file_view_command("cat"), "cat is not a default file-view command");
+    }
+
+    #[test]
+    fn fileviewcommands_config_replaces_the_default_set() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["fileviewcommands = cat bat\n"]);
+        assert!(cfg.is_file_view_command("cat something"));
+        assert!(cfg.is_file_view_command("bat something"));
+        assert!(!cfg.is_file_view_command("less something"), "less was not re-added to the custom list");
+    }
+
+    #[test]
+    fn first_non_flag_argument_skips_leading_flags() {
+        assert_eq!(first_non_flag_argument("tail -f app.log"), Some("app.log"));
+        assert_eq!(first_non_flag_argument("less -N config.yaml"), Some("config.yaml"));
+        assert_eq!(first_non_flag_argument("less file.txt"), Some("file.txt"));
+        assert_eq!(first_non_flag_argument("less"), None);
+        assert_eq!(first_non_flag_argument("less -N -x"), None, "only flag arguments");
+    }
+
+    #[test]
     fn config_parses_user_file() {
         // `$HOME` is process-global and `cargo test` runs every
         // test in the crate in one process, so this holds the

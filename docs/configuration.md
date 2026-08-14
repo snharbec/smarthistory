@@ -48,6 +48,7 @@ value" so you can confirm what the TUI actually sees.
 - [Capture & output](#capture--output)
   - [`tmuxpaneoutputdir`](#tmuxpaneoutputdir)
   - [`ignorecapture`](#ignorecapture)
+  - [`fileviewcommands`](#fileviewcommands)
   - [`capturelines`](#capturelines)
   - [`capturelines.<cmd>`](#capturelinescmd)
 - [History list & filtering](#history-list--filtering)
@@ -137,6 +138,26 @@ value (`ignorecapture=`) means capture everything.
 ```ini
 # Add a few chatty commands to the default skip list:
 ignorecapture=cd ls pwd exit clear history fc jobs bg fg wait disown suspend neofetch fastfetch
+```
+
+### `fileviewcommands`
+
+|                  |                                                     |
+| ---------------- | --------------------------------------------------- |
+| **Type**         | Space-separated list of command names (first token) |
+| **Default**      | `less more bat tail head`                           |
+| **Env override** | —                                                   |
+
+Commands whose first non-flag argument is recorded as a `viewed` file event
+(time tracking — see [`docs/modes/project.md`](modes/project.md#file-tracking)),
+the same `file_events` table `smarthistory file viewed` writes to. Matched
+against the **first token** of the command (no `$PATH` resolution or basename
+stripping, same convention `ignorecapture` uses), so `tail -f app.log` and
+`less -N config.yaml` both record their respective files. Setting this
+**replaces** the default list entirely — it doesn't append.
+
+```ini
+fileviewcommands=less more bat tail head cat
 ```
 
 ### `capturelines`
@@ -1320,6 +1341,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | ------------------------------- | --------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `tmuxpaneoutputdir`             | path                              | `~/.cache/tmux-history`                                          | [Capture & output](#capture--output)                                      |
 | `ignorecapture`                 | list                              | `cd ls pwd exit clear history fc jobs bg fg wait disown suspend` | [Capture & output](#capture--output)                                      |
+| `fileviewcommands`              | list                              | `less more bat tail head`                                        | [Capture & output](#capture--output)                                      |
 | `capturelines`                  | `ALL` \| int                      | `20`                                                             | [Capture & output](#capture--output)                                      |
 | `capturelines.<cmd>`            | `ALL` \| int                      | —                                                                | [Capture & output](#capture--output)                                      |
 | `duplicatefilter`               | `on` \| `off`                     | `on`                                                             | [History list & filtering](#history-list--filtering)                      |

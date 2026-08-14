@@ -945,6 +945,11 @@ const DEFAULT_NO_CAPTURE: &[&str] = &[
     "vi", "nvim", "vim", "top", "htop", "emacs", "more", "less", "lazygit",
 ];
 
+/// Default `fileviewcommands` set — commands whose first non-flag
+/// argument is recorded as a `viewed` file event when the config
+/// file is absent or does not set `fileviewcommands`.
+const DEFAULT_FILE_VIEW_COMMANDS: &[&str] = &["less", "more", "bat", "tail", "head"];
+
 /// Default number of captured lines when neither `capturelines` nor a
 /// per-command override is configured.
 const DEFAULT_CAPTURE_LINES: usize = 20;
@@ -1386,6 +1391,17 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
             .collect::<Vec<_>>()
             .join(" ")
     );
+    let mut view_cmds: Vec<&String> = cfg.file_view_commands.iter().collect();
+    view_cmds.sort();
+    let _ = writeln!(
+        f,
+        "  fileviewcommands = {}",
+        view_cmds
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let default = match cfg.default_capture_lines {
         Some(n) => n.to_string(),
         None => "ALL".to_string(),
@@ -1756,6 +1772,17 @@ pub struct Config {
     /// Commands whose output is never captured. Empty means capture
     /// everything.
     ignore_capture: std::collections::HashSet<String>,
+    /// Commands whose first non-flag argument is recorded as a
+    /// `viewed` file event (`file_events`, same table
+    /// `smarthistory file viewed` writes to) — a `less`/`cat`-style
+    /// pager or file dump is itself evidence the file was viewed,
+    /// with no editor hook required. Matched against the command's
+    /// literal first whitespace token (same convention
+    /// `ignore_capture` uses — no `$PATH` resolution or basename
+    /// stripping, so `/usr/bin/less` won't match a bare `less`
+    /// entry). See `first_non_flag_argument` for how the "file"
+    /// argument itself is picked out from the rest of the command.
+    file_view_commands: std::collections::HashSet<String>,
     /// Default number of captured lines, or `None` for unlimited.
     default_capture_lines: Option<usize>,
     /// Per-command override for captured lines.
@@ -2226,9 +2253,14 @@ impl Config {
             .unwrap_or_else(|_| std::path::PathBuf::from(".cache/tmux-history"));
         let ignore: std::collections::HashSet<String> =
             DEFAULT_NO_CAPTURE.iter().map(|s| s.to_string()).collect();
+        let file_view_commands: std::collections::HashSet<String> = DEFAULT_FILE_VIEW_COMMANDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         Config {
             tmux_pane_output_dir: dir,
             ignore_capture: ignore,
+            file_view_commands,
             default_capture_lines: Some(DEFAULT_CAPTURE_LINES),
             capture_lines_per_command: std::collections::HashMap::new(),
             duplicate_filter: true,
@@ -2464,6 +2496,10 @@ impl Config {
                 }
                 "ignorecapture" => {
                     self.ignore_capture = value.split_whitespace().map(|s| s.to_string()).collect();
+                }
+                "fileviewcommands" => {
+                    self.file_view_commands =
+                        value.split_whitespace().map(|s| s.to_string()).collect();
                 }
                 "capturelines" => {
                     if let Some(parsed) = parse_capture_lines(value) {
@@ -3333,6 +3369,14 @@ impl Config {
         self.ignore_capture.contains(first_token(command))
     }
 
+    /// True when `command`'s program name is in `fileviewcommands`
+    /// (default `less`/`more`/`bat`/`tail`/`head`) — i.e. this
+    /// command's first non-flag argument should be recorded as a
+    /// `viewed` file event.
+    fn is_file_view_command(&self, command: &str) -> bool {
+        self.file_view_commands.contains(first_token(command))
+    }
+
     /// Return the resolved TUI theme. The returned `TuiTheme` reflects
     /// any user overrides from `~/.config/smarthistory/config`.
     pub fn theme(&self) -> &TuiTheme {
@@ -4083,6 +4127,20 @@ impl Config {
 /// the no-capture list.
 fn first_token(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or("")
+}
+
+/// The first non-flag (not `-`-prefixed) argument of a command line
+/// — used to pick the "file" out of a `fileviewcommands` invocation
+/// like `tail -f app.log` or `less -N config.yaml`. Skips every
+/// leading `-...` token, not just one; doesn't understand flags that
+/// take a separate value (`head -n 20 file.csv` picks `20`, not
+/// `file.csv`) — a known, accepted limitation, not a bug to fix
+/// here. Returns `None` when the command has no arguments at all, or
+/// only flag arguments.
+fn first_non_flag_argument(command: &str) -> Option<&str> {
+    let mut tokens = command.split_whitespace();
+    tokens.next()?; // the command name itself, not an argument
+    tokens.find(|tok| !tok.starts_with('-'))
 }
 
 /// Run `command`, capture up to `max_lines` of combined stdout/stderr,
@@ -6431,6 +6489,36 @@ fn main() -> anyhow::Result<()> {
                 project_cfg.project_idle_threshold_secs,
                 None,
             )?;
+
+            // File tracking: a `less`/`bat`/`tail`/`head`-style
+            // command (`fileviewcommands`, configurable) is itself
+            // evidence its file argument was viewed — record it the
+            // same as an explicit `smarthistory file viewed <path>`
+            // call, no editor hook required. Resolved relative to
+            // `pwd` (the argument is usually a relative path) and
+            // attributed by the FILE's own directory, same as the
+            // `file viewed` subcommand — not necessarily `pwd`
+            // itself, though in practice they're almost always the
+            // same directory.
+            if project_cfg.is_file_view_command(&command)
+                && let Some(arg) = first_non_flag_argument(&command)
+            {
+                let candidate = if std::path::Path::new(arg).is_absolute() {
+                    arg.to_string()
+                } else {
+                    format!("{pwd}/{arg}")
+                };
+                let canonical = crate::util::canonicalize_directory(&candidate);
+                let dir = std::path::Path::new(&canonical)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let file_project = resolve_current_project(&conn, &project_cfg, &dir)?;
+                conn.execute(
+                    "INSERT INTO file_events (path, event_kind, project_slug, timestamp) VALUES (?1, 'viewed', ?2, ?3)",
+                    params![canonical, file_project, now],
+                )?;
+            }
 
             // Atomic upsert: if (command, directory, session_id) already
             // exists, refresh its timestamp and exit_code; otherwise

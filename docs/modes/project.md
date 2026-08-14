@@ -126,6 +126,32 @@ existed before the write — e.g. in a `BufWritePre` autocmd, via
 `filereadable(expand('%:p'))` — before deciding which of the two to call; the
 exact detection is editor-specific and left to the hook.)
 
+### Automatic `viewed` events from shell commands
+
+No editor hook needed for the common case of paging through a file from the
+shell: `smarthistory add` (the shell hook that already fires after every
+command) checks the command's program name against `fileviewcommands` (config
+key, default `less more bat tail head`) and, on a match, records the first
+non-flag argument as a `viewed` event automatically.
+
+```ini
+# Replace the default list (setting this key replaces it entirely,
+# it doesn't append):
+fileviewcommands=less more bat tail head cat
+```
+
+```sh
+tail -f app.log        # -> viewed: app.log (the -f flag is skipped)
+less -N config.yaml    # -> viewed: config.yaml
+```
+
+The argument is resolved relative to the shell's cwd when it's a relative path,
+then attributed by its own directory exactly like `smarthistory file viewed`
+does. This is a simple heuristic, not a full argument parser: a flag that takes
+a separate value (`head -n 20 file.csv`) is picked up as if `20` were the file —
+a known, accepted limitation, not something worth a real parser for a handful of
+pager-style commands.
+
 ## Pausing tracking
 
 ```sh
