@@ -354,6 +354,11 @@ smarthistory project report
 
 # Yesterday, one project, only commands active for at least 30s:
 smarthistory project report --day yesterday --project acme --min-duration 30
+
+# Pause tracking (lunch, a meeting, ...) — call again to resume the exact
+# project that was active when you paused:
+smarthistory project pause
+smarthistory project pause
 ```
 
 Websites (bookmarks/history from `^` mode, plus JIRA REST-mode visits from `-`

@@ -754,6 +754,20 @@ enum ProjectAction {
     /// shell prompt or script; prints nothing (exit code 1) when
     /// unresolved.
     Current,
+    /// Toggle project tracking off/on: a manual "stop attributing
+    /// time to any project" switch, e.g. for a lunch break or a
+    /// meeting where you don't want the current directory's project
+    /// to keep accruing time. First call pauses — closes the open
+    /// `project_sessions` row (if any, `end_reason = "paused"`) and
+    /// remembers whatever project was active, so directory/marker
+    /// resolution is fully suppressed (not just the session that
+    /// happened to be open) until you resume, even if you `cd`
+    /// around a directory-bound project's tree in the meantime.
+    /// Second call resumes — restores that exact remembered project
+    /// (`end_reason = "switch"` on the reopened session), not
+    /// whatever the current directory would resolve to on its own.
+    /// Prints which state it switched to.
+    Pause,
 }
 
 /// A single history entry for JSON export/import.
@@ -5137,6 +5151,21 @@ fn init_db() -> anyhow::Result<Connection> {
         )",
         [],
     )?;
+    // `smarthistory project pause`'s toggle state — a singleton row
+    // (same `CHECK (id = 1)` invariant as `project_current`) present
+    // only while tracking is paused. `paused_slug` snapshots whatever
+    // project was active at the moment of pausing (NULL when nothing
+    // was), so `pause` called again restores exactly that project
+    // rather than re-resolving from the directory the user happens
+    // to be in when they resume.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS project_pause (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            paused_slug TEXT,
+            paused_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
     // If an older database still has the per-row comment column from
     // a previous schema, migrate those comments into the global
     // command_comments table and then drop the column.
@@ -5341,13 +5370,31 @@ fn find_project_marker(pwd: &std::path::Path) -> Option<String> {
     None
 }
 
+/// True while `smarthistory project pause` has tracking paused (a
+/// `project_pause` row exists). Checked first, and unconditionally,
+/// by `resolve_current_project` — a pause must stick even if the
+/// user `cd`s into a directory-bound project's tree while paused, not
+/// just suppress whatever was resolved at the moment of pausing.
+fn is_project_tracking_paused(conn: &Connection) -> anyhow::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let row: Option<i64> = conn
+        .query_row("SELECT id FROM project_pause WHERE id = 1", [], |row| row.get(0))
+        .optional()?;
+    Ok(row.is_some())
+}
+
 /// Resolve which project (if any) owns the current directory/context,
-/// in priority order: in-repo marker file, longest `project.<slug>.dir`
-/// prefix match, the last explicitly-selected project
-/// (`project_current`, set by `smarthistory project select` — see the
-/// `.` picker), then `None` (untracked).
+/// in priority order: is tracking paused (`smarthistory project
+/// pause`) — always `None` if so, regardless of the rest; in-repo
+/// marker file; longest `project.<slug>.dir` prefix match; the last
+/// explicitly-selected project (`project_current`, set by
+/// `smarthistory project select` — see the `.` picker); then `None`
+/// (untracked).
 fn resolve_current_project(conn: &Connection, cfg: &Config, pwd: &str) -> anyhow::Result<Option<String>> {
     use rusqlite::OptionalExtension;
+    if is_project_tracking_paused(conn)? {
+        return Ok(None);
+    }
     if let Some(slug) = find_project_marker(std::path::Path::new(pwd)) {
         return Ok(Some(slug));
     }
@@ -7118,6 +7165,64 @@ fn main() -> anyhow::Result<()> {
                     None => {
                         eprintln!("smarthistory: no active project");
                         std::process::exit(1);
+                    }
+                }
+            }
+            ProjectAction::Pause => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                if is_project_tracking_paused(&conn)? {
+                    // Resume: restore the snapshot taken when we
+                    // paused, then discard it — `switch_project` is
+                    // called with `forced_reason = Some("switch")`
+                    // even when `paused_slug` is `None`, so a still-
+                    // open session from some OTHER project (opened
+                    // by a plain `smarthistory add` racing with this
+                    // resume) still gets closed correctly rather
+                    // than silently left open past the resume point.
+                    let paused_slug: Option<String> = conn.query_row(
+                        "SELECT paused_slug FROM project_pause WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    conn.execute("DELETE FROM project_pause WHERE id = 1", [])?;
+                    let cfg = Config::load();
+                    switch_project(
+                        &conn,
+                        paused_slug.as_deref(),
+                        now,
+                        cfg.project_idle_threshold_secs,
+                        Some("switch"),
+                    )?;
+                    match paused_slug {
+                        Some(slug) => eprintln!("smarthistory: project tracking resumed: {slug:?}"),
+                        None => eprintln!("smarthistory: project tracking resumed (no project was active)"),
+                    }
+                } else {
+                    // Pause: snapshot whatever project is active
+                    // right now (same resolution `smarthistory add`
+                    // uses), then close it — `switch_project(...,
+                    // None, ...)` closes the open session without
+                    // opening a replacement.
+                    let cfg = Config::load();
+                    let pwd = crate::util::current_directory_for_storage();
+                    let active = resolve_current_project(&conn, &cfg, &pwd)?;
+                    switch_project(
+                        &conn,
+                        None,
+                        now,
+                        cfg.project_idle_threshold_secs,
+                        Some("paused"),
+                    )?;
+                    conn.execute(
+                        "INSERT INTO project_pause (id, paused_slug, paused_at) VALUES (1, ?1, ?2)",
+                        params![active, now],
+                    )?;
+                    match &active {
+                        Some(slug) => eprintln!("smarthistory: project tracking paused (was: {slug:?})"),
+                        None => eprintln!("smarthistory: project tracking paused (no project was active)"),
                     }
                 }
             }

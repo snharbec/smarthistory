@@ -91,6 +91,21 @@ global command activity (`history.timestamp`), not per-pane — so running a bui
 in one pane and editing in another, both in the same project, count as one
 continuous session.
 
+## Pausing tracking
+
+```sh
+smarthistory project pause
+```
+
+A toggle: the first call **pauses** — closes the currently-open session (if any,
+`end_reason = "paused"`) and suppresses all resolution (marker file,
+`project.<slug>.dir`, explicit selection) until resumed, so `cd`-ing into a
+directory-bound project while paused doesn't quietly restart tracking. The
+second call **resumes** — reopens a session for whichever project was active at
+the moment you paused (`end_reason = "switch"` on the reopened session), not
+whatever the directory you're currently in would resolve to. Useful for a lunch
+break or a meeting where you don't want the time attributed to anything.
+
 ## `smarthistory project report`
 
 ```sh
