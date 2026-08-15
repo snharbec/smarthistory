@@ -456,6 +456,13 @@ action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
 `zle-line-init` hook. Selecting a predicted candidate works exactly like
 selecting a normal search result (`Tab`/`Enter`/arrows all behave identically).
 
+Scoped to the current search mode, same as the normal search results shown once
+you start typing: SESS only predicts successors observed in
+`$SMART_HISTORY_SESSION`, DIR only ones observed in `$PWD`, GLOBAL is unscoped.
+This matters for concurrently-active panes — without it, a command from an
+unrelated pane that happened to run right after your last command could show up
+as "predicted," even though it has nothing to do with what you're doing here.
+
 ```ini
 dropdown.enabled=on
 dropdown.predict=on

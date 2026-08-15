@@ -581,6 +581,21 @@ enum Commands {
         /// Maximum number of candidates to return. Default 5.
         #[arg(short, long)]
         limit: Option<usize>,
+        /// Scope the successor lookup to this directory: only rows
+        /// whose `directory` matches are considered when pairing
+        /// each command with whatever ran immediately after it, so
+        /// a command from an unrelated directory can never count as
+        /// a "next" for this one. Matches `Commands::Search`'s
+        /// `--directory` in shape and canonicalization.
+        #[arg(short, long)]
+        directory: Option<String>,
+        /// Scope the successor lookup to the current
+        /// `$SMART_HISTORY_SESSION` — same idea as `--directory`
+        /// above, but by session instead: a concurrently-running
+        /// pane's command can never count as a "next" for this
+        /// session's history.
+        #[arg(short, long)]
+        session: bool,
     },
     /// Re-run the connection command for the current tmux session or
     /// herdr workspace, if it was created from a configured
@@ -5901,9 +5916,11 @@ struct ReportCommandRow {
 /// `min(next_command_in_session_ts - ts, idle_threshold)`, falling
 /// back to the session's own end (or "now") for a session's last
 /// command. Partitioned by `session_id` so a gap in one pane's
-/// activity never inflates a command's duration in another —
-/// deliberately different from [`Commands::Next`]'s "next command"
-/// predictor query, which isn't session-scoped.
+/// activity never inflates a command's duration in another — same
+/// "a concurrently running pane's command must never spuriously
+/// count as this one's successor" rationale [`next_command_candidates`]
+/// applies via its `directory`/`session_id` scoping, just always-on
+/// here (a report has no "global" mode to fall back to).
 fn report_command_rows(
     conn: &Connection,
     range_start: i64,
@@ -5973,6 +5990,76 @@ fn report_command_rows(
             })
         },
     )?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// The successor-frequency "next command" predictor behind
+/// `Commands::Next` (CLI: `smarthistory next`), `Ctrl-S`
+/// (`_smarthistory_next_history`), and the dropdown's
+/// `dropdown.predict` empty-line prediction. Pairs every `history`
+/// row with whatever ran immediately after it (SQLite's `LEAD()`
+/// window function, ordered by timestamp), then returns the most
+/// frequent successors of `command`, `(next_command, frequency)`,
+/// ranked by frequency descending (alphabetical tie-break).
+///
+/// `directory`/`session_id`, when given, scope the pairing itself —
+/// only rows matching the scope are even eligible to be a
+/// predecessor or successor — not just the final result. Filtering
+/// only the OUTPUT would still let a command from an unrelated
+/// directory/session count as "next" just because it happened to be
+/// chronologically adjacent in the unfiltered table; scoping the
+/// CTE's input instead means a concurrently running pane's command
+/// can never spuriously count as this scope's successor. `None` for
+/// both means the historical unscoped (global) behavior.
+fn next_command_candidates(
+    conn: &Connection,
+    command: &str,
+    limit: usize,
+    directory: Option<&str>,
+    session_id: Option<&str>,
+) -> anyhow::Result<Vec<(String, i64)>> {
+    let mut scope_clause = String::new();
+    let mut scope_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(dir) = directory {
+        scope_clause.push_str(" AND directory = ?");
+        scope_params.push(Box::new(dir.to_string()));
+    }
+    if let Some(sid) = session_id {
+        scope_clause.push_str(" AND session_id = ?");
+        scope_params.push(Box::new(sid.to_string()));
+    }
+    let sql = format!(
+        "
+        WITH pairs AS (
+            SELECT
+                command,
+                LEAD(command) OVER (ORDER BY timestamp ASC, id ASC) AS next_cmd
+            FROM history
+            WHERE 1=1{scope_clause}
+        )
+        SELECT next_cmd, COUNT(*) AS freq
+        FROM pairs
+        WHERE command = ? AND next_cmd IS NOT NULL
+        GROUP BY next_cmd
+        ORDER BY freq DESC, next_cmd ASC
+        LIMIT ?
+        "
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut all_params: Vec<&dyn rusqlite::ToSql> =
+        scope_params.iter().map(|p| p.as_ref()).collect();
+    all_params.push(&command);
+    let limit_i64 = limit as i64;
+    all_params.push(&limit_i64);
+    let rows = stmt.query_map(&all_params[..], |row| {
+        let next: String = row.get(0)?;
+        let freq: i64 = row.get(1)?;
+        Ok((next, freq))
+    })?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -7259,34 +7346,35 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Next { command, limit } => {
-            // Find the most frequent commands that follow `command`
-            // in the global history. Uses SQLite's LEAD() window
-            // function to pair each row with its immediate successor
-            // by timestamp, then groups by the successor and counts.
+        Commands::Next {
+            command,
+            limit,
+            directory,
+            session,
+        } => {
             let limit = limit.unwrap_or(5);
-            let sql = "
-                WITH pairs AS (
-                    SELECT
-                        command,
-                        LEAD(command) OVER (ORDER BY timestamp ASC, id ASC) AS next_cmd
-                    FROM history
-                )
-                SELECT next_cmd, COUNT(*) AS freq
-                FROM pairs
-                WHERE command = ?1 AND next_cmd IS NOT NULL
-                GROUP BY next_cmd
-                ORDER BY freq DESC, next_cmd ASC
-                LIMIT ?2
-            ";
-            let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map(params![command, limit as i64], |row| {
-                let next: String = row.get(0)?;
-                let freq: i64 = row.get(1)?;
-                Ok((next, freq))
-            })?;
-            for r in rows {
-                let (next, freq) = r?;
+            let directory_canonical = directory.as_deref().map(crate::util::canonicalize_directory);
+            let session_id = if session {
+                match env::var("SMART_HISTORY_SESSION") {
+                    Ok(s) if !s.is_empty() => Some(s),
+                    _ => {
+                        eprintln!(
+                            "warning: --session requested but SMART_HISTORY_SESSION is not set; ignoring"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let candidates = next_command_candidates(
+                &conn,
+                &command,
+                limit,
+                directory_canonical.as_deref(),
+                session_id.as_deref(),
+            )?;
+            for (next, freq) in candidates {
                 println!("{}\t{}", freq, crate::util::escape_field_for_output(&next));
             }
         }

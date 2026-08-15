@@ -69,8 +69,10 @@ of falling through to zsh's native history.
   (a `type: project` note), resolved by directory or explicit `.`-mode
   selection, no daemon required. `smarthistory project report` prints a
   per-project daily rollup. See [Time tracking](#time-tracking) below.
-- **Smart "next command" predictor** (`Ctrl+S`): ranks the global history by
-  successor frequency via SQLite's `LEAD()` window function.
+- **Smart "next command" predictor** (`Ctrl+S`): ranks history by successor
+  frequency via SQLite's `LEAD()` window function, scoped to the current search
+  mode (SESS/DIR/GLOBAL). The live dropdown can also show this on an empty line
+  (`dropdown.predict=on`).
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate
   natural-language into a runnable command (`=`), describe a command in plain
   prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`). Question mode (`?`)

@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `Ctrl-S`/`smarthistory next`/`dropdown.predict` (the "next command" predictor)
+  now scope by the current search mode (SESS/DIR/GLOBAL) instead of always
+  predicting from the entire unscoped global history. New `Commands::Next` flags
+  `--session`/`--directory <DIR>` restrict which rows are even eligible to be
+  paired as a predecessor/successor -- not just filter the output -- so a
+  command from a different, concurrently-active pane (or an unrelated directory)
+  can never spuriously count as "next" for this scope. `Ctrl-S` and the
+  dropdown's prediction both pass the current mode automatically; GLOBAL keeps
+  the previous unscoped behavior.
 - New `dropdown.predict=on|off` config key (default off): when the command line
   is empty, the live dropdown widget shows predicted next commands instead of
   nothing, using the same successor-frequency data `Ctrl-S`/`smarthistory next`
