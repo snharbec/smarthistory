@@ -25,6 +25,15 @@ sysinfo = "0.39"
 # argument was supplied` at the build of `cookie`.
 time = "=0.3.51"
 note_search = { git = "https://github.com/snharbec/note_search.git" }
+# Cross-platform file watching for the `smarthistory daemon`
+# (FSEvents on macOS, inotify on Linux). The 4.x line keeps the
+# `DebouncedEvent` API, whose debounce window coalesces the burst
+# of events from a single editor save into one event — exactly
+# what time tracking wants (one "file saved in project X", not
+# 50 raw events). notify 5.x/6.x/7.x replaced `DebouncedEvent` with
+# a raw `Event` stream that has no built-in debounce, so we pin
+# the 4.x line.
+notify = "4"
 # `reqwest` is ALSO a transitive dep of `note_search`
 # (it uses `reqwest` for its JIRA import feature). Adding
 # it directly here reuses the SAME already-compiled

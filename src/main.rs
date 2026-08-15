@@ -3,6 +3,7 @@
 mod ag;
 mod browser;
 mod codegraph;
+mod daemon;
 mod debounce;
 mod files;
 mod highlight;
@@ -730,6 +731,26 @@ enum Commands {
     /// migration are stored `~`-shortened from the start (see
     /// `current_directory_for_storage`).
     Update,
+    /// Watch configured project directories for file changes and
+    /// record them as `file_events` (created/modified/deleted),
+    /// attributed to the project the file lives in — the automatic
+    /// counterpart to the editor-hook `file` command. Runs in the
+    /// foreground; manage it with a launchd/systemd unit or `&`.
+    ///
+    /// Which directories are watched, which files/directories are
+    /// ignored, and which event kinds are recorded are all
+    /// configurable via `daemon.*` keys (see `docs/daemon.md`).
+    Daemon {
+        /// Watch these directories instead of the configured
+        /// `daemon.watch` / `project.<slug>.dir` roots.
+        #[arg(short, long)]
+        watch: Vec<String>,
+        /// Watch, drain the current event burst, record, and exit —
+        /// a cron-style poll fallback for environments that can't
+        /// keep a long-running process alive.
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 /// Sub-commands of `smarthistory config`. `Get` preserves the
@@ -2086,6 +2107,33 @@ pub struct Config {
     /// (`.venv/`, `.terraform/`,
     /// etc.).
     files_ignores: Vec<String>,
+    /// Whether the `smarthistory daemon` file-watching loop is
+    /// enabled. Default `true` — running the command is the opt-in;
+    /// `daemon.enabled=off` is a kill switch. Set via
+    /// `daemon.enabled=on|off`.
+    daemon_enabled: bool,
+    /// Explicit directories the daemon watches, in addition to (or
+    /// instead of) the derived `project.<slug>.dir` roots. When
+    /// empty, the daemon watches every `project.<slug>.dir` entry.
+    /// Set via `daemon.watch=<dir> <dir> ...`.
+    daemon_watch: Vec<String>,
+    /// Directory basenames the daemon skips (e.g. `target`,
+    /// `node_modules`). Combined with the built-in
+    /// [`crate::files::DEFAULT_IGNORES`] list at watch time. Set via
+    /// `daemon.ignore-dirs=<name> <name> ...`.
+    daemon_ignore_dirs: Vec<String>,
+    /// File globs the daemon skips, matched against the event path's
+    /// basename (`*` and `?` supported). Set via
+    /// `daemon.ignore-files=<glob> <glob> ...`.
+    daemon_ignore_files: Vec<String>,
+    /// Which event kinds the daemon records. Default
+    /// `created,modified,deleted`. Set via
+    /// `daemon.events=created,modified,deleted`.
+    daemon_events: Vec<String>,
+    /// The debounce window (milliseconds) that coalesces the burst
+    /// of events from a single editor save into one event. Default
+    /// 500. Set via `daemon.debounce-ms=<N>`.
+    daemon_debounce_ms: u64,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
     /// User-configured additional
@@ -2419,6 +2467,12 @@ impl Config {
             todo_line_option: String::from("+$LINE"),
             jira_fragments: std::collections::HashMap::new(),
             files_ignores: Vec::new(),
+            daemon_enabled: true,
+            daemon_watch: Vec::new(),
+            daemon_ignore_dirs: Vec::new(),
+            daemon_ignore_files: Vec::new(),
+            daemon_events: vec!["created".to_string(), "modified".to_string(), "deleted".to_string()],
+            daemon_debounce_ms: 500,
             query_prefixes: QueryPrefixes::default(),
             // `~` expansion: `$HOME` is
             // always in the set (the
@@ -2970,6 +3024,40 @@ impl Config {
                             if !name.is_empty() {
                                 self.files_ignores.push(name.to_string());
                             }
+                        }
+                    } else if other == "daemon.enabled" {
+                        self.daemon_enabled = crate::util::parse_bool(value, true);
+                    } else if other == "daemon.watch" {
+                        for dir in value.split_whitespace() {
+                            if !dir.is_empty() {
+                                self.daemon_watch.push(dir.to_string());
+                            }
+                        }
+                    } else if other == "daemon.ignore-dirs" {
+                        for name in value.split_whitespace() {
+                            if !name.is_empty() {
+                                self.daemon_ignore_dirs.push(name.to_string());
+                            }
+                        }
+                    } else if other == "daemon.ignore-files" {
+                        for pat in value.split_whitespace() {
+                            if !pat.is_empty() {
+                                self.daemon_ignore_files.push(pat.to_string());
+                            }
+                        }
+                    } else if other == "daemon.events" {
+                        self.daemon_events = value
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    } else if other == "daemon.debounce-ms" {
+                        match value.trim().parse::<u64>() {
+                            Ok(n) if n > 0 => self.daemon_debounce_ms = n,
+                            _ => eprintln!(
+                                "warning: daemon.debounce-ms={:?} is not a positive integer; keeping the previous value",
+                                value
+                            ),
                         }
                     } else if let Some(rest) = other.strip_prefix("project.") {
                         // `project.idlethreshold = <seconds>` is a
@@ -3912,6 +4000,55 @@ impl Config {
     /// at walk time.
     pub fn files_ignores(&self) -> &[String] {
         &self.files_ignores
+    }
+
+    /// Whether the `smarthistory daemon` file-watching loop is
+    /// enabled. See the `daemon_enabled` field doc.
+    pub fn daemon_enabled(&self) -> bool {
+        self.daemon_enabled
+    }
+
+    /// The directories the daemon watches: the explicit
+    /// `daemon.watch` list when non-empty, otherwise every
+    /// `project.<slug>.dir` entry (tilde-expanded).
+    pub fn daemon_watch_roots(&self) -> Vec<String> {
+        if !self.daemon_watch.is_empty() {
+            return self.daemon_watch.clone();
+        }
+        let home_list: Vec<String> =
+            std::iter::once(std::env::var("HOME").unwrap_or_default())
+                .filter(|s| !s.is_empty())
+                .collect();
+        self.projects
+            .iter()
+            .map(|(_, def)| {
+                crate::util::expand_home_to_absolute(&def.dir, &home_list).into_owned()
+            })
+            .collect()
+    }
+
+    /// Directory basenames the daemon skips. See the
+    /// `daemon_ignore_dirs` field doc.
+    pub fn daemon_ignore_dirs(&self) -> &[String] {
+        &self.daemon_ignore_dirs
+    }
+
+    /// File globs the daemon skips. See the `daemon_ignore_files`
+    /// field doc.
+    pub fn daemon_ignore_files(&self) -> &[String] {
+        &self.daemon_ignore_files
+    }
+
+    /// Whether the daemon should record the given event kind
+    /// (`created`/`modified`/`deleted`).
+    pub fn daemon_events_enabled(&self, kind: &str) -> bool {
+        self.daemon_events.iter().any(|e| e == kind)
+    }
+
+    /// The daemon's debounce window in milliseconds. See the
+    /// `daemon_debounce_ms` field doc.
+    pub fn daemon_debounce_ms(&self) -> u64 {
+        self.daemon_debounce_ms
     }
 
     /// Per-extension shell commands invoked by
@@ -5545,7 +5682,7 @@ fn init_db() -> anyhow::Result<Connection> {
         "CREATE TABLE IF NOT EXISTS file_events (
             id INTEGER PRIMARY KEY,
             path TEXT NOT NULL,
-            event_kind TEXT NOT NULL CHECK (event_kind IN ('viewed', 'modified', 'created')),
+            event_kind TEXT NOT NULL CHECK (event_kind IN ('viewed', 'modified', 'created', 'deleted')),
             project_slug TEXT,
             timestamp INTEGER NOT NULL
         )",
@@ -5555,6 +5692,15 @@ fn init_db() -> anyhow::Result<Connection> {
         "CREATE INDEX IF NOT EXISTS idx_file_events_project_ts ON file_events (project_slug, timestamp)",
         [],
     )?;
+    // Older databases created the `file_events` table with a CHECK
+    // that only allowed ('viewed', 'modified', 'created') — before
+    // the `smarthistory daemon` added `deleted`. SQLite can't alter
+    // a CHECK constraint in place, so recreate the table (same
+    // rename-and-recreate pattern `migrate_history_comment_column`
+    // uses) when the stored DDL predates `deleted`. Runs AFTER the
+    // index creation above so the index is recreated on the final
+    // table shape.
+    migrate_file_events_deleted(&conn)?;
     // If an older database still has the per-row comment column from
     // a previous schema, migrate those comments into the global
     // command_comments table and then drop the column.
@@ -6237,6 +6383,7 @@ fn report_file_events(
             "viewed" => &mut groups.viewed,
             "modified" => &mut groups.modified,
             "created" => &mut groups.created,
+            "deleted" => &mut groups.deleted,
             _ => continue,
         };
         *bucket.entry(path).or_insert(0) += 1;
@@ -6396,6 +6543,7 @@ struct FileEventGroups {
     viewed: std::collections::BTreeMap<String, usize>,
     modified: std::collections::BTreeMap<String, usize>,
     created: std::collections::BTreeMap<String, usize>,
+    deleted: std::collections::BTreeMap<String, usize>,
 }
 
 /// Print one `### Files <label>` list: each deduplicated path, with
@@ -6565,6 +6713,54 @@ fn migrate_history_mode_column(conn: &Connection) -> anyhow::Result<()> {
     // enough SQLite, so this should work.
     conn.execute(
         "ALTER TABLE history ADD COLUMN mode TEXT NOT NULL DEFAULT 'command'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// If the `file_events` table's CHECK constraint predates the
+/// `deleted` event kind (added by the `smarthistory daemon`), recreate
+/// the table with the widened CHECK. SQLite can't alter a CHECK in
+/// place, so this uses the same rename-and-recreate pattern as
+/// `migrate_history_comment_column`. Detects the old shape by reading
+/// the stored `CREATE TABLE` DDL from `sqlite_master` and checking for
+/// `'deleted'`.
+fn migrate_file_events_deleted(conn: &Connection) -> anyhow::Result<()> {
+    use rusqlite::OptionalExtension;
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'file_events'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // No table yet (fresh DB) — nothing to migrate; `init_db`'s own
+    // `CREATE TABLE IF NOT EXISTS` already has the widened CHECK.
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains("'deleted'") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE file_events RENAME TO file_events_old", [])?;
+    conn.execute(
+        "CREATE TABLE file_events (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            event_kind TEXT NOT NULL CHECK (event_kind IN ('viewed', 'modified', 'created', 'deleted')),
+            project_slug TEXT,
+            timestamp INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO file_events (id, path, event_kind, project_slug, timestamp)
+         SELECT id, path, event_kind, project_slug, timestamp FROM file_events_old",
+        [],
+    )?;
+    conn.execute("DROP TABLE file_events_old", [])?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_file_events_project_ts ON file_events (project_slug, timestamp)",
         [],
     )?;
     Ok(())
@@ -7989,7 +8185,10 @@ fn main() -> anyhow::Result<()> {
                         .collect();
                     let untracked_websites = websites_by_slug.get(&None);
                     let untracked_files = files_by_slug.get(&None).is_some_and(|g| {
-                        !g.viewed.is_empty() || !g.modified.is_empty() || !g.created.is_empty()
+                        !g.viewed.is_empty()
+                            || !g.modified.is_empty()
+                            || !g.created.is_empty()
+                            || !g.deleted.is_empty()
                     });
                     if !untracked.is_empty()
                         || untracked_websites.is_some_and(|v| !v.is_empty())
@@ -8026,6 +8225,7 @@ fn main() -> anyhow::Result<()> {
                     print_file_events_section("viewed", &file_groups.viewed);
                     print_file_events_section("modified", &file_groups.modified);
                     print_file_events_section("created", &file_groups.created);
+                    print_file_events_section("deleted", &file_groups.deleted);
                     println!("\n### Websites");
                     match websites_by_slug.get(slug) {
                         Some(items) if !items.is_empty() => print_website_section(items),
@@ -8157,6 +8357,7 @@ fn main() -> anyhow::Result<()> {
                 print_file_events_section("viewed", &groups.viewed);
                 print_file_events_section("modified", &groups.modified);
                 print_file_events_section("created", &groups.created);
+                print_file_events_section("deleted", &groups.deleted);
             }
         },
         Commands::File { action } => {
@@ -8698,6 +8899,16 @@ fn main() -> anyhow::Result<()> {
                 updated = updated,
                 skipped = skipped
             );
+        }
+        Commands::Daemon { watch, once } => {
+            let cfg = Config::load();
+            if !cfg.daemon_enabled() && watch.is_empty() {
+                eprintln!(
+                    "smarthistory daemon: disabled — set `daemon.enabled=on` in the config"
+                );
+                return Ok(());
+            }
+            crate::daemon::run(&cfg, &conn, &watch, once)?;
         }
         Commands::Check { prefix } => {
             tui::run_tui_check(prefix, false)?;
