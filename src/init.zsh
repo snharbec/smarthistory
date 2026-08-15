@@ -1666,6 +1666,7 @@ _smarthistory_register_hook() {
     local hooks_name="_smarthistory_hooks_${safe}"
     typeset -g $hooks_name
     if [[ "${widgets[$widget]:-}" != "user:${dispatch}" ]]; then
+        local has_orig=1
         case ${widgets[$widget]:-} in
             builtin)
                 eval "${orig}() { zle .${widget} }"
@@ -1674,15 +1675,36 @@ _smarthistory_register_hook() {
             user:*)
                 zle -N $orig ${widgets[$widget]#user:}
                 ;;
+            "")
+                # No existing definition at all — the normal case
+                # for special hook-only widgets (`zle-line-init`,
+                # `zle-line-finish`, `zle-keymap-select`, ...) on a
+                # shell where nothing else has hooked them yet.
+                # There's no underlying behavior to call through to
+                # (unlike `self-insert` etc, `.${widget}` isn't a
+                # real builtin for these), so the dispatcher below
+                # skips the passthrough call entirely and only runs
+                # the registered hooks.
+                has_orig=0
+                ;;
             *) return ;;
         esac
-        eval "${dispatch}() {
-            zle ${orig} -- \"\$@\"
-            local _sm_hook
-            for _sm_hook in \${(s: :)${hooks_name}}; do
-                \$_sm_hook
-            done
-        }"
+        if (( has_orig )); then
+            eval "${dispatch}() {
+                zle ${orig} -- \"\$@\"
+                local _sm_hook
+                for _sm_hook in \${(s: :)${hooks_name}}; do
+                    \$_sm_hook
+                done
+            }"
+        else
+            eval "${dispatch}() {
+                local _sm_hook
+                for _sm_hook in \${(s: :)${hooks_name}}; do
+                    \$_sm_hook
+                done
+            }"
+        fi
         zle -N $widget $dispatch
     fi
     local current="${(P)hooks_name}"
@@ -1695,6 +1717,22 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
     unset _smarthistory_dropdown_w
+    # `dropdown.predict=on` shows predictions on an EMPTY line, but
+    # none of the widgets hooked above ever fire on a fresh prompt —
+    # they're all keystroke-driven (self-insert et al.), so without
+    # this, the prediction only ever appeared after some OTHER
+    # widget happened to call `_smarthistory_dropdown_render`
+    # explicitly (e.g. Ctrl-g/`_smarthistory_cycle_mode`), never on
+    # the very first empty prompt. `zle-line-init` is zsh's special
+    # hook widget that fires once whenever zle starts editing a new
+    # line — i.e. right after each prompt is drawn — which is
+    # exactly the "arrived at a fresh line" moment predictions need.
+    # `precmd` (where `_smarthistory_last_cmd` is updated for the
+    # command that just finished) always runs before `zle-line-init`,
+    # so the prediction is already correct by the time this fires.
+    if [[ "$_smarthistory_dropdown_predict_enabled" = "1" ]]; then
+        _smarthistory_register_hook zle-line-init _smarthistory_dropdown_render
+    fi
     # Pure navigation: move the highlighted row forward/backward
     # (wraparound) and paint — NEVER touch BUFFER. These are what
     # Up/Down (`_smarthistory_up_history` / `_smarthistory_down_history`)

@@ -450,9 +450,11 @@ followed the last command actually run in this shell — capped at 3 candidates
 regardless of [`dropdown.limit`](#dropdownlimit): a "what's next" hint at the
 very start of a line is meant to be a quick glance, not a long list to scan.
 With nothing run yet in the session, or with this off (the default), an empty
-line shows no dropdown, same as before this existed. Selecting a predicted
-candidate works exactly like selecting a normal search result
-(`Tab`/`Enter`/arrows all behave identically).
+line shows no dropdown, same as before this existed. The prediction appears on
+the very first empty prompt after a command finishes — not only after some other
+action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
+`zle-line-init` hook. Selecting a predicted candidate works exactly like
+selecting a normal search result (`Tab`/`Enter`/arrows all behave identically).
 
 ```ini
 dropdown.enabled=on
