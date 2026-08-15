@@ -305,24 +305,29 @@ segments.minwords=0    # keep every segment, however short
 | **Default**      | `off`         |
 | **Env override** | —             |
 
-Syntax-highlight each history row's command text in the TUI's list, using the
-same `bat`-based mechanism as [`dropdown.highlight`](#dropdownhighlight) above —
-lexical token coloring (strings, flags, operators, …) via
-[`bat`](https://github.com/sharkdp/bat). Applies only to real, executed
-`command`-mode rows (not directories, panes, notes, files, or any other prefix
-mode's rows, which aren't bash text) and only while there's no active search
-query — the moment you start typing a search, the existing matched-substring
-highlight takes over instead, since that's the more useful signal while actively
-searching: which rows matched, and where. The two never compose onto the same
-row.
+Syntax-highlight each history row's command text in the TUI's list — lexical
+token coloring (strings, flags, operators, …) via
+[`syntect`](https://github.com/trishume/syntect), the same Rust engine
+[`bat`](https://github.com/sharkdp/bat) itself is built on, compiled directly
+into `smarthistory` rather than shelled out to as an external `bat` process
+(unlike [`dropdown.highlight`](#dropdownhighlight) above, which is a zsh-side
+feature with no access to this app's own Rust code and still uses `bat`).
+Applies only to real, executed `command`-mode rows (not directories, panes,
+notes, files, or any other prefix mode's rows, which aren't bash text) and only
+while there's no active search query — the moment you start typing a search, the
+existing matched-substring highlight takes over instead, since that's the more
+useful signal while actively searching: which rows matched, and where. The two
+never compose onto the same row.
 
-All currently-visible rows needing highlighting are batched into a single `bat`
-call (never one call per row) whenever the visible window changes, and the
-result is cached per command text for the rest of the session — the TUI redraws
-roughly every 100ms regardless of input, so a per-row `bat` spawn on every tick
-would be far too expensive. Off by default for the same subprocess-cost reason
-`dropdown.highlight` is. Silently stays off — no error — when `bat` isn't on
-`$PATH`, even if this is `on`.
+Highlighted results are cached per `(color scheme, command text)` for the rest
+of the session — the TUI redraws roughly every 100ms regardless of input, so
+re-highlighting on every tick would be wasteful even though a single `syntect`
+call is cheap (no subprocess spawn, unlike `dropdown.highlight`'s `bat` call).
+Off by default purely as a visual preference toggle, not because of any
+external-tool requirement — `syntect`'s syntax and theme data ship inside the
+`smarthistory` binary itself, so this works out of the box with no separate
+install, unlike `dropdown.highlight`, which silently does nothing if `bat` isn't
+on `$PATH`.
 
 ```ini
 tui.highlight=on
@@ -413,22 +418,24 @@ dropdown.minchars=2
 
 Syntax-highlight each dropdown candidate instead of plain text: lexical token
 coloring (strings, flags, operators, …) via
-[`bat`](https://github.com/sharkdp/bat) — the same
-`bat --plain --color=always --theme <light|dark>` invocation this app's
-`highlight_with_bat` already uses for the `$` tags-mode preview and the
-`smart-open.default` fallback — plus a self-checked green/red for the first
-word, since `bat`'s highlighting is purely lexical and can't tell a valid
-command from a typo. The check mirrors what a real shell highlighter looks at:
-aliases, functions, builtins, `$PATH` commands, and common reserved words (`if`,
-`for`, `sudo`, …) are green; anything else is red.
+[`bat`](https://github.com/sharkdp/bat) — the dropdown is a zsh widget with no
+access to this app's own Rust code, so it's the one place in this app that still
+shells out to `bat --plain --color=always --theme <light|dark>` (the Rust side's
+`$` tags-mode preview and `smart-open.default` fallback use `syntect`, compiled
+directly into `smarthistory`, instead — see [`tui.highlight`](#tuihighlight)) —
+plus a self-checked green/red for the first word, since `bat`'s highlighting is
+purely lexical and can't tell a valid command from a typo. The check mirrors
+what a real shell highlighter looks at: aliases, functions, builtins, `$PATH`
+commands, and common reserved words (`if`, `for`, `sudo`, …) are green; anything
+else is red.
 
 The `--theme` choice matches the resolved `tuicolor.bg`'s perceived brightness
-(the same ITU-R BT.601 formula `highlight_with_bat`'s Rust-side theme detection
-uses), read once at shell-init time from `smarthistory config get palette` — so
-dropdown colors read correctly against the same light/dark background the rest
-of the app already assumes, not `bat`'s own default theme. The palette itself is
-resolved using whichever scheme (light/dark) your last TUI session actually had
-active (`Action::ToggleColorScheme`, persisted in the session file) — with
+(the same ITU-R BT.601 formula the Rust side's theme detection uses), read once
+at shell-init time from `smarthistory config get palette` — so dropdown colors
+read correctly against the same light/dark background the rest of the app
+already assumes, not `bat`'s own default theme. The palette itself is resolved
+using whichever scheme (light/dark) your last TUI session actually had active
+(`Action::ToggleColorScheme`, persisted in the session file) — with
 `theme.dark`/`theme.light` both configured, toggling in the TUI and opening a
 new shell changes the dropdown's colors too.
 
@@ -1126,9 +1133,9 @@ symbol navigation as long as CodeGraph has indexed it.
 
 The source-context preview (the 50-line window around a selected symbol) is
 loaded lazily on selection; this keeps the initial TAGS load fast even on
-multi-megabyte tag files. The preview is rendered through `bat` with the
-matching `--theme=light` / `--theme=dark` flag derived from the active theme's
-`bg` brightness.
+multi-megabyte tag files. The preview is syntax-highlighted in-process via
+[`syntect`](https://github.com/trishume/syntect) (no `bat` subprocess), using
+the light or dark theme variant matching the active theme's `bg` brightness.
 
 Full reference: **[docs/modes/tags.md](modes/tags.md)**.
 

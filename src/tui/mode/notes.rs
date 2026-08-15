@@ -540,11 +540,9 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Pipe through `bat` for syntax highlighting (same as
-    // tags / codegraph modes). `highlight_with_bat_auto` lets
-    // bat detect the language from the file extension via
-    // `--file-name`. Falls back to the plain text when bat is
-    // unavailable.
+    // Syntax-highlight (same as tags / codegraph modes).
+    // `highlight_with_bat_auto` detects the language from the
+    // file extension.
     let highlighted =
         crate::highlight::highlight_with_bat_auto(&preview, &filepath_str).unwrap_or(preview);
 

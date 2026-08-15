@@ -249,7 +249,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // Use the shared classifier so `$`, `,` (ag),
     // and any future content modes share one set of
     // rules. The first `@lang` token (if any) drives
-    // both the extension filter and the bat
+    // both the extension filter and the
     // syntax-highlight; later `@lang` tokens are
     // accepted by the parser but ignored here
     // (consistent with ag mode using the first one).
@@ -258,11 +258,11 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // Build the extension set for the language
     // filter (if any). An unknown language — e.g.
     // `@cobol` — yields `None`, in which case we
-    // still apply the bat highlighting (bat will
-    // fall back to its own extension-based
-    // detection, gracefully degrading), but we skip
-    // the extension filter so the user sees a
-    // (possibly empty) result rather than a silent
+    // still apply highlighting (falling back to
+    // extension-based detection, gracefully
+    // degrading), but we skip the extension filter
+    // so the user sees a (possibly empty) result
+    // rather than a silent
     // zero.
     let allowed_exts: Option<Vec<String>> = lang_filter
         .and_then(crate::highlight::extensions_for_language)
@@ -475,10 +475,11 @@ fn fetch_via_codegraph(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// from disk (cached in `App::tags_source_cache`),
 /// appends the callers / callees overlay if the
 /// row came from the CodeGraph fallback
-/// (`fetch_tags_via_codegraph`), and pipes the
-/// result through `bat` with the active theme's
-/// `--theme=light` / `--theme=dark` flag. See the
-/// original `App::ensure_selected_tag_context`
+/// (`fetch_tags_via_codegraph`), and
+/// syntax-highlights the result (`syntect`, via
+/// `highlight_with_bat`/`highlight_with_bat_auto`)
+/// using the active theme's light/dark variant. See
+/// the original `App::ensure_selected_tag_context`
 /// doc for the full rationale on the cap.
 pub(crate) fn ensure_selected_context(app: &mut App) {
     if !matches(app) {
@@ -539,9 +540,8 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         row.output = if let Some(lang) = lang {
             crate::highlight::highlight_with_bat(&context, &lang).unwrap_or(context)
         } else {
-            // No explicit `@lang`: let `bat` auto-detect
-            // from the source file's extension via
-            // `--file-name`.
+            // No explicit `@lang`: auto-detect from the
+            // source file's extension.
             crate::highlight::highlight_with_bat_auto(&context, &filepath).unwrap_or(context)
         };
         // Set the scroll hint so the

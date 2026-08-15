@@ -7,11 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - New `tui.highlight=on|off` config key (default off): the TUI's history list
-  syntax-highlights each `command`-mode row via the same `bat`-based mechanism
-  as `dropdown.highlight`, while there's no active search query (the
-  matched-substring search highlight takes over instead the moment you start
-  typing). All visible not-yet-highlighted rows are batched into a single `bat`
-  call and cached per command text, since the TUI redraws roughly every 100ms
+  syntax-highlights each `command`-mode row via
+  [`syntect`](https://github.com/trishume/syntect) — the same engine `bat`
+  itself is built on, compiled directly into `smarthistory` (no external `bat`
+  binary required, unlike `dropdown.highlight`) — while there's no active search
+  query (the matched-substring search highlight takes over instead the moment
+  you start typing). Highlighted results are cached per
+  `(color scheme, command text)`, since the TUI redraws roughly every 100ms
   regardless of input.
 - `Ctrl-S`/`smarthistory next`/`dropdown.predict` (the "next command" predictor)
   now scope by the current search mode (SESS/DIR/GLOBAL) instead of always
@@ -432,6 +434,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `highlight_with_bat`/`highlight_with_bat_auto` (the preview-pane syntax
+  highlighters used by `ag`, `$` tags, CodeGraph, notes, todo, segments,
+  similar, and files modes) are now backed by
+  [`syntect`](https://github.com/trishume/syntect) in-process instead of
+  shelling out to the `bat` binary, matching `tui.highlight`'s engine. No config
+  or behavior change — same `Option<String>` ANSI output — but these preview
+  panes now work without `bat` installed and no longer pay a subprocess call per
+  render.
 - Extracted the large `select_for_run_impl` staging method from `src/tui.rs`
   into a new `src/tui/actions.rs` module, shrinking `tui.rs` by ~2,500 lines.
 - Moved `parse_bool` into `src/util.rs` and removed the duplicate copy in

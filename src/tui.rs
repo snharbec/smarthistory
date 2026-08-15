@@ -1997,27 +1997,30 @@ pub(crate) struct App {
         Option<(String, Mode, ExitFilter, MatchAlgorithm, crate::tui::state::DirectorySource)>,
 
     /// `tui.highlight=on|off` — whether the history list
-    /// syntax-highlights `mode = "command"` rows via `bat`,
-    /// mirroring the zsh dropdown's `dropdown.highlight`. Set by
-    /// `run_tui_to_stdout` right after construction (see
-    /// `App::new`'s doc comment on this field's initializer for
-    /// why it isn't a constructor parameter); every other `App::new`
-    /// caller (tests, `run_tui_check`) gets the safe `false` default.
+    /// syntax-highlights `mode = "command"` rows via `syntect`
+    /// (in-process, see `crate::highlight::highlight_bash_commands`),
+    /// mirroring the zsh dropdown's `dropdown.highlight` (which
+    /// stays on `bat`, being a zsh widget with no access to this
+    /// app's own Rust code). Set by `run_tui_to_stdout` right after
+    /// construction (see `App::new`'s doc comment on this field's
+    /// initializer for why it isn't a constructor parameter); every
+    /// other `App::new` caller (tests, `run_tui_check`) gets the
+    /// safe `false` default.
     tui_highlight_enabled: bool,
 
-    /// Cache of `bat`-highlighted spans for `tui_highlight_enabled`,
+    /// Cache of syntax-highlighted spans for `tui_highlight_enabled`,
     /// keyed by `(is_light_theme, cmd_display)` — the light/dark
     /// component in the key means a color-scheme toggle produces
     /// fresh cache misses for the new scheme automatically, instead
     /// of needing explicit invalidation at every `install_palette`
-    /// call site. Filled in batches (one `bat` subprocess call for
-    /// every not-yet-cached command in the currently visible
-    /// window) by `draw_list`, BEFORE the per-row `render_row` calls
-    /// that read it — never filled lazily one row at a time, since
-    /// the run loop's `terminal.draw()` fires roughly every 100ms
-    /// regardless of input, so a per-row spawn would mean a `bat`
-    /// subprocess call, potentially dozens of them, on every single
-    /// tick.
+    /// call site. Filled in batches (one `highlight_bash_commands`
+    /// call for every not-yet-cached command in the currently
+    /// visible window) by `draw_list`, BEFORE the per-row
+    /// `render_row` calls that read it — never filled lazily one row
+    /// at a time, since the run loop's `terminal.draw()` fires
+    /// roughly every 100ms regardless of input, so a per-row call
+    /// would mean re-running the highlighter, potentially dozens of
+    /// times, on every single tick.
     command_highlight_cache:
         std::collections::HashMap<(bool, String), Vec<ratatui::text::Span<'static>>>,
 

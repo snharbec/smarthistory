@@ -93,12 +93,12 @@ pub struct SegmentsState {
     pub request: Option<SegmentsRequest>,
     /// Cached results of the most recent search.
     pub rows: Vec<HistoryRow>,
-    /// `bat`-highlighted output preview, keyed by (absolute file
+    /// Syntax-highlighted output preview, keyed by (absolute file
     /// path, 1-based start line). `App::refresh()` runs on every
     /// keystroke, which rebuilds `merged_rows` from scratch (from
     /// this struct's own `rows`, whose `output` is always the raw
     /// unhighlighted segment text) — without this cache,
-    /// `ensure_selected_context` would re-spawn `bat` on the same
+    /// `ensure_selected_context` would re-highlight the same
     /// selected row on every single keystroke, which is exactly
     /// the kind of per-keystroke blocking work the background
     /// search thread was introduced to eliminate. The selected
@@ -540,13 +540,14 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// Unlike `tags` / `ag` mode's `read_source_context_with_cache`
 /// (which prefixes every line with a line number and marks the
 /// match with `>>`), this passes a RAW, unmodified slice of the
-/// file through `bat` — the same "clean markdown in, syntax-
-/// highlighted markdown out" pipeline `notes::ensure_selected_context`
-/// / `todo::ensure_selected_context` use. The line-number/`>>`
-/// prefixing is appropriate for tags/ag's mixed-language source
-/// files, but for markdown notes it fights `bat`'s own heading /
-/// checkbox / link highlighting (the prefix isn't valid markdown,
-/// so headings etc. no longer parse as such).
+/// file through `highlight_with_bat_auto` — the same "clean
+/// markdown in, syntax-highlighted markdown out" pipeline
+/// `notes::ensure_selected_context` / `todo::ensure_selected_context`
+/// use. The line-number/`>>` prefixing is appropriate for tags/ag's
+/// mixed-language source files, but for markdown notes it fights
+/// the highlighter's own heading / checkbox / link highlighting
+/// (the prefix isn't valid markdown, so headings etc. no longer
+/// parse as such).
 ///
 /// The slice is a window of `SOURCE_CONTEXT_LINES` (50) lines
 /// CENTERED on the segment's `start_line` (25 before, the line

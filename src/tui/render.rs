@@ -1467,8 +1467,9 @@ fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
     let end = (scroll + inner_h).min(total);
     let start = scroll;
     // The overlay text may carry ANSI escape codes: tags &
-    // codegraph modes pipe source context through `bat
-    // --color=always`, and ag matches carry ANSI from `ag`.
+    // codegraph modes syntax-highlight source context (`syntect`,
+    // via `highlight_with_bat`/`highlight_with_bat_auto`), and ag
+    // matches carry ANSI from `ag`.
     // The markdown `render_preview_line` path doesn't parse
     // ANSI (it mangles `\x1b[...m` through the inline parser),
     // so when the text contains an escape we route every
@@ -4163,8 +4164,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
     // `tui.highlight`: batch-fill `command_highlight_cache` for any
     // not-yet-cached command text in the visible window, BEFORE
-    // building `ListItem`s below — one `bat` subprocess call for
-    // potentially many rows, not one call per row (see
+    // building `ListItem`s below — one `highlight_bash_commands`
+    // call for potentially many rows, not one call per row (see
     // `App::command_highlight_cache`'s doc comment for why that
     // matters: this file redraws unconditionally on every ~100ms
     // tick). Only `mode = "command"` rows are real bash text worth
@@ -4383,9 +4384,10 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// The active color scheme's light/dark classification, read from
-/// the same thread-local `PALETTE` `bat_theme_arg()` (in
-/// `src/highlight.rs`) uses to pick `bat --theme light|dark` — kept
-/// in sync with whatever `bat` will actually be invoked with, so
+/// the same thread-local `PALETTE` this app's theme system already
+/// tracks — used to pick between `syntect`'s bundled
+/// `base16-ocean.light`/`base16-ocean.dark` themes
+/// (`crate::highlight::highlight_bash_commands`) so
 /// `command_highlight_cache`'s key always matches the colors that
 /// were (or will be) rendered.
 fn command_highlight_is_light() -> bool {
@@ -4402,35 +4404,38 @@ fn command_highlight_cached(app: &App, cmd: &str) -> bool {
 
 /// Batch-fill `App::command_highlight_cache` for every entry in
 /// `commands` (assumed already deduplicated and not-yet-cached by
-/// the caller — see `draw_list`'s call site). One `bat` subprocess
-/// call for the whole batch via `highlight_commands_batch`, not one
-/// per command; see that function's and `command_highlight_cache`'s
-/// doc comments for why batching matters here.
-///
-/// On a `bat` failure (unavailable, non-zero exit, line-count
-/// mismatch), caches a PLAIN (unstyled) fallback span for every
-/// command in the batch too — not just skipping the cache — so a
-/// `bat`-less environment converges to "stop trying" after the
-/// first failed attempt for each distinct command, instead of
-/// re-attempting (and re-failing) the same subprocess call on every
-/// subsequent ~100ms redraw tick.
+/// the caller — see `draw_list`'s call site) via
+/// `crate::highlight::highlight_bash_commands`, converting its
+/// `HighlightedSpan`s straight into `ratatui::text::Span`s — no
+/// subprocess, no ANSI text to parse. Always succeeds (that
+/// function has no "external tool missing" failure mode to handle),
+/// so unlike the old `bat`-based version there's no fallback branch
+/// here.
 fn fill_command_highlight_cache(app: &mut App, commands: &[String]) {
     let is_light = command_highlight_is_light();
     let refs: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
-    match crate::highlight::highlight_commands_batch(&refs) {
-        Some(lines) => {
-            for (cmd, line) in commands.iter().zip(lines.iter()) {
-                let spans = parse_ansi_line(line);
-                app.command_highlight_cache
-                    .insert((is_light, cmd.clone()), spans);
-            }
-        }
-        None => {
-            for cmd in commands {
-                app.command_highlight_cache
-                    .insert((is_light, cmd.clone()), vec![Span::raw(cmd.clone())]);
-            }
-        }
+    let highlighted = crate::highlight::highlight_bash_commands(&refs, is_light);
+    for (cmd, tokens) in commands.iter().zip(highlighted) {
+        let spans: Vec<Span<'static>> = tokens
+            .into_iter()
+            .map(|t| {
+                let mut style = Style::default().fg(ratatui::style::Color::Rgb(
+                    t.color.0, t.color.1, t.color.2,
+                ));
+                if t.bold {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if t.italic {
+                    style = style.add_modifier(Modifier::ITALIC);
+                }
+                if t.underline {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                Span::styled(t.text, style)
+            })
+            .collect();
+        app.command_highlight_cache
+            .insert((is_light, cmd.clone()), spans);
     }
 }
 
@@ -4989,7 +4994,7 @@ pub(crate) fn render_row<'a>(
         }
         spans.extend(text_spans);
     } else {
-        // `tui.highlight`: use the cached bat-syntax-highlighted
+        // `tui.highlight`: use the cached syntax-highlighted
         // spans instead of the plain/matched-substring rendering,
         // but ONLY for real command rows and ONLY while there's no
         // active search query to emphasize — the moment the user
@@ -5000,8 +5005,8 @@ pub(crate) fn render_row<'a>(
         // both onto the same text. `command_highlight_cache` is
         // guaranteed already filled for every row in the visible
         // window by `draw_list`'s batch pre-pass (see its call
-        // site), so this is a cache lookup only — never a `bat`
-        // spawn from inside the per-row render path.
+        // site), so this is a cache lookup only — never a
+        // highlighter call from inside the per-row render path.
         let mut text_spans = if app.tui_highlight_enabled
             && row.mode == "command"
             && app.query.trim().is_empty()
@@ -6672,15 +6677,15 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // Ag/tags/codegraph/segments/similar carry up to
     // [`SOURCE_CONTEXT_LINES`] (50) lines of source context
     // CENTERED on the matched line (segments AND similar mode via
-    // the same `bat`-highlighted window, see
+    // the same syntax-highlighted window, see
     // `crate::tui::mode::segments::ensure_selected_context` /
     // `crate::tui::mode::similar::ensure_selected_context`) plus,
     // for tags/codegraph, a callers/callees overlay. JIRA rows
     // carry a 3-line header (Status/Priority, Due/Assignee,
     // Description label) followed by the full issue description
     // body. Notes / todo / files rows carry the first 50 lines of
-    // the referenced file (piped through `bat` for syntax
-    // highlighting). Pane rows carry the last 50 visible lines of
+    // the referenced file (syntax-highlighted). Pane rows carry
+    // the last 50 visible lines of
     // the underlying herdr pane (from `herdr pane read <pane_id>
     // --lines 50`).
     // The inline pane's height caps the actually-visible count
@@ -6704,15 +6709,17 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     } else {
         4
     };
-    // `highlight_with_bat` (`--color=always`) emits ANSI escape
-    // codes for tags/codegraph rows, and `ag` itself emits ANSI
-    // for matched-line previews. The markdown `render_preview_line`
-    // path doesn't parse ANSI (it would mangle `\x1b[...m` through
-    // the inline parser), so any output containing an escape must
-    // go through `parse_ansi_line` instead. This is mode-agnostic:
-    // a codegraph/tags row falls back to plain text when bat is
-    // unavailable (no ANSI), and an ag row whose match had no
-    // coloring proceeds through the markdown path cleanly.
+    // `highlight_with_bat`/`highlight_with_bat_auto` (`syntect`,
+    // in-process — see `src/highlight.rs`) emit 24-bit-color ANSI
+    // escape codes for tags/codegraph rows, and `ag` itself emits
+    // ANSI for matched-line previews. The markdown
+    // `render_preview_line` path doesn't parse ANSI (it would
+    // mangle `\x1b[...m` through the inline parser), so any output
+    // containing an escape must go through `parse_ansi_line`
+    // instead. This is mode-agnostic: an ag row whose match had no
+    // coloring proceeds through the markdown path cleanly (`ag`
+    // itself decides whether to emit ANSI, independent of
+    // `highlight_with_bat*`).
     //
     // herdr pane content is plain text by default (we don't pass
     // `--format ansi` to `herdr pane read` to keep the IPC
@@ -6737,8 +6744,8 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // area get truncated at the right edge with the beginning
     // still visible. The previous behavior (`.wrap(Wrap { trim:
     // false })`) wrapped long lines to multiple visual rows,
-    // which destroyed the source-code alignment for `bat`-
-    // highlighted previews (e.g. an indented `    foo` line
+    // which destroyed the source-code alignment for
+    // syntax-highlighted previews (e.g. an indented `    foo` line
     // would wrap to a new row with the indentation preserved
     // but the start position no longer matching the source).
     // Source code reads top-to-bottom / left-to-right; users
