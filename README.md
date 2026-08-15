@@ -154,13 +154,13 @@ no equivalent of.
 
 ### From the line editor
 
-| Key      | Action                                                       |
-| -------- | ------------------------------------------------------------ |
-| `Ctrl+R` | Open the TUI picker.                                         |
-| `Up`     | Walk back through matches for the current line.              |
-| `Down`   | Walk forward through matches; clear the line at the start.   |
-| `Ctrl+G` | Cycle scope: SESS → DIR → GLOBAL → STATS → SESS.             |
-| `Ctrl+S` | Insert the most-probable next command; press again to cycle. |
+| Key      | Action                                                                                                                                             |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Ctrl+R` | Open the TUI picker. If there's text on the command line already, the picker opens searching for it; on an empty line it restores the last search. |
+| `Up`     | Walk back through matches for the current line.                                                                                                    |
+| `Down`   | Walk forward through matches; clear the line at the start.                                                                                         |
+| `Ctrl+G` | Cycle scope: SESS → DIR → GLOBAL → STATS → SESS.                                                                                                   |
+| `Ctrl+S` | Insert the most-probable next command; press again to cycle.                                                                                       |
 
 ### From the CLI
 

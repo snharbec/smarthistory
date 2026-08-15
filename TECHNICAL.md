@@ -111,7 +111,10 @@ match standard workflow expectations. This project aims to provide:
   `ollama.model` configuration as the other LLM features.
 - **TUI picker on `Ctrl+R`:** a `ratatui`-based full-screen picker replacing
   `fzf`. Supports live filtering, mode cycle (`Ctrl+G`), enter to run,
-  left/right to prefill for editing.
+  left/right to prefill for editing. If there's text already on the command line
+  when `Ctrl+R` is pressed, the picker opens searching for exactly that text
+  instead of restoring the last search; pressing `Ctrl+R` on an empty line still
+  restores the persisted last search, as before.
 - **Clipboard yank on `Ctrl+Y`:** copy the most useful piece of the current view
   to the system clipboard via `arboard`. When the captured-output view is open,
   the output text is copied; otherwise the selected row's command is copied.
