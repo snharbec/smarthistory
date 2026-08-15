@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory comments list|add|delete`: manage comment-expansion entries
+  (`command_comments`) directly instead of only setting one via `add --comment`
+  on the original command. `list` prints every stored comment with its exact
+  command, flagging any orphaned ones (no matching `history` row, so `expand`
+  won't resolve them yet). `add <command> <comment>` attaches/overwrites a
+  comment; `delete <command>` removes one.
 - New `tui.highlight=on|off` config key (default off): the TUI's history list
   syntax-highlights each `command`-mode row via
   [`syntect`](https://github.com/trishume/syntect) — the same engine `bat`

@@ -233,6 +233,19 @@ enum Commands {
         /// The comment text to resolve.
         text: String,
     },
+    /// Manage the comments used by comment-expansion (`smarthistory
+    /// expand`, the zsh/bash space-triggered widget).
+    ///
+    /// A comment is attached to a specific, exact command string in
+    /// `command_comments`; it only actually expands (via `expand`)
+    /// once that exact command also has at least one row in
+    /// `history` (matching is case-sensitive — see `Expand`'s doc
+    /// comment). `list`/`add`/`delete` operate directly on
+    /// `command_comments`.
+    Comments {
+        #[command(subcommand)]
+        action: CommentsAction,
+    },
     /// Ask the LLM a question directly from the shell prompt — no
     /// TUI. Called by the `accept-line` widget in `init.zsh` when
     /// the typed line starts with the configured question prefix
@@ -742,6 +755,34 @@ enum ConfigAction {
     Check,
     /// Print every known configuration key with its resolved value.
     List,
+}
+
+/// Sub-commands of `smarthistory comments`, which manage the
+/// `command_comments` table directly (see [`Commands::Comments`]).
+#[derive(clap::Subcommand, Debug)]
+enum CommentsAction {
+    /// List every stored comment, with its exact command and
+    /// whether it currently resolves via `expand` (i.e. the command
+    /// has at least one row in `history`).
+    List,
+    /// Attach a comment to a command, creating or overwriting
+    /// whichever comment that exact command already had.
+    ///
+    /// Doesn't touch `history` — if the command has never actually
+    /// been run, the comment is stored but won't resolve via
+    /// `expand` until it has (and a later `prune` would delete it
+    /// as orphaned in the meantime).
+    Add {
+        /// The exact command text to attach the comment to.
+        command: String,
+        /// The comment text (what you'll type to expand it).
+        comment: String,
+    },
+    /// Delete the comment attached to an exact command.
+    Delete {
+        /// The exact command text whose comment should be removed.
+        command: String,
+    },
 }
 
 /// Sub-commands of `smarthistory project`. `Report` rolls up a
@@ -5188,6 +5229,72 @@ fn resolve_comment(conn: &Connection, text: &str) -> anyhow::Result<Option<Strin
     .map_err(anyhow::Error::from)
 }
 
+/// One row of `smarthistory comments list`: the exact command, its
+/// comment, and whether the command currently has at least one row
+/// in `history` (i.e. whether `expand` would actually resolve this
+/// comment right now, or whether it's a not-yet-runnable/orphaned
+/// entry — see [`CommentsAction::Add`] and `Commands::Prune`'s
+/// orphan cleanup).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommentRow {
+    command: String,
+    comment: String,
+    has_history: bool,
+}
+
+/// Every row of `command_comments`, ordered by comment text
+/// (case-insensitively) then command, for `smarthistory comments
+/// list`. Backing query for [`CommentsAction::List`].
+fn list_comments(conn: &Connection) -> anyhow::Result<Vec<CommentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.command, c.comment, \
+                EXISTS(SELECT 1 FROM history h WHERE h.command = c.command) \
+         FROM command_comments c \
+         ORDER BY c.comment COLLATE NOCASE, c.command",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CommentRow {
+                command: row.get(0)?,
+                comment: row.get(1)?,
+                has_history: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Attach `comment` to `command` in `command_comments` (creating or
+/// overwriting whichever comment that exact command already had).
+/// Returns whether `command` already has at least one row in
+/// `history` — the caller uses this to warn when the comment won't
+/// actually resolve via `expand` yet. Backing logic for
+/// [`CommentsAction::Add`].
+fn add_comment(conn: &Connection, command: &str, comment: &str) -> anyhow::Result<bool> {
+    conn.execute(
+        "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+         ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+        params![command, comment],
+    )?;
+    let has_history: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM history WHERE command = ?1)",
+        params![command],
+        |row| row.get(0),
+    )?;
+    Ok(has_history)
+}
+
+/// Delete `command`'s comment from `command_comments`, if any.
+/// Returns whether a row was actually deleted. Backing logic for
+/// [`CommentsAction::Delete`].
+fn delete_comment(conn: &Connection, command: &str) -> anyhow::Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM command_comments WHERE command = ?1",
+        params![command],
+    )?;
+    Ok(deleted > 0)
+}
+
 /// What `smarthistory pane-exec` should do for a given current
 /// session/workspace name, resolved against the configured
 /// `session.<id>`/`host.<id>` entries.
@@ -6925,6 +7032,51 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", command);
             }
         }
+        Commands::Comments { action } => match action {
+            CommentsAction::List => {
+                let rows = list_comments(&conn)?;
+                if rows.is_empty() {
+                    println!("No comments stored.");
+                } else {
+                    let comment_width = rows
+                        .iter()
+                        .map(|r| r.comment.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .max("COMMENT".len());
+                    println!("{:<comment_width$}  COMMAND", "COMMENT");
+                    for r in &rows {
+                        let suffix = if r.has_history {
+                            String::new()
+                        } else {
+                            "  (orphaned: no history — won't expand)".to_string()
+                        };
+                        println!(
+                            "{:<comment_width$}  {}{}",
+                            r.comment, r.command, suffix
+                        );
+                    }
+                }
+            }
+            CommentsAction::Add { command, comment } => {
+                let has_history = add_comment(&conn, &command, &comment)?;
+                println!("Added comment {:?} for {:?}.", comment, command);
+                if !has_history {
+                    eprintln!(
+                        "warning: {:?} has no history rows yet — this comment won't expand until it's run at least once",
+                        command
+                    );
+                }
+            }
+            CommentsAction::Delete { command } => {
+                if delete_comment(&conn, &command)? {
+                    println!("Deleted comment for {:?}.", command);
+                } else {
+                    eprintln!("No comment found for {:?}.", command);
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Ask { question } => {
             use llm::LlmClient;
             use std::io::Write;

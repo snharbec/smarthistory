@@ -544,6 +544,13 @@ smarthistory add "docker compose up -d" --exit-code 0 --comment deploy
 # docker compose up -d
 ```
 
+**Managing comments directly**: `smarthistory comments list` prints every stored
+comment with its exact command, flagging any that are orphaned (no matching
+`history` row, so `expand` won't resolve them yet — see `smarthistory prune`,
+which deletes these). `smarthistory comments add <command> <comment>` and
+`smarthistory comments delete <command>` let you attach or remove a comment
+without re-running the original command through `add --comment`.
+
 **Which widget the space bar actually triggers.** Plain zsh binds the space key
 to `self-insert`, but many setups (including stock oh-my-zsh, via
 `lib/key-bindings.zsh`) rebind it to `magic-space` instead (zsh's built-in
