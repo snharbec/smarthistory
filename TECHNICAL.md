@@ -751,6 +751,8 @@ smarthistory project files
 smarthistory file viewed <path>
 smarthistory file modified <path>
 smarthistory file created <path>
+smarthistory ask <question>
+smarthistory comments list|add|delete
 ```
 
 - `search` and `select` are similar; `select` exists primarily as a hook for
@@ -875,6 +877,23 @@ smarthistory file created <path>
   process's cwd isn't necessarily the file's directory. `project report`'s Files
   viewed/modified/created sections read from this table, deduplicated by path
   with an occurrence count.
+- `ask <question>` is the console question mode: type `?question text` at the
+  raw zsh prompt (no TUI) and press `Enter`; `smarthistory` intercepts the line
+  at `accept-line` and calls the LLM directly, printing the colorized answer to
+  stderr. The last command run in the session (command line, exit code, captured
+  output) is included as context, so `?why did that fail` works without
+  retyping the command. If the answer suggests commands, an interactive numbered
+  pick list stages the chosen one into the next prompt for review — never run
+  automatically. The question is recorded to `history` (`mode = 'question'`)
+  exactly like a TUI-asked one. See [`docs/modes/question.md`](docs/modes/question.md).
+- `comments list|add|delete` manages the `command_comments` table directly
+  (the entries comment-expansion resolves). `list` prints every stored comment
+  with its exact command, flagging orphaned ones (no matching `history` row, so
+  `expand` won't resolve them yet — the same condition `prune`'s orphan cleanup
+  targets). `add <command> <comment>` attaches/overwrites a comment, warning if
+  the command has no history yet; `delete <command>` removes one, exiting 1 if
+  none existed. See the `command_comments` discussion in
+  [`docs/configuration.md`](docs/configuration.md).
 
 ### Sample output
 
@@ -957,8 +976,8 @@ can never spuriously count as "next" for this scope. Without either flag, `next`
 is unscoped (the historical global behavior):
 
 ```
-$ smarthistory next CMD1 --session       # only successors observed in $SMART_HISTORY_SESSION
-$ smarthistory next CMD1 --directory ~/proj  # only successors observed in that directory
+smarthistory next CMD1 --session       # only successors observed in $SMART_HISTORY_SESSION
+smarthistory next CMD1 --directory ~/proj  # only successors observed in that directory
 ```
 
 The first 8 lines of `smarthistory init zsh` show the generated session UUID (it

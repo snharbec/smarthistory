@@ -182,6 +182,8 @@ smarthistory config check              # validate the config file
 smarthistory check [--prefix <char>]   # health-check prefix modes (--prefix to check one)
 smarthistory import-atuin              # import from atuin
 smarthistory update                    # normalize stored directory paths
+smarthistory ask <question>            # ask the LLM a question from the console (see below)
+smarthistory comments list|add|delete  # manage comment-expansion entries
 ```
 
 ### TUI subcommand options
