@@ -1958,14 +1958,14 @@ pub struct Config {
     /// `dropdown.predict=on|off`.
     dropdown_predict: bool,
     /// Whether the TUI's history list syntax-highlights each
-    /// command's text (via the same `bat`-based mechanism as
-    /// `dropdown.highlight`) instead of plain text. Default
-    /// `false`, opt-in for the same reason as `dropdown.highlight`
-    /// — it costs a `bat` subprocess call. Applies only to plain
-    /// `mode = "command"` rows (a real executed shell command, not
-    /// a directory/pane/file/note/… row, which aren't bash text)
-    /// and only while there's no active search query to emphasize
-    /// — the moment the user starts typing a search, the existing
+    /// command's text (via `syntect`, in-process — no external
+    /// binary, unlike `dropdown.highlight`'s zsh-side `bat` call)
+    /// instead of plain text. Default `false`, purely a visual
+    /// preference toggle. Applies only to plain `mode = "command"`
+    /// rows (a real executed shell command, not a
+    /// directory/pane/file/note/… row, which aren't bash text) and
+    /// only while there's no active search query to emphasize — the
+    /// moment the user starts typing a search, the existing
     /// matched-substring highlight takes over instead, since that's
     /// the more useful signal while actively searching. Set via
     /// `tui.highlight=on|off`.
