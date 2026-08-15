@@ -418,22 +418,24 @@ dropdown.minchars=2
 
 Syntax-highlight each dropdown candidate instead of plain text: lexical token
 coloring (strings, flags, operators, …) via
-[`bat`](https://github.com/sharkdp/bat) — the same
-`bat --plain --color=always --theme <light|dark>` invocation this app's
-`highlight_with_bat` already uses for the `$` tags-mode preview and the
-`smart-open.default` fallback — plus a self-checked green/red for the first
-word, since `bat`'s highlighting is purely lexical and can't tell a valid
-command from a typo. The check mirrors what a real shell highlighter looks at:
-aliases, functions, builtins, `$PATH` commands, and common reserved words (`if`,
-`for`, `sudo`, …) are green; anything else is red.
+[`bat`](https://github.com/sharkdp/bat) — the dropdown is a zsh widget with no
+access to this app's own Rust code, so it's the one place in this app that still
+shells out to `bat --plain --color=always --theme <light|dark>` (the Rust side's
+`$` tags-mode preview and `smart-open.default` fallback use `syntect`, compiled
+directly into `smarthistory`, instead — see [`tui.highlight`](#tuihighlight)) —
+plus a self-checked green/red for the first word, since `bat`'s highlighting is
+purely lexical and can't tell a valid command from a typo. The check mirrors
+what a real shell highlighter looks at: aliases, functions, builtins, `$PATH`
+commands, and common reserved words (`if`, `for`, `sudo`, …) are green; anything
+else is red.
 
 The `--theme` choice matches the resolved `tuicolor.bg`'s perceived brightness
-(the same ITU-R BT.601 formula `highlight_with_bat`'s Rust-side theme detection
-uses), read once at shell-init time from `smarthistory config get palette` — so
-dropdown colors read correctly against the same light/dark background the rest
-of the app already assumes, not `bat`'s own default theme. The palette itself is
-resolved using whichever scheme (light/dark) your last TUI session actually had
-active (`Action::ToggleColorScheme`, persisted in the session file) — with
+(the same ITU-R BT.601 formula the Rust side's theme detection uses), read once
+at shell-init time from `smarthistory config get palette` — so dropdown colors
+read correctly against the same light/dark background the rest of the app
+already assumes, not `bat`'s own default theme. The palette itself is resolved
+using whichever scheme (light/dark) your last TUI session actually had active
+(`Action::ToggleColorScheme`, persisted in the session file) — with
 `theme.dark`/`theme.light` both configured, toggling in the TUI and opening a
 new shell changes the dropdown's colors too.
 
@@ -1131,9 +1133,9 @@ symbol navigation as long as CodeGraph has indexed it.
 
 The source-context preview (the 50-line window around a selected symbol) is
 loaded lazily on selection; this keeps the initial TAGS load fast even on
-multi-megabyte tag files. The preview is rendered through `bat` with the
-matching `--theme=light` / `--theme=dark` flag derived from the active theme's
-`bg` brightness.
+multi-megabyte tag files. The preview is syntax-highlighted in-process via
+[`syntect`](https://github.com/trishume/syntect) (no `bat` subprocess), using
+the light or dark theme variant matching the active theme's `bg` brightness.
 
 Full reference: **[docs/modes/tags.md](modes/tags.md)**.
 

@@ -434,6 +434,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `highlight_with_bat`/`highlight_with_bat_auto` (the preview-pane syntax
+  highlighters used by `ag`, `$` tags, CodeGraph, notes, todo, segments,
+  similar, and files modes) are now backed by
+  [`syntect`](https://github.com/trishume/syntect) in-process instead of
+  shelling out to the `bat` binary, matching `tui.highlight`'s engine. No config
+  or behavior change — same `Option<String>` ANSI output — but these preview
+  panes now work without `bat` installed and no longer pay a subprocess call per
+  render.
 - Extracted the large `select_for_run_impl` staging method from `src/tui.rs`
   into a new `src/tui/actions.rs` module, shrinking `tui.rs` by ~2,500 lines.
 - Moved `parse_bool` into `src/util.rs` and removed the duplicate copy in

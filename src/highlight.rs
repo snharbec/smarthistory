@@ -1,8 +1,9 @@
 //! Shared helpers for syntax highlighting and query tokenisation.
 //!
 //! `ag` and the TUI's symbols (`$`) mode both benefit from:
-//! - Bat-based syntax highlighting (per-line context piped through
-//!   the `bat` CLI with `--color=always`).
+//! - `syntect`-based syntax highlighting (the same Rust engine `bat`
+//!   itself is built on, run in-process — no external `bat` binary
+//!   required).
 //! - A common "split the query into search terms, globs, and
 //!   `@lang` language flags" classifier.
 //!
@@ -11,9 +12,7 @@
 //! tags view, future content views) reuse the same plumbing
 //! without copy-pasting the implementation.
 
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 /// A simple classifier for a query body.
 ///
@@ -23,8 +22,8 @@ use std::process::{Command, Stdio};
 ///
 /// Used by both `ag` mode and the tags view: ag passes `globs` to
 /// `ag -G` and `languages` to `ag --<lang>`; tags mode uses
-/// `languages` to filter by file extension and to pipe the
-/// preview through `bat --language <lang>`.
+/// `languages` to filter by file extension and as the `lang` token
+/// for [`highlight_with_bat`]'s preview highlighting.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct QueryTokens {
     pub terms: Vec<String>,
@@ -42,7 +41,7 @@ pub struct QueryTokens {
 /// An empty `@lang` token (`@`) is silently dropped. Multiple
 /// languages may be supplied; callers that only support one
 /// (e.g. tags mode, which uses the first for extension filtering
-/// and bat highlighting) should pick the first entry.
+/// and preview highlighting) should pick the first entry.
 pub fn parse_query_tokens(pattern: &str) -> QueryTokens {
     let mut out = QueryTokens::default();
     for tok in pattern.split_whitespace() {
@@ -62,55 +61,91 @@ pub fn parse_query_tokens(pattern: &str) -> QueryTokens {
     out
 }
 
-/// Pipe a source snippet through `bat` for syntax highlighting.
-/// Returns `None` if `bat` is not on PATH, the call fails, or
-/// `bat` exits non-zero (the caller falls back to the unhighlighted
-/// text).
-///
-/// `lang` is forwarded as `bat --language <lang>`. When `lang` is
-/// empty the caller should not invoke this function at all.
-///
-/// The active TUI theme's light/dark classification is read
-/// from the `PALETTE` thread-local (populated by
-/// `install_palette`) so `bat` uses the matching `--theme=light`
-/// or `--theme=dark` for syntax colors that contrast with the
-/// TUI's background.
-fn bat_theme_arg() -> &'static str {
-    if crate::tui::theme::palette_storage::PALETTE.with(|p| p.borrow().is_light_theme) {
-        "light"
-    } else {
-        "dark"
-    }
+/// Whether the active TUI theme (light vs dark) — read from the
+/// `PALETTE` thread-local (populated by `install_palette`) — should
+/// resolve to `syntect`'s light or dark bundled theme variant, so
+/// syntax colors contrast correctly with the TUI's background.
+fn is_light_theme() -> bool {
+    crate::tui::theme::palette_storage::PALETTE.with(|p| p.borrow().is_light_theme)
 }
 
+/// Resolve the `syntect` theme matching the active color scheme —
+/// the same `base16-ocean.light`/`base16-ocean.dark` pair
+/// [`highlight_bash_commands`] uses, so every highlighted surface in
+/// this app (the TUI's history list AND its preview panes) reads as
+/// one consistent palette.
+fn resolve_theme(is_light: bool) -> &'static syntect::highlighting::Theme {
+    let ts = theme_set();
+    let theme_name = if is_light {
+        "base16-ocean.light"
+    } else {
+        "base16-ocean.dark"
+    };
+    ts.themes
+        .get(theme_name)
+        .or_else(|| ts.themes.values().next())
+        .expect("syntect::highlighting::ThemeSet::load_defaults() always bundles at least one theme")
+}
+
+/// Highlight `text` (which may be multi-line, unlike
+/// [`highlight_bash_commands`]'s single-line commands) against
+/// `syntax`/`theme` and return it as a single 24-bit-ANSI-escaped
+/// string, ready for the same `parse_ansi_line`-based rendering
+/// path every caller of `highlight_with_bat`/`highlight_with_bat_auto`
+/// already uses. `syntect::util::as_24_bit_terminal_escaped` doesn't
+/// itself emit a trailing reset code, so one (`\x1b[0m`) is appended
+/// after each line to prevent color bleed into whatever the caller
+/// concatenates or renders next to it.
+fn highlight_as_ansi(
+    text: &str,
+    syntax: &syntect::parsing::SyntaxReference,
+    theme: &syntect::highlighting::Theme,
+) -> String {
+    let ss = syntax_set();
+    let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
+    let mut out = String::with_capacity(text.len() * 2);
+    for line in syntect::util::LinesWithEndings::from(text) {
+        match highlighter.highlight_line(line, ss) {
+            Ok(ranges) => {
+                out.push_str(&syntect::util::as_24_bit_terminal_escaped(&ranges, false));
+                out.push_str("\x1b[0m");
+            }
+            // `highlight_line` only errors on malformed syntax
+            // definitions, never on the input text itself — not
+            // expected with the bundled default syntaxes, but fall
+            // back to the unstyled line rather than dropping it.
+            Err(_) => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// Syntax-highlight `context` for the given `lang` token (e.g. an
+/// `@lang` search-token from [`parse_query_tokens`]) using
+/// `syntect` — the same engine `bat` itself is built on, run
+/// in-process rather than shelled out to. `lang` is matched against
+/// `syntect`'s bundled syntax definitions by name/token first (its
+/// own `bash`/`rust`/`python`/… identifiers), then by treating it as
+/// a file extension (covers short forms like `py`/`rs` that happen
+/// to equal the extension).
+///
+/// Returns `None` when `lang` doesn't match any known syntax (the
+/// caller falls back to the unhighlighted text) — mirrors the
+/// original `bat --language <lang>` behavior, which exits non-zero
+/// for a language name it doesn't recognize, unlike the auto-detect
+/// path ([`highlight_with_bat_auto`]) below, which always succeeds.
+/// When `lang` is empty the caller should not invoke this function
+/// at all.
 pub fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
     if lang.is_empty() {
         return None;
     }
-    let theme_arg = bat_theme_arg();
-    let mut child = Command::new("bat")
-        .arg("--language")
-        .arg(lang)
-        .arg("--plain")
-        .arg("--color=always")
-        .arg("--theme")
-        .arg(theme_arg)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    {
-        let stdin = child.stdin.as_mut()?;
-        let _ = stdin.write_all(context.as_bytes());
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+    let ss = syntax_set();
+    let syntax = ss
+        .find_syntax_by_token(lang)
+        .or_else(|| ss.find_syntax_by_extension(lang))?;
+    let theme = resolve_theme(is_light_theme());
+    Some(highlight_as_ansi(context, syntax, theme))
 }
 
 /// One highlighted token from [`highlight_bash_commands`]: a run of
@@ -241,53 +276,49 @@ pub fn highlight_bash_commands(commands: &[&str], is_light: bool) -> Vec<Vec<Hig
         .collect()
 }
 
-/// Like [`highlight_with_bat`], but lets `bat` auto-detect the
-/// language from the source file's extension (no `--language`
-/// flag). `bat` reads the snippet from stdin so it has no
-/// filename to detect from by default; passing `--file-name=`
-/// with the real source path restores `bat`'s extension-based
-/// detection (`.rs` → Rust, `.java` → Java, …). Used by the
-/// `tags` / `codegraph` / `ag` preview paths when the user did
-/// not supply an explicit `@lang` token. Returns `None` when
-/// `bat` is unavailable, exits non-zero, or emits non-UTF8 —
-/// the caller falls back to the unhighlighted text.
+/// Like [`highlight_with_bat`], but auto-detects the language from
+/// the source file's extension (or exact basename, for
+/// extension-less files like `Makefile`) instead of taking an
+/// explicit `lang` token. `filepath` only needs to LOOK like the
+/// real path — nothing is read from disk; `syntect`'s syntax lookup
+/// works purely off the string, the same way the old `bat
+/// --file-name <path>` flag did (`bat` itself never opened the file
+/// either, since `context` was piped in via stdin). Used by the
+/// `tags` / `codegraph` / `ag` / notes / todo / segments / similar /
+/// files preview paths when the user did not supply an explicit
+/// `@lang` token.
+///
+/// Unlike [`highlight_with_bat`], this always returns `Some` — an
+/// unrecognized extension falls back to `syntect`'s plain-text
+/// syntax (no color, but still succeeds), mirroring how `bat
+/// --file-name` itself never errors out for an extension it doesn't
+/// know, only for things like invalid input encoding.
 pub fn highlight_with_bat_auto(context: &str, filepath: &str) -> Option<String> {
-    let theme_arg = bat_theme_arg();
-    let mut child = Command::new("bat")
-        .arg("--plain")
-        .arg("--color=always")
-        .arg("--file-name")
-        .arg(filepath)
-        .arg("--theme")
-        .arg(theme_arg)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    {
-        let stdin = child.stdin.as_mut()?;
-        let _ = stdin.write_all(context.as_bytes());
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+    let ss = syntax_set();
+    let path = Path::new(filepath);
+    let ext = path.extension().and_then(|e| e.to_str());
+    let basename = path.file_name().and_then(|n| n.to_str());
+    let syntax = ext
+        .and_then(|e| ss.find_syntax_by_extension(e))
+        .or_else(|| basename.and_then(|b| ss.find_syntax_by_extension(b)))
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    let theme = resolve_theme(is_light_theme());
+    Some(highlight_as_ansi(context, syntax, theme))
 }
 
-/// Map a file extension to a `bat` language identifier.
+/// Map a file extension to a language identifier (also usable as
+/// [`highlight_with_bat`]'s `lang` argument, since these names
+/// overlap with `syntect`'s own syntax tokens for every language
+/// listed here).
 ///
 /// Returns `None` when the extension is not associated with a
 /// known language. The mapping is intentionally small: the
 /// languages a `ctags` `tags` file is likely to cover and the
-/// languages that are useful for `bat` highlighting in a typical
-/// polyglot project. Unknown extensions fall through to `None`
-/// (no filter applied when the user-supplied `@lang` is empty,
-/// or a no-op for `bat` which will then highlight by extension
-/// automatically).
+/// languages that are useful for preview highlighting in a typical
+/// polyglot project. Unknown extensions fall through to `None` (no
+/// filter applied when the user-supplied `@lang` is empty, or a
+/// no-op for preview highlighting, which will then fall back to
+/// extension-based auto-detection — see [`highlight_with_bat_auto`]).
 ///
 /// Currently unused by the rest of the crate but kept for
 /// future call sites (e.g. an automatic per-file language hint
@@ -335,9 +366,9 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     })
 }
 
-/// Return the set of file extensions associated with a `bat`
-/// language identifier. Used by the tags view to filter rows by
-/// extension when the user supplies `@lang`.
+/// Return the set of file extensions associated with a language
+/// identifier. Used by the tags view to filter rows by extension
+/// when the user supplies `@lang`.
 ///
 /// The table mirrors `language_for_path`; `None` is returned
 /// when the language is unknown so the caller can either skip
@@ -436,5 +467,83 @@ mod tests {
         let exts = extensions_for_language("rust").unwrap();
         assert!(exts.contains(&"rs"));
         assert!(extensions_for_language("nope").is_none());
+    }
+
+    /// Crude CSI-sequence stripper for test verification only —
+    /// good enough to prove `highlight_with_bat*` never drops or
+    /// reorders the original text, only wraps it in color codes.
+    fn strip_ansi_for_test(s: &str) -> String {
+        let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+        re.replace_all(s, "").to_string()
+    }
+
+    // `highlight_with_bat`/`highlight_with_bat_auto` are pure Rust
+    // (`syntect`, not a `bat` subprocess) as of the syntect swap, so
+    // — unlike the old bat-based versions, which had no tests since
+    // they depended on an external tool that might not be present
+    // in CI — these can exercise real behavior directly.
+
+    #[test]
+    fn highlight_with_bat_empty_lang_returns_none() {
+        assert_eq!(highlight_with_bat("fn main() {}", ""), None);
+    }
+
+    #[test]
+    fn highlight_with_bat_unknown_lang_returns_none() {
+        // Mirrors the original `bat --language <lang>` behavior:
+        // an explicit but unrecognized language name is a hard
+        // failure, not a silent fall-through to plain text (that's
+        // what `highlight_with_bat_auto` is for).
+        assert_eq!(
+            highlight_with_bat("hello", "totally-not-a-real-language-xyz"),
+            None
+        );
+    }
+
+    #[test]
+    fn highlight_with_bat_known_lang_adds_ansi_without_altering_text() {
+        let src = "fn main() {\n    println!(\"hi\");\n}\n";
+        let out = highlight_with_bat(src, "rust").expect("rust is a bundled syntect syntax");
+        assert!(
+            out.contains('\x1b'),
+            "expected ANSI escape codes in highlighted output"
+        );
+        assert_eq!(
+            strip_ansi_for_test(&out),
+            src,
+            "stripping the added color codes must reproduce the original text exactly"
+        );
+    }
+
+    #[test]
+    fn highlight_with_bat_auto_known_extension_highlights() {
+        let src = "fn main() {}\n";
+        let out =
+            highlight_with_bat_auto(src, "src/main.rs").expect("highlight_with_bat_auto always succeeds");
+        assert!(out.contains('\x1b'));
+        assert_eq!(strip_ansi_for_test(&out), src);
+    }
+
+    #[test]
+    fn highlight_with_bat_auto_unknown_extension_still_succeeds() {
+        // Mirrors the real `bat --file-name <path>` behavior: an
+        // extension it doesn't recognize still succeeds (falls back
+        // to plain-text highlighting), it doesn't error out the way
+        // an explicit unrecognized `--language` does.
+        let src = "some random content\n";
+        let out = highlight_with_bat_auto(src, "file.totally-unknown-ext-xyz")
+            .expect("highlight_with_bat_auto always succeeds, even for an unknown extension");
+        assert_eq!(strip_ansi_for_test(&out), src);
+    }
+
+    #[test]
+    fn highlight_with_bat_auto_matches_extensionless_file_by_basename() {
+        // `Makefile` has no extension; the basename-based fallback
+        // lookup should still find the Makefile syntax (or at worst
+        // fall back to plain text) without erroring.
+        let src = "all:\n\techo hi\n";
+        let out = highlight_with_bat_auto(src, "Makefile")
+            .expect("highlight_with_bat_auto always succeeds");
+        assert_eq!(strip_ansi_for_test(&out), src);
     }
 }

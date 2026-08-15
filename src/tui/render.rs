@@ -6708,15 +6708,17 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     } else {
         4
     };
-    // `highlight_with_bat` (`--color=always`) emits ANSI escape
-    // codes for tags/codegraph rows, and `ag` itself emits ANSI
-    // for matched-line previews. The markdown `render_preview_line`
-    // path doesn't parse ANSI (it would mangle `\x1b[...m` through
-    // the inline parser), so any output containing an escape must
-    // go through `parse_ansi_line` instead. This is mode-agnostic:
-    // a codegraph/tags row falls back to plain text when bat is
-    // unavailable (no ANSI), and an ag row whose match had no
-    // coloring proceeds through the markdown path cleanly.
+    // `highlight_with_bat`/`highlight_with_bat_auto` (`syntect`,
+    // in-process — see `src/highlight.rs`) emit 24-bit-color ANSI
+    // escape codes for tags/codegraph rows, and `ag` itself emits
+    // ANSI for matched-line previews. The markdown
+    // `render_preview_line` path doesn't parse ANSI (it would
+    // mangle `\x1b[...m` through the inline parser), so any output
+    // containing an escape must go through `parse_ansi_line`
+    // instead. This is mode-agnostic: an ag row whose match had no
+    // coloring proceeds through the markdown path cleanly (`ag`
+    // itself decides whether to emit ANSI, independent of
+    // `highlight_with_bat*`).
     //
     // herdr pane content is plain text by default (we don't pass
     // `--format ansi` to `herdr pane read` to keep the IPC
