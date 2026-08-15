@@ -303,6 +303,22 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
+  `directory, timestamp`) that the schema was missing. The main history fetch
+  sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by
+  `session_id`/`directory` equality, none of which the existing
+  `idx_history_dedup` (command, directory, session_id) could serve — every fetch
+  fell back to a full table scan plus an external sort before `LIMIT 1000` could
+  truncate anything. At small history sizes this was unnoticeable; at very large
+  ones (hundreds of thousands to millions of rows) it meant every keystroke
+  re-scanned the whole table. Verified via `EXPLAIN QUERY PLAN`: SESS-scoped
+  fetches now do an index seek
+  (`SEARCH ... USING COVERING INDEX idx_history_session_ts`) instead of a full
+  scan, and the unscoped/global fetch does an ordered index scan
+  (`SCAN ... USING COVERING INDEX idx_history_timestamp`) instead of
+  scan-then-sort. `Mode::Stats`'s `LEAD()` window query still has to visit every
+  row (window functions can't skip rows), but no longer needs a separate
+  temp-B-tree sort pass first.
 - `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word now
   actually works in plain interactive use, not just inside the `--glob-complete`
   picker — `docs/modes/files.md` already documented `/*.toml` and `*<glob>` path
