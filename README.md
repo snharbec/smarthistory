@@ -73,7 +73,12 @@ of falling through to zsh's native history.
   successor frequency via SQLite's `LEAD()` window function.
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate
   natural-language into a runnable command (`=`), describe a command in plain
-  prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`).
+  prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`). Question mode (`?`)
+  answers a question about the last command you ran, right from the raw shell
+  prompt — no TUI needed: type `?why did that fail`, press Enter, get a
+  colorized answer in the console, with an interactive pick list if the answer
+  suggests one or more commands (staged into the next prompt for review, never
+  run automatically). Also reachable from inside the TUI.
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which
   directories are active in a tmux session or herdr workspace; the `*` mode
   lists all panes across all sessions/workspaces as a tree; selecting a row

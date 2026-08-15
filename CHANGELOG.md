@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory ask <question>` / console question mode: type
+  `?question text` directly at the normal zsh prompt (no TUI) and press Enter. A
+  transient `Thinking…` line shows while the request is in flight, then -- on an
+  interactive terminal -- gets replaced in place by the colorized
+  `LLM Answer`-headed answer, using the same last-command context as the TUI's
+  `?` mode. If the answer suggests one or more commands, an interactive numbered
+  pick list stages the chosen one into the next prompt for review -- it is never
+  run automatically. Intercepted at `accept-line` in `init.zsh` before the line
+  would ever reach real shell execution; the question is recorded to history the
+  same way a TUI-asked question is, so it appears identically in `?`-mode search
+  and `project report`.
 - Question mode (`?`): the last command run in the session — its command line,
   exit code, and captured output, if any — is now automatically included as
   context, so `?what does that do` or `?why did that fail` resolve "that"/"this"

@@ -338,9 +338,7 @@ introductory text.\n\n{}",
 /// session, gathered so a `?` question can refer to "that
 /// command"/"this"/"it" without the user having to repeat
 /// it. `output` is already truncated to a prompt-safe length
-/// by the caller (`App::last_command_context`) before this
-/// struct is built — this module only formats, it doesn't
-/// bound sizes.
+/// by [`last_command_context`] before this struct is built.
 #[derive(Debug, Clone)]
 pub struct LastCommandContext {
     pub command: String,
@@ -350,6 +348,66 @@ pub struct LastCommandContext {
     /// of misleadingly showing 0.
     pub exit_code: Option<i32>,
     pub output: Option<String>,
+}
+
+/// Maximum number of characters of a command's captured
+/// output to fold into the `?` question prompt. Bounds the
+/// prompt size sent to the LLM — `history_output` stores
+/// output uncapped, but only enough to see what happened is
+/// useful for answering "why did this fail"-style questions.
+const QUESTION_CONTEXT_OUTPUT_MAX_CHARS: usize = 2000;
+
+/// Truncate `s` to at most `max_chars` characters (not
+/// bytes — this only ever runs on UTF-8 command output, and
+/// slicing by byte offset could land mid-codepoint), appending
+/// a marker when truncation actually happened.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut truncated: String = s.chars().take(max_chars).collect();
+    truncated.push_str("… [truncated]");
+    truncated
+}
+
+/// The most recently run shell command in `session_id`
+/// (`mode = 'command'`, so LLM/question rows themselves are
+/// excluded), with its exit code and captured output if any.
+/// Shared by the TUI's `?` question mode (`App::last_command_context`)
+/// and the `smarthistory ask` CLI subcommand — neither the query
+/// nor the truncation has any TUI dependency. Returns `None`
+/// for a session with no command rows yet, or if the lookup
+/// otherwise fails.
+///
+/// An `exit_code` of `-1` is `capture_command_output`'s
+/// sentinel for "no exit code available" (the process was
+/// killed by a signal) — not a real POSIX status, so it's
+/// mapped to `None` here rather than shown to the LLM as a
+/// misleading status.
+pub fn last_command_context(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Option<LastCommandContext> {
+    conn.query_row(
+        "SELECT h.command, h.exit_code, o.output \
+         FROM history h \
+         LEFT JOIN history_output o ON h.id = o.history_id \
+         WHERE h.mode = 'command' AND h.session_id = ?1 \
+         ORDER BY h.timestamp DESC, h.id DESC LIMIT 1",
+        rusqlite::params![session_id],
+        |row| {
+            let command: String = row.get(0)?;
+            let exit_code: Option<i32> = row.get(1)?;
+            let output: Option<String> = row.get(2)?;
+            Ok((command, exit_code, output))
+        },
+    )
+    .ok()
+    .map(|(command, exit_code, output)| LastCommandContext {
+        command,
+        exit_code: exit_code.filter(|&c| c != -1),
+        output: output.map(|o| truncate_chars(&o, QUESTION_CONTEXT_OUTPUT_MAX_CHARS)),
+    })
 }
 
 /// The prompt template for the "general question"
@@ -392,6 +450,70 @@ answer about the command above; otherwise just answer the question.\n\n",
 Respond with plain prose only — no markdown, no lists, no code blocks, no preamble.\n\n{}{}",
         context_block, question
     )
+}
+
+/// Like [`build_question_prompt`], but for `smarthistory ask`
+/// (the console `?` flow, no TUI): additionally invites the
+/// LLM to suggest one or more concrete shell commands as
+/// fenced code blocks, which [`split_question_answer`] then
+/// extracts into a pick list. A separate function rather than
+/// a flag on `build_question_prompt` so the TUI's `?` mode
+/// prompt — and its "no code blocks" instruction — is
+/// completely unaffected by this.
+pub fn build_question_console_prompt(question: &str, context: Option<&LastCommandContext>) -> String {
+    let base = build_question_prompt(question, context);
+    format!(
+        "{base}\n\nIf you have one or more concrete shell commands to suggest, list each \
+as its own fenced code block (```like this```) after your answer. Omit code blocks \
+entirely if no command is relevant."
+    )
+}
+
+/// Split a `build_question_console_prompt` response into
+/// `(prose, suggested_commands)`. Everything before the first
+/// fenced code block (` ``` `-delimited) is the prose answer,
+/// trimmed. Each fenced block contributes one suggestion per
+/// non-empty line inside it, in order; text after the last
+/// fence (the model occasionally adds trailing commentary
+/// despite being told not to) is ignored — the pick list is
+/// meant to be a short, unambiguous set of commands, not a
+/// place to also parse trailing prose.
+///
+/// No fence at all → `(raw.trim(), vec![])`, so a plain
+/// factual question with no command suggestion behaves
+/// exactly like `split_question_answer` was never involved.
+pub fn split_question_answer(raw: &str) -> (String, Vec<String>) {
+    let Some(first_fence) = raw.find("```") else {
+        return (raw.trim().to_string(), Vec::new());
+    };
+    let prose = raw[..first_fence].trim().to_string();
+
+    let mut suggestions = Vec::new();
+    let mut rest = &raw[first_fence..];
+    while let Some(open_rel) = rest.find("```") {
+        let after_open = &rest[open_rel + 3..];
+        // Skip an optional language tag on the fence's opening
+        // line (e.g. ```bash), same as `sanitize_command`'s
+        // fence handling.
+        let body_start = after_open.find('\n').map(|i| i + 1).unwrap_or(0);
+        let body = &after_open[body_start..];
+        let Some(close_rel) = body.find("```") else {
+            break;
+        };
+        let block = &body[..close_rel];
+        for line in block.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                suggestions.push(line.to_string());
+            }
+        }
+        rest = &body[close_rel + 3..];
+        let Some(next_open) = rest.find("```") else {
+            break;
+        };
+        rest = &rest[next_open..];
+    }
+    (prose, suggestions)
 }
 
 /// Strip the LLM's likely cruft and return the first plausible
@@ -544,6 +666,73 @@ mod tests {
         };
         let p = build_question_prompt("why did that fail?", Some(&ctx));
         assert!(p.contains("cat: missing.txt: No such file or directory"));
+    }
+
+    #[test]
+    fn build_question_console_prompt_adds_fence_instruction_and_keeps_base() {
+        let p = build_question_console_prompt("why did that fail?", None);
+        assert!(p.contains("why did that fail?"));
+        assert!(p.contains("fenced code block"));
+    }
+
+    #[test]
+    fn split_question_answer_no_fence_returns_trimmed_prose_and_no_suggestions() {
+        let (prose, suggestions) = split_question_answer("  It failed because X.  \n");
+        assert_eq!(prose, "It failed because X.");
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn split_question_answer_single_line_fence() {
+        let raw = "It failed because X.\n\n```\nls -la /tmp\n```\n";
+        let (prose, suggestions) = split_question_answer(raw);
+        assert_eq!(prose, "It failed because X.");
+        assert_eq!(suggestions, vec!["ls -la /tmp".to_string()]);
+    }
+
+    #[test]
+    fn split_question_answer_multi_line_fence_yields_one_suggestion_per_line() {
+        let raw = "Try one of these.\n```\ngit stash\ngit stash pop\n```";
+        let (prose, suggestions) = split_question_answer(raw);
+        assert_eq!(prose, "Try one of these.");
+        assert_eq!(
+            suggestions,
+            vec!["git stash".to_string(), "git stash pop".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_question_answer_multiple_fences() {
+        let raw = "Two options.\n```\noption one\n```\n```\noption two\n```";
+        let (prose, suggestions) = split_question_answer(raw);
+        assert_eq!(prose, "Two options.");
+        assert_eq!(
+            suggestions,
+            vec!["option one".to_string(), "option two".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_question_answer_ignores_text_after_last_fence() {
+        let raw = "Try this.\n```\nfoo --fix\n```\nHope that helps!";
+        let (prose, suggestions) = split_question_answer(raw);
+        assert_eq!(prose, "Try this.");
+        assert_eq!(suggestions, vec!["foo --fix".to_string()]);
+    }
+
+    #[test]
+    fn split_question_answer_honors_language_tag_on_opening_fence() {
+        let raw = "```bash\nfoo --fix\n```";
+        let (_prose, suggestions) = split_question_answer(raw);
+        assert_eq!(suggestions, vec!["foo --fix".to_string()]);
+    }
+
+    #[test]
+    fn split_question_answer_unterminated_fence_yields_no_suggestions() {
+        let raw = "Some prose.\n```\nfoo --fix";
+        let (prose, suggestions) = split_question_answer(raw);
+        assert_eq!(prose, "Some prose.");
+        assert!(suggestions.is_empty());
     }
 
     #[test]

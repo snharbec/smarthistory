@@ -26,26 +26,6 @@ pub(crate) fn pattern(app: &App) -> &str {
     }
 }
 
-/// Maximum number of characters of a command's captured
-/// output to fold into the `?` question prompt. Bounds the
-/// prompt size sent to the LLM — `history_output` stores
-/// output uncapped, but only enough to see what happened is
-/// useful for answering "why did this fail"-style questions.
-const QUESTION_CONTEXT_OUTPUT_MAX_CHARS: usize = 2000;
-
-/// Truncate `s` to at most `max_chars` characters (not
-/// bytes — this only ever runs on UTF-8 command output, and
-/// slicing by byte offset could land mid-codepoint), appending
-/// a marker when truncation actually happened.
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut truncated: String = s.chars().take(max_chars).collect();
-    truncated.push_str("… [truncated]");
-    truncated
-}
-
 impl App {
     /// True if the current query is a general question
     /// request (prefixed with configured question prefix).
@@ -89,43 +69,16 @@ impl App {
     }
 
     /// The most recently run shell command in the current
-    /// session (`mode = 'command'`, so LLM/question rows
-    /// themselves are excluded), with its exit code and
-    /// captured output if any. Feeds the `?` question prompt
-    /// so questions like "what does that command do" or "why
-    /// did this fail" can resolve "that"/"this" without the
-    /// user retyping the command. Returns `None` for a
-    /// brand-new session with no command rows yet, or if the
-    /// lookup otherwise fails.
-    ///
-    /// An `exit_code` of `-1` is `capture_command_output`'s
-    /// sentinel for "no exit code available" (the process was
-    /// killed by a signal) — not a real POSIX status, so it's
-    /// mapped to `None` here rather than shown to the LLM as
-    /// a misleading status.
+    /// session, with its exit code and captured output if
+    /// any — used to seed the `?` question prompt so questions
+    /// like "what does that command do" or "why did this fail"
+    /// can resolve "that"/"this" without the user retyping the
+    /// command. Thin wrapper around `crate::llm::last_command_context`,
+    /// which has no TUI dependency and is shared with the
+    /// `smarthistory ask` CLI subcommand.
     pub(crate) fn last_command_context(&self) -> Option<crate::llm::LastCommandContext> {
         let session_id = std::env::var("SMART_HISTORY_SESSION").unwrap_or_default();
-        self.conn
-            .query_row(
-                "SELECT h.command, h.exit_code, o.output \
-                 FROM history h \
-                 LEFT JOIN history_output o ON h.id = o.history_id \
-                 WHERE h.mode = 'command' AND h.session_id = ?1 \
-                 ORDER BY h.timestamp DESC, h.id DESC LIMIT 1",
-                params![&session_id],
-                |row| {
-                    let command: String = row.get(0)?;
-                    let exit_code: Option<i32> = row.get(1)?;
-                    let output: Option<String> = row.get(2)?;
-                    Ok((command, exit_code, output))
-                },
-            )
-            .ok()
-            .map(|(command, exit_code, output)| crate::llm::LastCommandContext {
-                command,
-                exit_code: exit_code.filter(|&c| c != -1),
-                output: output.map(|o| truncate_chars(&o, QUESTION_CONTEXT_OUTPUT_MAX_CHARS)),
-            })
+        crate::llm::last_command_context(&self.conn, &session_id)
     }
 
     /// Persist a general question to the history table with
