@@ -359,6 +359,88 @@
         assert_eq!(resolve_comment(&conn, "dep").unwrap(), None);
     }
 
+    #[test]
+    fn list_comments_is_empty_when_no_comments_stored() {
+        let conn = search_test_db();
+        assert_eq!(list_comments(&conn).unwrap(), Vec::new());
+    }
+
+    /// `list_comments` orders by comment text case-insensitively,
+    /// and reports `has_history` correctly for both a command that
+    /// exists in `history` (`ls -la`, from the fixture) and one that
+    /// doesn't (never added).
+    #[test]
+    fn list_comments_orders_by_comment_and_reports_history_presence() {
+        let conn = search_test_db();
+        conn.execute_batch(
+            "INSERT INTO command_comments (command, comment) VALUES
+             ('ls -la', 'zzz-last'),
+             ('never-run-command', 'aaa-first');",
+        )
+        .unwrap();
+        let rows = list_comments(&conn).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                CommentRow {
+                    command: "never-run-command".to_string(),
+                    comment: "aaa-first".to_string(),
+                    has_history: false,
+                },
+                CommentRow {
+                    command: "ls -la".to_string(),
+                    comment: "zzz-last".to_string(),
+                    has_history: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn add_comment_reports_whether_command_has_history() {
+        let conn = search_test_db();
+        // 'ls -la' is in the fixture's history; 'never-run' isn't.
+        assert!(add_comment(&conn, "ls -la", "deploy").unwrap());
+        assert!(!add_comment(&conn, "never-run", "orphan").unwrap());
+        assert_eq!(
+            resolve_comment(&conn, "deploy").unwrap(),
+            Some("ls -la".to_string())
+        );
+        // The orphaned comment is stored but doesn't resolve (no
+        // matching history row for `resolve_comment`'s JOIN).
+        assert_eq!(resolve_comment(&conn, "orphan").unwrap(), None);
+    }
+
+    /// A second `add_comment` call for the same command overwrites
+    /// the first comment rather than erroring or duplicating (the
+    /// table's `command` column is a PRIMARY KEY).
+    #[test]
+    fn add_comment_overwrites_existing_comment_for_same_command() {
+        let conn = search_test_db();
+        add_comment(&conn, "ls -la", "first").unwrap();
+        add_comment(&conn, "ls -la", "second").unwrap();
+        assert_eq!(resolve_comment(&conn, "first").unwrap(), None);
+        assert_eq!(
+            resolve_comment(&conn, "second").unwrap(),
+            Some("ls -la".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_comment_removes_it_and_reports_true() {
+        let conn = search_test_db();
+        add_comment(&conn, "ls -la", "deploy").unwrap();
+        assert!(delete_comment(&conn, "ls -la").unwrap());
+        assert_eq!(resolve_comment(&conn, "deploy").unwrap(), None);
+        assert_eq!(list_comments(&conn).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn delete_comment_on_missing_command_reports_false() {
+        let conn = search_test_db();
+        assert!(!delete_comment(&conn, "nope").unwrap());
+    }
+
     /// Build the minimal schema `import_history_rows` needs
     /// (`history` with its dedup index, plus the two side tables).
     fn import_test_db() -> Connection {
