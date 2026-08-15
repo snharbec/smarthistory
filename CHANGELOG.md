@@ -6,6 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory daemon`: a file-watching loop that records file changes in
+  configured project directories as `file_events` (created/modified/deleted),
+  attributed to the project the file lives in — the automatic counterpart to
+  the editor-hook `smarthistory file` command, capturing activity that never
+  goes through the shell (GUI editors, browsers, any non-terminal app).
+  Configurable via `daemon.*` keys: `daemon.watch` (which directories to watch;
+  defaults to every `project.<slug>.dir` entry), `daemon.ignore-dirs`
+  (directory basenames to skip, combined with the built-in `DEFAULT_IGNORES`),
+  `daemon.ignore-files` (file globs to skip), `daemon.events` (which event
+  kinds to record), `daemon.debounce-ms` (the window that coalesces an editor
+  save's event burst into one row), and `daemon.enabled` (kill switch). Uses the
+  `notify` crate (FSEvents on macOS, inotify on Linux). See `docs/daemon.md`.
+- The `file_events` table now supports a `deleted` event kind (recorded by the
+  daemon on file removal); `project report` prints a new "Files deleted"
+  section. Existing databases are migrated automatically.
+
 - New `smarthistory comments list|add|delete`: manage comment-expansion entries
   (`command_comments`) directly instead of only setting one via `add --comment`
   on the original command. `list` prints every stored comment with its exact
@@ -201,7 +217,7 @@ All notable changes to this project will be documented in this file.
   entries keep working unmodified, no migration needed.
 - The `--glob-complete[-dir]`/`--pid-complete` pickers (`vi a*<TAB>`,
   `cd proj*<TAB>`, `kill sleep<TAB>`) now prefill the query with a trailing
-  space (`a* `, `proj* `, `sleep `) instead of no space — ready to keep typing
+  space (`a*`, `proj*`, `sleep`) instead of no space — ready to keep typing
   an extra narrowing word immediately, no need to press space first.
 - `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
   `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment variables,
@@ -376,14 +392,14 @@ All notable changes to this project will be documented in this file.
 - `*` panes mode: `Enter` on the `# Sessions` / `# Directories` / `# hosts`
   group header now collapses/expands it (`▾`/`▸` triangle) instead of trying to
   focus something. In-memory for the current launch only; an individual live
-  workspace's own `## ` sub-heading is unaffected and still stages its focus
+  workspace's own `##` sub-heading is unaffected and still stages its focus
   command as before.
 - `*` panes mode: every pane's name now renders bold, always — not just panes
-  that get the dominant `▶ ` running marker.
+  that get the dominant `▶` running marker.
 - `*` panes mode: live tmux/herdr workspaces now wrap under a common synthetic
-  `# Sessions` heading, with each individual workspace rendered as a `## `
+  `# Sessions` heading, with each individual workspace rendered as a `##`
   sub-heading underneath (panes indented one level deeper) — matching the
-  `Directories`/`hosts` sections' own `# `-headed look. Purely presentational:
+  `Directories`/`hosts` sections' own `#`-headed look. Purely presentational:
   each workspace remains its own independently filterable/group-scopable group,
   unchanged.
 - `,` (ag) mode: each row's timestamp is now the matched file's real
@@ -438,7 +454,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `*` panes mode: a pane actually running something (not just an idle shell
-  prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so busy
+  prompt) now gets a dominant `▶` marker in bold + the highlight color, so busy
   panes stand out immediately in a long list.
 - `create-note` dialog: `Ctrl-A` selects the whole active field (Title or
   Content). While selected, `Ctrl-C` yanks it to the clipboard instead of
