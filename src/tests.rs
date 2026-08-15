@@ -319,17 +319,22 @@
         );
     }
 
+    /// Case must match exactly: typing `rust` must not expand a
+    /// comment stored as `RUST` (or vice versa) — the expansion is
+    /// deliberately case-sensitive so a short common word doesn't
+    /// accidentally trigger it.
     #[test]
-    fn resolve_comment_matches_case_insensitively() {
+    fn resolve_comment_is_case_sensitive() {
         let conn = search_test_db();
         conn.execute(
-            "INSERT INTO command_comments (command, comment) VALUES ('ls -la', 'Deploy')",
+            "INSERT INTO command_comments (command, comment) VALUES ('cargo build --release', 'RUST')",
             [],
         )
         .unwrap();
+        assert_eq!(resolve_comment(&conn, "rust").unwrap(), None);
         assert_eq!(
-            resolve_comment(&conn, "deploy").unwrap(),
-            Some("ls -la".to_string())
+            resolve_comment(&conn, "RUST").unwrap(),
+            Some("cargo build --release".to_string())
         );
     }
 
