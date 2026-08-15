@@ -10720,14 +10720,15 @@ fn fetch_segments_headings_start_with_hash() {
 /// `ensure_selected_context_centers_window_on_match_line_for_long_file`
 /// for the case where the file is longer than the window and the
 /// window has to center on the match instead.
-/// The preview must be RAW markdown piped through `bat` — the
-/// same "clean content in, syntax-highlighted content out"
-/// pipeline `notes` / `todo` mode use — not `tags`/`ag` mode's
+/// The preview must be RAW markdown, syntax-highlighted via
+/// `highlight_with_bat_auto` (`syntect`) — the same "clean
+/// content in, syntax-highlighted content out" pipeline `notes` /
+/// `todo` mode use — not `tags`/`ag` mode's
 /// `read_source_context_with_cache` format, which prefixes every
 /// line with a right-aligned line number and marks the matched
 /// line with `>>`. That annotation isn't valid markdown, so it
-/// would fight `bat`'s heading/checkbox/link highlighting instead
-/// of complementing it.
+/// would fight the highlighter's heading/checkbox/link
+/// highlighting instead of complementing it.
 #[test]
 fn ensure_selected_context_produces_clean_markdown_without_line_number_prefix() {
     let (dir, db_path) = setup_todo_db();
@@ -10779,9 +10780,9 @@ fn ensure_selected_context_loads_full_file_for_segment_row() {
     app.query = ":Older".to_string();
     app.refresh();
     drive_segments_search(&mut app);
-    // Strip ANSI escapes before asserting on substrings: `bat`
-    // syntax-highlights each token as its own colored span, so a
-    // multi-token phrase like "# Older" (hash + space + word,
+    // Strip ANSI escapes before asserting on substrings: the
+    // highlighter syntax-highlights each token as its own colored
+    // span, so a multi-token phrase like "# Older" (hash + space + word,
     // each separately styled) won't appear as one contiguous
     // substring in the raw (styled) output even though the text
     // is there.
@@ -10809,11 +10810,12 @@ fn ensure_selected_context_loads_full_file_for_segment_row() {
 }
 
 /// `crate::tui::mode::similar::ensure_selected_context` is the same
-/// windowed-`bat`-preview code as segments mode's, just reading from
-/// `similar_state` instead of `segments_state` — this doesn't need a
-/// live Ollama instance to test, since it operates purely on the
-/// selected row's `directory`/`session_id` and the real file on
-/// disk, regardless of how that row got into the list.
+/// windowed, syntax-highlighted preview code as segments mode's,
+/// just reading from `similar_state` instead of `segments_state` —
+/// this doesn't need a live Ollama instance to test, since it
+/// operates purely on the selected row's `directory`/`session_id`
+/// and the real file on disk, regardless of how that row got into
+/// the list.
 #[test]
 fn ensure_selected_context_loads_full_file_for_similar_row() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -10876,9 +10878,9 @@ fn ensure_selected_context_loads_full_file_for_similar_row() {
 /// `App::refresh`), and `merged_rows` is rebuilt from scratch each
 /// time (with the raw, unhighlighted segment text) — so without a
 /// cache, re-selecting the same row on every keystroke would
-/// re-spawn `bat` every time, which is exactly the per-keystroke
-/// blocking work the background search thread was introduced to
-/// eliminate. Once a row's context has been computed, it must be
+/// re-run the highlighter every time, which is exactly the
+/// per-keystroke blocking work the background search thread was
+/// introduced to eliminate. Once a row's context has been computed, it must be
 /// served from `SegmentsState::context_cache` on subsequent calls
 /// for the same file/line, not recomputed.
 #[test]
@@ -10918,8 +10920,8 @@ fn ensure_selected_context_caches_by_file_and_line() {
     // `output` resets to the raw segment text) and then, as part
     // of its own per-mode context step, calls
     // `ensure_selected_context` again for the same selected row —
-    // this must be served from the cache rather than re-spawning
-    // `bat`, which is the whole point of the cache.
+    // this must be served from the cache rather than re-running
+    // the highlighter, which is the whole point of the cache.
     app.refresh();
     assert_eq!(
         app.merged_rows()[heading_idx].output,
@@ -16412,7 +16414,7 @@ test_ssh_config\t\t30,0\n";
 ///    files);
 /// 2. labels each returned row's `source` with the
 ///    language (e.g. `"tags:rust"`) so downstream code
-///    can tell whether a bat-highlight pass was applied.
+///    can tell whether a syntax-highlight pass was applied.
 ///
 /// The test uses a self-contained tags file in a temp
 /// directory so it doesn't depend on the repo's real

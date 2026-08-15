@@ -618,10 +618,11 @@ impl SelectedTheme {
 /// Determine if a `Color` is "light" using the ITU-R BT.601
 /// perceived-brightness formula (the same one
 /// `ratatui_themes::ThemePalette::is_light()` uses). This is
-/// used by the `bat` color-highlighting paths to pick
-/// `--theme=light` (for light themes) or `--theme=dark`
-/// (for dark themes) so syntax-highlighted source previews
-/// match the active theme's background.
+/// used by the `syntect`-based color-highlighting paths (see
+/// `crate::highlight::resolve_theme`) to pick the light or dark
+/// theme variant, and by the zsh dropdown's `bat --theme=light` /
+/// `--theme=dark` selection, so syntax-highlighted source previews
+/// match the active theme's background either way.
 fn is_color_light(color: Color) -> bool {
     if let Color::Rgb(r, g, b) = color {
         let brightness = (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000;
@@ -769,9 +770,10 @@ pub struct Palette {
     pub(crate) input_bg: Color,
     /// Background color for the status bar.
     pub(crate) status_bg: Color,
-    /// Whether the active theme is a light theme (for
-    /// `bat --theme=light>` / `bat --theme=dark`
-    /// selection in the color-highlighting paths).
+    /// Whether the active theme is a light theme (for the
+    /// `syntect` theme-variant selection in the Rust-side
+    /// color-highlighting paths, and the zsh dropdown's
+    /// `bat --theme=light` / `--theme=dark` selection).
     /// Computed from the theme's `bg` color brightness
     /// via the ITU-R BT.601 perceived-brightness
     /// formula, matching the `ratatui-themes`
