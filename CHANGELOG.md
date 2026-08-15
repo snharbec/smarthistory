@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `dropdown.predict=on|off` config key (default off): when the command line
+  is empty, the live dropdown widget shows predicted next commands instead of
+  nothing, using the same successor-frequency data `Ctrl-S`/`smarthistory next`
+  already computes. Capped at 3 candidates regardless of `dropdown.limit`.
+  Selecting a prediction works exactly like selecting a normal search result.
 - `Ctrl-R` now takes over any text already on the command line as the TUI's
   starting search query, instead of always restoring the last search regardless
   of what's typed. An empty command line still restores the persisted last

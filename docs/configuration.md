@@ -62,6 +62,7 @@ value" so you can confirm what the TUI actually sees.
   - [`dropdown.minchars`](#dropdownminchars)
   - [`dropdown.highlight`](#dropdownhighlight)
   - [`dropdown.matchmode`](#dropdownmatchmode)
+  - [`dropdown.predict`](#dropdownpredict)
 - [Comment expansion](#comment-expansion)
   - [`commentexpand.enabled`](#commentexpandenabled)
 - [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion)
@@ -432,6 +433,32 @@ match set to substring"), regardless of whether the dropdown is currently on.
 ```ini
 dropdown.enabled=on
 dropdown.matchmode=substring
+```
+
+### `dropdown.predict`
+
+|                  |               |
+| ---------------- | ------------- |
+| **Type**         | `on` \| `off` |
+| **Default**      | `off`         |
+| **Env override** | —             |
+
+When the command line is empty, show predicted next commands instead of showing
+nothing. Predictions come from the same successor-frequency data
+`Ctrl+S`/`smarthistory next` already uses — the commands that most often
+followed the last command actually run in this shell — capped at 3 candidates
+regardless of [`dropdown.limit`](#dropdownlimit): a "what's next" hint at the
+very start of a line is meant to be a quick glance, not a long list to scan.
+With nothing run yet in the session, or with this off (the default), an empty
+line shows no dropdown, same as before this existed. The prediction appears on
+the very first empty prompt after a command finishes — not only after some other
+action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
+`zle-line-init` hook. Selecting a predicted candidate works exactly like
+selecting a normal search result (`Tab`/`Enter`/arrows all behave identically).
+
+```ini
+dropdown.enabled=on
+dropdown.predict=on
 ```
 
 ---
@@ -1353,6 +1380,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `dropdown.minchars`             | non-negative int                  | `1`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.highlight`            | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.matchmode`            | `prefix` \| `substring`           | `prefix`                                                         | [Live dropdown completion](#live-dropdown-completion)                     |
+| `dropdown.predict`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `commentexpand.enabled`         | `on` \| `off`                     | `off`                                                            | [Comment expansion](#comment-expansion)                                   |
 | `globcomplete.enabled`          | `on` \| `off`                     | `off`                                                            | [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion) |
 | `tuicolor.bg`                   | color                             | theme's `bg`                                                     | [Theme](#theme)                                                           |

@@ -223,6 +223,13 @@ typeset -g _smarthistory_dropdown_minchars=1
 # in ~/.config/smarthistory/config (defaults to "prefix"); this only
 # picks what a new shell starts on — Ctrl-t still toggles regardless.
 typeset -g _smarthistory_matchmode="prefix"
+# Whether the dropdown shows predicted next commands (from the same
+# successor-frequency data Ctrl-S/`smarthistory next` uses) when the
+# command line is empty, instead of showing nothing. Opt-in, off by
+# default — see `dropdown.predict=on|off` in
+# ~/.config/smarthistory/config. Capped at 3 candidates regardless
+# of `dropdown.limit` (see `_smarthistory_dropdown_render`).
+typeset -g _smarthistory_dropdown_predict_enabled="0"
 if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_dropdown_enabled="1"
     _smarthistory_dropdown_limit_raw=$(smarthistory config get dropdown.limit 2>/dev/null)
@@ -234,6 +241,8 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
         substring) _smarthistory_matchmode="substring" ;;
         *) _smarthistory_matchmode="prefix" ;;
     esac
+    [[ "$(smarthistory config get dropdown.predict 2>/dev/null)" == "on" ]] \
+        && _smarthistory_dropdown_predict_enabled="1"
 fi
 # Mirror the search-scope/match-mode state into real environment
 # variables, not just the zsh-internal `$_smarthistory_mode`/
@@ -1447,57 +1456,89 @@ _smarthistory_dropdown_render() {
         _smarthistory_dropdown_clear
         return
     fi
-    if (( $#LBUFFER < _smarthistory_dropdown_minchars )); then
+    # An empty command line is a special case, independent of
+    # `dropdown.minchars` (which gates the NORMAL search below —
+    # `minchars=0` would otherwise also mean "show every history row
+    # on an empty line," which is a different, unwanted feature).
+    # With nothing typed there's no search to run at all; the only
+    # thing worth showing is a "what's next" prediction, and only
+    # when the user opted in and there's actually a last-run command
+    # to predict from.
+    if (( $#LBUFFER == 0 )); then
+        if [[ "$_smarthistory_dropdown_predict_enabled" != "1" ]] || [[ -z "$_smarthistory_last_cmd" ]]; then
+            _smarthistory_dropdown_clear
+            return
+        fi
+    elif (( $#LBUFFER < _smarthistory_dropdown_minchars )); then
         _smarthistory_dropdown_clear
         return
     fi
-    local -a args
-    # `--prefix`: match commands that START WITH what's typed, not a
-    # substring anywhere in the command — a plain substring match
-    # made "ls" match `open "http://.../details"` (contains "ls"
-    # inside the URL), which is surprising for a live as-you-type
-    # completion (unlike Up/Down's keypress-triggered walk, which
-    # keeps the broader substring match). Only added when
-    # `_smarthistory_matchmode` is "prefix" (the default) — Ctrl-t
-    # (`_smarthistory_cycle_matchmode`) toggles it to "substring" for
-    # anyone who wants the broader match here too, accepting the
-    # above noise tradeoff.
-    #
-    # `--ansi=off`: the widget always pipes the search call into a
-    # `$()`-style capture, which is never a TTY — so `--ansi=full`
-    # (and `--ansi=bold`) never actually produce styled SGR output
-    # here, they fall back to bracket-wrapped text (`[ls]`) for
-    # pipe-safety. Those literal `[`/`]` characters aren't part of
-    # the history at all; they were the CLI's non-TTY highlight
-    # fallback leaking into what the user sees. `--ansi=off` gives
-    # plain, unmodified command text instead. The matched-prefix
-    # emphasis `--ansi=full` was trying to provide over a real TTY
-    # is recreated properly in `_smarthistory_dropdown_paint` via a
-    # `region_highlight` `bold` span over the first `$#LBUFFER`
-    # characters of each row — the same mechanism already used to
-    # color the box chrome and bold the selected row.
-    #
-    # `--fields diff,exit_code,command`: `diff` (the "last called" age
-    # column, e.g. "5m"/"2h"/"3d") and `exit_code` (drawn as a `✓`/`✗`
-    # marker) are both consumed by `_smarthistory_dropdown_paint`.
-    # `diff` and `exit_code` MUST come first, in this order — the CLI
-    # joins fields with exactly two spaces and left-pads `diff` for
-    # column alignment, but never inserts padding *between* cells, and
-    # `exit_code` is always a bare integer (never contains whitespace)
-    # — so the first two runs of 2+ spaces in a line unambiguously
-    # bound `diff` and `exit_code`, and everything after the second one
-    # is the command, even in the rare case the command itself
-    # contains a run of 2+ spaces later in the line (we only ever
-    # split on the first two such runs).
-    args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,exit_code,command --ansi=off)
-    [[ "$_smarthistory_matchmode" == "prefix" ]] && args+=(--prefix)
-    case "$_smarthistory_mode" in
-        sess)   args+=(--session) ;;
-        dir)    args+=(--directory "$PWD") ;;
-        global) ;;
-    esac
     local raw
-    raw=$(smarthistory search "${args[@]}" 2>/dev/null)
+    if (( $#LBUFFER == 0 )); then
+        # Prediction branch (`dropdown.predict=on`, reached only when
+        # the gate above already confirmed it's enabled and
+        # `_smarthistory_last_cmd` is set): same successor-frequency
+        # data Ctrl-S (`_smarthistory_next_history`) uses, via
+        # `smarthistory next`. That command's output is
+        # `<freq>\t<command>`, not the `<diff>  <exit_code>  <command>`
+        # shape `smarthistory search` produces — `cut -f2` strips the
+        # frequency column down to bare command lines. Those don't
+        # match the 2-space-run pattern the parse loop below expects,
+        # so they fall through its own defensive fallback and render
+        # as plain command text with no age/exit-code marker — which
+        # is correct here: a prediction isn't tied to one specific
+        # past run. Hardcoded to 3 candidates (not `dropdown.limit`):
+        # a "what's next" hint at the very start of a line is meant
+        # to be a quick glance, not a long list to scan.
+        raw=$(smarthistory next "$_smarthistory_last_cmd" --limit 3 2>/dev/null | cut -f2)
+    else
+        local -a args
+        # `--prefix`: match commands that START WITH what's typed, not a
+        # substring anywhere in the command — a plain substring match
+        # made "ls" match `open "http://.../details"` (contains "ls"
+        # inside the URL), which is surprising for a live as-you-type
+        # completion (unlike Up/Down's keypress-triggered walk, which
+        # keeps the broader substring match). Only added when
+        # `_smarthistory_matchmode` is "prefix" (the default) — Ctrl-t
+        # (`_smarthistory_cycle_matchmode`) toggles it to "substring" for
+        # anyone who wants the broader match here too, accepting the
+        # above noise tradeoff.
+        #
+        # `--ansi=off`: the widget always pipes the search call into a
+        # `$()`-style capture, which is never a TTY — so `--ansi=full`
+        # (and `--ansi=bold`) never actually produce styled SGR output
+        # here, they fall back to bracket-wrapped text (`[ls]`) for
+        # pipe-safety. Those literal `[`/`]` characters aren't part of
+        # the history at all; they were the CLI's non-TTY highlight
+        # fallback leaking into what the user sees. `--ansi=off` gives
+        # plain, unmodified command text instead. The matched-prefix
+        # emphasis `--ansi=full` was trying to provide over a real TTY
+        # is recreated properly in `_smarthistory_dropdown_paint` via a
+        # `region_highlight` `bold` span over the first `$#LBUFFER`
+        # characters of each row — the same mechanism already used to
+        # color the box chrome and bold the selected row.
+        #
+        # `--fields diff,exit_code,command`: `diff` (the "last called" age
+        # column, e.g. "5m"/"2h"/"3d") and `exit_code` (drawn as a `✓`/`✗`
+        # marker) are both consumed by `_smarthistory_dropdown_paint`.
+        # `diff` and `exit_code` MUST come first, in this order — the CLI
+        # joins fields with exactly two spaces and left-pads `diff` for
+        # column alignment, but never inserts padding *between* cells, and
+        # `exit_code` is always a bare integer (never contains whitespace)
+        # — so the first two runs of 2+ spaces in a line unambiguously
+        # bound `diff` and `exit_code`, and everything after the second one
+        # is the command, even in the rare case the command itself
+        # contains a run of 2+ spaces later in the line (we only ever
+        # split on the first two such runs).
+        args=("$LBUFFER" --limit "$_smarthistory_dropdown_limit" --fields diff,exit_code,command --ansi=off)
+        [[ "$_smarthistory_matchmode" == "prefix" ]] && args+=(--prefix)
+        case "$_smarthistory_mode" in
+            sess)   args+=(--session) ;;
+            dir)    args+=(--directory "$PWD") ;;
+            global) ;;
+        esac
+        raw=$(smarthistory search "${args[@]}" 2>/dev/null)
+    fi
     local -a _sm_dropdown_lines
     _sm_dropdown_lines=("${(f)raw}")
     # `${(f)raw}` on an empty string yields one empty element, not
@@ -1625,6 +1666,7 @@ _smarthistory_register_hook() {
     local hooks_name="_smarthistory_hooks_${safe}"
     typeset -g $hooks_name
     if [[ "${widgets[$widget]:-}" != "user:${dispatch}" ]]; then
+        local has_orig=1
         case ${widgets[$widget]:-} in
             builtin)
                 eval "${orig}() { zle .${widget} }"
@@ -1633,15 +1675,36 @@ _smarthistory_register_hook() {
             user:*)
                 zle -N $orig ${widgets[$widget]#user:}
                 ;;
+            "")
+                # No existing definition at all — the normal case
+                # for special hook-only widgets (`zle-line-init`,
+                # `zle-line-finish`, `zle-keymap-select`, ...) on a
+                # shell where nothing else has hooked them yet.
+                # There's no underlying behavior to call through to
+                # (unlike `self-insert` etc, `.${widget}` isn't a
+                # real builtin for these), so the dispatcher below
+                # skips the passthrough call entirely and only runs
+                # the registered hooks.
+                has_orig=0
+                ;;
             *) return ;;
         esac
-        eval "${dispatch}() {
-            zle ${orig} -- \"\$@\"
-            local _sm_hook
-            for _sm_hook in \${(s: :)${hooks_name}}; do
-                \$_sm_hook
-            done
-        }"
+        if (( has_orig )); then
+            eval "${dispatch}() {
+                zle ${orig} -- \"\$@\"
+                local _sm_hook
+                for _sm_hook in \${(s: :)${hooks_name}}; do
+                    \$_sm_hook
+                done
+            }"
+        else
+            eval "${dispatch}() {
+                local _sm_hook
+                for _sm_hook in \${(s: :)${hooks_name}}; do
+                    \$_sm_hook
+                done
+            }"
+        fi
         zle -N $widget $dispatch
     fi
     local current="${(P)hooks_name}"
@@ -1654,6 +1717,22 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
     unset _smarthistory_dropdown_w
+    # `dropdown.predict=on` shows predictions on an EMPTY line, but
+    # none of the widgets hooked above ever fire on a fresh prompt —
+    # they're all keystroke-driven (self-insert et al.), so without
+    # this, the prediction only ever appeared after some OTHER
+    # widget happened to call `_smarthistory_dropdown_render`
+    # explicitly (e.g. Ctrl-g/`_smarthistory_cycle_mode`), never on
+    # the very first empty prompt. `zle-line-init` is zsh's special
+    # hook widget that fires once whenever zle starts editing a new
+    # line — i.e. right after each prompt is drawn — which is
+    # exactly the "arrived at a fresh line" moment predictions need.
+    # `precmd` (where `_smarthistory_last_cmd` is updated for the
+    # command that just finished) always runs before `zle-line-init`,
+    # so the prediction is already correct by the time this fires.
+    if [[ "$_smarthistory_dropdown_predict_enabled" = "1" ]]; then
+        _smarthistory_register_hook zle-line-init _smarthistory_dropdown_render
+    fi
     # Pure navigation: move the highlighted row forward/backward
     # (wraparound) and paint — NEVER touch BUFFER. These are what
     # Up/Down (`_smarthistory_up_history` / `_smarthistory_down_history`)
