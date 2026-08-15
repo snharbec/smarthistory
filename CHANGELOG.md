@@ -59,6 +59,66 @@ All notable changes to this project will be documented in this file.
   without retyping the command; a question unrelated to any command still works
   the same as before. `Tab` also submits the question now, same as `Enter`, so
   you don't have to reach for Enter after typing.
+
+### Changed
+
+- `highlight_with_bat`/`highlight_with_bat_auto` (the preview-pane syntax
+  highlighters used by `ag`, `$` tags, CodeGraph, notes, todo, segments,
+  similar, and files modes) are now backed by
+  [`syntect`](https://github.com/trishume/syntect) in-process instead of
+  shelling out to the `bat` binary, matching `tui.highlight`'s engine. No config
+  or behavior change — same `Option<String>` ANSI output — but these preview
+  panes now work without `bat` installed and no longer pay a subprocess call per
+  render.
+
+### Fixed
+
+- Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
+  `directory, timestamp`) that the schema was missing. The main history fetch
+  sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by
+  `session_id`/`directory` equality, none of which the existing
+  `idx_history_dedup` (command, directory, session_id) could serve — every fetch
+  fell back to a full table scan plus an external sort before `LIMIT 1000` could
+  truncate anything. At small history sizes this was unnoticeable; at very large
+  ones (hundreds of thousands to millions of rows) it meant every keystroke
+  re-scanned the whole table. Verified via `EXPLAIN QUERY PLAN`: SESS-scoped
+  fetches now do an index seek
+  (`SEARCH ... USING COVERING INDEX idx_history_session_ts`) instead of a full
+  scan, and the unscoped/global fetch does an ordered index scan
+  (`SCAN ... USING COVERING INDEX idx_history_timestamp`) instead of
+  scan-then-sort. `Mode::Stats`'s `LEAD()` window query still has to visit every
+  row (window functions can't skip rows), but no longer needs a separate
+  temp-B-tree sort pass first.
+- The TUI re-fetched `labeled_rows` (every history row with a comment) from the
+  database on every single keystroke, even though its SQL has no dependency on
+  the typed query at all — query-based filtering happens in-memory afterward, in
+  `build_merged_rows`. The data only actually changes when a comment is
+  added/edited/deleted, and every action that does that already re-fetches it
+  explicitly right after; the extra call inside `refresh()` was pure repeated
+  waste, worse the more commented history entries exist.
+- `smarthistory project report`'s per-command duration query computed its
+  `LEAD()` window over every `mode = 'command'` row in the entire history table,
+  regardless of how narrow the requested `--day`/date range was — the range
+  filter was only applied after the window function ran. Now scoped to
+  `[range_start, range_end + idle_threshold)`: the lower bound is exact (the
+  window only ever looks forward in time, so earlier rows can never affect an
+  in-range row's computed duration), and the upper bound is padded by the idle
+  threshold so a command near the end of the range still sees its real next
+  command if one exists within the idle window — a row whose real successor
+  falls beyond the padding is, by construction, more than the idle threshold
+  away either way, so the capped result comes out identical whether the exact
+  gap is known or conservatively missing.
+- Comment-expansion (`smarthistory expand`, the space-triggered zsh/bash widget)
+  matched case-insensitively (SQLite's `COLLATE NOCASE`), so a short common
+  lowercase word (e.g. `rust`) could unintentionally expand a comment stored
+  with different casing (e.g. `RUST`). Matching is now case-sensitive (SQLite's
+  default `BINARY` collation): `rust` stays a normal command-line word, only the
+  exact-case `RUST` triggers expansion.
+
+## 2.0.0 - 2026-08-14
+
+### Added
+
 - New `smarthistory project files`: prints the files viewed/modified/created
   since the currently-open project session started — scoped to the live session
   rather than a whole calendar day like `project report`. Reads the open
@@ -116,6 +176,11 @@ All notable changes to this project will be documented in this file.
   `project.<slug>.dir`/`jiralabel.<slug>.match`/`weburl.<slug>.match` against
   `type: project` note slugs and warns on either side having no match. See
   [`docs/modes/project.md`](docs/modes/project.md) for the full reference.
+
+## 1.5.0 - 2026-08-09
+
+### Added
+
 - New `Ctrl-z` (`CycleNavPrefix`) action: cycles directly between the three
   navigation prefix modes — `*` (panes), `#` (directories), `~` (zoxide) —
   without going through the full `PickPrefix` picker. Reads the actual
@@ -156,6 +221,11 @@ All notable changes to this project will be documented in this file.
   Each press confirms the new mode with a transient `zle -M` status message
   ("smarthistory match set to substring"/"smarthistory mode set to DIR" for
   `Ctrl-g` too), replacing the earlier RPROMPT-text approach entirely.
+
+## 1.4.0 - 2026-08-09
+
+### Added
+
 - New `globcomplete.enabled` zsh feature (off by default): replaces
   fzf-tab-style completion for files, directories, and processes. Pressing `Tab`
   on a word containing shell-glob syntax (`* ? [`) — e.g. `vi a*<TAB>` or
@@ -192,6 +262,32 @@ All notable changes to this project will be documented in this file.
   `--root <DIR>` CLI flags (the last also usable to override the base directory
   for plain `/` mode's walk; unused by `--pid-complete`, which has no filesystem
   walk to root).
+
+### Fixed
+
+- `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word now
+  actually works in plain interactive use, not just inside the `--glob-complete`
+  picker — `docs/modes/files.md` already documented `/*.toml` and `*<glob>` path
+  segments as supported, but the walker only ever did literal AND-of-substring
+  matching, so a query like `* tui` required a literal `*` character in the
+  filename (never happens) and matched nothing, forever. The first word is now
+  glob-matched (root-scoped, recursive, basename-only) exactly like the picker;
+  every word after it still narrows further by substring, and a query with no
+  glob-looking first word is completely unaffected.
+- Preview-pane markdown renderer: an unclosed italic marker that was actually a
+  literal underscore (e.g. a directory or file name like `alpha_sub`) was
+  silently rewritten to an asterisk on render (`alpha_sub` → `alpha*sub`) — the
+  fallback-to-plain-text path for an unclosed marker reconstructed the marker
+  from a fixed per-_kind_ string (`MarkerKind::Italic` always spelled `"*"`)
+  instead of the actual character that opened it, since `*` and `_` are both
+  valid italic openers but only one was ever remembered. Found via the new
+  glob-completion directory picker's content preview, but affects any preview
+  text containing a bare underscore in any mode.
+
+## 1.3.0 - 2026-08-08
+
+### Added
+
 - New `%` (processes) mode: lists every running OS process (macOS + Linux, all
   users), via the new `sysinfo` dependency. The typed body filters by substring
   against the process's name/cmdline, working directory, and executable path.
@@ -294,104 +390,9 @@ All notable changes to this project will be documented in this file.
   modification time (was always `0`/Unix-epoch), and results sort
   newest-modified file first (was `ag`'s own arbitrary output order). Matches
   within the same file keep their line-number order.
-- `*` panes mode: a pane actually running something (not just an idle shell
-  prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so busy
-  panes stand out immediately in a long list.
-- `create-note` dialog: `Ctrl-A` selects the whole active field (Title or
-  Content). While selected, `Ctrl-C` yanks it to the clipboard instead of
-  cancelling the dialog, and `Backspace` deletes the whole field instead of one
-  character; any other key drops the selection.
-- New `~` prefix mode: zoxide directories. Lists every directory in the local
-  `zoxide` database (`zoxide query -l`, highest frecency score first), filtered
-  by the typed query. Selecting a row creates a new tmux session / herdr
-  workspace rooted there — the same staging `#` Directories mode uses for an
-  unmarked row, including the `T`-marked "jump to an already-active pane there"
-  behavior. Requires the `zoxide` binary on `$PATH`; see `docs/modes/zoxide.md`.
-- New `^` prefix mode: browser bookmarks + history, merged from every configured
-  (or auto-detected) Chrome / Firefox / Safari profile. Each row is tagged
-  `bookmark` / `history` so typing that word narrows the list to one source;
-  `Enter` opens the URL in the system browser. Configure via
-  `browser.<id>.type=chrome|firefox|safari` + `browser.<id>.profile=<path>`; see
-  `docs/modes/browser.md`.
-- `session.<id>` and `host.<id>` entries can now live in their own dedicated
-  `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions` files
-  instead of (or split across, alongside) the main config file. Both are read
-  only by the TUI (`Config::load_tui`), not the plain CLI subcommands (`search`,
-  `add`, `capture-*`, …), since session/host data is exclusively a `*`-mode
-  (panes) concern. The in-TUI "add session" (`F5`) / "add host" (`F6`) dialogs
-  now write new entries to these dedicated files, creating them if they don't
-  exist yet.
-- New `'` meta-prefix mode: type `'` then a partial mode name (e.g. `'jir`) and
-  press Tab to jump straight into that mode by name instead of memorizing its
-  single-character prefix. A unique match activates immediately (query becomes
-  just the target prefix, e.g. `-`); an ambiguous match, or bare `'` + Tab,
-  opens the same picker `F1` (`PickPrefix`) uses, pre-filtered to the matching
-  names. Configurable via `prefix.meta=<char>` (default `'`). Also fixes a
-  pre-existing bug where `apply_prefix` (the `F1` picker's commit path) didn't
-  recognize the paperless (`<`) or browser (`^`) prefixes as strippable when
-  switching modes.
-- `CreateNote` (the Title + Content dialog) now pre-fills from the row that was
-  selected when the action fired: a question row splits into Title (the
-  question) + Content (the LLM's answer); a note row inserts a `[[wiki-link]]`;
-  a JIRA row inserts a markdown link to the issue's browse URL (bare key if JIRA
-  isn't configured); every other row (plain history, or any other mode) wraps
-  the command text in a fenced ` ```bash ` block.
 
 ### Fixed
 
-- Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
-  `directory, timestamp`) that the schema was missing. The main history fetch
-  sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by
-  `session_id`/`directory` equality, none of which the existing
-  `idx_history_dedup` (command, directory, session_id) could serve — every fetch
-  fell back to a full table scan plus an external sort before `LIMIT 1000` could
-  truncate anything. At small history sizes this was unnoticeable; at very large
-  ones (hundreds of thousands to millions of rows) it meant every keystroke
-  re-scanned the whole table. Verified via `EXPLAIN QUERY PLAN`: SESS-scoped
-  fetches now do an index seek
-  (`SEARCH ... USING COVERING INDEX idx_history_session_ts`) instead of a full
-  scan, and the unscoped/global fetch does an ordered index scan
-  (`SCAN ... USING COVERING INDEX idx_history_timestamp`) instead of
-  scan-then-sort. `Mode::Stats`'s `LEAD()` window query still has to visit every
-  row (window functions can't skip rows), but no longer needs a separate
-  temp-B-tree sort pass first.
-- The TUI re-fetched `labeled_rows` (every history row with a comment) from the
-  database on every single keystroke, even though its SQL has no dependency on
-  the typed query at all — query-based filtering happens in-memory afterward, in
-  `build_merged_rows`. The data only actually changes when a comment is
-  added/edited/deleted, and every action that does that already re-fetches it
-  explicitly right after; the extra call inside `refresh()` was pure repeated
-  waste, worse the more commented history entries exist.
-- `smarthistory project report`'s per-command duration query computed its
-  `LEAD()` window over every `mode = 'command'` row in the entire history table,
-  regardless of how narrow the requested `--day`/date range was — the range
-  filter was only applied after the window function ran. Now scoped to
-  `[range_start, range_end + idle_threshold)`: the lower bound is exact (the
-  window only ever looks forward in time, so earlier rows can never affect an
-  in-range row's computed duration), and the upper bound is padded by the idle
-  threshold so a command near the end of the range still sees its real next
-  command if one exists within the idle window — a row whose real successor
-  falls beyond the padding is, by construction, more than the idle threshold
-  away either way, so the capped result comes out identical whether the exact
-  gap is known or conservatively missing.
-- `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word now
-  actually works in plain interactive use, not just inside the `--glob-complete`
-  picker — `docs/modes/files.md` already documented `/*.toml` and `*<glob>` path
-  segments as supported, but the walker only ever did literal AND-of-substring
-  matching, so a query like `* tui` required a literal `*` character in the
-  filename (never happens) and matched nothing, forever. The first word is now
-  glob-matched (root-scoped, recursive, basename-only) exactly like the picker;
-  every word after it still narrows further by substring, and a query with no
-  glob-looking first word is completely unaffected.
-- Preview-pane markdown renderer: an unclosed italic marker that was actually a
-  literal underscore (e.g. a directory or file name like `alpha_sub`) was
-  silently rewritten to an asterisk on render (`alpha_sub` → `alpha*sub`) — the
-  fallback-to-plain-text path for an unclosed marker reconstructed the marker
-  from a fixed per-_kind_ string (`MarkerKind::Italic` always spelled `"*"`)
-  instead of the actual character that opened it, since `*` and `_` are both
-  valid italic openers but only one was ever remembered. Found via the new
-  glob-completion directory picker's content preview, but affects any preview
-  text containing a bare underscore in any mode.
 - Line-editor live dropdown: `Enter` now commits AND runs a highlighted
   candidate in one press, same as before the Tab/Enter key-model rework —
   navigate with `Up`/`Down`, then `Enter` alone accepts it. Previously `Enter`
@@ -432,22 +433,178 @@ All notable changes to this project will be documented in this file.
   directories-first then alphabetical). Matches what `docs/modes/files.md`
   already documented.
 
-### Security
+## 1.2.6 - 2026-08-05
 
-- Harden shell command staging throughout the TUI by consistently using POSIX
-  single-quote escaping (`util::shell_quote`) for user-provided paths, note
-  text, `.command` script arguments, and multiplexer labels/session names.
+### Added
+
+- `*` panes mode: a pane actually running something (not just an idle shell
+  prompt) now gets a dominant `▶ ` marker in bold + the highlight color, so busy
+  panes stand out immediately in a long list.
+- `create-note` dialog: `Ctrl-A` selects the whole active field (Title or
+  Content). While selected, `Ctrl-C` yanks it to the clipboard instead of
+  cancelling the dialog, and `Backspace` deletes the whole field instead of one
+  character; any other key drops the selection.
+
+## 1.2.5 - 2026-08-04
+
+### Added
+
+- New `~` prefix mode: zoxide directories. Lists every directory in the local
+  `zoxide` database (`zoxide query -l`, highest frecency score first), filtered
+  by the typed query. Selecting a row creates a new tmux session / herdr
+  workspace rooted there — the same staging `#` Directories mode uses for an
+  unmarked row, including the `T`-marked "jump to an already-active pane there"
+  behavior. Requires the `zoxide` binary on `$PATH`; see `docs/modes/zoxide.md`.
+- Release CI: added `ubuntu-22.04` (glibc 2.35) as a second Linux build target
+  alongside `ubuntu-latest` (now tracking 24.04/glibc 2.39), so the released
+  binary still runs on older distros whose glibc predates 2.39.
+
+## 1.2.4 - 2026-08-03
+
+### Added
+
+- New `smarthistory create-note <title> <content>` [--edit]: create a note
+  directly from the CLI, no TUI or interactive dialog needed. Builds the same
+  level-3-heading body (title/content, extracted `[[link]]`s and `#tag`s) the
+  interactive dialog stages on `Ctrl-S` and runs `note_search create-note`
+  directly; `--edit` opens `$EDITOR` on the daily note right after saving.
+  `build_note_body()` extracts the heading-building logic so the TUI dialog and
+  this CLI path share one implementation (also fixed a latent bug where tags
+  pulled from the content field lost their leading `#` when merged into the
+  heading).
+- `smarthistory create-note` now launches the same interactive dialog
+  `Action::CreateNote` opens (equivalent to `smarthistory tui --create-note`),
+  pre-filled from `--title`/`--content`, instead of writing the note headlessly.
+  Also adds `Up`/`Down` arrow navigation inside the dialog's Content field (move
+  a line at a time, preserving column) — `Left`/`Right` already worked but
+  `Up`/`Down` were unhandled.
+
+### Fixed
+
+- The create-note dialog's `Esc`/`Ctrl-C` used to close it immediately, silently
+  discarding whatever was typed. Now, if either field has text, a confirmation
+  opens first: `Enter` (default) saves, `d`/`D` drops, the Cancel binding backs
+  out to editing without losing anything, and `Ctrl-C` force-quits the whole TUI
+  immediately (same panic-button semantics as the existing delete
+  confirmations). An empty dialog still closes immediately.
+
+## 1.2.3 - 2026-08-02
+
+### Added
+
+- New `smarthistory pane-exec`: reconnects a freshly opened pane/window (one not
+  opened via smarthistory's own `*` panes picker) by looking up its current
+  session name/workspace label against the matching `session.<id>`/`host.<id>`
+  config entry — no separate registration step needed. A session match re-runs
+  `.exec` directly; a host match re-runs just the `ssh` connection.
+- New `smarthistory init bash`: bash/readline support, deliberately smaller in
+  scope than zsh (history capture,
+  `Ctrl-R`/`Up`/`Down`/comment-expansion/`Ctrl-S`/`Ctrl-G` widgets — no live
+  dropdown box, since that's built entirely on zsh's
+  POSTDISPLAY/region_highlight, which Readline has no equivalent of). The
+  capture pipeline works down to bash 3.2 (macOS's stock default); the
+  line-editor widgets need bash >= 4.0 for `READLINE_LINE`/`READLINE_POINT` via
+  `bind -x`.
+
+## 1.2.2 - 2026-08-02
+
+### Added
+
+- New `segments.minwords` config key (default `5`, `0` disables): drops any note
+  segment (`:` and `"` mode) whose body has this many words or fewer, not
+  counting its own header line — a heading with little or nothing under it is
+  noise most of the time. Applies to both `run_segments_search` (`:` mode) and
+  `run_similar_search` (`"` mode) via a shared `segment_body_word_count` helper.
+- Dropdown shadow text: once a candidate is actually highlighted
+  (`Tab`/`Shift-Tab`/`Up`/`Down` navigated to a specific row, not just the fresh
+  unhighlighted box), its not-yet-typed remainder now previews inline right
+  after the cursor, dimmed — the same visual convention zsh-autosuggestions
+  uses. `Right`/`Ctrl-E`/`Enter` already committed exactly this text; always on
+  whenever `dropdown.enabled=on`, no new config key needed since there's no new
+  subprocess cost.
+
+## 1.2.0 - 2026-08-01
+
+### Added
+
+- New `dropdown.highlight=on|off` config key (default off): syntax-color each
+  dropdown candidate via `bat`. Off by default, mirroring
+  `dropdown.enabled`/`commentexpand.enabled`'s config plumbing.
+- New `commentexpand.enabled=on|off` config key (default off): the
+  space-triggered comment-expansion zsh widget — typing a comment's text (set
+  via `smarthistory add ... --comment ...`) at the start of the line, then a
+  space, replaces it with the most recently used command carrying that comment,
+  the same UX as zsh-abbr/fish abbreviations.
+- Dropdown `Tab`: the first press on a fresh candidate set now extends the
+  command line to the longest prefix common to every current candidate
+  (readline-style "expand to unambiguous completion"), re-queries against that
+  longer prefix, then jumps straight to "chosen" so the next `Tab` cycles
+  normally instead of re-expanding a no-op.
+- New `Ctrl-O` binding in the create-note dialog: saves then opens the note in
+  `$EDITOR` (chains `note_search create-note` with `&& $EDITOR <path>`),
+  alongside the existing `Ctrl-S` (save and exit only).
+- Release CI: pushing a `v*` tag now builds native binaries on macOS (arm64 +
+  x86_64) and Linux (x86_64), runs the test suite, strips and packages each as
+  `smarthistory-<target-triple>.tar.gz` with a `.sha256` checksum, and uploads
+  both as GitHub Release assets.
+
+### Fixed
+
+- Comment-expansion and dropdown widgets could reference each other's nested
+  wrapper functions after re-sourcing `init.zsh`, causing "maximum nested
+  function level reached" on the next keystroke. Replaced with a single
+  dispatcher per widget backed by a dedup'd hook list, which re-sourcing only
+  appends to. Also hooked `magic-space` (not just `self-insert`), since many
+  setups — including stock oh-my-zsh — rebind the space key to it, which
+  previously meant comment-expansion never fired at all.
+- `dropdown.highlight`'s `bat` call was missing `--theme` entirely, falling back
+  to `bat`'s own default theme instead of the light/dark choice the Rust side
+  already makes everywhere else. Now computed from the resolved `tuicolor.bg`
+  value at shell-init time (`smarthistory config get palette`), same ITU-R
+  BT.601 brightness formula the Rust side uses.
+- `smarthistory config get palette` always resolved colors as the Dark scheme
+  regardless of what the user last had active in the TUI. Now reads the
+  persisted `colorscheme=` line from the session file
+  (`TuiSession::persisted_scheme()`), so with `theme.dark`/`theme.light` both
+  configured, toggling the scheme in the TUI and opening a new shell changes the
+  dropdown's colors to match.
+
+## 1.1.0 - 2026-08-01
+
+### Added
+
+- New `^` prefix mode: browser bookmarks + history, merged from every configured
+  (or auto-detected) Chrome / Firefox / Safari profile. Each row is tagged
+  `bookmark` / `history` so typing that word narrows the list to one source;
+  `Enter` opens the URL in the system browser. Configure via
+  `browser.<id>.type=chrome|firefox|safari` + `browser.<id>.profile=<path>`; see
+  `docs/modes/browser.md`.
+- `session.<id>` and `host.<id>` entries can now live in their own dedicated
+  `~/.config/smarthistory/hosts` and `~/.config/smarthistory/sessions` files
+  instead of (or split across, alongside) the main config file. Both are read
+  only by the TUI (`Config::load_tui`), not the plain CLI subcommands (`search`,
+  `add`, `capture-*`, …), since session/host data is exclusively a `*`-mode
+  (panes) concern. The in-TUI "add session" (`F5`) / "add host" (`F6`) dialogs
+  now write new entries to these dedicated files, creating them if they don't
+  exist yet.
+- New `'` meta-prefix mode: type `'` then a partial mode name (e.g. `'jir`) and
+  press Tab to jump straight into that mode by name instead of memorizing its
+  single-character prefix. A unique match activates immediately (query becomes
+  just the target prefix, e.g. `-`); an ambiguous match, or bare `'` + Tab,
+  opens the same picker `F1` (`PickPrefix`) uses, pre-filtered to the matching
+  names. Configurable via `prefix.meta=<char>` (default `'`). Also fixes a
+  pre-existing bug where `apply_prefix` (the `F1` picker's commit path) didn't
+  recognize the paperless (`<`) or browser (`^`) prefixes as strippable when
+  switching modes.
+- `CreateNote` (the Title + Content dialog) now pre-fills from the row that was
+  selected when the action fired: a question row splits into Title (the
+  question) + Content (the LLM's answer); a note row inserts a `[[wiki-link]]`;
+  a JIRA row inserts a markdown link to the issue's browse URL (bare key if JIRA
+  isn't configured); every other row (plain history, or any other mode) wraps
+  the command text in a fenced ` ```bash ` block.
 
 ### Changed
 
-- `highlight_with_bat`/`highlight_with_bat_auto` (the preview-pane syntax
-  highlighters used by `ag`, `$` tags, CodeGraph, notes, todo, segments,
-  similar, and files modes) are now backed by
-  [`syntect`](https://github.com/trishume/syntect) in-process instead of
-  shelling out to the `bat` binary, matching `tui.highlight`'s engine. No config
-  or behavior change — same `Option<String>` ANSI output — but these preview
-  panes now work without `bat` installed and no longer pay a subprocess call per
-  render.
 - Extracted the large `select_for_run_impl` staging method from `src/tui.rs`
   into a new `src/tui/actions.rs` module, shrinking `tui.rs` by ~2,500 lines.
 - Moved `parse_bool` into `src/util.rs` and removed the duplicate copy in
@@ -648,11 +805,13 @@ All notable changes to this project will be documented in this file.
 - Resolved `cargo fmt` drift in `src/ag.rs` and `src/files.rs`.
 - Fixed `clippy::items_after_test_module` warning in `src/ag.rs`.
 
+### Security
+
+- Harden shell command staging throughout the TUI by consistently using POSIX
+  single-quote escaping (`util::shell_quote`) for user-provided paths, note
+  text, `.command` script arguments, and multiplexer labels/session names.
+
 ### Repository hygiene
 
 - Expanded `.gitignore` to cover `.codegraph/`, `.pi-loop.json.lock`, generated
   `TAGS`, and local scratch files.
-
-## 1.1.0
-
-- Initial reviewed release.
