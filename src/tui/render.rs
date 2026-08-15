@@ -4383,9 +4383,10 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// The active color scheme's light/dark classification, read from
-/// the same thread-local `PALETTE` `bat_theme_arg()` (in
-/// `src/highlight.rs`) uses to pick `bat --theme light|dark` — kept
-/// in sync with whatever `bat` will actually be invoked with, so
+/// the same thread-local `PALETTE` this app's theme system already
+/// tracks — used to pick between `syntect`'s bundled
+/// `base16-ocean.light`/`base16-ocean.dark` themes
+/// (`crate::highlight::highlight_bash_commands`) so
 /// `command_highlight_cache`'s key always matches the colors that
 /// were (or will be) rendered.
 fn command_highlight_is_light() -> bool {
@@ -4402,35 +4403,38 @@ fn command_highlight_cached(app: &App, cmd: &str) -> bool {
 
 /// Batch-fill `App::command_highlight_cache` for every entry in
 /// `commands` (assumed already deduplicated and not-yet-cached by
-/// the caller — see `draw_list`'s call site). One `bat` subprocess
-/// call for the whole batch via `highlight_commands_batch`, not one
-/// per command; see that function's and `command_highlight_cache`'s
-/// doc comments for why batching matters here.
-///
-/// On a `bat` failure (unavailable, non-zero exit, line-count
-/// mismatch), caches a PLAIN (unstyled) fallback span for every
-/// command in the batch too — not just skipping the cache — so a
-/// `bat`-less environment converges to "stop trying" after the
-/// first failed attempt for each distinct command, instead of
-/// re-attempting (and re-failing) the same subprocess call on every
-/// subsequent ~100ms redraw tick.
+/// the caller — see `draw_list`'s call site) via
+/// `crate::highlight::highlight_bash_commands`, converting its
+/// `HighlightedSpan`s straight into `ratatui::text::Span`s — no
+/// subprocess, no ANSI text to parse. Always succeeds (that
+/// function has no "external tool missing" failure mode to handle),
+/// so unlike the old `bat`-based version there's no fallback branch
+/// here.
 fn fill_command_highlight_cache(app: &mut App, commands: &[String]) {
     let is_light = command_highlight_is_light();
     let refs: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
-    match crate::highlight::highlight_commands_batch(&refs) {
-        Some(lines) => {
-            for (cmd, line) in commands.iter().zip(lines.iter()) {
-                let spans = parse_ansi_line(line);
-                app.command_highlight_cache
-                    .insert((is_light, cmd.clone()), spans);
-            }
-        }
-        None => {
-            for cmd in commands {
-                app.command_highlight_cache
-                    .insert((is_light, cmd.clone()), vec![Span::raw(cmd.clone())]);
-            }
-        }
+    let highlighted = crate::highlight::highlight_bash_commands(&refs, is_light);
+    for (cmd, tokens) in commands.iter().zip(highlighted) {
+        let spans: Vec<Span<'static>> = tokens
+            .into_iter()
+            .map(|t| {
+                let mut style = Style::default().fg(ratatui::style::Color::Rgb(
+                    t.color.0, t.color.1, t.color.2,
+                ));
+                if t.bold {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if t.italic {
+                    style = style.add_modifier(Modifier::ITALIC);
+                }
+                if t.underline {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                Span::styled(t.text, style)
+            })
+            .collect();
+        app.command_highlight_cache
+            .insert((is_light, cmd.clone()), spans);
     }
 }
 

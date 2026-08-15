@@ -48,6 +48,18 @@ reqwest = { version = "0.12", features = [
   "native-tls",
 ] }
 ureq = { version = "2", features = ["json"] }
+# In-process syntax highlighting for `tui.highlight` (the TUI's
+# command-list coloring) — the same engine `bat` itself is built on,
+# used here directly instead of shelling out to the `bat` binary.
+# `default-features = false` + `default-fancy` explicitly selects the
+# pure-Rust `fancy-regex` backend over syntect's default `onig`
+# (Oniguruma, a C library) — this project cross-compiles release
+# binaries for macOS x86_64/arm64 and Linux x86_64 (see
+# `.github/workflows/release.yml`), and pulling in a C regex engine
+# would add a toolchain requirement to every one of those targets for
+# no benefit `fancy-regex` doesn't already cover for the small,
+# single-line shell-command strings this highlights.
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 
 # Feature flag for the
 # alternative `herdr`

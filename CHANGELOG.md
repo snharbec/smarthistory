@@ -7,11 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - New `tui.highlight=on|off` config key (default off): the TUI's history list
-  syntax-highlights each `command`-mode row via the same `bat`-based mechanism
-  as `dropdown.highlight`, while there's no active search query (the
-  matched-substring search highlight takes over instead the moment you start
-  typing). All visible not-yet-highlighted rows are batched into a single `bat`
-  call and cached per command text, since the TUI redraws roughly every 100ms
+  syntax-highlights each `command`-mode row via
+  [`syntect`](https://github.com/trishume/syntect) — the same engine `bat`
+  itself is built on, compiled directly into `smarthistory` (no external `bat`
+  binary required, unlike `dropdown.highlight`) — while there's no active search
+  query (the matched-substring search highlight takes over instead the moment
+  you start typing). Highlighted results are cached per
+  `(color scheme, command text)`, since the TUI redraws roughly every 100ms
   regardless of input.
 - `Ctrl-S`/`smarthistory next`/`dropdown.predict` (the "next command" predictor)
   now scope by the current search mode (SESS/DIR/GLOBAL) instead of always

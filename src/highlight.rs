@@ -113,36 +113,132 @@ pub fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
-/// Syntax-highlight multiple single-line bash command strings in
-/// ONE `bat` subprocess call, for callers that need to highlight
-/// many distinct strings without paying one subprocess spawn per
-/// string — the TUI's `tui.highlight` feature, which redraws
-/// unconditionally on every ~100ms tick (`terminal.draw()` in the
-/// run loop), unlike the zsh dropdown widget's per-keystroke
-/// `bat` call. Each element of `commands` MUST already be a
-/// single logical line (no embedded `\n`/`\r` — the TUI's
-/// `cmd_display` already replaces those with a visible `↵` marker
-/// before this is called); a multi-line entry here would desync
-/// the by-line splitting this function uses to map `bat`'s output
-/// back to each input.
+/// One highlighted token from [`highlight_bash_commands`]: a run of
+/// text sharing a single color/style, in the order it appears in
+/// the source command. `color` is resolved RGB (from whichever
+/// `syntect` theme was selected — see that function's doc comment),
+/// ready to hand straight to `ratatui::style::Color::Rgb` without
+/// any further theme lookup or ANSI parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighlightedSpan {
+    pub text: String,
+    pub color: (u8, u8, u8),
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+/// The bundled `syntect` syntax/theme data, parsed once and reused
+/// for the lifetime of the process — `SyntaxSet::load_defaults_newlines`
+/// and `ThemeSet::load_defaults` both parse a non-trivial amount of
+/// bundled definition data, so paying that cost on every highlight
+/// call (this runs from the TUI's render path) would defeat the
+/// point of moving off a `bat` subprocess for speed.
+fn syntax_set() -> &'static syntect::parsing::SyntaxSet {
+    static SYNTAX_SET: std::sync::OnceLock<syntect::parsing::SyntaxSet> = std::sync::OnceLock::new();
+    SYNTAX_SET.get_or_init(syntect::parsing::SyntaxSet::load_defaults_newlines)
+}
+
+fn theme_set() -> &'static syntect::highlighting::ThemeSet {
+    static THEME_SET: std::sync::OnceLock<syntect::highlighting::ThemeSet> = std::sync::OnceLock::new();
+    THEME_SET.get_or_init(syntect::highlighting::ThemeSet::load_defaults)
+}
+
+/// Syntax-highlight multiple single-line bash command strings using
+/// `syntect` — the same Rust highlighting engine `bat` itself is
+/// built on — entirely in-process. No subprocess, no external `bat`
+/// binary requirement (unlike the `highlight_with_bat*` functions
+/// above), and no ANSI-text intermediate to parse back out: this
+/// returns already-resolved `HighlightedSpan`s ready to become
+/// `ratatui::text::Span`s directly.
 ///
-/// Returns `None` (the caller falls back to plain, unhighlighted
-/// text for every entry) if `bat` is unavailable, exits non-zero,
-/// emits non-UTF8, or — as a defensive correctness check — returns
-/// a different number of output lines than input commands were
-/// given, which would otherwise silently misattribute one
-/// command's highlighting to a different command.
-pub fn highlight_commands_batch(commands: &[&str]) -> Option<Vec<String>> {
-    if commands.is_empty() {
-        return Some(Vec::new());
-    }
-    let joined = commands.join("\n");
-    let highlighted = highlight_with_bat(&joined, "bash")?;
-    let lines: Vec<String> = highlighted.lines().map(|s| s.to_string()).collect();
-    if lines.len() != commands.len() {
-        return None;
-    }
-    Some(lines)
+/// Each element of `commands` should already be a single logical
+/// line (no embedded `\n`/`\r` — the TUI's `cmd_display` already
+/// replaces those with a visible `↵` marker before this is called);
+/// `syntect`'s line-oriented highlighter is given one call per
+/// command; unlike the old `bat`-subprocess design there's no
+/// external-process cost to batch away, so this is a plain loop, not
+/// a single joined call.
+///
+/// `is_light` selects the `base16-ocean.light`/`base16-ocean.dark`
+/// bundled theme — the same theme FAMILY for both, just the
+/// light/dark variant, so the two read as a matched pair rather than
+/// two visually unrelated palettes. Always succeeds: an unrecognized
+/// command (falls back to `syntect`'s built-in plain-text syntax) or
+/// a highlighter error yields a single unstyled span for that
+/// command rather than a `None`/error the caller has to branch on —
+/// there's no external tool that can be "missing" here, so the
+/// caller doesn't need a fallback path.
+pub fn highlight_bash_commands(commands: &[&str], is_light: bool) -> Vec<Vec<HighlightedSpan>> {
+    let ss = syntax_set();
+    let ts = theme_set();
+    let syntax = ss
+        .find_syntax_by_extension("sh")
+        .or_else(|| ss.find_syntax_by_token("bash"))
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    let theme_name = if is_light {
+        "base16-ocean.light"
+    } else {
+        "base16-ocean.dark"
+    };
+    let theme = ts
+        .themes
+        .get(theme_name)
+        .or_else(|| ts.themes.values().next())
+        .expect("syntect::highlighting::ThemeSet::load_defaults() always bundles at least one theme");
+
+    commands
+        .iter()
+        .map(|cmd| {
+            let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
+            // `load_defaults_newlines`-loaded syntaxes expect each
+            // line to include its trailing newline for correct
+            // internal state tracking; commands here are single
+            // lines with none, so append one and trim it back off
+            // each returned token below.
+            let line_with_newline = format!("{cmd}\n");
+            match highlighter.highlight_line(&line_with_newline, ss) {
+                Ok(ranges) => ranges
+                    .into_iter()
+                    .filter_map(|(style, text)| {
+                        let text = text.trim_end_matches(['\n', '\r']);
+                        if text.is_empty() {
+                            return None;
+                        }
+                        Some(HighlightedSpan {
+                            text: text.to_string(),
+                            color: (
+                                style.foreground.r,
+                                style.foreground.g,
+                                style.foreground.b,
+                            ),
+                            bold: style
+                                .font_style
+                                .contains(syntect::highlighting::FontStyle::BOLD),
+                            italic: style
+                                .font_style
+                                .contains(syntect::highlighting::FontStyle::ITALIC),
+                            underline: style
+                                .font_style
+                                .contains(syntect::highlighting::FontStyle::UNDERLINE),
+                        })
+                    })
+                    .collect(),
+                // `highlight_line` only errors on malformed syntax
+                // definitions, never on the input text itself — not
+                // expected to happen with the bundled default
+                // syntaxes, but fall back to a single plain span
+                // rather than panicking or losing the row.
+                Err(_) => vec![HighlightedSpan {
+                    text: (*cmd).to_string(),
+                    color: (255, 255, 255),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                }],
+            }
+        })
+        .collect()
 }
 
 /// Like [`highlight_with_bat`], but lets `bat` auto-detect the

@@ -12683,17 +12683,66 @@ fn render_row_ignores_syntax_cache_for_non_command_mode_rows() {
     );
 }
 
-/// `highlight_commands_batch(&[])` short-circuits to `Some(vec![])`
-/// without spawning `bat` at all -- the one path of this
-/// bat-dependent function that's safely testable without relying on
-/// `bat` actually being installed in the test environment (matching
-/// this codebase's existing convention of not unit-testing the
-/// live-subprocess paths of `highlight_with_bat` and friends).
+/// `highlight_bash_commands` is pure Rust (`syntect`, not a `bat`
+/// subprocess), so unlike its predecessor these tests can exercise
+/// REAL highlighting behavior instead of only the empty-input
+/// short-circuit -- no external tool availability to worry about in
+/// CI or anywhere else.
 #[test]
-fn highlight_commands_batch_empty_input_short_circuits() {
+fn highlight_bash_commands_empty_input_returns_empty() {
     assert_eq!(
-        crate::highlight::highlight_commands_batch(&[]),
-        Some(Vec::new())
+        crate::highlight::highlight_bash_commands(&[], false),
+        Vec::<Vec<crate::highlight::HighlightedSpan>>::new()
+    );
+}
+
+#[test]
+fn highlight_bash_commands_returns_one_entry_per_input_in_order() {
+    let out = crate::highlight::highlight_bash_commands(&["git status", "ls -la"], false);
+    assert_eq!(out.len(), 2);
+    // Reassembling each entry's token text must reproduce the
+    // original command exactly -- no dropped or reordered text.
+    assert_eq!(
+        out[0].iter().map(|s| s.text.as_str()).collect::<String>(),
+        "git status"
+    );
+    assert_eq!(
+        out[1].iter().map(|s| s.text.as_str()).collect::<String>(),
+        "ls -la"
+    );
+}
+
+/// The actual point of highlighting: a command with a recognizable
+/// bash construct (a `-`-prefixed flag) must come back as MORE than
+/// one token/color -- proving `syntect` is really applying the bash
+/// grammar, not just handing back the whole line as one plain span
+/// (which would indicate the syntax lookup silently fell back to
+/// plain text).
+#[test]
+fn highlight_bash_commands_produces_multiple_tokens_for_a_flagged_command() {
+    let out = crate::highlight::highlight_bash_commands(&["docker run -it --rm ubuntu"], false);
+    assert_eq!(out.len(), 1);
+    assert!(
+        out[0].len() > 1,
+        "expected bash syntax highlighting to split this command into multiple tokens, got: {:?}",
+        out[0]
+    );
+}
+
+/// Light and dark must select genuinely different color palettes
+/// (`base16-ocean.light` vs `base16-ocean.dark`) -- proven by
+/// checking at least one token's resolved RGB differs between the
+/// two calls for the same command.
+#[test]
+fn highlight_bash_commands_light_and_dark_use_different_palettes() {
+    let dark = crate::highlight::highlight_bash_commands(&["git status"], false);
+    let light = crate::highlight::highlight_bash_commands(&["git status"], true);
+    assert_eq!(dark.len(), 1);
+    assert_eq!(light.len(), 1);
+    assert_ne!(
+        dark[0].iter().map(|s| s.color).collect::<Vec<_>>(),
+        light[0].iter().map(|s| s.color).collect::<Vec<_>>(),
+        "light and dark themes must resolve to different colors"
     );
 }
 
