@@ -8902,7 +8902,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Daemon { watch, once } => {
             let cfg = Config::load();
-            if !cfg.daemon_enabled() && watch.is_empty() {
+            if !cfg.daemon_enabled() {
                 eprintln!(
                     "smarthistory daemon: disabled — set `daemon.enabled=on` in the config"
                 );
