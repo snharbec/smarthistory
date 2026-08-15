@@ -5304,7 +5304,71 @@ fn init_db() -> anyhow::Result<Connection> {
     migrate_history_comment_column(&conn)?;
     // If an older database is missing the `mode` column, add it.
     migrate_history_mode_column(&conn)?;
+    // Called AFTER both migrations above, not alongside
+    // `idx_history_dedup` earlier in this function:
+    // `migrate_history_comment_column` recreates the `history`
+    // table from scratch (RENAME to `history_old`, fresh
+    // `CREATE TABLE history`, copy, drop) when it runs, which
+    // drops every index that isn't explicitly recreated inside
+    // that migration (it only recreates `idx_history_dedup`,
+    // since these three didn't exist when it was written).
+    // Creating them here instead — after the table is in its
+    // final shape for this run, migrated or not — guarantees
+    // they exist regardless of which path a given database took;
+    // `IF NOT EXISTS` makes this a no-op on every subsequent
+    // launch.
+    ensure_history_performance_indexes(&conn)?;
     Ok(conn)
+}
+
+/// Three indexes covering the main history fetch (`App::fetch`,
+/// no-prefix/History mode), which sorts
+/// `ORDER BY h.timestamp DESC LIMIT 1000`, with the SESS/DIR scopes
+/// additionally filtering on `session_id`/`directory` equality
+/// (`App::build_where`). None of that is covered by
+/// `idx_history_dedup` (whose leading column is `command`, not
+/// useful for these filters/sort) — at large row counts (e.g. ~1M
+/// rows) every fetch fell back to a full table scan plus an
+/// external sort before the `LIMIT` could truncate anything. These
+/// three indexes turn the common cases into index range scans
+/// instead:
+///   - GLOBAL scope (no session/directory filter): the
+///     `ORDER BY timestamp DESC` alone.
+///   - SESS scope: `session_id = ?` seek, already sorted by
+///     timestamp within that seek.
+///   - DIR scope: same, keyed on `directory`.
+///
+/// `Mode::Stats`'s `LEAD()` window (`crate::tui::stats::fetch`)
+/// still has to visit every row satisfying its own
+/// `ORDER BY timestamp ASC` — window functions can't skip rows —
+/// but `idx_history_timestamp` lets SQLite feed that ordering from
+/// the index instead of materializing a separate temp-B-tree sort
+/// of the whole table first, which is still a real win at large
+/// row counts.
+///
+/// Extracted as its own function (rather than inlined in
+/// `init_db`) so it can be called, and tested, independently of
+/// `init_db`'s file-backed `Connection` — in particular, so a test
+/// can verify these indexes still exist after
+/// `migrate_history_comment_column` has rebuilt the table, without
+/// needing a real on-disk database.
+fn ensure_history_performance_indexes(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_timestamp
+         ON history (timestamp DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_session_ts
+         ON history (session_id, timestamp DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_directory_ts
+         ON history (directory, timestamp DESC)",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Longest-`dir`-prefix match: which configured project's directory

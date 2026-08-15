@@ -126,6 +126,78 @@
         .expect("upsert must succeed against the rebuilt table");
     }
 
+    fn index_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap()
+    }
+
+    #[test]
+    fn ensure_history_performance_indexes_creates_all_three() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY,
+                command TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                exit_code INTEGER,
+                timestamp INTEGER,
+                mode TEXT NOT NULL DEFAULT 'command'
+            )",
+            [],
+        )
+        .unwrap();
+
+        ensure_history_performance_indexes(&conn).unwrap();
+
+        assert!(index_exists(&conn, "idx_history_timestamp"));
+        assert!(index_exists(&conn, "idx_history_session_ts"));
+        assert!(index_exists(&conn, "idx_history_directory_ts"));
+    }
+
+    /// The actual regression this guards against: at the time these
+    /// indexes were added, `migrate_history_comment_column`
+    /// rebuilds `history` from scratch (see
+    /// `migrate_history_comment_column_recreates_dedup_index` above)
+    /// and only knows to recreate `idx_history_dedup`. Calling
+    /// `ensure_history_performance_indexes` AFTER that migration —
+    /// exactly the order `init_db` uses — must still leave all
+    /// three indexes in place on the rebuilt table.
+    #[test]
+    fn history_performance_indexes_survive_comment_column_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY,
+                command TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                exit_code INTEGER,
+                timestamp INTEGER,
+                comment TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE command_comments (command TEXT PRIMARY KEY, comment TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+
+        migrate_history_comment_column(&conn).unwrap();
+        ensure_history_performance_indexes(&conn).unwrap();
+
+        assert!(index_exists(&conn, "idx_history_timestamp"));
+        assert!(index_exists(&conn, "idx_history_session_ts"));
+        assert!(index_exists(&conn, "idx_history_directory_ts"));
+    }
+
     /// Build the minimal schema `build_search_where_clause`'s SQL
     /// needs: `history` plus the `command_comments` table it LEFT
     /// JOINs (the comment column it optionally matches against).
