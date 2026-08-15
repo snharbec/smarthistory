@@ -319,6 +319,25 @@ All notable changes to this project will be documented in this file.
   scan-then-sort. `Mode::Stats`'s `LEAD()` window query still has to visit every
   row (window functions can't skip rows), but no longer needs a separate
   temp-B-tree sort pass first.
+- The TUI re-fetched `labeled_rows` (every history row with a comment) from the
+  database on every single keystroke, even though its SQL has no dependency on
+  the typed query at all — query-based filtering happens in-memory afterward, in
+  `build_merged_rows`. The data only actually changes when a comment is
+  added/edited/deleted, and every action that does that already re-fetches it
+  explicitly right after; the extra call inside `refresh()` was pure repeated
+  waste, worse the more commented history entries exist.
+- `smarthistory project report`'s per-command duration query computed its
+  `LEAD()` window over every `mode = 'command'` row in the entire history table,
+  regardless of how narrow the requested `--day`/date range was — the range
+  filter was only applied after the window function ran. Now scoped to
+  `[range_start, range_end + idle_threshold)`: the lower bound is exact (the
+  window only ever looks forward in time, so earlier rows can never affect an
+  in-range row's computed duration), and the upper bound is padded by the idle
+  threshold so a command near the end of the range still sees its real next
+  command if one exists within the idle window — a row whose real successor
+  falls beyond the padding is, by construction, more than the idle threshold
+  away either way, so the capped result comes out identical whether the exact
+  gap is known or conservatively missing.
 - `/` (files) mode: glob syntax (`* ? [`) in the typed filter's first word now
   actually works in plain interactive use, not just inside the `--glob-complete`
   picker — `docs/modes/files.md` already documented `/*.toml` and `*<glob>` path

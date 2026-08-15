@@ -2165,6 +2165,63 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(rows[0].project_slug, None, "3000 falls after the session's end_ts=2000");
     }
 
+    /// `report_command_rows`'s `pairs` CTE restricts its input to
+    /// `[range_start, range_end + idle_threshold_secs)` rather than
+    /// scanning the whole `history` table -- this is the
+    /// correctness case that padding exists for: a command right
+    /// before `range_end` whose REAL successor lands just past
+    /// `range_end` but still within the idle window must see that
+    /// real gap, not a value inflated by the successor having been
+    /// excluded from the window.
+    #[test]
+    fn report_command_rows_sees_real_successor_just_past_range_end() {
+        let conn = report_test_conn();
+        // Command at 2450, 50s before range_end=2500. Its real
+        // successor is at 2550 -- 50s past range_end, well inside
+        // the padded window (range_end + idle_threshold = 2500 +
+        // 300 = 2800) but past range_end itself, so it would NOT
+        // be selected by a naive `timestamp < range_end` filter on
+        // the CTE.
+        insert_history(&conn, "boundary", "/repo", "paneA", 2450);
+        insert_history(&conn, "successor", "/repo", "paneA", 2550);
+
+        let rows = report_command_rows(&conn, 2000, 2500, 300).expect("query");
+        assert_eq!(rows.len(), 1, "only the in-range row is returned");
+        assert_eq!(rows[0].command, "boundary");
+        assert_eq!(
+            rows[0].active_secs, 100,
+            "must see the real 100s gap to its successor at 2550, not a value \
+             inflated by the successor falling outside [range_start, range_end)"
+        );
+    }
+
+    /// The other half of the same padding logic: when the real
+    /// successor falls entirely OUTSIDE the padded window (further
+    /// than `idle_threshold_secs` past `range_end`), the row must
+    /// still be capped at `idle_threshold_secs` -- the padding is
+    /// exactly as wide as correctness requires, not wider, so a
+    /// row whose successor is genuinely far away still gets the
+    /// same capped result whether the CTE knows the exact gap or
+    /// not.
+    #[test]
+    fn report_command_rows_caps_when_real_successor_is_far_beyond_padded_window() {
+        let conn = report_test_conn();
+        // Successor at 3000 is 550s after the boundary row (2450),
+        // and 500s past range_end=2500 -- well outside the padded
+        // window (2500 + 300 = 2800).
+        insert_history(&conn, "boundary", "/repo", "paneA", 2450);
+        insert_history(&conn, "far_successor", "/repo", "paneA", 3000);
+
+        let rows = report_command_rows(&conn, 2000, 2500, 300).expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].command, "boundary");
+        assert_eq!(
+            rows[0].active_secs, 300,
+            "gap capped at the idle threshold, same result whether or not the \
+             CTE could see the far-away real successor"
+        );
+    }
+
     #[test]
     fn project_sessions_in_range_clamps_still_open_session_to_now() {
         let conn = report_test_conn();

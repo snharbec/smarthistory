@@ -7291,6 +7291,144 @@ fn labeled_only_row_appears_at_end_of_merged_list() {
     assert_eq!(cmds, vec!["git status", "git pull"]);
 }
 
+/// `refresh()` must NOT re-query `labeled_rows` on a plain
+/// keystroke — its SQL has no dependency on `self.query` (the
+/// query-based filtering happens in-memory inside
+/// `build_merged_rows`), so re-fetching on every keystroke was pure
+/// waste. This proves the caching contract by mutating
+/// `command_comments` directly (bypassing the app, simulating "the
+/// DB changed without going through an app action that would call
+/// `refresh_labeled()`"), then typing a query character and calling
+/// `refresh()`: the stale (pre-mutation) labeled row must still be
+/// what's shown, because `refresh()` alone doesn't re-fetch it.
+/// Calling the explicit `refresh_labeled()` afterward (the same
+/// call every comment-mutating action site already makes) is what
+/// picks up the change.
+#[test]
+fn refresh_does_not_requery_labeled_rows_on_keystroke() {
+    let _env_guard = lock_or_recover(&ENV_LOCK);
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().expect("open in-memory db");
+    conn.execute_batch(
+        "CREATE TABLE history (
+                            id INTEGER PRIMARY KEY,
+                            command TEXT NOT NULL,
+                            directory TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            exit_code INTEGER,
+                            timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                            mode TEXT NOT NULL DEFAULT 'command'
+                        );
+                        CREATE TABLE command_comments (
+                            command TEXT PRIMARY KEY,
+                            comment TEXT NOT NULL
+                        );
+                        CREATE TABLE history_output (
+                            history_id INTEGER PRIMARY KEY,
+                            output TEXT NOT NULL,
+                            captured_at INTEGER DEFAULT (strftime('%s', 'now')),
+                            FOREIGN KEY (history_id) REFERENCES history(id) ON DELETE CASCADE
+                        );",
+    )
+    .expect("create tables");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    conn.execute(
+        "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) VALUES (1, 'git pull', '/tmp', 'current', 0, ?1)",
+        rusqlite::params![now],
+    )
+    .expect("insert row");
+    conn.execute(
+        "INSERT INTO command_comments (command, comment) VALUES ('git pull', 'original comment')",
+        [],
+    )
+    .expect("insert comment");
+
+    let prev_session = std::env::var("SMART_HISTORY_SESSION").ok();
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "current");
+    }
+    let mut app = App::new(
+        conn,
+        Mode::Sess,
+        String::new(),
+        false,
+        ExitFilter::All,
+        SortOrder::default(),
+        false,
+        SelectedTheme::None,
+        crate::tui::theme::ColorScheme::Dark,
+        KeyBindings::defaults(),
+        None,
+        None,
+        None, // paperless_config
+        crate::QueryPrefixes::default(),
+        None,
+        None,
+        String::from("+$LINE"),
+        std::collections::HashMap::new(),
+        Vec::new(),
+        std::collections::HashMap::new(),
+        test_multiplexer(),
+        crate::tui::state::PaneVisibility::default(),
+        crate::tui::state::PaneHeight::default(),
+        Vec::new(),
+        Vec::new(),
+    );
+    unsafe {
+        match prev_session.clone() {
+            Some(prev) => std::env::set_var("SMART_HISTORY_SESSION", prev),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    assert_eq!(
+        app.labeled_rows[0].comment, "original comment",
+        "initial App::new load must see the comment"
+    );
+
+    // Mutate `command_comments` directly, bypassing any app
+    // action (so no `refresh_labeled()` gets called for this
+    // change) -- simulates a comment edit whose UI-level
+    // `refresh_labeled()` call we're specifically testing is NOT
+    // what makes plain keystrokes pick up changes.
+    app.conn
+        .execute(
+            "UPDATE command_comments SET comment = 'changed comment' WHERE command = 'git pull'",
+            [],
+        )
+        .expect("update comment directly");
+
+    // A plain keystroke: change the query text and call
+    // `refresh()`, exactly what the run loop does on every
+    // keypress.
+    unsafe {
+        std::env::set_var("SMART_HISTORY_SESSION", "current");
+    }
+    app.query = "git".to_string();
+    app.refresh();
+    unsafe {
+        match prev_session {
+            Some(prev) => std::env::set_var("SMART_HISTORY_SESSION", prev),
+            None => std::env::remove_var("SMART_HISTORY_SESSION"),
+        }
+    }
+    assert_eq!(
+        app.labeled_rows[0].comment, "original comment",
+        "a plain keystroke's refresh() must NOT re-fetch labeled_rows"
+    );
+
+    // The explicit invalidation call (what every comment-mutating
+    // action site already calls right after `refresh()`) DOES
+    // pick up the change.
+    app.refresh_labeled();
+    assert_eq!(
+        app.labeled_rows[0].comment, "changed comment",
+        "explicit refresh_labeled() must see the updated comment"
+    );
+}
+
 /// When a labeled row's command IS
 /// already in the primary list (i.e. it
 /// matches the active filter on its own),
