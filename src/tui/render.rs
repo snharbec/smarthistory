@@ -4161,6 +4161,45 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let (first_visible, last_visible) =
         list_visible_window(rendered_idx, anchor_offset, visible_height, total_conceptual);
 
+    // `tui.highlight`: batch-fill `command_highlight_cache` for any
+    // not-yet-cached command text in the visible window, BEFORE
+    // building `ListItem`s below — one `bat` subprocess call for
+    // potentially many rows, not one call per row (see
+    // `App::command_highlight_cache`'s doc comment for why that
+    // matters: this file redraws unconditionally on every ~100ms
+    // tick). Only `mode = "command"` rows are real bash text worth
+    // highlighting.
+    //
+    // `merged`'s borrow must end before `fill_command_highlight_cache`
+    // (which needs `&mut app`) runs — scoped in its own block so its
+    // last use is the `missing` collection below, then `merged` is
+    // re-borrowed fresh afterward for `age_width`/`items`.
+    if app.tui_highlight_enabled {
+        let missing: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            (first_visible..last_visible)
+                .filter(|&i| i >= pad)
+                .filter_map(|i| {
+                    let data_idx = if is_panes {
+                        i - pad
+                    } else {
+                        real_count.saturating_sub(1) - (i - pad)
+                    };
+                    merged.get(data_idx)
+                })
+                .filter(|r| r.mode == "command")
+                .map(|r| r.command.replace('\n', "↵").replace('\r', ""))
+                .filter(|cmd| {
+                    !command_highlight_cached(app, cmd) && seen.insert(cmd.clone())
+                })
+                .collect()
+        };
+        if !missing.is_empty() {
+            fill_command_highlight_cache(app, &missing);
+        }
+    }
+    let merged = app.merged_rows();
+
     // `age_width` only needs to line up within what's actually on
     // screen, so derive it from the visible window instead of
     // scanning every row.
@@ -4340,6 +4379,58 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.list_state = ListState::default().with_offset(0);
         app.list_state.select(data_idx);
+    }
+}
+
+/// The active color scheme's light/dark classification, read from
+/// the same thread-local `PALETTE` `bat_theme_arg()` (in
+/// `src/highlight.rs`) uses to pick `bat --theme light|dark` — kept
+/// in sync with whatever `bat` will actually be invoked with, so
+/// `command_highlight_cache`'s key always matches the colors that
+/// were (or will be) rendered.
+fn command_highlight_is_light() -> bool {
+    crate::tui::theme::palette_storage::PALETTE.with(|p| p.borrow().is_light_theme)
+}
+
+/// Whether `cmd` (an already `cmd_display`-transformed, single-line
+/// command string) has a cached `tui.highlight` entry for the
+/// CURRENT color scheme.
+fn command_highlight_cached(app: &App, cmd: &str) -> bool {
+    app.command_highlight_cache
+        .contains_key(&(command_highlight_is_light(), cmd.to_string()))
+}
+
+/// Batch-fill `App::command_highlight_cache` for every entry in
+/// `commands` (assumed already deduplicated and not-yet-cached by
+/// the caller — see `draw_list`'s call site). One `bat` subprocess
+/// call for the whole batch via `highlight_commands_batch`, not one
+/// per command; see that function's and `command_highlight_cache`'s
+/// doc comments for why batching matters here.
+///
+/// On a `bat` failure (unavailable, non-zero exit, line-count
+/// mismatch), caches a PLAIN (unstyled) fallback span for every
+/// command in the batch too — not just skipping the cache — so a
+/// `bat`-less environment converges to "stop trying" after the
+/// first failed attempt for each distinct command, instead of
+/// re-attempting (and re-failing) the same subprocess call on every
+/// subsequent ~100ms redraw tick.
+fn fill_command_highlight_cache(app: &mut App, commands: &[String]) {
+    let is_light = command_highlight_is_light();
+    let refs: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
+    match crate::highlight::highlight_commands_batch(&refs) {
+        Some(lines) => {
+            for (cmd, line) in commands.iter().zip(lines.iter()) {
+                let spans = parse_ansi_line(line);
+                app.command_highlight_cache
+                    .insert((is_light, cmd.clone()), spans);
+            }
+        }
+        None => {
+            for cmd in commands {
+                app.command_highlight_cache
+                    .insert((is_light, cmd.clone()), vec![Span::raw(cmd.clone())]);
+            }
+        }
     }
 }
 
@@ -4898,7 +4989,30 @@ pub(crate) fn render_row<'a>(
         }
         spans.extend(text_spans);
     } else {
-        let mut text_spans = highlight_matches(&cmd_display, &app.query);
+        // `tui.highlight`: use the cached bat-syntax-highlighted
+        // spans instead of the plain/matched-substring rendering,
+        // but ONLY for real command rows and ONLY while there's no
+        // active search query to emphasize — the moment the user
+        // types a search, `highlight_matches`'s bold/colored
+        // matched-substring is the more useful signal (which of
+        // these rows actually matched, and where), so search takes
+        // priority over syntax color rather than trying to compose
+        // both onto the same text. `command_highlight_cache` is
+        // guaranteed already filled for every row in the visible
+        // window by `draw_list`'s batch pre-pass (see its call
+        // site), so this is a cache lookup only — never a `bat`
+        // spawn from inside the per-row render path.
+        let mut text_spans = if app.tui_highlight_enabled
+            && row.mode == "command"
+            && app.query.trim().is_empty()
+            && let Some(cached) = app
+                .command_highlight_cache
+                .get(&(command_highlight_is_light(), cmd_display.clone()))
+        {
+            cached.clone()
+        } else {
+            highlight_matches(&cmd_display, &app.query)
+        };
         if row.mode == "pane" {
             for s in &mut text_spans {
                 s.style = s.style.add_modifier(Modifier::BOLD);

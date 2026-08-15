@@ -1495,6 +1495,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(
         f,
+        "  tui.highlight = {}",
+        if cfg.tui_highlight { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        f,
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
@@ -1952,6 +1957,19 @@ pub struct Config {
     /// a quick glance, not a long list to scan. Set via
     /// `dropdown.predict=on|off`.
     dropdown_predict: bool,
+    /// Whether the TUI's history list syntax-highlights each
+    /// command's text (via the same `bat`-based mechanism as
+    /// `dropdown.highlight`) instead of plain text. Default
+    /// `false`, opt-in for the same reason as `dropdown.highlight`
+    /// — it costs a `bat` subprocess call. Applies only to plain
+    /// `mode = "command"` rows (a real executed shell command, not
+    /// a directory/pane/file/note/… row, which aren't bash text)
+    /// and only while there's no active search query to emphasize
+    /// — the moment the user starts typing a search, the existing
+    /// matched-substring highlight takes over instead, since that's
+    /// the more useful signal while actively searching. Set via
+    /// `tui.highlight=on|off`.
+    tui_highlight: bool,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -2351,6 +2369,7 @@ impl Config {
             dropdown_highlight: false,
             dropdown_matchmode: "prefix".to_string(),
             dropdown_predict: false,
+            tui_highlight: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -2629,6 +2648,9 @@ impl Config {
                 },
                 "dropdown.predict" => {
                     self.dropdown_predict = crate::util::parse_bool(value, false);
+                }
+                "tui.highlight" => {
+                    self.tui_highlight = crate::util::parse_bool(value, false);
                 }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
@@ -3812,6 +3834,13 @@ impl Config {
     /// `segments_min_words` field doc comment. Default `5`.
     pub fn segments_min_words(&self) -> usize {
         self.segments_min_words
+    }
+
+    /// Whether the TUI's history list syntax-highlights command
+    /// rows — see `tui.highlight` / the `tui_highlight` field doc
+    /// comment. Default `false`.
+    pub fn tui_highlight(&self) -> bool {
+        self.tui_highlight
     }
 
     /// The user-defined JQL fragments loaded from
@@ -8035,6 +8064,9 @@ fn main() -> anyhow::Result<()> {
                     "dropdown.matchmode" => println!("{}", cfg.dropdown_matchmode),
                     "dropdown.predict" => {
                         println!("{}", if cfg.dropdown_predict { "on" } else { "off" })
+                    }
+                    "tui.highlight" => {
+                        println!("{}", if cfg.tui_highlight { "on" } else { "off" })
                     }
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })

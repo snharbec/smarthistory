@@ -12514,6 +12514,189 @@ fn tmux_column_only_shown_in_directory_flavored_modes() {
     );
 }
 
+// --- tui.highlight (command syntax-highlight cache) ---------------------
+
+use ratatui::style::Modifier as SyntaxHighlightModifier;
+use ratatui::style::Style as SyntaxHighlightStyle;
+use ratatui::text::Span as SyntaxHighlightSpan;
+
+fn command_test_row(command: &str) -> HistoryRow {
+    HistoryRow {
+        id: 1,
+        command: command.to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "command".to_string(),
+        source: String::new(),
+        ..Default::default()
+    }
+}
+
+/// The exact cache key `render_row`/`draw_list` use: `(is_light,
+/// cmd_display)`. Tests read the same thread-local `PALETTE` state
+/// `command_highlight_is_light()` (private to `render.rs`) does,
+/// rather than duplicating that helper's visibility just for tests.
+fn command_highlight_cache_key_for_test(cmd: &str) -> (bool, String) {
+    let is_light =
+        crate::tui::theme::palette_storage::PALETTE.with(|p| p.borrow().is_light_theme);
+    (is_light, cmd.to_string())
+}
+
+/// The core `tui.highlight` behavior: with the feature enabled, no
+/// active search query, and a `mode = "command"` row whose text is
+/// already cached, `render_row` must use the CACHED spans rather
+/// than the plain/matched-substring `highlight_matches` path. Proven
+/// by injecting a cache entry with a distinctive, unmistakable style
+/// (`Modifier::UNDERLINED`, which nothing else in this code path
+/// ever sets) and asserting it survives into the rendered line.
+#[test]
+fn render_row_uses_syntax_highlight_cache_when_enabled_and_no_query() {
+    let mut app = directories_test_app(&[]);
+    app.query = String::new();
+    app.tui_highlight_enabled = true;
+    let row = command_test_row("git status");
+    app.command_highlight_cache.insert(
+        command_highlight_cache_key_for_test("git status"),
+        vec![SyntaxHighlightSpan::styled(
+            "git status".to_string(),
+            SyntaxHighlightStyle::default().add_modifier(SyntaxHighlightModifier::UNDERLINED),
+        )],
+    );
+
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let has_cached_marker = line
+        .spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(SyntaxHighlightModifier::UNDERLINED));
+    assert!(
+        has_cached_marker,
+        "expected the cached (underlined) syntax-highlight span to appear, got: {:?}",
+        line.spans
+    );
+}
+
+/// The moment there's an active search query, `render_row` must
+/// fall back to `highlight_matches` even though the row is
+/// `mode = "command"`, `tui.highlight` is enabled, and a cache entry
+/// exists for it — the matched-substring highlight is the more
+/// useful signal while actively searching, so it takes priority
+/// over syntax color rather than the two being composed together.
+#[test]
+fn render_row_prefers_match_highlight_over_syntax_cache_when_query_nonempty() {
+    let mut app = directories_test_app(&[]);
+    app.query = "status".to_string();
+    app.tui_highlight_enabled = true;
+    let row = command_test_row("git status");
+    app.command_highlight_cache.insert(
+        command_highlight_cache_key_for_test("git status"),
+        vec![SyntaxHighlightSpan::styled(
+            "git status".to_string(),
+            SyntaxHighlightStyle::default().add_modifier(SyntaxHighlightModifier::UNDERLINED),
+        )],
+    );
+
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let has_cached_marker = line
+        .spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(SyntaxHighlightModifier::UNDERLINED));
+    assert!(
+        !has_cached_marker,
+        "an active search query must bypass the syntax-highlight cache entirely, got: {:?}",
+        line.spans
+    );
+}
+
+/// With `tui.highlight` disabled, the cache is never consulted even
+/// if it happens to hold an entry for this row's text and the query
+/// is empty.
+#[test]
+fn render_row_ignores_syntax_cache_when_feature_disabled() {
+    let mut app = directories_test_app(&[]);
+    app.query = String::new();
+    app.tui_highlight_enabled = false;
+    let row = command_test_row("git status");
+    app.command_highlight_cache.insert(
+        command_highlight_cache_key_for_test("git status"),
+        vec![SyntaxHighlightSpan::styled(
+            "git status".to_string(),
+            SyntaxHighlightStyle::default().add_modifier(SyntaxHighlightModifier::UNDERLINED),
+        )],
+    );
+
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let has_cached_marker = line
+        .spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(SyntaxHighlightModifier::UNDERLINED));
+    assert!(
+        !has_cached_marker,
+        "tui.highlight=off must never read the cache, got: {:?}",
+        line.spans
+    );
+}
+
+/// A non-`"command"` row (e.g. a `#`-mode directory row) must never
+/// use the syntax-highlight cache, even if an entry happens to exist
+/// under the exact same text — bash syntax highlighting only makes
+/// sense for a real executed command, not a directory path or any
+/// other mode's primary text.
+#[test]
+fn render_row_ignores_syntax_cache_for_non_command_mode_rows() {
+    let mut app = directories_test_app(&[]);
+    app.query = "#dir".to_string();
+    app.tui_highlight_enabled = true;
+    let row = HistoryRow {
+        id: 1,
+        command: "/tmp".to_string(),
+        directory: "/tmp".to_string(),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: "directory".to_string(),
+        source: String::new(),
+        ..Default::default()
+    };
+    app.command_highlight_cache.insert(
+        command_highlight_cache_key_for_test("/tmp"),
+        vec![SyntaxHighlightSpan::styled(
+            "/tmp".to_string(),
+            SyntaxHighlightStyle::default().add_modifier(SyntaxHighlightModifier::UNDERLINED),
+        )],
+    );
+
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let has_cached_marker = line
+        .spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(SyntaxHighlightModifier::UNDERLINED));
+    assert!(
+        !has_cached_marker,
+        "a directory-mode row must never consult the command syntax-highlight cache, got: {:?}",
+        line.spans
+    );
+}
+
+/// `highlight_commands_batch(&[])` short-circuits to `Some(vec![])`
+/// without spawning `bat` at all -- the one path of this
+/// bat-dependent function that's safely testable without relying on
+/// `bat` actually being installed in the test environment (matching
+/// this codebase's existing convention of not unit-testing the
+/// live-subprocess paths of `highlight_with_bat` and friends).
+#[test]
+fn highlight_commands_batch_empty_input_short_circuits() {
+    assert_eq!(
+        crate::highlight::highlight_commands_batch(&[]),
+        Some(Vec::new())
+    );
+}
+
 /// The exit-status column (`✓`/`✗`/`~`) only appears in modes whose
 /// rows can carry a genuinely varying `exit_code`: `History`,
 /// `Output`, `Llm`, `Question` (all backed by the shared history
