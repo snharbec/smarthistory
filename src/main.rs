@@ -1475,6 +1475,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     let _ = writeln!(f, "  dropdown.matchmode = {}", cfg.dropdown_matchmode);
     let _ = writeln!(
         f,
+        "  dropdown.predict = {}",
+        if cfg.dropdown_predict { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        f,
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
@@ -1921,6 +1926,17 @@ pub struct Config {
     /// starts on. Default `prefix`, matching the historical hardcoded
     /// behavior. Set via `dropdown.matchmode=prefix|substring`.
     dropdown_matchmode: String,
+    /// Whether the dropdown widget shows predicted next commands
+    /// when the command line is empty, instead of showing nothing.
+    /// Default `false`, opt-in like `dropdown.enabled` above.
+    /// Predictions come from the same successor-frequency data
+    /// `Ctrl-S`/`Commands::Next` already uses (the commands that
+    /// most often followed the last command actually run), capped
+    /// at 3 candidates regardless of `dropdown.limit` — a
+    /// "what's next" hint at the very start of a line is meant to be
+    /// a quick glance, not a long list to scan. Set via
+    /// `dropdown.predict=on|off`.
+    dropdown_predict: bool,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -2319,6 +2335,7 @@ impl Config {
             segments_min_words: 5,
             dropdown_highlight: false,
             dropdown_matchmode: "prefix".to_string(),
+            dropdown_predict: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -2595,6 +2612,9 @@ impl Config {
                         value
                     ),
                 },
+                "dropdown.predict" => {
+                    self.dropdown_predict = crate::util::parse_bool(value, false);
+                }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
                     if matches!(
@@ -7925,6 +7945,9 @@ fn main() -> anyhow::Result<()> {
                         println!("{}", if cfg.dropdown_highlight { "on" } else { "off" })
                     }
                     "dropdown.matchmode" => println!("{}", cfg.dropdown_matchmode),
+                    "dropdown.predict" => {
+                        println!("{}", if cfg.dropdown_predict { "on" } else { "off" })
+                    }
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })
                     }
