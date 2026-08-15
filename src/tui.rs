@@ -5292,7 +5292,19 @@ impl App {
                 }
             });
         }
-        self.refresh_labeled();
+        // NOT calling `self.refresh_labeled()` here (unlike the
+        // rest of this function, which re-fetches on every real
+        // keystroke): `labeled_rows` holds every commented row,
+        // completely independent of `self.query` — the query-
+        // dependent filtering happens in-memory inside
+        // `build_merged_rows` below, not in the SQL. Its DB
+        // contents only change when `command_comments` is
+        // mutated (comment edit, or a delete action), and every
+        // call site that does that already calls
+        // `refresh_labeled()` explicitly right after `refresh()`
+        // (see e.g. `save_comment_edit`, `delete_selected`).
+        // Re-running the identical "every commented row" query on
+        // every keystroke here was pure repeated waste.
         // Rebuild the merged list once per refresh so subsequent
         // `selected_row()` lookups are O(1). The previous design
         // re-allocated this on every action dispatch (and three

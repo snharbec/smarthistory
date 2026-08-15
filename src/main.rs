@@ -5806,6 +5806,35 @@ fn report_command_rows(
     range_end: i64,
     idle_threshold_secs: i64,
 ) -> anyhow::Result<Vec<ReportCommandRow>> {
+    // The `pairs` CTE is restricted to `[range_start, range_end +
+    // idle_threshold_secs)` rather than scanning the entire
+    // `history` table (as an earlier version did) — at large row
+    // counts, computing `LEAD()` over every command-mode row ever
+    // recorded, on every report call regardless of how narrow the
+    // requested day range is, was a real cost that only grows with
+    // history size.
+    //
+    // The lower bound (`range_start`) is safe to apply unmodified:
+    // `LEAD()` only ever looks FORWARD in time, so no output row
+    // (all of which have `timestamp >= range_start`) can need a
+    // row before `range_start` to compute its `next_ts`.
+    //
+    // The upper bound is padded by `idle_threshold_secs`, not cut
+    // off exactly at `range_end`, so the LAST in-range command in
+    // each session still sees its real next command if one exists
+    // within the idle window. Without the padding, that boundary
+    // row's `next_ts` would spuriously come out `NULL` inside the
+    // CTE (because its real successor got excluded by the WHERE),
+    // falling through to `COALESCE(..., session_end, now())` and
+    // silently overestimating (or, worse, capping to a value that
+    // doesn't reflect an activity gap that was actually well under
+    // the idle threshold). Any row whose *real* next command falls
+    // outside this padded window is, by construction, further than
+    // `idle_threshold_secs` away — the `MIN(..., ?1)` cap in the
+    // outer SELECT produces the same `idle_threshold_secs` result
+    // whether `next_ts` is exactly known or conservatively missing,
+    // so the padding is exactly as much as correctness requires,
+    // no more.
     let sql = "
         WITH pairs AS (
             SELECT h.command, h.directory, h.timestamp,
@@ -5818,6 +5847,8 @@ fn report_command_rows(
               ON h.timestamp >= ps.start_ts
              AND (ps.end_ts IS NULL OR h.timestamp < ps.end_ts)
             WHERE h.mode = 'command'
+              AND h.timestamp >= ?2
+              AND h.timestamp < ?3 + ?1
         )
         SELECT command, directory, project_slug, timestamp,
                MIN(COALESCE(next_ts, session_end, strftime('%s', 'now')) - timestamp, ?1) AS active_secs
