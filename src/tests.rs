@@ -2312,6 +2312,127 @@ tmuxpaneoutputdir=~/custom-tmux
         );
     }
 
+    // --- next_command_candidates (Ctrl-S / `smarthistory next` / dropdown.predict) ----
+
+    #[test]
+    fn next_command_candidates_global_ignores_directory_and_session() {
+        let conn = report_test_conn();
+        // Two unrelated contexts, but both have "git status" followed
+        // by something -- global scope (no directory/session_id
+        // given) must count successors from BOTH.
+        insert_history(&conn, "git status", "/repoA", "paneA", 1000);
+        insert_history(&conn, "git push", "/repoA", "paneA", 1010);
+        insert_history(&conn, "git status", "/repoB", "paneB", 2000);
+        insert_history(&conn, "npm install", "/repoB", "paneB", 2010);
+
+        let candidates =
+            next_command_candidates(&conn, "git status", 5, None, None).expect("query");
+        let names: Vec<&str> = candidates.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(names.contains(&"git push"), "got: {:?}", names);
+        assert!(names.contains(&"npm install"), "got: {:?}", names);
+    }
+
+    /// The core scoping fix: with `session_id` scope, a command run
+    /// in a DIFFERENT, concurrently-active session/pane must never
+    /// count as this session's "next" -- even though it's the
+    /// chronologically-adjacent row in the unfiltered global table.
+    #[test]
+    fn next_command_candidates_session_scope_excludes_other_sessions() {
+        let conn = report_test_conn();
+        // paneA: "git status" at 1000, its real next in THIS pane is
+        // "git push" at 1020.
+        insert_history(&conn, "git status", "/repo", "paneA", 1000);
+        // An unrelated command from a DIFFERENT pane lands in between
+        // chronologically -- must not count as paneA's successor
+        // when scoped to paneA's session.
+        insert_history(&conn, "npm install", "/repo", "paneB", 1010);
+        insert_history(&conn, "git push", "/repo", "paneA", 1020);
+
+        let candidates =
+            next_command_candidates(&conn, "git status", 5, None, Some("paneA")).expect("query");
+        let names: Vec<&str> = candidates.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(names, vec!["git push"], "got: {:?}", names);
+        assert!(
+            !names.contains(&"npm install"),
+            "a different session's command must never count as this session's successor"
+        );
+    }
+
+    /// Same idea, scoped by directory instead of session: a command
+    /// run in an unrelated directory must never count as this
+    /// directory's "next", even across different sessions visiting
+    /// the same directory over time.
+    #[test]
+    fn next_command_candidates_directory_scope_excludes_other_directories() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repoA", "paneA", 1000);
+        insert_history(&conn, "cd /elsewhere", "/repoB", "paneA", 1010);
+        insert_history(&conn, "git push", "/repoA", "paneA", 1020);
+
+        let candidates =
+            next_command_candidates(&conn, "git status", 5, Some("/repoA"), None).expect("query");
+        let names: Vec<&str> = candidates.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(names, vec!["git push"], "got: {:?}", names);
+    }
+
+    /// Directory and session scope compose (AND), matching
+    /// `Commands::Search`'s own `--directory`/`--session` combining
+    /// behavior.
+    #[test]
+    fn next_command_candidates_directory_and_session_scope_combine() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repoA", "paneA", 1000);
+        // Same directory, different session -- excluded by session scope.
+        insert_history(&conn, "npm install", "/repoA", "paneB", 1005);
+        // Same session, different directory -- excluded by directory scope.
+        insert_history(&conn, "ls", "/repoB", "paneA", 1010);
+        // Matches both scopes.
+        insert_history(&conn, "git push", "/repoA", "paneA", 1020);
+
+        let candidates =
+            next_command_candidates(&conn, "git status", 5, Some("/repoA"), Some("paneA"))
+                .expect("query");
+        let names: Vec<&str> = candidates.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(names, vec!["git push"], "got: {:?}", names);
+    }
+
+    #[test]
+    fn next_command_candidates_ranks_by_frequency_then_alphabetically() {
+        let conn = report_test_conn();
+        // "git push" follows "git status" twice, "git log" once --
+        // frequency DESC, then alphabetical tie-break (irrelevant
+        // here since there's no tie, but exercises multi-row
+        // ordering).
+        insert_history(&conn, "git status", "/repo", "p1", 1000);
+        insert_history(&conn, "git push", "/repo", "p1", 1010);
+        insert_history(&conn, "git status", "/repo", "p1", 1020);
+        insert_history(&conn, "git push", "/repo", "p1", 1030);
+        insert_history(&conn, "git status", "/repo", "p1", 1040);
+        insert_history(&conn, "git log", "/repo", "p1", 1050);
+
+        let candidates =
+            next_command_candidates(&conn, "git status", 5, None, None).expect("query");
+        assert_eq!(
+            candidates,
+            vec![("git push".to_string(), 2), ("git log".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn next_command_candidates_respects_limit() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repo", "p1", 1000);
+        insert_history(&conn, "a", "/repo", "p1", 1010);
+        insert_history(&conn, "git status", "/repo", "p1", 1020);
+        insert_history(&conn, "b", "/repo", "p1", 1030);
+        insert_history(&conn, "git status", "/repo", "p1", 1040);
+        insert_history(&conn, "c", "/repo", "p1", 1050);
+
+        let candidates =
+            next_command_candidates(&conn, "git status", 2, None, None).expect("query");
+        assert_eq!(candidates.len(), 2);
+    }
+
     #[test]
     fn project_sessions_in_range_clamps_still_open_session_to_now() {
         let conn = report_test_conn();

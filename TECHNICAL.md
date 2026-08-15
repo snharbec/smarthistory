@@ -122,7 +122,10 @@ match standard workflow expectations. This project aims to provide:
   editor when fzf-style preview isn't available.
 - **Most-probable-next on `Ctrl+S`:** after running a command, pressing `Ctrl+S`
   inserts the most frequent command that followed it in the history, ordered by
-  frequency. Each subsequent press cycles through the next candidates.
+  frequency. Each subsequent press cycles through the next candidates. Scoped to
+  the current search mode (SESS/DIR/GLOBAL) — a session-scoped suggestion can
+  only ever be a successor actually observed in this session, not one pulled in
+  from an unrelated concurrently-active pane.
 - **Bulk deletion with confirmation:** `smarthistory clean` accepts the same
   filter flags as `search` and prompts before deleting.
 - **Note search on `@...`:** when you prefix a query with `@` and press `Enter`,
@@ -736,7 +739,7 @@ smarthistory select [QUERY] [--directory <dir>] [--session] [--exit-code OK|ERRO
 smarthistory list  [--fields f1,f2,...] [--table]
 smarthistory clean [QUERY] [--directory <dir>] [--session] [--exit-code OK|ERROR]
                      [--force]
-smarthistory next  <COMMAND> [--limit N]
+smarthistory next  <COMMAND> [--limit N] [--directory <dir>] [--session]
 smarthistory tui   [--mode SESS|DIR|GLOBAL] [--prefix <char>] [QUERY]
 smarthistory import-atuin
 smarthistory init  zsh
@@ -933,7 +936,8 @@ Aborted.
 ```
 
 `next` returns the most probable successor commands, with their frequency in the
-history. The `Ctrl+S` widget uses this internally:
+history. The `Ctrl+S` widget uses this internally, always scoped to the current
+search mode (see `--session`/`--directory` below):
 
 ```
 # History: CMD1, CMD2, CMD3, CMD1, CMD2, CMD1, CMD3
@@ -944,6 +948,17 @@ $ smarthistory next CMD1
 $ smarthistory next CMD2
 1 CMD1
 1 CMD3
+```
+
+`--session` and `--directory <DIR>` scope which rows are even eligible to be
+paired as a predecessor/successor — not just filter the output — so a command
+from an unrelated, concurrently-active pane (or a different directory entirely)
+can never spuriously count as "next" for this scope. Without either flag, `next`
+is unscoped (the historical global behavior):
+
+```
+$ smarthistory next CMD1 --session       # only successors observed in $SMART_HISTORY_SESSION
+$ smarthistory next CMD1 --directory ~/proj  # only successors observed in that directory
 ```
 
 The first 8 lines of `smarthistory init zsh` show the generated session UUID (it

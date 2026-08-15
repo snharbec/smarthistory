@@ -1490,7 +1490,19 @@ _smarthistory_dropdown_render() {
         # past run. Hardcoded to 3 candidates (not `dropdown.limit`):
         # a "what's next" hint at the very start of a line is meant
         # to be a quick glance, not a long list to scan.
-        raw=$(smarthistory next "$_smarthistory_last_cmd" --limit 3 2>/dev/null | cut -f2)
+        #
+        # Scoped to the current search mode, same
+        # `--session`/`--directory` mapping the normal search branch
+        # below uses — a SESS-scoped prediction only ever suggests a
+        # successor actually observed in this session, not one
+        # pulled in from an unrelated concurrently-active pane.
+        local -a _sm_predict_scope_args
+        case "$_smarthistory_mode" in
+            sess)   _sm_predict_scope_args=(--session) ;;
+            dir)    _sm_predict_scope_args=(--directory "$PWD") ;;
+            global) _sm_predict_scope_args=() ;;
+        esac
+        raw=$(smarthistory next "$_smarthistory_last_cmd" --limit 3 "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
     else
         local -a args
         # `--prefix`: match commands that START WITH what's typed, not a
@@ -2299,8 +2311,21 @@ _smarthistory_next_history() {
     # sorted by descending frequency). We fetch on every press so
     # that newly-added commands are visible immediately. The awk
     # script extracts just the command field, one per line.
+    #
+    # Scoped to the current search mode (SESS/DIR/GLOBAL), same
+    # `--session`/`--directory` mapping the dropdown's own
+    # `smarthistory search` calls use — so Ctrl-S only ever suggests
+    # a successor actually observed in this scope (this session, or
+    # this directory), not one from an unrelated concurrently-active
+    # pane or a different project entirely.
+    local -a _sm_next_scope_args
+    case "$_smarthistory_mode" in
+        sess)   _sm_next_scope_args=(--session) ;;
+        dir)    _sm_next_scope_args=(--directory "$PWD") ;;
+        global) _sm_next_scope_args=() ;;
+    esac
     local -a _smarthistory_candidates
-    _smarthistory_candidates=("${(f)$(smarthistory next "$_smarthistory_last_cmd" --limit 10 2>/dev/null | cut -f2)}")
+    _smarthistory_candidates=("${(f)$(smarthistory next "$_smarthistory_last_cmd" --limit 10 "${_sm_next_scope_args[@]}" 2>/dev/null | cut -f2)}")
     local n=${#_smarthistory_candidates}
     if [ $n -eq 0 ]; then
         zle -M "no suggestions after '$_smarthistory_last_cmd'"
