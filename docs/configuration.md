@@ -56,6 +56,7 @@ value" so you can confirm what the TUI actually sees.
   - [`initialmode`](#initialmode)
   - [`zsh.mode`](#zshmode)
   - [`segments.minwords`](#segmentsminwords)
+  - [`tui.highlight`](#tuihighlight)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -294,6 +295,37 @@ every segment regardless of length.
 ```ini
 segments.minwords=5
 segments.minwords=0    # keep every segment, however short
+```
+
+### `tui.highlight`
+
+|                  |               |
+| ---------------- | ------------- |
+| **Type**         | `on` \| `off` |
+| **Default**      | `off`         |
+| **Env override** | —             |
+
+Syntax-highlight each history row's command text in the TUI's list, using the
+same `bat`-based mechanism as [`dropdown.highlight`](#dropdownhighlight) above —
+lexical token coloring (strings, flags, operators, …) via
+[`bat`](https://github.com/sharkdp/bat). Applies only to real, executed
+`command`-mode rows (not directories, panes, notes, files, or any other prefix
+mode's rows, which aren't bash text) and only while there's no active search
+query — the moment you start typing a search, the existing matched-substring
+highlight takes over instead, since that's the more useful signal while actively
+searching: which rows matched, and where. The two never compose onto the same
+row.
+
+All currently-visible rows needing highlighting are batched into a single `bat`
+call (never one call per row) whenever the visible window changes, and the
+result is cached per command text for the rest of the session — the TUI redraws
+roughly every 100ms regardless of input, so a per-row `bat` spawn on every tick
+would be far too expensive. Off by default for the same subprocess-cost reason
+`dropdown.highlight` is. Silently stays off — no error — when `bat` isn't on
+`$PATH`, even if this is `on`.
+
+```ini
+tui.highlight=on
 ```
 
 ---
@@ -1382,6 +1414,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `initialmode`                   | enum                              | `SESS`                                                           | [History list & filtering](#history-list--filtering)                      |
 | `zsh.mode`                      | `sess` \| `dir` \| `global`       | `sess`                                                           | [History list & filtering](#history-list--filtering)                      |
 | `segments.minwords`             | non-negative int                  | `5`                                                              | [History list & filtering](#history-list--filtering)                      |
+| `tui.highlight`                 | `on` \| `off`                     | `off`                                                            | [History list & filtering](#history-list--filtering)                      |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.limit`                | positive int                      | `6`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.minchars`             | non-negative int                  | `1`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |

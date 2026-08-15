@@ -1996,6 +1996,31 @@ pub(crate) struct App {
     last_fetch_key:
         Option<(String, Mode, ExitFilter, MatchAlgorithm, crate::tui::state::DirectorySource)>,
 
+    /// `tui.highlight=on|off` — whether the history list
+    /// syntax-highlights `mode = "command"` rows via `bat`,
+    /// mirroring the zsh dropdown's `dropdown.highlight`. Set by
+    /// `run_tui_to_stdout` right after construction (see
+    /// `App::new`'s doc comment on this field's initializer for
+    /// why it isn't a constructor parameter); every other `App::new`
+    /// caller (tests, `run_tui_check`) gets the safe `false` default.
+    tui_highlight_enabled: bool,
+
+    /// Cache of `bat`-highlighted spans for `tui_highlight_enabled`,
+    /// keyed by `(is_light_theme, cmd_display)` — the light/dark
+    /// component in the key means a color-scheme toggle produces
+    /// fresh cache misses for the new scheme automatically, instead
+    /// of needing explicit invalidation at every `install_palette`
+    /// call site. Filled in batches (one `bat` subprocess call for
+    /// every not-yet-cached command in the currently visible
+    /// window) by `draw_list`, BEFORE the per-row `render_row` calls
+    /// that read it — never filled lazily one row at a time, since
+    /// the run loop's `terminal.draw()` fires roughly every 100ms
+    /// regardless of input, so a per-row spawn would mean a `bat`
+    /// subprocess call, potentially dozens of them, on every single
+    /// tick.
+    command_highlight_cache:
+        std::collections::HashMap<(bool, String), Vec<ratatui::text::Span<'static>>>,
+
     /// Aggregated files-mode state:
     /// debounce timer, in-flight walk
     /// request, last walked pattern,
@@ -5043,6 +5068,21 @@ impl App {
             global_query_draft: None,
             global_query_history_index: None,
             last_fetch_key: None,
+            // `false`/empty by default for every caller (tests,
+            // `run_tui_check`, and any other `App::new` call site
+            // that isn't the one real production entry point) —
+            // `run_tui_to_stdout` overwrites `tui_highlight_enabled`
+            // right after construction from `Config::tui.highlight`,
+            // same "the caller sets the real value, the constructor
+            // just needs a safe default" pattern
+            // `session_dirs_roots`/`session_subdirs_walked` above
+            // already use. Keyed by `(is_light_theme, cmd_display)`
+            // rather than just `cmd_display` so a color-scheme
+            // toggle naturally produces fresh cache misses for the
+            // new scheme instead of needing to be explicitly
+            // invalidated at every `install_palette` call site.
+            tui_highlight_enabled: false,
+            command_highlight_cache: std::collections::HashMap::new(),
         };
         app.recompile_regex();
         app.refresh();
@@ -11171,6 +11211,7 @@ pub fn run_tui_to_stdout(
         session_subdirs,
     );
     app.segments_min_words = app_cfg.segments_min_words();
+    app.tui_highlight_enabled = app_cfg.tui_highlight();
     // `--root <DIR>` overrides the base directory both plain `/`
     // mode and (when locked) the glob-completion picker resolve
     // relative walk roots against. `--glob-complete[-dir]`

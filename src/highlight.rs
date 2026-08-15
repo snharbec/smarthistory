@@ -113,6 +113,38 @@ pub fn highlight_with_bat(context: &str, lang: &str) -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
+/// Syntax-highlight multiple single-line bash command strings in
+/// ONE `bat` subprocess call, for callers that need to highlight
+/// many distinct strings without paying one subprocess spawn per
+/// string — the TUI's `tui.highlight` feature, which redraws
+/// unconditionally on every ~100ms tick (`terminal.draw()` in the
+/// run loop), unlike the zsh dropdown widget's per-keystroke
+/// `bat` call. Each element of `commands` MUST already be a
+/// single logical line (no embedded `\n`/`\r` — the TUI's
+/// `cmd_display` already replaces those with a visible `↵` marker
+/// before this is called); a multi-line entry here would desync
+/// the by-line splitting this function uses to map `bat`'s output
+/// back to each input.
+///
+/// Returns `None` (the caller falls back to plain, unhighlighted
+/// text for every entry) if `bat` is unavailable, exits non-zero,
+/// emits non-UTF8, or — as a defensive correctness check — returns
+/// a different number of output lines than input commands were
+/// given, which would otherwise silently misattribute one
+/// command's highlighting to a different command.
+pub fn highlight_commands_batch(commands: &[&str]) -> Option<Vec<String>> {
+    if commands.is_empty() {
+        return Some(Vec::new());
+    }
+    let joined = commands.join("\n");
+    let highlighted = highlight_with_bat(&joined, "bash")?;
+    let lines: Vec<String> = highlighted.lines().map(|s| s.to_string()).collect();
+    if lines.len() != commands.len() {
+        return None;
+    }
+    Some(lines)
+}
+
 /// Like [`highlight_with_bat`], but lets `bat` auto-detect the
 /// language from the source file's extension (no `--language`
 /// flag). `bat` reads the snippet from stdin so it has no
