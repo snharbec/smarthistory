@@ -1,13 +1,13 @@
 # The `smarthistory daemon` file watcher
 
 The `smarthistory daemon` command watches configured project directories for
-file changes and records them as `file_events` rows — the automatic counterpart
-to the editor-hook `smarthistory file` command. Both feed the same
+file changes and records them as `file_events` rows — the automatic
+counterpart to the editor-hook `smarthistory file` command. Both feed the same
 `project report` "Files viewed / modified / created / deleted" sections.
 
 The daemon's value is **capturing activity that never goes through the shell**:
-time spent editing files in a GUI editor, a browser, or any app that doesn't run
-a shell command. The lazy time-tracking model (which piggybacks on
+time spent editing files in a GUI editor, a browser, or any app that doesn't
+run a shell command. The lazy time-tracking model (which piggybacks on
 `smarthistory add` after each command) only records activity when a command
 runs; the daemon records file changes continuously, so a project session stays
 alive and correctly attributed even when you're not touching the terminal.
@@ -19,8 +19,8 @@ alive and correctly attributed even when you're not touching the terminal.
 - **Same attribution.** Each event is attributed to a project using the exact
   same `resolve_current_project` logic (marker file → `project.<slug>.dir` →
   last explicit selection), resolved from the **file's own directory** — the
-  same rule the `file` command uses, so a file in a sub-project of a monorepo is
-  attributed to the sub-project, not the watcher's cwd.
+  same rule the `file` command uses, so a file in a sub-project of a monorepo
+  is attributed to the sub-project, not the watcher's cwd.
 - **Same report.** `project report` already reads `file_events`; the daemon's
   rows appear there automatically. The daemon adds a new `deleted` event kind
   (see [Schema](#schema)), which the report now prints as a "Files deleted"
@@ -39,23 +39,22 @@ smarthistory daemon [--watch DIR ...] [--once]
   exits — a cron-style poll fallback for environments that can't keep a
   long-running process alive.
 
-The daemon prints the directories it's watching to stderr, so you can confirm it
-picked up the right roots.
+The daemon prints the directories it's watching to stderr, so you can confirm
+it picked up the right roots.
 
 ## Configuration
 
 All `daemon.*` keys live in `~/.config/smarthistory/config` (INI-style
 `key=value` lines).
 
-| Key                      | Default                    | Meaning                                                                                                                                                  |
-| ------------------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `daemon.enabled`         | `on`                       | Kill switch. `off` makes `smarthistory daemon` exit immediately. Running the command is the opt-in.                                                      |
-| `daemon.watch`           | _(derived)_                | Space-separated directories to watch. When empty, the daemon watches every `project.<slug>.dir` entry (tilde-expanded).                                  |
-| `daemon.ignore-dirs`     | _(built-ins)_              | Space-separated directory basenames to skip. Combined with the built-in `DEFAULT_IGNORES` list (`target`, `node_modules`, `.git`, …).                    |
-| `daemon.ignore-files`    | _(none)_                   | Space-separated file globs to skip, matched against the event path's basename. `*` and `?` supported.                                                    |
-| `daemon.events`          | `created,modified,deleted` | Comma-separated event kinds to record.                                                                                                                   |
-| `daemon.debounce-ms`     | `500`                      | The debounce window (milliseconds) that coalesces the burst of events from a single editor save into one event.                                          |
-| `daemon.merge-window-ms` | `1000`                     | How long a `deleted` event waits for a matching `created` event at the same path before it's recorded as a real deletion. `0` disables merging entirely. |
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `daemon.enabled` | `on` | Kill switch. `off` makes `smarthistory daemon` exit immediately. Running the command is the opt-in. |
+| `daemon.watch` | *(derived)* | Space-separated directories to watch. When empty, the daemon watches every `project.<slug>.dir` entry (tilde-expanded). |
+| `daemon.ignore-dirs` | *(built-ins)* | Space-separated directory basenames to skip. Combined with the built-in `DEFAULT_IGNORES` list (`target`, `node_modules`, `.git`, …). |
+| `daemon.ignore-files` | *(none)* | Space-separated file globs to skip, matched against the event path's basename. `*` and `?` supported. |
+| `daemon.events` | `created,modified,deleted` | Comma-separated event kinds to record. |
+| `daemon.debounce-ms` | `500` | The debounce window (milliseconds) that coalesces the burst of events from a single editor save into one event. |
 
 ### Which directories to watch
 
@@ -75,8 +74,9 @@ project.other.dir=~/work/other
 daemon.ignore-dirs=target node_modules .git .venv .terraform
 ```
 
-An event under any ignored directory is dropped before it touches the database —
-so a change inside `target/`, `.git/`, `node_modules/`, etc. is never recorded.
+An event under any ignored directory is dropped before it touches the
+database — so a change inside `target/`, `.git/`, `node_modules/`, etc. is
+never recorded.
 
 ### Which files to ignore
 
@@ -100,43 +100,14 @@ daemon.events=created,deleted
 daemon.debounce-ms=1000
 ```
 
-### Delete/create merging (atomic editor saves)
-
-Many editors — vim's default save strategy among them — don't overwrite a file
-in place. They rename the original file away (as a backup) and write a brand new
-file at the same path, which the watcher reports as a `Remove` immediately
-followed by a `Create`, not a `Write`. Recorded literally, every vim save would
-show up as a spurious delete-then-recreate pair in `project report` instead of
-one `modified` row.
-
-To avoid that, a `deleted` event isn't recorded immediately. It's held for up to
-`daemon.merge-window-ms` (default `1000`ms) waiting to see whether a
-`created`/`modified` event arrives for the _exact same path_. If one does, the
-pending delete is discarded and a single `modified` event is recorded instead;
-if the window elapses with nothing matching it, it's recorded as a real
-`deleted` event, same as before. A genuine deletion is still recorded promptly —
-the wait is bounded by the window, not by how long the daemon happens to run —
-and nothing pending is ever silently dropped: the daemon flushes every
-still-pending delete before it exits, `--once` included.
-
-```ini
-# Disable merging entirely — every delete is recorded immediately,
-# even ones an editor's atomic save would otherwise produce:
-daemon.merge-window-ms=0
-
-# A shorter window for editors/filesystems where the rename-and-recreate
-# completes very quickly:
-daemon.merge-window-ms=200
-```
-
 ## Event mapping
 
-| `notify` event                           | `file_events.event_kind`                                                                                                                              |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Create`                                 | `created` (or `modified`, if it completes a merged `deleted`+`created` pair — see [Delete/create merging](#deletecreate-merging-atomic-editor-saves)) |
-| `Write` / `Chmod`                        | `modified`                                                                                                                                            |
-| `Remove`                                 | `deleted`, after waiting `daemon.merge-window-ms` for a possible merge                                                                                |
-| `Rename` / `Rescan` / `Error` / `Notice` | _(skipped)_                                                                                                                                           |
+| `notify` event | `file_events.event_kind` |
+| --- | --- |
+| `Create` | `created` |
+| `Write` / `Chmod` | `modified` |
+| `Remove` | `deleted` |
+| `Rename` / `Rescan` / `Error` / `Notice` | *(skipped)* |
 
 ## Schema
 
