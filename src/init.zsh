@@ -118,9 +118,24 @@ add-zsh-hook precmd _smarthistory_precmd
 #   2 -> Right:        prefill BUFFER, cursor at end, do NOT submit
 #   3 -> Left:         prefill BUFFER, cursor at start, do NOT submit
 #   1 -> Esc/Ctrl+C:   cancel, leave BUFFER untouched
+#
+# If there's already text on the command line when Ctrl+R is
+# pressed, it's passed through as the TUI's starting search query --
+# the search opens on exactly what was typed instead of restoring
+# whatever was last searched for. An empty BUFFER (the common case:
+# Ctrl+R on a blank prompt) keeps the existing behavior of
+# restoring the persisted last search (`resolve_tui_cli_query` in
+# src/main.rs makes this precedence decision; a non-empty query
+# always wins, an empty one falls back to the session). `--`
+# forces positional parsing so typed text that happens to start
+# with `-` (e.g. `-l`) isn't misread as a flag.
 _smarthistory_select() {
     local selected rc
-    selected=$(smarthistory tui)
+    if [[ -n "$BUFFER" ]]; then
+        selected=$(smarthistory tui -- "$BUFFER")
+    else
+        selected=$(smarthistory tui)
+    fi
     rc=$?
     if [ -n "$selected" ]; then
         BUFFER="$selected"

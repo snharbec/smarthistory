@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `Ctrl-R` now takes over any text already on the command line as the TUI's
+  starting search query, instead of always restoring the last search regardless
+  of what's typed. An empty command line still restores the persisted last
+  search, unchanged. The positional `smarthistory tui [QUERY]` argument itself
+  now takes final precedence over the persisted `session.query` whenever it's
+  non-empty, matching `--prefix`'s existing precedence (an empty or omitted
+  value still falls back to the session as before).
 - New `smarthistory ask <question>` / console question mode: type
   `?question text` directly at the normal zsh prompt (no TUI) and press Enter. A
   transient `Thinking…` line shows while the request is in flight, then -- on an

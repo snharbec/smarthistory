@@ -1263,6 +1263,96 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(clear_thinking_message(false), "\n");
     }
 
+    /// The `Ctrl-R` case this function exists to support: when the
+    /// user has text on the command line already, `_smarthistory_select`
+    /// passes it through as the positional `query` argument, and it
+    /// must win over whatever the persisted `session.query` is —
+    /// otherwise Ctrl-R would silently ignore what's typed and just
+    /// restore the last search, which is the exact bug being fixed.
+    #[test]
+    fn resolve_tui_cli_query_nonempty_query_overrides_session() {
+        let (query, override_session) =
+            resolve_tui_cli_query(None, None, None, Some("typed text"), None, '/', '%');
+        assert_eq!(query, "typed text");
+        assert!(
+            override_session,
+            "non-empty --query must override the persisted session.query, \
+             same as --prefix already does"
+        );
+    }
+
+    /// The other half of the contract: no text on the command line
+    /// (empty string, e.g. bare `Ctrl-R` with nothing typed) must
+    /// NOT override the session — this is "the status right now"
+    /// the user asked to keep: the last search text is restored.
+    #[test]
+    fn resolve_tui_cli_query_empty_query_falls_back_to_session() {
+        let (query, override_session) =
+            resolve_tui_cli_query(None, None, None, Some(""), None, '/', '%');
+        assert_eq!(query, "");
+        assert!(!override_session, "empty --query must not override the session");
+
+        let (query, override_session) =
+            resolve_tui_cli_query(None, None, None, Some("   "), None, '/', '%');
+        assert_eq!(query, "   ");
+        assert!(
+            !override_session,
+            "whitespace-only --query must not override the session either"
+        );
+    }
+
+    #[test]
+    fn resolve_tui_cli_query_no_query_at_all_falls_back_to_session() {
+        let (query, override_session) = resolve_tui_cli_query(None, None, None, None, None, '/', '%');
+        assert_eq!(query, "");
+        assert!(!override_session);
+    }
+
+    /// `$SMARTHISTORY_TUI_QUERY` is treated identically to the
+    /// positional `--query` argument.
+    #[test]
+    fn resolve_tui_cli_query_nonempty_env_query_overrides_session() {
+        let (query, override_session) =
+            resolve_tui_cli_query(None, None, None, None, Some("env text"), '/', '%');
+        assert_eq!(query, "env text");
+        assert!(override_session);
+    }
+
+    /// `--prefix`/`--glob-complete`/`--pid-complete` all still take
+    /// priority over an explicit `--query`, matching clap's
+    /// `conflicts_with` rules (they're mutually exclusive at the CLI
+    /// level, but this pins the match arm ordering too).
+    #[test]
+    fn resolve_tui_cli_query_prefix_beats_explicit_query() {
+        let (query, override_session) =
+            resolve_tui_cli_query(None, None, Some("*"), Some("typed text"), None, '/', '%');
+        assert_eq!(query, "*");
+        assert!(override_session);
+    }
+
+    #[test]
+    fn resolve_tui_cli_query_glob_complete_beats_everything() {
+        let (query, override_session) = resolve_tui_cli_query(
+            Some(("a*", crate::tui::FilePickerKind::Files)),
+            Some("ignored"),
+            Some("ignored"),
+            Some("ignored"),
+            None,
+            '/',
+            '%',
+        );
+        assert_eq!(query, "/a* ");
+        assert!(override_session);
+    }
+
+    #[test]
+    fn resolve_tui_cli_query_pid_complete_beats_query() {
+        let (query, override_session) =
+            resolve_tui_cli_query(None, Some("sleep"), None, Some("ignored"), None, '/', '%');
+        assert_eq!(query, "%sleep ");
+        assert!(override_session);
+    }
+
     #[test]
     fn format_ask_output_numbers_multiple_suggestions_in_order() {
         let suggestions = vec!["git stash".to_string(), "git stash pop".to_string()];

@@ -415,7 +415,15 @@ enum Commands {
         /// user's default pane height).
         #[arg(long, value_name = "HEIGHT")]
         pane_height: Option<String>,
-        /// Starting query text (overridden by `--prefix`).
+        /// Starting query text (overridden by `--prefix`). When
+        /// non-empty, takes final precedence over the persisted
+        /// `session.query` — same as `--prefix` — so the TUI opens
+        /// searching for exactly this text rather than restoring
+        /// the last search. An empty value (or omitting this
+        /// argument) falls back to the persisted `session.query` as
+        /// before. Used by the `Ctrl-R` zsh widget to pass whatever
+        /// text is already on the command line, if any, straight
+        /// through as the starting search.
         #[arg(index = 1)]
         query: Option<String>,
         /// Open the two-field `create-note` dialog (Title + Content
@@ -6346,6 +6354,93 @@ struct CompletionPickerArgs {
     root: Option<PathBuf>,
 }
 
+/// Resolve `(initial_query, override_session_query)` from
+/// `run_tui_command`'s CLI query-related inputs, in priority order:
+/// glob-complete pattern > pid-complete pattern > `--prefix` char >
+/// explicit `--query` text (positional or `$SMARTHISTORY_TUI_QUERY`)
+/// > nothing.
+///
+/// `override_session_query = true` means the persisted
+/// `session.query` is NOT restored for this launch — the caller's
+/// intent takes final precedence. This is true for every branch
+/// EXCEPT a `None`/empty `query`/`env_query`, which falls through to
+/// the persisted session query as before (see `resolve_initial_query`
+/// for how that fallback plays out).
+///
+/// A non-empty `--query` (or `$SMARTHISTORY_TUI_QUERY`) overriding
+/// the session is what makes `Ctrl-R` with text already on the
+/// command line search for that text instead of restoring
+/// whatever was last searched for — `_smarthistory_select` in
+/// `init.zsh` passes non-empty `$BUFFER` through as this positional
+/// argument. An EMPTY query (or none given at all) is
+/// indistinguishable from "the user didn't ask for anything
+/// specific," so it still falls back to the persisted session query,
+/// same as today.
+///
+/// Extracted as a pure function (no `Config`/terminal I/O) so this
+/// precedence contract is independently unit-testable, same rationale
+/// as `resolve_initial_query`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_tui_cli_query(
+    glob_complete_effective: Option<(&str, tui::FilePickerKind)>,
+    pid_complete: Option<&str>,
+    prefix: Option<&str>,
+    query: Option<&str>,
+    env_query: Option<&str>,
+    files_prefix: char,
+    processes_prefix: char,
+) -> (String, bool) {
+    match (
+        glob_complete_effective,
+        pid_complete,
+        prefix,
+        query,
+        env_query,
+    ) {
+        (Some((pattern, _kind)), _, _, _, _) => {
+            // `--glob-complete[-dir] <PATTERN>` implies the files
+            // prefix REGARDLESS of kind — a directory picker still
+            // drives the exact same underlying `/` files-mode
+            // walk/fetch pipeline, just filtered down to directory
+            // entries (see `FilePickerKind`). Same "one-off, starts
+            // in a specific mode, don't persist" treatment `--prefix`
+            // gets, just pre-filled with the raw glob word instead of
+            // a bare prefix char. `clap`'s `conflicts_with` already
+            // rules out `prefix`/`pid_complete` being set here.
+            //
+            // Trailing space: lands the cursor ready for an
+            // immediate extra narrowing word (`*.md jira`, see
+            // `FilesFilter::Glob`'s `extra_tokens`) without the user
+            // having to press space first. Harmless for the filter
+            // itself — `FilesState::current_pattern` trims the body
+            // before tokenizing either way.
+            (format!("{}{} ", files_prefix, pattern), true)
+        }
+        (None, Some(pattern), _, _, _) => {
+            // `--pid-complete <PATTERN>` implies the processes
+            // prefix — same shape as `--glob-complete`, just a
+            // different target mode and no glob translation (the
+            // pattern is passed through verbatim; `%` mode does its
+            // own free-text substring matching). Trailing space for
+            // the same "ready to keep typing" reason as the
+            // glob-complete branch above.
+            (format!("{}{} ", processes_prefix, pattern), true)
+        }
+        (None, None, Some(p), _, _) => {
+            // Take the first char of the prefix string (it's always
+            // a single char by construction; we accept multi-char
+            // input defensively for shell-quoted strings).
+            let first_char = p.chars().next().unwrap_or_default().to_string();
+            (first_char, true)
+        }
+        (None, None, None, Some(q), _) if !q.trim().is_empty() => (q.to_string(), true),
+        (None, None, None, None, Some(q)) if !q.trim().is_empty() => (q.to_string(), true),
+        (None, None, None, Some(q), _) => (q.to_string(), false),
+        (None, None, None, None, Some(q)) => (q.to_string(), false),
+        (None, None, None, None, None) => (String::new(), false),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tui_command(
     conn: Connection,
@@ -6471,58 +6566,15 @@ fn run_tui_command(
     // `--pid-complete` can read the configured prefix characters
     // before the `initial_query` match runs.
     let tui_cfg = Config::load();
-    let (initial_query, override_session_query) =
-        match (
-            glob_complete_effective,
-            pid_complete.as_deref(),
-            prefix.as_deref(),
-            query.as_deref(),
-            env_query.as_deref(),
-        ) {
-            (Some((pattern, _kind)), _, _, _, _) => {
-                // `--glob-complete[-dir] <PATTERN>` implies the
-                // files prefix REGARDLESS of kind — a directory
-                // picker still drives the exact same underlying `/`
-                // files-mode walk/fetch pipeline, just filtered down
-                // to directory entries (see `FilePickerKind`). Same
-                // "one-off, starts in a specific mode, don't
-                // persist" treatment `--prefix` gets, just pre-filled
-                // with the raw glob word instead of a bare prefix
-                // char. `clap`'s `conflicts_with` already rules out
-                // `prefix`/`pid_complete` being set here.
-                //
-                // Trailing space: lands the cursor ready for an
-                // immediate extra narrowing word (`*.md jira`, see
-                // `FilesFilter::Glob`'s `extra_tokens`) without the
-                // user having to press space first. Harmless for the
-                // filter itself — `FilesState::current_pattern`
-                // trims the body before tokenizing either way.
-                let files_prefix = tui_cfg.query_prefixes().files;
-                (format!("{}{} ", files_prefix, pattern), true)
-            }
-            (None, Some(pattern), _, _, _) => {
-                // `--pid-complete <PATTERN>` implies the processes
-                // prefix — same shape as `--glob-complete`, just a
-                // different target mode and no glob translation
-                // (the pattern is passed through verbatim; `%` mode
-                // does its own free-text substring matching).
-                // Trailing space for the same "ready to keep typing"
-                // reason as the glob-complete branch above.
-                let processes_prefix = tui_cfg.query_prefixes().processes;
-                (format!("{}{} ", processes_prefix, pattern), true)
-            }
-            (None, None, Some(p), _, _) => {
-                // Take the first char of the prefix string
-                // (it's always a single char by construction;
-                // we accept multi-char input defensively for
-                // shell-quoted strings).
-                let first_char = p.chars().next().unwrap_or_default().to_string();
-                (first_char, true)
-            }
-            (None, None, None, Some(q), _) => (q.to_string(), false),
-            (None, None, None, None, Some(q)) => (q.to_string(), false),
-            (None, None, None, None, None) => (String::new(), false),
-        };
+    let (initial_query, override_session_query) = resolve_tui_cli_query(
+        glob_complete_effective,
+        pid_complete.as_deref(),
+        prefix.as_deref(),
+        query.as_deref(),
+        env_query.as_deref(),
+        tui_cfg.query_prefixes().files,
+        tui_cfg.query_prefixes().processes,
+    );
     // Build the LLM client up front so the TUI entry
     // point doesn't need to know about config parsing.
     // The TUI itself only sees `Option<Box<dyn LlmClient>>`
