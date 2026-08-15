@@ -165,8 +165,8 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// for preview in the output preview pane. Called from
 /// `App::refresh()` on every selection change. A **file** row (the
 /// absolute path is in `directory`, set during `walk_dir`) gets its
-/// first 50 lines piped through `bat` for syntax highlighting (same
-/// as tags / codegraph / notes / todo modes). A **directory** row —
+/// first 50 lines syntax-highlighted (same as tags / codegraph /
+/// notes / todo modes). A **directory** row —
 /// only ever present in `merged_rows` for a locked
 /// `--glob-complete-dir` picker (plain `/` mode's `fetch` filters
 /// directories out entirely) — gets a plain listing of its immediate

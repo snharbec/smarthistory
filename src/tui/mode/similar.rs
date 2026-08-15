@@ -3,7 +3,7 @@
 //! Same architecture as `:` (segments) mode — debounced background-
 //! thread search over `note_search`'s `segments` table, same
 //! `notes.database` tag/link Tab-completion namespace, same windowed
-//! `bat`-highlighted preview keyed on the matched segment's own
+//! syntax-highlighted preview keyed on the matched segment's own
 //! `start_line` — but the entire typed body (everything after the
 //! prefix) is treated as ONE phrase rather than parsed as a query DSL:
 //! there's no `#tag` / `[[link]]` / `(a OR b)` support here, the whole
@@ -76,7 +76,7 @@ pub struct SimilarState {
     pub in_flight: bool,
     pub request: Option<SimilarRequest>,
     pub rows: Vec<HistoryRow>,
-    /// `bat`-highlighted output preview, keyed by (absolute file
+    /// Syntax-highlighted output preview, keyed by (absolute file
     /// path, 1-based start line) — same rationale as
     /// `SegmentsState::context_cache`.
     pub context_cache: std::collections::HashMap<(String, usize), String>,
@@ -493,9 +493,9 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// Lazy-load context around the SELECTED result's own segment start
 /// line into `output`. Identical to
 /// `crate::tui::mode::segments::ensure_selected_context` (same
-/// windowed, raw-markdown-through-`bat` preview, same per-(file,line)
-/// cache) — the results here are `SegmentResult`s too, just ranked by
-/// similarity instead of matched by query DSL.
+/// windowed, raw-markdown-through-syntax-highlighting preview, same
+/// per-(file,line) cache) — the results here are `SegmentResult`s
+/// too, just ranked by similarity instead of matched by query DSL.
 pub(crate) fn ensure_selected_context(app: &mut App) {
     if !matches(app) {
         return;

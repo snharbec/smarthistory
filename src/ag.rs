@@ -266,14 +266,14 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     // matches would otherwise `stat` it once per match line.
     let mut mtime_cache: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
-    // Use the first explicit language for bat syntax highlighting.
-    // If multiple languages were specified we use only the first
-    // to avoid guessing per-file; bat auto-detects from extension
-    // when no language is given, but here we prefer the user's
-    // explicit choice.
-    let bat_lang = tokens.languages.first().map(String::as_str);
-    let mut bat_count = 0usize;
-    const BAT_MAX: usize = 50;
+    // Use the first explicit language for syntax highlighting. If
+    // multiple languages were specified we use only the first to
+    // avoid guessing per-file; extension-based auto-detection
+    // kicks in when no language is given, but here we prefer the
+    // user's explicit choice.
+    let highlight_lang = tokens.languages.first().map(String::as_str);
+    let mut highlight_count = 0usize;
+    const HIGHLIGHT_MAX: usize = 50;
 
     for line in stdout.lines() {
         // Format: file:line_number:matched_content
@@ -329,21 +329,21 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
         let context = read_source_context(&abs_path, line_number);
 
         // If a language was specified, pipe the context through
-        // `bat` for syntax highlighting. We cap the number of
-        // bat calls to keep the background thread responsive.
-        // With no `@lang`, fall through to `bat`'s extension-based
-        // auto-detection via `--file-name` (rather than plain
-        // text) so `.rs` / `.java` / `.py` matches still get
-        // colored previews.
-        let output = if let Some(lang) = bat_lang {
-            if bat_count < BAT_MAX {
-                bat_count += 1;
+        // `highlight_with_bat` for syntax highlighting. We cap the
+        // number of highlight calls to keep the background thread
+        // responsive. With no `@lang`, fall through to
+        // `highlight_with_bat_auto`'s extension-based
+        // auto-detection so `.rs` / `.java` / `.py` matches still
+        // get colored previews.
+        let output = if let Some(lang) = highlight_lang {
+            if highlight_count < HIGHLIGHT_MAX {
+                highlight_count += 1;
                 highlight_with_bat(&context, lang).unwrap_or(context)
             } else {
                 context
             }
-        } else if bat_count < BAT_MAX {
-            bat_count += 1;
+        } else if highlight_count < HIGHLIGHT_MAX {
+            highlight_count += 1;
             highlight_with_bat_auto(&context, &abs_path).unwrap_or(context)
         } else {
             context
@@ -354,7 +354,7 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| file.to_string());
 
-        let source = if let Some(lang) = bat_lang {
+        let source = if let Some(lang) = highlight_lang {
             format!("ag:{}", lang)
         } else {
             "ag".to_string()

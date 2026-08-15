@@ -1467,8 +1467,9 @@ fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
     let end = (scroll + inner_h).min(total);
     let start = scroll;
     // The overlay text may carry ANSI escape codes: tags &
-    // codegraph modes pipe source context through `bat
-    // --color=always`, and ag matches carry ANSI from `ag`.
+    // codegraph modes syntax-highlight source context (`syntect`,
+    // via `highlight_with_bat`/`highlight_with_bat_auto`), and ag
+    // matches carry ANSI from `ag`.
     // The markdown `render_preview_line` path doesn't parse
     // ANSI (it mangles `\x1b[...m` through the inline parser),
     // so when the text contains an escape we route every
@@ -4163,8 +4164,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
     // `tui.highlight`: batch-fill `command_highlight_cache` for any
     // not-yet-cached command text in the visible window, BEFORE
-    // building `ListItem`s below — one `bat` subprocess call for
-    // potentially many rows, not one call per row (see
+    // building `ListItem`s below — one `highlight_bash_commands`
+    // call for potentially many rows, not one call per row (see
     // `App::command_highlight_cache`'s doc comment for why that
     // matters: this file redraws unconditionally on every ~100ms
     // tick). Only `mode = "command"` rows are real bash text worth
@@ -4993,7 +4994,7 @@ pub(crate) fn render_row<'a>(
         }
         spans.extend(text_spans);
     } else {
-        // `tui.highlight`: use the cached bat-syntax-highlighted
+        // `tui.highlight`: use the cached syntax-highlighted
         // spans instead of the plain/matched-substring rendering,
         // but ONLY for real command rows and ONLY while there's no
         // active search query to emphasize — the moment the user
@@ -5004,8 +5005,8 @@ pub(crate) fn render_row<'a>(
         // both onto the same text. `command_highlight_cache` is
         // guaranteed already filled for every row in the visible
         // window by `draw_list`'s batch pre-pass (see its call
-        // site), so this is a cache lookup only — never a `bat`
-        // spawn from inside the per-row render path.
+        // site), so this is a cache lookup only — never a
+        // highlighter call from inside the per-row render path.
         let mut text_spans = if app.tui_highlight_enabled
             && row.mode == "command"
             && app.query.trim().is_empty()
@@ -6676,15 +6677,15 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // Ag/tags/codegraph/segments/similar carry up to
     // [`SOURCE_CONTEXT_LINES`] (50) lines of source context
     // CENTERED on the matched line (segments AND similar mode via
-    // the same `bat`-highlighted window, see
+    // the same syntax-highlighted window, see
     // `crate::tui::mode::segments::ensure_selected_context` /
     // `crate::tui::mode::similar::ensure_selected_context`) plus,
     // for tags/codegraph, a callers/callees overlay. JIRA rows
     // carry a 3-line header (Status/Priority, Due/Assignee,
     // Description label) followed by the full issue description
     // body. Notes / todo / files rows carry the first 50 lines of
-    // the referenced file (piped through `bat` for syntax
-    // highlighting). Pane rows carry the last 50 visible lines of
+    // the referenced file (syntax-highlighted). Pane rows carry
+    // the last 50 visible lines of
     // the underlying herdr pane (from `herdr pane read <pane_id>
     // --lines 50`).
     // The inline pane's height caps the actually-visible count
@@ -6743,8 +6744,8 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // area get truncated at the right edge with the beginning
     // still visible. The previous behavior (`.wrap(Wrap { trim:
     // false })`) wrapped long lines to multiple visual rows,
-    // which destroyed the source-code alignment for `bat`-
-    // highlighted previews (e.g. an indented `    foo` line
+    // which destroyed the source-code alignment for
+    // syntax-highlighted previews (e.g. an indented `    foo` line
     // would wrap to a new row with the indentation preserved
     // but the start position no longer matching the source).
     // Source code reads top-to-bottom / left-to-right; users

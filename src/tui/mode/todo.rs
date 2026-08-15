@@ -533,8 +533,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Pipe through `bat` for syntax highlighting (same as
-    // tags / codegraph / notes modes).
+    // Syntax-highlight (same as tags / codegraph / notes modes).
     let filepath_str = filepath.to_string_lossy().into_owned();
     let highlighted =
         crate::highlight::highlight_with_bat_auto(&preview, &filepath_str).unwrap_or(preview);

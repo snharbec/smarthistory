@@ -209,7 +209,7 @@ pub(crate) fn check(_app: &App) -> CheckReport {
 ///    (e.g. `@rust`); the language filters the
 ///    FTS5 search and shapes the row's `source`
 ///    field (so `ensure_selected_context` can
-///    pass it to `bat --language`).
+///    pass it to `highlight_with_bat`).
 /// 2. Open (and cache) the read-only CodeGraph
 ///    connection. The connection is opened here
 ///    (not in `App::new`) so a repo without an
@@ -302,10 +302,11 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// from disk (cached in `App::tags_source_cache`
 /// so multiple symbols in the same file share one
 /// disk read), appends the callers / callees
-/// overlay (each capped at 15 entries), and pipes
-/// the result through `bat` with the
-/// active theme's `--theme=light` / `--theme=dark`
-/// flag. See the original
+/// overlay (each capped at 15 entries), and
+/// syntax-highlights the result (`syntect`, via
+/// `highlight_with_bat`/`highlight_with_bat_auto`)
+/// using the active theme's light/dark variant. See
+/// the original
 /// `App::ensure_selected_codegraph_context` doc
 /// for the full rationale on the cap.
 pub(crate) fn ensure_selected_context(app: &mut App) {
@@ -362,9 +363,8 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
         row.output = if let Some(lang) = language {
             crate::highlight::highlight_with_bat(&context, &lang).unwrap_or(context)
         } else {
-            // No explicit `@lang`: let `bat` auto-detect
-            // from the source file's extension via
-            // `--file-name`.
+            // No explicit `@lang`: auto-detect from the
+            // source file's extension.
             crate::highlight::highlight_with_bat_auto(&context, &filepath).unwrap_or(context)
         };
         // Scroll hint: the
