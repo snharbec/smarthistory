@@ -2134,6 +2134,17 @@ pub struct Config {
     /// of events from a single editor save into one event. Default
     /// 500. Set via `daemon.debounce-ms=<N>`.
     daemon_debounce_ms: u64,
+    /// How long (milliseconds) a `deleted` event waits for a matching
+    /// `created` event at the same path before it's recorded as a
+    /// real deletion. Many editors (vim's default backup-and-rename
+    /// save, among others) save by renaming the original file away
+    /// and writing a new file at the same path — the watcher reports
+    /// that as delete-then-create, not a modification. When a
+    /// `created` event for the same path arrives within this window,
+    /// the pending `deleted` is discarded and a single `modified`
+    /// event is recorded instead. Default 1000. Set via
+    /// `daemon.merge-window-ms=<N>`.
+    daemon_merge_window_ms: u64,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
     /// User-configured additional
@@ -2473,6 +2484,7 @@ impl Config {
             daemon_ignore_files: Vec::new(),
             daemon_events: vec!["created".to_string(), "modified".to_string(), "deleted".to_string()],
             daemon_debounce_ms: 500,
+            daemon_merge_window_ms: 1000,
             query_prefixes: QueryPrefixes::default(),
             // `~` expansion: `$HOME` is
             // always in the set (the
@@ -3056,6 +3068,14 @@ impl Config {
                             Ok(n) if n > 0 => self.daemon_debounce_ms = n,
                             _ => eprintln!(
                                 "warning: daemon.debounce-ms={:?} is not a positive integer; keeping the previous value",
+                                value
+                            ),
+                        }
+                    } else if other == "daemon.merge-window-ms" {
+                        match value.trim().parse::<u64>() {
+                            Ok(n) => self.daemon_merge_window_ms = n,
+                            _ => eprintln!(
+                                "warning: daemon.merge-window-ms={:?} is not a non-negative integer; keeping the previous value",
                                 value
                             ),
                         }
@@ -4049,6 +4069,12 @@ impl Config {
     /// `daemon_debounce_ms` field doc.
     pub fn daemon_debounce_ms(&self) -> u64 {
         self.daemon_debounce_ms
+    }
+
+    /// The daemon's delete/create merge window in milliseconds. See
+    /// the `daemon_merge_window_ms` field doc.
+    pub fn daemon_merge_window_ms(&self) -> u64 {
+        self.daemon_merge_window_ms
     }
 
     /// Per-extension shell commands invoked by

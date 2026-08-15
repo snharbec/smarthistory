@@ -8,19 +8,29 @@ All notable changes to this project will be documented in this file.
 
 - New `smarthistory daemon`: a file-watching loop that records file changes in
   configured project directories as `file_events` (created/modified/deleted),
-  attributed to the project the file lives in — the automatic counterpart to
-  the editor-hook `smarthistory file` command, capturing activity that never
-  goes through the shell (GUI editors, browsers, any non-terminal app).
-  Configurable via `daemon.*` keys: `daemon.watch` (which directories to watch;
-  defaults to every `project.<slug>.dir` entry), `daemon.ignore-dirs`
-  (directory basenames to skip, combined with the built-in `DEFAULT_IGNORES`),
-  `daemon.ignore-files` (file globs to skip), `daemon.events` (which event
-  kinds to record), `daemon.debounce-ms` (the window that coalesces an editor
-  save's event burst into one row), and `daemon.enabled` (kill switch). Uses the
-  `notify` crate (FSEvents on macOS, inotify on Linux). See `docs/daemon.md`.
+  attributed to the project the file lives in — the automatic counterpart to the
+  editor-hook `smarthistory file` command, capturing activity that never goes
+  through the shell (GUI editors, browsers, any non-terminal app). Configurable
+  via `daemon.*` keys: `daemon.watch` (which directories to watch; defaults to
+  every `project.<slug>.dir` entry), `daemon.ignore-dirs` (directory basenames
+  to skip, combined with the built-in `DEFAULT_IGNORES`), `daemon.ignore-files`
+  (file globs to skip), `daemon.events` (which event kinds to record),
+  `daemon.debounce-ms` (the window that coalesces an editor save's event burst
+  into one row), and `daemon.enabled` (kill switch). Uses the `notify` crate
+  (FSEvents on macOS, inotify on Linux). See `docs/daemon.md`.
 - The `file_events` table now supports a `deleted` event kind (recorded by the
   daemon on file removal); `project report` prints a new "Files deleted"
   section. Existing databases are migrated automatically.
+- New `daemon.merge-window-ms` config key (default `1000`): many editors — vim's
+  default save strategy among them — save by renaming the original file away and
+  writing a new one at the same path, which the daemon's watcher reports as
+  `Remove` immediately followed by `Create`, not a `Write`. A `deleted` event
+  now waits up to this window for a matching `created` event at the same path
+  before being recorded; a match merges the pair into a single `modified` event
+  instead of a spurious delete-then-recreate. `0` disables merging. A genuine
+  deletion is still recorded once the window elapses, and nothing pending is
+  ever silently dropped — the daemon flushes every still-pending delete before
+  it exits, `--once` included.
 
 - New `smarthistory comments list|add|delete`: manage comment-expansion entries
   (`command_comments`) directly instead of only setting one via `add --comment`
@@ -217,8 +227,8 @@ All notable changes to this project will be documented in this file.
   entries keep working unmodified, no migration needed.
 - The `--glob-complete[-dir]`/`--pid-complete` pickers (`vi a*<TAB>`,
   `cd proj*<TAB>`, `kill sleep<TAB>`) now prefill the query with a trailing
-  space (`a*`, `proj*`, `sleep`) instead of no space — ready to keep typing
-  an extra narrowing word immediately, no need to press space first.
+  space (`a*`, `proj*`, `sleep`) instead of no space — ready to keep typing an
+  extra narrowing word immediately, no need to press space first.
 - `init.zsh` now exports `SMARTHISTORY_MODE` (`sess`/`dir`/`global`) and
   `SMARTHISTORY_MATCHMODE` (`prefix`/`substring`) as real environment variables,
   kept in sync on every `Ctrl-g`/`Ctrl-t` toggle

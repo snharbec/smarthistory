@@ -19,6 +19,13 @@
 //!   record.
 //! - `daemon.debounce-ms=<N>` — the debounce window that coalesces the
 //!   burst of events from a single editor save into one event.
+//! - `daemon.merge-window-ms=<N>` — how long a `deleted` event waits
+//!   for a matching `created` event at the same path before it's
+//!   recorded as a real deletion; a match within the window merges
+//!   into a single `modified` event instead (see
+//!   [`PendingDeletes`] — this is what covers editors, notably vim's
+//!   default save strategy, that save by renaming the original file
+//!   away and writing a new one at the same path).
 //! - `daemon.enabled=on|off` — kill switch (default on; running the
 //!   command is the opt-in).
 
@@ -26,9 +33,10 @@ use crate::Config;
 use anyhow::Context;
 use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::Connection;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Run the watch loop until interrupted (or, in `--once` mode, until
 /// the current event burst has drained). `cli_watch` overrides the
@@ -86,35 +94,72 @@ pub fn run(
 
     let dir_ignores = crate::files::IgnoreSet::new(cfg.daemon_ignore_dirs());
     let file_ignores = FileIgnoreSet::new(cfg.daemon_ignore_files());
+    let merge_window = Duration::from_millis(cfg.daemon_merge_window_ms());
+    let mut pending_deletes = PendingDeletes::new();
 
     // `--once`: drain the current burst then exit, so a cron-style
     // poll can't hang forever.
     let drain_deadline = if once {
-        Some(std::time::Instant::now() + once_drain_window(cfg.daemon_debounce_ms()))
+        Some(Instant::now() + once_drain_window(cfg.daemon_debounce_ms()))
     } else {
         None
     };
 
     loop {
-        let event = match drain_deadline {
+        // Wake up at whichever comes first: the overall `--once`
+        // deadline, or the earliest pending `deleted` event's merge
+        // window expiring (so a real deletion still gets recorded
+        // promptly when nothing shows up to merge it with).
+        let wake_at = match (drain_deadline, pending_deletes.earliest_deadline(merge_window)) {
+            (Some(d), Some(p)) => Some(d.min(p)),
+            (Some(d), None) => Some(d),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        };
+
+        let event = match wake_at {
             Some(deadline) => {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    break;
-                }
-                match rx.recv_timeout(remaining) {
-                    Ok(e) => e,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    None
+                } else {
+                    match rx.recv_timeout(remaining) {
+                        Ok(e) => Some(e),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            flush_all_pending(conn, cfg, &dir_ignores, &file_ignores, &mut pending_deletes);
+                            break;
+                        }
+                    }
                 }
             }
             None => match rx.recv() {
-                Ok(e) => e,
-                Err(_) => break,
+                Ok(e) => Some(e),
+                Err(_) => {
+                    flush_all_pending(conn, cfg, &dir_ignores, &file_ignores, &mut pending_deletes);
+                    break;
+                }
             },
         };
 
-        let (path, kind) = match event {
+        let Some(event) = event else {
+            // A `recv_timeout` deadline fired. Flush every pending
+            // delete whose own window has expired (a real deletion,
+            // nothing showed up to merge it with).
+            for path in pending_deletes.take_expired(merge_window) {
+                record_event(conn, cfg, &dir_ignores, &file_ignores, &path, "deleted");
+            }
+            // If the overall `--once` deadline is what fired (not
+            // just an earlier pending-delete expiry), we're done:
+            // flush anything still pending and exit.
+            if drain_deadline.is_some_and(|d| Instant::now() >= d) {
+                flush_all_pending(conn, cfg, &dir_ignores, &file_ignores, &mut pending_deletes);
+                break;
+            }
+            continue;
+        };
+
+        let (path, raw_kind) = match event {
             DebouncedEvent::Create(p) => (p, "created"),
             DebouncedEvent::Write(p) | DebouncedEvent::Chmod(p) => (p, "modified"),
             DebouncedEvent::Remove(p) => (p, "deleted"),
@@ -123,42 +168,154 @@ pub fn run(
             _ => continue,
         };
 
-        if !cfg.daemon_events_enabled(kind) {
-            continue;
-        }
-        if is_under_ignored_dir(&path, &dir_ignores) {
-            continue;
-        }
-        if file_ignores.matches(&path) {
+        if raw_kind == "deleted" {
+            // Don't record yet — stash it and see whether a
+            // create/modify for the same path shows up within
+            // `merge_window` (see the module doc comment). The
+            // ignore-dir/ignore-file filters still apply up front so
+            // an ignored path never occupies a pending slot.
+            if !is_under_ignored_dir(&path, &dir_ignores) && !file_ignores.matches(&path) {
+                pending_deletes.stash(path);
+            }
             continue;
         }
 
-        // Same attribution the `file` command uses, resolved from the
-        // FILE's own directory (not the watcher's cwd).
-        let (canonical, dir) = canonicalize_event_path(&path);
-        let slug = match crate::resolve_current_project(conn, cfg, &dir) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("smarthistory daemon: failed to resolve project for {dir}: {e}");
-                continue;
-            }
+        // A create/modify: if a delete was pending for this exact
+        // path, this is the rename-based save completing — merge
+        // into one `modified` event instead of two. Otherwise record
+        // it as whatever it actually is.
+        let kind = if pending_deletes.try_merge(&path) {
+            "modified"
+        } else {
+            raw_kind
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // A single failed write (e.g. the busy timeout above was
-        // still exceeded under heavy concurrent load) must not kill
-        // a daemon meant to run for days — log and keep watching
-        // rather than propagating with `?`.
-        if let Err(e) = conn.execute(
-            "INSERT INTO file_events (path, event_kind, project_slug, timestamp) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![canonical, kind, slug, now],
-        ) {
-            eprintln!("smarthistory daemon: failed to record {kind} event for {canonical}: {e}");
-        }
+        record_event(conn, cfg, &dir_ignores, &file_ignores, &path, kind);
     }
     Ok(())
+}
+
+/// Record every still-pending delete as a real deletion (nothing
+/// showed up in time to merge it with) — called when the watch loop
+/// is about to exit for any reason, so a deletion right before
+/// shutdown is never silently dropped just because its merge window
+/// hadn't fully elapsed yet.
+fn flush_all_pending(
+    conn: &Connection,
+    cfg: &Config,
+    dir_ignores: &crate::files::IgnoreSet,
+    file_ignores: &FileIgnoreSet,
+    pending: &mut PendingDeletes,
+) {
+    for path in pending.take_all() {
+        record_event(conn, cfg, dir_ignores, file_ignores, &path, "deleted");
+    }
+}
+
+/// Resolve and insert one `file_events` row for `path`/`kind`, after
+/// the event-kind and ignore-dir/ignore-file filters. Shared by the
+/// immediate create/modify path and the two places a pending delete
+/// gets flushed.
+fn record_event(
+    conn: &Connection,
+    cfg: &Config,
+    dir_ignores: &crate::files::IgnoreSet,
+    file_ignores: &FileIgnoreSet,
+    path: &Path,
+    kind: &str,
+) {
+    if !cfg.daemon_events_enabled(kind) {
+        return;
+    }
+    if is_under_ignored_dir(path, dir_ignores) {
+        return;
+    }
+    if file_ignores.matches(path) {
+        return;
+    }
+
+    // Same attribution the `file` command uses, resolved from the
+    // FILE's own directory (not the watcher's cwd).
+    let (canonical, dir) = canonicalize_event_path(path);
+    let slug = match crate::resolve_current_project(conn, cfg, &dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("smarthistory daemon: failed to resolve project for {dir}: {e}");
+            return;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // A single failed write (e.g. the busy timeout above was still
+    // exceeded under heavy concurrent load) must not kill a daemon
+    // meant to run for days — log and keep watching rather than
+    // propagating with `?`.
+    if let Err(e) = conn.execute(
+        "INSERT INTO file_events (path, event_kind, project_slug, timestamp) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![canonical, kind, slug, now],
+    ) {
+        eprintln!("smarthistory daemon: failed to record {kind} event for {canonical}: {e}");
+    }
+}
+
+/// Paths with a `deleted` event awaiting a possible matching
+/// `created`/`modified` event at the same path, keyed by the raw
+/// (pre-canonicalization) watcher path — a create/modify for the
+/// exact same watched path notify already reported the delete for
+/// shares that same raw path, so no canonicalization is needed to
+/// match them up.
+struct PendingDeletes {
+    stashed: HashMap<PathBuf, Instant>,
+}
+
+impl PendingDeletes {
+    fn new() -> Self {
+        Self {
+            stashed: HashMap::new(),
+        }
+    }
+
+    /// Record (or refresh) a pending delete for `path`.
+    fn stash(&mut self, path: PathBuf) {
+        self.stashed.insert(path, Instant::now());
+    }
+
+    /// If `path` has a pending delete, consume it (so it's never
+    /// flushed as a real deletion) and report the merge.
+    fn try_merge(&mut self, path: &Path) -> bool {
+        self.stashed.remove(path).is_some()
+    }
+
+    /// The earliest instant any pending delete's merge window
+    /// expires, or `None` when nothing is pending.
+    fn earliest_deadline(&self, window: Duration) -> Option<Instant> {
+        self.stashed.values().map(|&t| t + window).min()
+    }
+
+    /// Remove and return every path whose merge window has expired
+    /// as of now — these are real deletions, nothing merged with
+    /// them in time.
+    fn take_expired(&mut self, window: Duration) -> Vec<PathBuf> {
+        let now = Instant::now();
+        let expired: Vec<PathBuf> = self
+            .stashed
+            .iter()
+            .filter(|&(_, &t)| now >= t + window)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in &expired {
+            self.stashed.remove(p);
+        }
+        expired
+    }
+
+    /// Remove and return every still-pending path, regardless of
+    /// whether its window has expired — used when the watch loop is
+    /// exiting and nothing should be silently dropped.
+    fn take_all(&mut self) -> Vec<PathBuf> {
+        self.stashed.drain().map(|(p, _)| p).collect()
+    }
 }
 
 /// How long `--once` mode waits for the current event burst to drain
@@ -265,6 +422,69 @@ mod tests {
     #[test]
     fn once_drain_window_scales_with_debounce_ms() {
         assert!(once_drain_window(5000) > once_drain_window(500));
+    }
+
+    #[test]
+    fn pending_deletes_merge_cancels_the_pending_delete() {
+        let mut pending = PendingDeletes::new();
+        let path = PathBuf::from("/tmp/foo.txt");
+        pending.stash(path.clone());
+        assert!(pending.try_merge(&path), "a stashed delete should merge");
+        // Merging consumes it — a second attempt finds nothing left
+        // to merge, and it must not be flushed later either.
+        assert!(!pending.try_merge(&path));
+        assert_eq!(pending.take_all(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn pending_deletes_merge_only_matches_the_same_path() {
+        let mut pending = PendingDeletes::new();
+        pending.stash(PathBuf::from("/tmp/foo.txt"));
+        assert!(
+            !pending.try_merge(Path::new("/tmp/bar.txt")),
+            "a delete for one path must not merge with a create for a different path"
+        );
+    }
+
+    #[test]
+    fn pending_deletes_take_expired_only_returns_paths_past_the_window() {
+        let mut pending = PendingDeletes::new();
+        pending.stash(PathBuf::from("/tmp/foo.txt"));
+        // A window far in the future hasn't expired yet.
+        assert_eq!(
+            pending.take_expired(Duration::from_secs(3600)),
+            Vec::<PathBuf>::new()
+        );
+        // A zero-length window is already expired.
+        assert_eq!(
+            pending.take_expired(Duration::from_secs(0)),
+            vec![PathBuf::from("/tmp/foo.txt")]
+        );
+        // take_expired removes what it returns.
+        assert_eq!(
+            pending.take_expired(Duration::from_secs(0)),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn pending_deletes_take_all_ignores_the_window_entirely() {
+        let mut pending = PendingDeletes::new();
+        pending.stash(PathBuf::from("/tmp/foo.txt"));
+        pending.stash(PathBuf::from("/tmp/bar.txt"));
+        let mut all = pending.take_all();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![PathBuf::from("/tmp/bar.txt"), PathBuf::from("/tmp/foo.txt")]
+        );
+        assert_eq!(pending.take_all(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn pending_deletes_earliest_deadline_is_none_when_empty() {
+        let pending = PendingDeletes::new();
+        assert_eq!(pending.earliest_deadline(Duration::from_secs(1)), None);
     }
 
     #[test]
