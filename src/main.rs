@@ -225,7 +225,7 @@ enum Commands {
     /// Resolve a comment to its most recently used command.
     ///
     /// Used by the zsh comment-expansion widget: `text` is matched
-    /// exactly (case-insensitively) against `command_comments.comment`;
+    /// exactly (case-sensitively) against `command_comments.comment`;
     /// if multiple commands share that exact comment, the one most
     /// recently run wins. Prints the bare command with no formatting,
     /// or nothing if there's no match.
@@ -5166,18 +5166,20 @@ fn build_search_where_clause(
 
 /// Resolve a comment to the most recently used command that carries
 /// it, for the zsh comment-expansion widget (`smarthistory expand`).
-/// Matches `command_comments.comment` exactly (case-insensitively,
-/// matching the case-insensitivity `LIKE` already gives substring
-/// search elsewhere in this file) rather than as a substring — unlike
-/// `build_search_where_clause`, which is deliberately substring-based
-/// and matches command-or-comment together, this needs an unambiguous
-/// single answer for a specific typed word.
+/// Matches `command_comments.comment` exactly and case-sensitively
+/// (SQLite's default `BINARY` collation) rather than as a substring —
+/// unlike `build_search_where_clause`, which is deliberately
+/// substring-based, case-insensitive, and matches command-or-comment
+/// together, this needs an unambiguous single answer for a specific
+/// typed word, and case sensitivity lets a short lowercase word like
+/// `rust` stay a normal command-line word while its uppercase
+/// counterpart `RUST` triggers the expansion.
 fn resolve_comment(conn: &Connection, text: &str) -> anyhow::Result<Option<String>> {
     use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT h.command FROM history h \
          JOIN command_comments c ON h.command = c.command \
-         WHERE c.comment = ?1 COLLATE NOCASE \
+         WHERE c.comment = ?1 \
          ORDER BY h.timestamp DESC LIMIT 1",
         params![text],
         |row| row.get(0),

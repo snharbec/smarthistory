@@ -519,11 +519,13 @@ text (as set via `smarthistory add ... --comment "..."`) at the very start of
 the command line, then a space, replaces it with the most recently used command
 carrying that exact comment — the same UX as zsh-abbr/fish abbreviations,
 sourced from smarthistory's own comment data. Matching is exact and
-case-insensitive against `command_comments.comment` (not a substring match, and
-not scoped to the command text), so a comment shared by multiple commands always
-resolves to whichever was run most recently. Off by default, same opt-in
-reasoning as `dropdown.enabled` above: it hooks keystroke widgets, a bigger
-behavior change than the prefix-triggered modes.
+case-sensitive against `command_comments.comment` (not a substring match, and
+not scoped to the command text) — `rust` won't expand a comment stored as
+`RUST`, so a short, common lowercase word can still be typed as a normal
+command-line word without accidentally triggering an expansion. A comment shared
+by multiple commands always resolves to whichever was run most recently. Off by
+default, same opt-in reasoning as `dropdown.enabled` above: it hooks keystroke
+widgets, a bigger behavior change than the prefix-triggered modes.
 
 ```ini
 commentexpand.enabled=on
