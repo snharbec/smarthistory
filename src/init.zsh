@@ -2206,10 +2206,28 @@ _smarthistory_up_history() {
     # `_smarthistory_dropdown_accept`'s doc comment for why that
     # changed. Everything below this branch is completely unchanged
     # from before the dropdown feature existed.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
+    #
+    # EXCEPT when `LBUFFER` is empty: `_smarthistory_dropdown_render`
+    # only ever shows a dropdown on an empty line for
+    # `dropdown.predict` (a "what usually comes next" hint — see its
+    # own `$#LBUFFER == 0` branch there; the normal typed-search
+    # dropdown never activates with zero characters, even with
+    # `dropdown.minchars=0`). Routing Up into that prediction list
+    # meant Up could never recall the command you just ran — the most
+    # basic, universally-expected shell keybinding there is — the
+    # instant `dropdown.predict` happened to have a suggestion for it.
+    # An empty line always means "walk real history," never "browse
+    # predictions" — the prediction is a glance-hint, not a modal
+    # takeover of Up/Down.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 && -n "$LBUFFER" ]]; then
         _smarthistory_dropdown_navigate_prev
         return
     fi
+    # Falling through to a real history recall on an empty line
+    # supersedes any prediction dropdown that happened to be showing
+    # (it was a hint for the now-abandoned empty line) — clear it so
+    # its ghost text doesn't linger stale over the recalled command.
+    [[ $_smarthistory_dropdown_visible -eq 1 ]] && _smarthistory_dropdown_clear
     # Always use smarthistory, even with an empty LBUFFER (an empty
     # query means "give me the oldest command in the current scope").
     _smarthistory_prime_cache
@@ -2253,12 +2271,15 @@ _smarthistory_up_history() {
 _smarthistory_down_history() {
     # When the live dropdown is showing, Down navigates the candidate
     # list forward (`_smarthistory_dropdown_navigate_next`) — see
-    # `_smarthistory_up_history` above for the backward case and why
-    # navigation lives here rather than in Tab.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 ]]; then
+    # `_smarthistory_up_history` above for the backward case, why
+    # navigation lives here rather than in Tab, and why an empty
+    # `LBUFFER` (a `dropdown.predict` hint, never a normal search
+    # dropdown) always falls through to the real history walk instead.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 && -n "$LBUFFER" ]]; then
         _smarthistory_dropdown_navigate_next
         return
     fi
+    [[ $_smarthistory_dropdown_visible -eq 1 ]] && _smarthistory_dropdown_clear
     # Down walks the match list in the *opposite* direction of Up
     # (Up advances through the array from oldest to newest, Down
     # walks back from newest to oldest). At the very start of the

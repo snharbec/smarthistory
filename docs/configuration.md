@@ -492,8 +492,19 @@ With nothing run yet in the session, or with this off (the default), an empty
 line shows no dropdown, same as before this existed. The prediction appears on
 the very first empty prompt after a command finishes — not only after some other
 action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
-`zle-line-init` hook. Selecting a predicted candidate works exactly like
-selecting a normal search result (`Tab`/`Enter`/arrows all behave identically).
+`zle-line-init` hook. `Tab`/`Enter` accept the top (most probable) prediction
+directly, same as a normal search result.
+
+**`Up`/`Down` never browse predictions** — on an empty line they always walk
+your real command history instead, even while a prediction is showing. An empty
+line is the single most load-bearing place `Up` is expected to just recall your
+last command; letting a prediction dropdown intercept it meant `Up` could
+silently stop doing that the moment `smarthistory next` happened to have a
+suggestion for whatever you'd just run. The prediction dropdown is purely a
+glance-hint on this line — its top candidate is one `Tab`/`Enter` away, but the
+up-to-3-candidate list itself isn't arrow-navigable (unlike a normal
+typed-search dropdown, where `Up`/`Down` do navigate the candidates, since
+there's no competing "recall history" expectation once you've typed something).
 
 Scoped to the current search mode, same as the normal search results shown once
 you start typing: SESS only predicts successors observed in

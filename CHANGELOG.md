@@ -126,6 +126,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `Up`/`Down` on an empty command line no longer get hijacked by the
+  `dropdown.predict` prediction dropdown. With both `dropdown.enabled=on` and
+  `dropdown.predict=on`, an empty prompt after running a command shows a "what
+  usually comes next" hint — but `Up`/`Down` unconditionally routed into
+  navigating _that_ list whenever it was visible, so pressing `Up` to recall the
+  command you'd just run silently did nothing (or landed on an unrelated
+  predicted successor) whenever `smarthistory next` happened to have a
+  suggestion for it. An empty line always means "walk real history" now, never
+  "browse predictions" — the prediction dropdown remains visible as a
+  glance-hint, and `Tab`/`Enter` still accept its top candidate directly, but
+  `Up`/`Down` no longer intercept it. `Up`/`Down` on a normal typed-search
+  dropdown (non-empty line) are unaffected.
 - Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
   `directory, timestamp`) that the schema was missing. The main history fetch
   sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by
