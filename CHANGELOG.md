@@ -88,6 +88,18 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `smarthistory export`/`import` now cover the whole database, not just
+  `history`/comments/output. Export format bumped to version 2 (version 1 files
+  still import fine): every `command_comments` row is now exported independent
+  of `history` (so a comment on a command with no `history` row, or whose only
+  row falls outside `--since`/`--until`, still round-trips — previously it was
+  silently dropped), plus new `file_events`, `project_sessions`, and the
+  `project_current`/`project_pause` singleton state. Import upserts
+  comments/sessions and inserts new file events (deduplicated, since the table
+  has no unique constraint of its own); the `project_current`/`project_pause`
+  snapshot is only applied if it's newer than what's already in the target
+  database, so importing an old backup onto a live one can't revert the actual
+  current project to a stale value.
 - `highlight_with_bat`/`highlight_with_bat_auto` (the preview-pane syntax
   highlighters used by `ag`, `$` tags, CodeGraph, notes, todo, segments,
   similar, and files modes) are now backed by

@@ -692,26 +692,45 @@ enum Commands {
         #[arg(short, long)]
         exit_code: i32,
     },
-    /// Export all history data to a JSON file.
+    /// Export all history and time-tracking data to a JSON file.
     ///
-    /// The file contains every history entry, command comment, and
-    /// captured output, so a complete round-trip import is possible.
+    /// The file contains every history entry with its captured
+    /// output; every command comment (independent of `history`, so
+    /// one on a command with no history row, or outside
+    /// `--since`/`--until`, still round-trips); every `file_events`
+    /// row; every `project_sessions` row; and the current
+    /// `project_current`/`project_pause` singleton state — a
+    /// complete round-trip import is possible.
     Export {
         /// Path to the output JSON file.
         filename: PathBuf,
         /// Optional start timestamp (Unix epoch seconds). Only
-        /// entries with timestamp >= this value are exported.
+        /// history/file-event/project-session entries with
+        /// timestamp >= this value are exported. Comments and the
+        /// `project_current`/`project_pause` snapshot are unaffected
+        /// (they have no timestamp of their own to filter on).
         #[arg(long)]
         since: Option<i64>,
         /// Optional end timestamp (Unix epoch seconds). Only
-        /// entries with timestamp <= this value are exported.
+        /// history/file-event/project-session entries with
+        /// timestamp <= this value are exported. Same exemptions as
+        /// `--since`.
         #[arg(long)]
         until: Option<i64>,
     },
-    /// Import history data from a JSON file created by `export`.
+    /// Import history and time-tracking data from a JSON file created
+    /// by `export`.
     ///
-    /// Existing entries with the same (command, directory,
-    /// session_id) are updated; new entries are inserted.
+    /// Existing `history` entries with the same (command, directory,
+    /// session_id) are updated; new entries are inserted. Comments
+    /// are upserted by command text. `file_events` rows are inserted
+    /// only if not already present (they're an immutable log, so
+    /// there's nothing to update). `project_sessions` rows are
+    /// upserted by (project_slug, start_ts). The
+    /// `project_current`/`project_pause` singleton state is only
+    /// applied if it's newer than whatever's already in the target
+    /// database, so importing an old backup onto a live database
+    /// can't revert the actual current project to a stale snapshot.
     Import {
         /// Path to the input JSON file.
         filename: PathBuf,
@@ -941,13 +960,89 @@ struct HistoryExportRow {
     output: Option<String>,
 }
 
+/// A single `command_comments` row for JSON export/import, exported
+/// independently of `history` (unlike the same-named field on
+/// [`HistoryExportRow`], which is kept for backward compatibility
+/// importing an older export) — so a comment on a command with no
+/// matching `history` row, or whose only `history` row falls outside
+/// a `--since`/`--until` window, still round-trips. Comments have no
+/// timestamp of their own, so this list ignores `--since`/`--until`
+/// entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommentExportRow {
+    command: String,
+    comment: String,
+}
+
+/// A single `file_events` row (`smarthistory daemon`/`smarthistory
+/// file`) for JSON export/import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileEventExportRow {
+    path: String,
+    event_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_slug: Option<String>,
+    timestamp: i64,
+}
+
+/// A single time-tracking `project_sessions` row for JSON
+/// export/import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectSessionExportRow {
+    project_slug: String,
+    start_ts: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_ts: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_reason: Option<String>,
+}
+
+/// The singleton `project_current` row (`smarthistory project
+/// select`) for JSON export/import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectCurrentExportRow {
+    project_slug: String,
+    set_ts: i64,
+}
+
+/// The singleton `project_pause` row (`smarthistory project pause`)
+/// for JSON export/import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectPauseExportRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paused_slug: Option<String>,
+    paused_at: i64,
+}
+
 /// The full export/import format.
+///
+/// `version` is bumped to `2` for the `comments`/`file_events`/
+/// `project_sessions`/`project_current`/`project_pause` fields added
+/// alongside the original `history` (version `1`, still importable —
+/// every new field defaults to empty/`None` when absent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryExport {
     /// Schema version for forward compatibility.
     version: i32,
     /// All history entries.
     history: Vec<HistoryExportRow>,
+    /// Every `command_comments` row, independent of `history` — see
+    /// [`CommentExportRow`].
+    #[serde(default)]
+    comments: Vec<CommentExportRow>,
+    /// Every `file_events` row.
+    #[serde(default)]
+    file_events: Vec<FileEventExportRow>,
+    /// Every `project_sessions` row.
+    #[serde(default)]
+    project_sessions: Vec<ProjectSessionExportRow>,
+    /// The singleton `project_current` row, if set.
+    #[serde(default)]
+    project_current: Option<ProjectCurrentExportRow>,
+    /// The singleton `project_pause` row, if time tracking was
+    /// paused at export time.
+    #[serde(default)]
+    project_pause: Option<ProjectPauseExportRow>,
 }
 
 fn get_db_path() -> PathBuf {
@@ -5509,6 +5604,170 @@ fn resolve_pane_exec(cfg: &Config, current_name: &str) -> PaneExecTarget {
     PaneExecTarget::NotFound
 }
 
+/// A `WHERE` fragment (leading ` AND ...`, empty when both bounds are
+/// `None`) plus its bound params for an optional `[since, until]`
+/// timestamp range on `column`. Shared by every `Commands::Export`
+/// query so `--since`/`--until` scope `history`, `file_events`, and
+/// `project_sessions` identically (the column name differs per
+/// table, hence the parameter rather than a single hardcoded clause).
+struct TimeRangeClause {
+    clause: String,
+    params: Vec<Box<dyn rusqlite::ToSql>>,
+}
+
+fn time_range_clause(column: &str, since: Option<i64>, until: Option<i64>) -> TimeRangeClause {
+    let mut clause = String::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(ts) = since {
+        clause.push_str(&format!(" AND {column} >= ?"));
+        params.push(Box::new(ts));
+    }
+    if let Some(ts) = until {
+        clause.push_str(&format!(" AND {column} <= ?"));
+        params.push(Box::new(ts));
+    }
+    TimeRangeClause { clause, params }
+}
+
+/// Upsert every exported comment into `command_comments`,
+/// independent of `history` — see [`CommentExportRow`]. Returns the
+/// number of rows upserted (inserted or updated; unlike
+/// `import_history_rows` there's no meaningful insert-vs-update
+/// distinction to report here since a comment overwrite is a normal,
+/// expected outcome of re-importing the same export).
+fn import_comments(conn: &Connection, comments: &[CommentExportRow]) -> anyhow::Result<usize> {
+    for c in comments {
+        conn.execute(
+            "INSERT INTO command_comments (command, comment) VALUES (?1, ?2) \
+             ON CONFLICT (command) DO UPDATE SET comment = excluded.comment",
+            params![c.command, c.comment],
+        )?;
+    }
+    Ok(comments.len())
+}
+
+/// Insert every exported file event not already present, matched by
+/// `(path, event_kind, project_slug, timestamp)`. `file_events` rows
+/// are an immutable log — there's nothing to update on a match, only
+/// insert-if-new. Returns the number of rows actually inserted.
+fn import_file_events(conn: &Connection, events: &[FileEventExportRow]) -> anyhow::Result<usize> {
+    use rusqlite::OptionalExtension;
+    let mut inserted = 0usize;
+    for e in events {
+        let existed = conn
+            .query_row(
+                "SELECT 1 FROM file_events \
+                 WHERE path = ?1 AND event_kind = ?2 AND project_slug IS ?3 AND timestamp = ?4",
+                params![e.path, e.event_kind, e.project_slug, e.timestamp],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !existed {
+            conn.execute(
+                "INSERT INTO file_events (path, event_kind, project_slug, timestamp) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![e.path, e.event_kind, e.project_slug, e.timestamp],
+            )?;
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
+}
+
+/// Upsert every exported project session, matched by `(project_slug,
+/// start_ts)` — no schema-level unique constraint exists, but that
+/// pair uniquely identifies a session in practice (a project can't
+/// start two sessions at the same instant). An existing session's
+/// `end_ts`/`end_reason` are updated in case the export captured it
+/// after it closed. Returns the number of NEW sessions inserted.
+fn import_project_sessions(
+    conn: &Connection,
+    sessions: &[ProjectSessionExportRow],
+) -> anyhow::Result<usize> {
+    use rusqlite::OptionalExtension;
+    let mut inserted = 0usize;
+    for s in sessions {
+        let existing_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM project_sessions WHERE project_slug = ?1 AND start_ts = ?2",
+                params![s.project_slug, s.start_ts],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match existing_id {
+            Some(id) => {
+                conn.execute(
+                    "UPDATE project_sessions SET end_ts = ?1, end_reason = ?2 WHERE id = ?3",
+                    params![s.end_ts, s.end_reason, id],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO project_sessions (project_slug, start_ts, end_ts, end_reason) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![s.project_slug, s.start_ts, s.end_ts, s.end_reason],
+                )?;
+                inserted += 1;
+            }
+        }
+    }
+    Ok(inserted)
+}
+
+/// Apply the exported singleton `project_current` row, but only if
+/// it's newer than (or there's no) existing one — importing an old
+/// backup onto a live database must not clobber the actual current
+/// project with a stale snapshot. A no-op when `row` is `None`
+/// (absent from an older export, or never set).
+fn import_project_current(
+    conn: &Connection,
+    row: Option<&ProjectCurrentExportRow>,
+) -> anyhow::Result<()> {
+    let Some(row) = row else { return Ok(()) };
+    use rusqlite::OptionalExtension;
+    let existing_set_ts: Option<i64> = conn
+        .query_row("SELECT set_ts FROM project_current WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if existing_set_ts.is_some_and(|ts| ts >= row.set_ts) {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, ?1, ?2) \
+         ON CONFLICT (id) DO UPDATE SET project_slug = excluded.project_slug, \
+         set_ts = excluded.set_ts",
+        params![row.project_slug, row.set_ts],
+    )?;
+    Ok(())
+}
+
+/// Same "newer wins" guard as [`import_project_current`], for the
+/// singleton `project_pause` row.
+fn import_project_pause(
+    conn: &Connection,
+    row: Option<&ProjectPauseExportRow>,
+) -> anyhow::Result<()> {
+    let Some(row) = row else { return Ok(()) };
+    use rusqlite::OptionalExtension;
+    let existing_paused_at: Option<i64> = conn
+        .query_row("SELECT paused_at FROM project_pause WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if existing_paused_at.is_some_and(|ts| ts >= row.paused_at) {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO project_pause (id, paused_slug, paused_at) VALUES (1, ?1, ?2) \
+         ON CONFLICT (id) DO UPDATE SET paused_slug = excluded.paused_slug, \
+         paused_at = excluded.paused_at",
+        params![row.paused_slug, row.paused_at],
+    )?;
+    Ok(())
+}
+
 /// Upsert every row of an imported `HistoryExport` into `history`
 /// (plus its `command_comments` / `history_output` side tables),
 /// returning `(imported, updated)` counts. Extracted from
@@ -8541,17 +8800,12 @@ fn main() -> anyhow::Result<()> {
             since,
             until,
         } => {
-            // Build the time-range filter.
-            let mut time_clause = String::new();
-            let mut time_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            if let Some(ts) = since {
-                time_clause.push_str(" AND h.timestamp >= ?");
-                time_params.push(Box::new(ts));
-            }
-            if let Some(ts) = until {
-                time_clause.push_str(" AND h.timestamp <= ?");
-                time_params.push(Box::new(ts));
-            }
+            // Build the time-range filter, one copy per query since
+            // the timestamp column differs (`h.timestamp` for
+            // history, `timestamp`/`start_ts` for the others).
+            let history_time_clause = time_range_clause("h.timestamp", since, until);
+            let file_events_time_clause = time_range_clause("timestamp", since, until);
+            let sessions_time_clause = time_range_clause("start_ts", since, until);
 
             // Fetch history rows with their comments and output.
             let sql = format!(
@@ -8563,10 +8817,10 @@ fn main() -> anyhow::Result<()> {
                  LEFT JOIN history_output o ON h.id = o.history_id \
                  WHERE 1=1{} \
                  ORDER BY h.timestamp ASC",
-                time_clause
+                history_time_clause.clause
             );
             let params_ref: Vec<&dyn rusqlite::ToSql> =
-                time_params.iter().map(|p| p.as_ref()).collect();
+                history_time_clause.params.iter().map(|p| p.as_ref()).collect();
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(&params_ref[..], |row| {
                 Ok(HistoryExportRow {
@@ -8581,22 +8835,117 @@ fn main() -> anyhow::Result<()> {
                     output: row.get::<_, Option<String>>(8)?,
                 })
             })?;
-
             let mut history = Vec::new();
             for row in rows {
                 history.push(row?);
             }
 
+            // Every comment, regardless of whether its command has a
+            // history row in range (or at all) — see
+            // `CommentExportRow`'s doc comment.
+            let mut stmt =
+                conn.prepare("SELECT command, comment FROM command_comments ORDER BY command")?;
+            let comments = stmt
+                .query_map([], |row| {
+                    Ok(CommentExportRow {
+                        command: row.get(0)?,
+                        comment: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let sql = format!(
+                "SELECT path, event_kind, project_slug, timestamp FROM file_events \
+                 WHERE 1=1{} ORDER BY timestamp ASC",
+                file_events_time_clause.clause
+            );
+            let params_ref: Vec<&dyn rusqlite::ToSql> = file_events_time_clause
+                .params
+                .iter()
+                .map(|p| p.as_ref())
+                .collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let file_events = stmt
+                .query_map(&params_ref[..], |row| {
+                    Ok(FileEventExportRow {
+                        path: row.get(0)?,
+                        event_kind: row.get(1)?,
+                        project_slug: row.get(2)?,
+                        timestamp: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let sql = format!(
+                "SELECT project_slug, start_ts, end_ts, end_reason FROM project_sessions \
+                 WHERE 1=1{} ORDER BY start_ts ASC",
+                sessions_time_clause.clause
+            );
+            let params_ref: Vec<&dyn rusqlite::ToSql> = sessions_time_clause
+                .params
+                .iter()
+                .map(|p| p.as_ref())
+                .collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let project_sessions = stmt
+                .query_map(&params_ref[..], |row| {
+                    Ok(ProjectSessionExportRow {
+                        project_slug: row.get(0)?,
+                        start_ts: row.get(1)?,
+                        end_ts: row.get(2)?,
+                        end_reason: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // The two singleton tables are current-state snapshots,
+            // not a time-ranged log — always included regardless of
+            // `--since`/`--until`.
+            use rusqlite::OptionalExtension;
+            let project_current = conn
+                .query_row(
+                    "SELECT project_slug, set_ts FROM project_current WHERE id = 1",
+                    [],
+                    |row| {
+                        Ok(ProjectCurrentExportRow {
+                            project_slug: row.get(0)?,
+                            set_ts: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()?;
+            let project_pause = conn
+                .query_row(
+                    "SELECT paused_slug, paused_at FROM project_pause WHERE id = 1",
+                    [],
+                    |row| {
+                        Ok(ProjectPauseExportRow {
+                            paused_slug: row.get(0)?,
+                            paused_at: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()?;
+
             let export = HistoryExport {
-                version: 1,
+                version: 2,
                 history,
+                comments,
+                file_events,
+                project_sessions,
+                project_current,
+                project_pause,
             };
 
             let json = serde_json::to_string_pretty(&export)?;
             std::fs::write(&filename, json)?;
             eprintln!(
-                "Exported {} history entries to {}",
+                "Exported {} history entries, {} comments, {} file events, {} project \
+                 sessions to {}",
                 export.history.len(),
+                export.comments.len(),
+                export.file_events.len(),
+                export.project_sessions.len(),
                 filename.display()
             );
         }
@@ -8604,16 +8953,25 @@ fn main() -> anyhow::Result<()> {
             let json = std::fs::read_to_string(&filename)?;
             let export: HistoryExport = serde_json::from_str(&json)?;
 
-            if export.version != 1 {
-                anyhow::bail!("Unsupported export version {}; expected 1", export.version);
+            if export.version != 1 && export.version != 2 {
+                anyhow::bail!("Unsupported export version {}; expected 1 or 2", export.version);
             }
 
+            let comments_upserted = import_comments(&conn, &export.comments)?;
             let (imported, updated) = import_history_rows(&conn, &export.history)?;
+            let file_events_imported = import_file_events(&conn, &export.file_events)?;
+            let sessions_imported = import_project_sessions(&conn, &export.project_sessions)?;
+            import_project_current(&conn, export.project_current.as_ref())?;
+            import_project_pause(&conn, export.project_pause.as_ref())?;
 
             eprintln!(
-                "Imported {} new entries, updated {} existing entries from {}",
+                "Imported {} new entries, updated {} existing entries, {} comments, {} new \
+                 file events, {} new project sessions from {}",
                 imported,
                 updated,
+                comments_upserted,
+                file_events_imported,
+                sessions_imported,
                 filename.display()
             );
         }
