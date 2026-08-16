@@ -68,7 +68,10 @@ of falling through to zsh's native history.
 - **Time tracking**: attributes directories/commands/notes/websites to a project
   (a `type: project` note), resolved by directory or explicit `.`-mode
   selection, no daemon required. `smarthistory project report` prints a
-  per-project daily rollup. See [Time tracking](#time-tracking) below.
+  per-project daily rollup; `smarthistory serve` serves the same data as a web
+  dashboard (JSON API + a single-page UI, loopback-only by default — no
+  authentication). See [Time tracking](#time-tracking) below and
+  [docs/server.md](docs/server.md).
 - **Smart "next command" predictor** (`Ctrl+S`): ranks history by successor
   frequency via SQLite's `LEAD()` window function, scoped to the current search
   mode (SESS/DIR/GLOBAL). The live dropdown can also show this on an empty line

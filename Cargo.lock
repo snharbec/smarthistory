@@ -3390,6 +3390,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "axum",
  "chrono",
  "clap",
  "crossterm",
@@ -3407,6 +3408,7 @@ dependencies = [
  "syntect",
  "sysinfo",
  "time",
+ "tokio",
  "ureq",
 ]
 

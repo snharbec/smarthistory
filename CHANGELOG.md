@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `smarthistory serve`: an HTTP server exposing the same time-tracking data
+  `project report` prints as text — a JSON API
+  (`/api/report`/`/api/history`/`/api/projects`) plus an embedded single-page
+  web UI (overview of every project active on a day, a drill-down detail view
+  with collapsible files/notes/links lists, date navigation, and a project
+  search view showing the last 7 days of tracked time, with real browser
+  back/forward via `history.pushState`/`popstate`). No authentication — binds to
+  `127.0.0.1` by default (`serve.host`/`serve.port` config keys, or
+  `--host`/`--port`), with a startup warning if widened past loopback. Every
+  request opens its own short-lived read-only DB connection. `axum`/`tokio` were
+  already fully compiled into the dependency tree transitively via
+  `note_search`, so adding them directly costs no extra binary weight. The
+  day-report aggregation previously inline in `ProjectAction::Report`'s handler
+  is now the shared `build_day_report` function, so the CLI's text report and
+  the web API can never drift apart. See `docs/server.md`.
 - New `smarthistory daemon`: a file-watching loop that records file changes in
   configured project directories as `file_events` (created/modified/deleted),
   attributed to the project the file lives in — the automatic counterpart to the

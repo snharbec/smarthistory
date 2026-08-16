@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>smarthistory — time tracking</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card-bg: #ffffff;
+    --border: #e2e5eb;
+    --text: #1a1d23;
+    --text-dim: #6b7280;
+    --accent: #3b6fe0;
+    --accent-bg: #eaf0fd;
+    --danger: #d1495b;
+    --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --card-bg: #1c1f26;
+      --border: #2c313c;
+      --text: #e6e8eb;
+      --text-dim: #9aa1ab;
+      --accent: #6f9bf5;
+      --accent-bg: #1f2b47;
+      --danger: #e0697a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 0;
+    white-space: nowrap;
+  }
+  header h1 a { color: var(--text); }
+  .day-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .day-nav button, .icon-btn {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .day-nav button:hover, .icon-btn:hover { background: var(--accent-bg); }
+  .day-nav input[type="date"] {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  #search {
+    margin-left: auto;
+    position: relative;
+    min-width: 200px;
+  }
+  #search input {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 10px;
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  #search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    margin-top: 4px;
+    max-height: 260px;
+    overflow-y: auto;
+    display: none;
+  }
+  #search-results.open { display: block; }
+  #search-results div {
+    padding: 7px 12px;
+    cursor: pointer;
+  }
+  #search-results div:hover { background: var(--accent-bg); }
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 14px;
+    margin: 0 0 4px;
+  }
+  .project-list {
+    display: grid;
+    gap: 10px;
+  }
+  .project-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    cursor: pointer;
+    box-shadow: var(--shadow);
+  }
+  .project-row:hover { border-color: var(--accent); }
+  .project-row .slug { font-weight: 600; }
+  .project-row .badge.untracked { color: var(--text-dim); font-style: italic; }
+  .duration {
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .muted { color: var(--text-dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--text-dim); font-weight: 600; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    background: var(--card-bg);
+  }
+  details > summary {
+    cursor: pointer;
+    font-weight: 600;
+    list-style: none;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before {
+    content: "▸";
+    display: inline-block;
+    width: 1em;
+    color: var(--text-dim);
+  }
+  details[open] > summary::before { content: "▾"; }
+  details ul { margin: 8px 0 0; padding-left: 1.6em; }
+  details li { margin-bottom: 2px; word-break: break-all; }
+  .breadcrumb { margin-bottom: 14px; font-size: 13px; }
+  .history-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    height: 140px;
+    padding-top: 10px;
+  }
+  .history-bar {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    cursor: pointer;
+    height: 100%;
+  }
+  .history-bar .bar {
+    width: 60%;
+    background: var(--accent);
+    border-radius: 4px 4px 0 0;
+    min-height: 2px;
+    transition: opacity 0.1s;
+  }
+  .history-bar:hover .bar { opacity: 0.75; }
+  .history-bar .label {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: center;
+  }
+  .history-bar .val {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .empty { color: var(--text-dim); font-style: italic; padding: 8px 0; }
+  .error { color: var(--danger); }
+  .cluster-title { font-weight: 600; margin: 10px 0 2px; }
+  .cluster-title:first-child { margin-top: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="/" data-link>smarthistory</a></h1>
+  <div class="day-nav" id="day-nav" style="display:none">
+    <button id="day-prev" title="Previous day">&larr;</button>
+    <input type="date" id="day-picker" />
+    <button id="day-next" title="Next day">&rarr;</button>
+    <button id="day-today">Today</button>
+  </div>
+  <div id="search">
+    <input type="text" id="search-input" placeholder="Search project…" autocomplete="off" />
+    <div id="search-results"></div>
+  </div>
+</header>
+<main id="app"></main>
+
+<script>
+(function () {
+  "use strict";
+
+  const app = document.getElementById("app");
+  const dayNav = document.getElementById("day-nav");
+  const dayPicker = document.getElementById("day-picker");
+
+  // ---------- helpers ----------
+
+  function todayLocal() {
+    const d = new Date();
+    return fmtDate(d);
+  }
+  function fmtDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  function shiftDate(dateStr, deltaDays) {
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + deltaDays);
+    return fmtDate(dt);
+  }
+  function formatDuration(secs) {
+    secs = Math.max(0, secs | 0);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
+    if (m > 0) return `${m}m${String(s).padStart(2, "0")}s`;
+    return `${s}s`;
+  }
+  function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+  }
+  function shortenHome(path) {
+    return path; // server already sends absolute paths; kept simple client-side
+  }
+  async function getJSON(url) {
+    const res = await fetch(url);
+    if (!res.ok) {
+      let msg = res.statusText;
+      try {
+        const body = await res.json();
+        if (body.error) msg = body.error;
+      } catch (_) {}
+      throw new Error(msg || `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  // ---------- routing ----------
+
+  function navigate(path) {
+    if (path === location.pathname) return;
+    history.pushState({}, "", path);
+    render();
+  }
+
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-link]");
+    if (!a) return;
+    e.preventDefault();
+    navigate(a.getAttribute("href"));
+  });
+  window.addEventListener("popstate", render);
+
+  // Route shapes:
+  //   /                              -> today, all projects
+  //   /day/<date>                    -> that day, all projects
+  //   /day/<date>/project/<slug>     -> that day, one project detail
+  //   /project/<slug>                -> 7-day history for one project
+  function parseRoute(pathname) {
+    const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (parts.length === 0) {
+      return { view: "overview", date: todayLocal() };
+    }
+    if (parts[0] === "day" && parts[1]) {
+      if (parts[2] === "project" && parts[3]) {
+        return { view: "detail", date: parts[1], slug: parts[3] };
+      }
+      return { view: "overview", date: parts[1] };
+    }
+    if (parts[0] === "project" && parts[1]) {
+      return { view: "history", slug: parts[1] };
+    }
+    return { view: "overview", date: todayLocal() };
+  }
+
+  // ---------- rendering ----------
+
+  async function render() {
+    const route = parseRoute(location.pathname);
+    if (route.view === "history") {
+      dayNav.style.display = "none";
+      await renderHistory(route.slug);
+    } else if (route.view === "detail") {
+      dayNav.style.display = "flex";
+      dayPicker.value = route.date;
+      await renderDetail(route.date, route.slug);
+    } else {
+      dayNav.style.display = "flex";
+      dayPicker.value = route.date;
+      await renderOverview(route.date);
+    }
+  }
+
+  async function renderOverview(date) {
+    app.innerHTML = `<p class="muted">Loading…</p>`;
+    let report;
+    try {
+      report = await getJSON(`/api/report?day=${encodeURIComponent(date)}`);
+    } catch (err) {
+      app.innerHTML = `<p class="error">Failed to load report: ${esc(err.message)}</p>`;
+      return;
+    }
+    if (report.projects.length === 0) {
+      app.innerHTML = `
+        <div class="card"><h2>${esc(report.date)}</h2>
+        <p class="empty">No tracked activity this day.</p></div>`;
+      return;
+    }
+    const rows = report.projects
+      .map((p) => {
+        const href = `/day/${encodeURIComponent(date)}/project/${encodeURIComponent(p.slug)}`;
+        const badge = p.is_untracked ? `<span class="badge untracked">untracked</span>` : "";
+        return `
+        <a class="project-row" href="${href}" data-link>
+          <span class="slug">${esc(p.slug)} ${badge}</span>
+          <span class="duration">${formatDuration(p.active_secs)}</span>
+        </a>`;
+      })
+      .join("");
+    app.innerHTML = `
+      <div class="card"><h2>${esc(report.date)}</h2></div>
+      <div class="project-list">${rows}</div>
+    `;
+  }
+
+  async function renderDetail(date, slug) {
+    app.innerHTML = `<p class="muted">Loading…</p>`;
+    let report;
+    try {
+      report = await getJSON(
+        `/api/report?day=${encodeURIComponent(date)}&project=${encodeURIComponent(slug)}`
+      );
+    } catch (err) {
+      app.innerHTML = `<p class="error">Failed to load report: ${esc(err.message)}</p>`;
+      return;
+    }
+    const p = report.projects[0];
+    const backHref = `/day/${encodeURIComponent(date)}`;
+    if (!p) {
+      app.innerHTML = `
+        <div class="breadcrumb"><a href="${backHref}" data-link>&larr; ${esc(date)}</a></div>
+        <div class="card"><p class="empty">No activity for "${esc(slug)}" on this day.</p></div>`;
+      return;
+    }
+
+    const dirs = p.directories.length
+      ? `<table><tbody>${p.directories
+          .map((d) => `<tr><td class="mono">${esc(d.directory)}</td><td class="duration">${formatDuration(d.active_secs)}</td></tr>`)
+          .join("")}</tbody></table>`
+      : `<p class="empty">(none)</p>`;
+
+    const cmds = p.commands.length
+      ? `<table><thead><tr><th>Time</th><th>Duration</th><th>Directory</th><th>Command</th></tr></thead><tbody>${p.commands
+          .map(
+            (c) =>
+              `<tr><td class="mono">${esc(c.time_label)}</td><td class="duration">${formatDuration(c.active_secs)}</td><td class="mono">${esc(shortenHome(c.directory))}</td><td class="mono">${esc(c.command)}</td></tr>`
+          )
+          .join("")}</tbody></table>`
+      : `<p class="empty">(none)</p>`;
+
+    const notes = p.notes.length
+      ? `<ul>${p.notes.map((n) => `<li>[[${esc(n)}]]</li>`).join("")}</ul>`
+      : `<p class="empty">(none)</p>`;
+
+    function fileList(entries) {
+      if (!entries.length) return `<p class="empty">(none)</p>`;
+      return `<ul>${entries
+        .map((e) => `<li>${esc(e.path)}${e.count > 1 ? ` <span class="muted">(${e.count}x)</span>` : ""}</li>`)
+        .join("")}</ul>`;
+    }
+
+    const websites = p.websites.length
+      ? p.websites
+          .map(
+            (c) =>
+              `<div class="cluster-title">${esc(c.cluster)}</div><ul>${c.links
+                .map((l) => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a></li>`)
+                .join("")}</ul>`
+          )
+          .join("")
+      : `<p class="empty">(none)</p>`;
+
+    app.innerHTML = `
+      <div class="breadcrumb"><a href="${backHref}" data-link>&larr; ${esc(date)}</a></div>
+      <div class="card">
+        <h2>${esc(p.slug)}</h2>
+        <p>Total active time: <span class="duration">${formatDuration(p.active_secs)}</span></p>
+      </div>
+      <details open><summary>Directories</summary>${dirs}</details>
+      <details open><summary>Commands</summary>${cmds}</details>
+      <details><summary>Notes created</summary>${notes}</details>
+      <details><summary>Files viewed (${p.files.viewed.length})</summary>${fileList(p.files.viewed)}</details>
+      <details><summary>Files modified (${p.files.modified.length})</summary>${fileList(p.files.modified)}</details>
+      <details><summary>Files created (${p.files.created.length})</summary>${fileList(p.files.created)}</details>
+      <details><summary>Files deleted (${p.files.deleted.length})</summary>${fileList(p.files.deleted)}</details>
+      <details><summary>Websites</summary>${websites}</details>
+    `;
+  }
+
+  async function renderHistory(slug) {
+    app.innerHTML = `<p class="muted">Loading…</p>`;
+    let days;
+    try {
+      days = await getJSON(`/api/history?project=${encodeURIComponent(slug)}&days=7`);
+    } catch (err) {
+      app.innerHTML = `<p class="error">Failed to load history: ${esc(err.message)}</p>`;
+      return;
+    }
+    const max = Math.max(1, ...days.map((d) => d.active_secs));
+    const bars = days
+      .map((d) => {
+        const pct = Math.max(2, Math.round((d.active_secs / max) * 100));
+        const label = d.date.slice(5); // MM-DD
+        const href = `/day/${encodeURIComponent(d.date)}/project/${encodeURIComponent(slug)}`;
+        return `
+        <a class="history-bar" href="${href}" data-link title="${esc(d.date)}: ${formatDuration(d.active_secs)}">
+          <span class="val">${d.active_secs > 0 ? formatDuration(d.active_secs) : ""}</span>
+          <span class="bar" style="height:${pct}%"></span>
+          <span class="label">${esc(label)}</span>
+        </a>`;
+      })
+      .join("");
+    const total = days.reduce((sum, d) => sum + d.active_secs, 0);
+    app.innerHTML = `
+      <div class="breadcrumb"><a href="/" data-link>&larr; today</a></div>
+      <div class="card">
+        <h2>${esc(slug)} — last ${days.length} days</h2>
+        <p class="muted">Total: <span class="duration">${formatDuration(total)}</span></p>
+        <div class="history-bars">${bars}</div>
+      </div>
+    `;
+  }
+
+  // ---------- header controls ----------
+
+  document.getElementById("day-prev").addEventListener("click", () => {
+    const route = parseRoute(location.pathname);
+    const date = route.date || todayLocal();
+    goToDay(shiftDate(date, -1), route.slug);
+  });
+  document.getElementById("day-next").addEventListener("click", () => {
+    const route = parseRoute(location.pathname);
+    const date = route.date || todayLocal();
+    goToDay(shiftDate(date, 1), route.slug);
+  });
+  document.getElementById("day-today").addEventListener("click", () => {
+    const route = parseRoute(location.pathname);
+    goToDay(todayLocal(), route.slug);
+  });
+  dayPicker.addEventListener("change", () => {
+    const route = parseRoute(location.pathname);
+    if (dayPicker.value) goToDay(dayPicker.value, route.slug);
+  });
+  function goToDay(date, slug) {
+    navigate(slug ? `/day/${encodeURIComponent(date)}/project/${encodeURIComponent(slug)}` : `/day/${encodeURIComponent(date)}`);
+  }
+
+  // ---------- search ----------
+
+  const searchInput = document.getElementById("search-input");
+  const searchResults = document.getElementById("search-results");
+  let allProjects = [];
+  getJSON("/api/projects").then((p) => (allProjects = p)).catch(() => {});
+
+  function showSearchResults(list) {
+    if (!list.length) {
+      searchResults.classList.remove("open");
+      searchResults.innerHTML = "";
+      return;
+    }
+    searchResults.innerHTML = list
+      .map((slug) => `<div data-slug="${esc(slug)}">${esc(slug)}</div>`)
+      .join("");
+    searchResults.classList.add("open");
+  }
+  searchInput.addEventListener("input", () => {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) {
+      showSearchResults([]);
+      return;
+    }
+    showSearchResults(allProjects.filter((s) => s.toLowerCase().includes(q)).slice(0, 20));
+  });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const q = searchInput.value.trim();
+      if (!q) return;
+      const match = allProjects.find((s) => s.toLowerCase() === q.toLowerCase()) || allProjects.find((s) => s.toLowerCase().includes(q.toLowerCase()));
+      if (match) {
+        searchInput.value = "";
+        showSearchResults([]);
+        navigate(`/project/${encodeURIComponent(match)}`);
+      }
+    } else if (e.key === "Escape") {
+      showSearchResults([]);
+    }
+  });
+  searchResults.addEventListener("click", (e) => {
+    const target = e.target.closest("[data-slug]");
+    if (!target) return;
+    const slug = target.getAttribute("data-slug");
+    searchInput.value = "";
+    showSearchResults([]);
+    navigate(`/project/${encodeURIComponent(slug)}`);
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#search")) showSearchResults([]);
+  });
+
+  // ---------- boot ----------
+
+  render();
+})();
+</script>
+</body>
+</html>

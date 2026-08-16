@@ -11,6 +11,7 @@ mod jira;
 mod llm;
 mod multiplexer;
 mod paperless;
+mod server;
 mod ssh_config;
 mod tui;
 mod util;
@@ -770,6 +771,28 @@ enum Commands {
         #[arg(long)]
         once: bool,
     },
+    /// Serve the time-tracking dashboard: a JSON API plus an embedded
+    /// web UI over the same data `project report` prints as text (see
+    /// `docs/server.md`). Runs in the foreground; manage it with a
+    /// launchd/systemd unit or `&`, same convention `daemon` uses.
+    ///
+    /// **No authentication.** Binds to `127.0.0.1` (loopback only) by
+    /// default — `--host`/`serve.host` widens the bind for LAN access,
+    /// but that's an explicit opt-in with a printed warning, never the
+    /// default, since anyone who can reach the port can read every
+    /// tracked project's directories, commands, notes, and visited
+    /// URLs for any day.
+    Serve {
+        /// Port to listen on. Defaults to `serve.port`, or `4590` if
+        /// that's not set either.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Host/address to bind. Defaults to `serve.host`, or
+        /// `127.0.0.1` if that's not set either. Only widen this past
+        /// loopback if you understand there's no authentication.
+        #[arg(long)]
+        host: Option<String>,
+    },
 }
 
 /// Sub-commands of `smarthistory config`. `Get` preserves the
@@ -1045,7 +1068,7 @@ struct HistoryExport {
     project_pause: Option<ProjectPauseExportRow>,
 }
 
-fn get_db_path() -> PathBuf {
+pub(crate) fn get_db_path() -> PathBuf {
     let home = env::var("HOME").expect("HOME not set");
     PathBuf::from(home)
         .join(".local")
@@ -2240,6 +2263,14 @@ pub struct Config {
     /// event is recorded instead. Default 1000. Set via
     /// `daemon.merge-window-ms=<N>`.
     daemon_merge_window_ms: u64,
+    /// Host/address `smarthistory serve` binds by default. Default
+    /// `127.0.0.1` (loopback only — there's no authentication, so
+    /// never default wider than this). Overridden per-invocation by
+    /// `--host`. Set via `serve.host=<address>`.
+    serve_host: String,
+    /// Port `smarthistory serve` binds by default. Default `4590`.
+    /// Overridden per-invocation by `--port`. Set via `serve.port=<N>`.
+    serve_port: u16,
     /// User-customizable query prefix characters.
     query_prefixes: QueryPrefixes,
     /// User-configured additional
@@ -2580,6 +2611,8 @@ impl Config {
             daemon_events: vec!["created".to_string(), "modified".to_string(), "deleted".to_string()],
             daemon_debounce_ms: 500,
             daemon_merge_window_ms: 1000,
+            serve_host: "127.0.0.1".to_string(),
+            serve_port: 4590,
             query_prefixes: QueryPrefixes::default(),
             // `~` expansion: `$HOME` is
             // always in the set (the
@@ -3171,6 +3204,19 @@ impl Config {
                             Ok(n) => self.daemon_merge_window_ms = n,
                             _ => eprintln!(
                                 "warning: daemon.merge-window-ms={:?} is not a non-negative integer; keeping the previous value",
+                                value
+                            ),
+                        }
+                    } else if other == "serve.host" {
+                        let trimmed = value.trim();
+                        if !trimmed.is_empty() {
+                            self.serve_host = trimmed.to_string();
+                        }
+                    } else if other == "serve.port" {
+                        match value.trim().parse::<u16>() {
+                            Ok(n) if n > 0 => self.serve_port = n,
+                            _ => eprintln!(
+                                "warning: serve.port={:?} is not a valid port number; keeping the previous value",
                                 value
                             ),
                         }
@@ -4123,6 +4169,16 @@ impl Config {
         self.daemon_enabled
     }
 
+    /// Every configured `project.<slug>.dir` slug, in config-file
+    /// declaration order. Doesn't include a project that only ever
+    /// appears in `project_sessions` (e.g. one whose config entry was
+    /// since removed/renamed) — see `all_project_slugs`, which unions
+    /// this with the database, for the full set `smarthistory serve`'s
+    /// `/api/projects` and search view need.
+    pub fn project_slugs(&self) -> Vec<String> {
+        self.projects.iter().map(|(slug, _)| slug.clone()).collect()
+    }
+
     /// The directories the daemon watches: the explicit
     /// `daemon.watch` list when non-empty, otherwise every
     /// `project.<slug>.dir` entry (tilde-expanded).
@@ -4170,6 +4226,18 @@ impl Config {
     /// the `daemon_merge_window_ms` field doc.
     pub fn daemon_merge_window_ms(&self) -> u64 {
         self.daemon_merge_window_ms
+    }
+
+    /// `smarthistory serve`'s default bind host. See the
+    /// `serve_host` field doc.
+    pub fn serve_host(&self) -> &str {
+        &self.serve_host
+    }
+
+    /// `smarthistory serve`'s default bind port. See the
+    /// `serve_port` field doc.
+    pub fn serve_port(&self) -> u16 {
+        self.serve_port
     }
 
     /// Per-extension shell commands invoked by
@@ -6381,7 +6449,7 @@ fn switch_project(
 fn parse_project_report_day(
     day: &Option<String>,
 ) -> anyhow::Result<(i64, i64, chrono::NaiveDate)> {
-    use chrono::{Duration, Local, NaiveDate, TimeZone};
+    use chrono::{Duration, Local, NaiveDate};
     let today = Local::now().date_naive();
     let date = match day.as_deref() {
         None | Some("today") => today,
@@ -6393,6 +6461,19 @@ fn parse_project_report_day(
             )
         })?,
     };
+    let (start_ts, end_ts) = day_range(date);
+    Ok((start_ts, end_ts, date))
+}
+
+/// The `[start, end)` Unix timestamp range covering one local
+/// calendar day. Factored out of `parse_project_report_day` (which
+/// additionally resolves the `--day` CLI string to a `NaiveDate`
+/// first) so `smarthistory serve`'s `/api/history` endpoint
+/// (`project_history`) can compute a range directly from a
+/// `NaiveDate` it already has, without round-tripping through a
+/// `YYYY-MM-DD` string.
+pub(crate) fn day_range(date: chrono::NaiveDate) -> (i64, i64) {
+    use chrono::{Duration, Local, TimeZone};
     let start_naive = date.and_hms_opt(0, 0, 0).unwrap();
     let end_naive = (date + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap();
     // `.single()` can fail across a DST transition; fall back to
@@ -6409,7 +6490,7 @@ fn parse_project_report_day(
         .single()
         .map(|dt| dt.timestamp())
         .unwrap_or_else(|| end_naive.and_utc().timestamp());
-    Ok((start_ts, end_ts, date))
+    (start_ts, end_ts)
 }
 
 /// A `project_sessions` row overlapping the report's day range, with
@@ -6746,65 +6827,104 @@ fn group_command_rows<'a>(rows: &[&'a ReportCommandRow]) -> Vec<CommandGroup<'a>
     groups
 }
 
-fn print_project_report_section(slug: &str, rows: &[&ReportCommandRow], min_duration: i64) {
-    let total: i64 = rows.iter().map(|r| r.active_secs).sum();
-    println!("\n## {slug}");
-    println!("Total active time: {}", format_duration_secs(total));
+/// One directory's active-time total within a project's day, sorted
+/// by `active_secs` descending — the `### Directories` breakdown, for
+/// both the CLI printer and the JSON API.
+#[derive(Debug, Clone, Serialize)]
+struct DirectoryTotal {
+    directory: String,
+    active_secs: i64,
+}
 
-    let mut by_dir: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
-    for r in rows {
-        *by_dir.entry(r.directory.as_str()).or_insert(0) += r.active_secs;
-    }
+/// One collapsed `(command, directory)` group in the `### Commands`
+/// table (see [`group_command_rows`]/[`CommandGroup`]), reshaped for
+/// serialization. `time_label` is the CLI's own `HH:MM:SS`/`Nx`
+/// rendering, precomputed once here so the JSON API and the CLI
+/// table show the identical label rather than each formatting it
+/// separately; `timestamp` is `None` for a collapsed (`count > 1`)
+/// group, matching `time_label` being `"Nx"` rather than a real time.
+#[derive(Debug, Clone, Serialize)]
+struct CommandGroupJson {
+    time_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<i64>,
+    count: usize,
+    active_secs: i64,
+    directory: String,
+    command: String,
+}
+
+/// One project's (or "untracked"'s) full report section for a single
+/// day — everything [`print_project_report_section`] and the
+/// `smarthistory serve` JSON API (`crate::server`) both render from
+/// one shared, already-computed source. `directories`/`active_secs`
+/// are derived from every command row in range; `commands` is
+/// additionally filtered to `>= min_duration` (matching
+/// `ProjectAction::Report`'s `--min-duration`, which only trims the
+/// commands table, never the total or directories breakdown).
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDaySummary {
+    slug: String,
+    /// `true` for the trailing "untracked" bucket (command rows with
+    /// no resolved project) — `slug` is still the display string
+    /// `"untracked"` in that case, but a real project could in theory
+    /// share that name, so callers that need to distinguish should
+    /// check this flag rather than compare `slug` against the
+    /// literal string.
+    is_untracked: bool,
+    active_secs: i64,
+    directories: Vec<DirectoryTotal>,
+    commands: Vec<CommandGroupJson>,
+    /// Note basenames ([`note_basename`]) created during a tracked
+    /// window for this project. Always empty for the untracked
+    /// bucket — notes are only ever attributed to a real session.
+    notes: Vec<String>,
+    files: FileEventGroupsJson,
+    websites: Vec<WebsiteClusterJson>,
+}
+
+/// A single day's report: every project active that day (plus a
+/// trailing "untracked" bucket, unless `--project`/`?project=`
+/// narrowed to one slug) — see [`build_day_report`].
+#[derive(Debug, Clone, Serialize)]
+struct DayReport {
+    date: String,
+    projects: Vec<ProjectDaySummary>,
+}
+
+fn print_project_report_section(summary: &ProjectDaySummary) {
+    println!("\n## {}", summary.slug);
+    println!(
+        "Total active time: {}",
+        format_duration_secs(summary.active_secs)
+    );
+
     println!("\n### Directories");
-    if by_dir.is_empty() {
+    if summary.directories.is_empty() {
         println!("(none)");
     } else {
-        let mut dirs: Vec<(&str, i64)> = by_dir.into_iter().collect();
-        dirs.sort_by_key(|d| std::cmp::Reverse(d.1));
-        for (dir, secs) in dirs {
+        for d in &summary.directories {
             println!(
                 "- {} ({})",
-                crate::util::expand_home(dir),
-                format_duration_secs(secs)
+                crate::util::expand_home(&d.directory),
+                format_duration_secs(d.active_secs)
             );
         }
     }
 
     println!("\n### Commands");
-    let filtered: Vec<&ReportCommandRow> = rows
-        .iter()
-        .filter(|r| r.active_secs >= min_duration)
-        .copied()
-        .collect();
-    if filtered.is_empty() {
+    if summary.commands.is_empty() {
         println!("(none)");
     } else {
         println!("| Time | Duration | Directory | Command |");
         println!("| --- | --- | --- | --- |");
-        // A single-occurrence command keeps its actual timestamp in
-        // the Time column; a repeated one (same command, same
-        // directory, run across two or more shell sessions during
-        // the day — see `group_command_rows`) shows a "Nx" count
-        // there instead, since there's no single timestamp left to
-        // show once the rows are folded together.
-        for g in &group_command_rows(&filtered) {
-            let time_cell = if g.count > 1 {
-                format!("{}x", g.count)
-            } else {
-                chrono::DateTime::from_timestamp(g.timestamp, 0)
-                    .map(|dt| {
-                        dt.with_timezone(&chrono::Local)
-                            .format("%H:%M:%S")
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| g.timestamp.to_string())
-            };
+        for g in &summary.commands {
             println!(
                 "| {} | {} | {} | {} |",
-                time_cell,
-                format_duration_secs(g.total_secs),
-                escape_md_table_cell(&crate::util::expand_home(g.directory)),
-                escape_md_table_cell(g.command)
+                g.time_label,
+                format_duration_secs(g.active_secs),
+                escape_md_table_cell(&crate::util::expand_home(&g.directory)),
+                escape_md_table_cell(&g.command)
             );
         }
     }
@@ -6822,7 +6942,7 @@ fn escape_md_table_cell(s: &str) -> String {
 /// One project's (or "untracked"'s) file-tracking events for the
 /// report's day range, already deduplicated by path with an
 /// occurrence count (`path -> count`) per event kind — see the
-/// `files_by_slug` construction in `ProjectAction::Report`'s handler.
+/// `files_by_slug` construction in [`build_day_report`].
 #[derive(Default)]
 struct FileEventGroups {
     viewed: std::collections::BTreeMap<String, usize>,
@@ -6831,23 +6951,59 @@ struct FileEventGroups {
     deleted: std::collections::BTreeMap<String, usize>,
 }
 
+/// One deduplicated path within a [`FileEventGroups`] bucket, reshaped
+/// for both the CLI's `print_file_events_section` and the
+/// `smarthistory serve` JSON API (`crate::server`) — a single
+/// (path, count) source both consume, instead of each re-deriving it
+/// from `FileEventGroups`' raw `BTreeMap`s independently.
+#[derive(Debug, Clone, Serialize)]
+struct FileEventEntry {
+    path: String,
+    count: usize,
+}
+
+/// [`FileEventGroups`] converted to sorted `Vec<FileEventEntry>` per
+/// kind — the shape both `print_file_events_section` and the JSON API
+/// render from. See [`file_event_entries`].
+#[derive(Debug, Clone, Default, Serialize)]
+struct FileEventGroupsJson {
+    viewed: Vec<FileEventEntry>,
+    modified: Vec<FileEventEntry>,
+    created: Vec<FileEventEntry>,
+    deleted: Vec<FileEventEntry>,
+}
+
+/// Convert one [`FileEventGroups`] bucket's `BTreeMap<path, count>`
+/// into a path-sorted `Vec<FileEventEntry>` (a `BTreeMap`'s iteration
+/// order already is path-sorted; this just reshapes it into a
+/// JSON/print-friendly owned list).
+fn file_event_entries(paths: &std::collections::BTreeMap<String, usize>) -> Vec<FileEventEntry> {
+    paths
+        .iter()
+        .map(|(path, &count)| FileEventEntry {
+            path: path.clone(),
+            count,
+        })
+        .collect()
+}
+
 /// Print one `### Files <label>` list: each deduplicated path, with
 /// an `(Nx)` occurrence count when the file was viewed/modified/
 /// created more than once in the day (same convention the Commands
 /// table's `Nx` counter uses) — a single occurrence prints bare, no
 /// `(1x)` noise. Paths are `$HOME`-shortened to `~` like every other
 /// path in this report.
-fn print_file_events_section(label: &str, paths: &std::collections::BTreeMap<String, usize>) {
+fn print_file_events_section(label: &str, entries: &[FileEventEntry]) {
     println!("\n### Files {label}");
-    if paths.is_empty() {
+    if entries.is_empty() {
         println!("(none)");
         return;
     }
-    for (path, count) in paths {
-        if *count > 1 {
-            println!("- {} ({}x)", crate::util::expand_home(path), count);
+    for e in entries {
+        if e.count > 1 {
+            println!("- {} ({}x)", crate::util::expand_home(&e.path), e.count);
         } else {
-            println!("- {}", crate::util::expand_home(path));
+            println!("- {}", crate::util::expand_home(&e.path));
         }
     }
 }
@@ -6859,6 +7015,26 @@ struct WebsiteLink {
     cluster: String,
     title: String,
     url: String,
+}
+
+/// One website link within a cluster, for the `### Websites` section
+/// — the JSON-friendly shape [`group_website_links`]'s output gets
+/// converted to once, up front in [`build_day_report`], instead of
+/// the CLI and the JSON API each re-grouping the raw [`WebsiteLink`]s
+/// independently.
+#[derive(Debug, Clone, Serialize)]
+struct WebsiteLinkJson {
+    title: String,
+    url: String,
+}
+
+/// One cluster's worth of website links (`weburlgroup.<name>.label`,
+/// or the auto-derived host), already deduplicated by URL — see
+/// [`group_website_links`].
+#[derive(Debug, Clone, Serialize)]
+struct WebsiteClusterJson {
+    cluster: String,
+    links: Vec<WebsiteLinkJson>,
 }
 
 /// The basename of a note's filename, stripped of its extension —
@@ -6917,15 +7093,404 @@ fn group_website_links(items: &[WebsiteLink]) -> Vec<(&str, Vec<(&str, &str)>)> 
 /// grouped by cluster (a `weburlgroup.<name>.match` label, or —
 /// falling back automatically — the visit's own host, so every
 /// `github.com` page lands under one `github.com` group without
-/// needing per-domain config) via `group_website_links`. Each URL
-/// renders as a Markdown link, `[title](url)`.
-fn print_website_section(items: &[WebsiteLink]) {
-    for (cluster, links) in group_website_links(items) {
-        println!("- **{}**", escape_md_link_text(cluster));
-        for (url, title) in links {
-            println!("  - [{}]({})", escape_md_link_text(title), url);
+/// needing per-domain config) via `group_website_links`, already
+/// clustered by [`build_day_report`] into [`WebsiteClusterJson`]s
+/// (the JSON API renders the exact same list, so the grouping/dedup
+/// happens once, not once per consumer). Each URL renders as a
+/// Markdown link, `[title](url)`.
+fn print_website_section(clusters: &[WebsiteClusterJson]) {
+    for c in clusters {
+        println!("- **{}**", escape_md_link_text(&c.cluster));
+        for link in &c.links {
+            println!("  - [{}]({})", escape_md_link_text(&link.title), link.url);
         }
     }
+}
+
+/// [`group_website_links`]'s output, reshaped into owned
+/// [`WebsiteClusterJson`]s for both the CLI printer and the JSON API.
+fn website_clusters(items: &[WebsiteLink]) -> Vec<WebsiteClusterJson> {
+    group_website_links(items)
+        .into_iter()
+        .map(|(cluster, links)| WebsiteClusterJson {
+            cluster: cluster.to_string(),
+            links: links
+                .into_iter()
+                .map(|(url, title)| WebsiteLinkJson {
+                    title: title.to_string(),
+                    url: url.to_string(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Build a full day's time-tracking report: every project active
+/// that day (plus a trailing "untracked" bucket, unless `project`
+/// narrows the whole report to one slug), each with its directories
+/// breakdown, commands table (filtered to `>= min_duration`), notes
+/// created, file events, and website visits.
+///
+/// The single data source for both `ProjectAction::Report`'s CLI text
+/// output and the `smarthistory serve` JSON API (`crate::server`) —
+/// extracted from what used to be `ProjectAction::Report`'s own
+/// handler body so the two surfaces can never drift apart. Assembles
+/// `project_sessions_in_range`, `report_command_rows`,
+/// `report_file_events`, and `resolve_project_for_website_visit`'s
+/// 3-tier website resolution exactly as the CLI report always has;
+/// see those functions' own doc comments for the underlying query
+/// semantics.
+pub(crate) fn build_day_report(
+    conn: &Connection,
+    cfg: &Config,
+    range_start: i64,
+    range_end: i64,
+    date: &chrono::NaiveDate,
+    project: Option<&str>,
+    min_duration: i64,
+) -> anyhow::Result<DayReport> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let sessions = project_sessions_in_range(conn, range_start, range_end, now)?;
+    let commands =
+        report_command_rows(conn, range_start, range_end, cfg.project_idle_threshold_secs)?;
+
+    // Notes created during a tracked window, bucketed by whichever
+    // project's interval contains their `created` timestamp. Notes
+    // outside every interval (or with no `created` timestamp) aren't
+    // shown — "untracked" is a bucket for command time, not for notes
+    // with no project to attribute them to.
+    let mut notes_by_slug: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    if let Some(db_path) = cfg.notes_database() {
+        let service =
+            note_search::database_service::DatabaseService::new(&db_path.display().to_string());
+        let criteria = note_search::SearchCriteria {
+            list_only: true,
+            ..Default::default()
+        };
+        match service.search_notes(&criteria) {
+            Ok(notes) => {
+                for note in notes {
+                    let Some(created) = note.created else {
+                        continue;
+                    };
+                    if created < range_start || created >= range_end {
+                        continue;
+                    }
+                    let hit = sessions.iter().find(|s| {
+                        created >= s.start_ts && (s.still_open || created < s.effective_end)
+                    });
+                    if let Some(session) = hit {
+                        notes_by_slug
+                            .entry(session.slug.clone())
+                            .or_default()
+                            .push(note.filename);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: notes lookup failed, skipping notes section: {e}");
+            }
+        }
+    } else {
+        eprintln!("warning: notes.database is not configured; skipping notes section");
+    }
+
+    // Website visits: browser bookmarks/history in range, plus `-`
+    // mode's JIRA REST visits (which land in `history.command` as
+    // `open "<browse_url>"`, not a separate table — see
+    // `resolve_project_for_website_visit`'s doc comment). Each visit
+    // is resolved through the full 3-tier priority and,
+    // independently, clustered for display via `weburlgroup`. The
+    // JIRA client is built once (`None` when JIRA isn't configured,
+    // in which case tier 1 is simply skipped for every visit) and the
+    // label cache is shared across every visit so a ticket referenced
+    // by multiple visits costs one REST round-trip, not one per
+    // visit.
+    let jira_client: Option<Box<dyn crate::jira::JiraClient>> = crate::jira::JiraConfig::from_env()
+        .map(|c| Box::new(crate::jira::RestJiraClient::new(c)) as Box<_>);
+    let mut label_cache: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    // `resolve_text` is what tier 1/2 resolution scans (a raw command
+    // still needs its embedded issue key / URL substring findable —
+    // see `resolve_project_for_website_visit`'s doc comment);
+    // `url`/`title` are the clean values used for display, clustering,
+    // and dedup, which a raw `open "<url>"` command string is not.
+    struct WebsiteVisit {
+        resolve_text: String,
+        url: String,
+        title: String,
+        timestamp: i64,
+    }
+    let mut visits: Vec<WebsiteVisit> = Vec::new();
+    let browser_sources = crate::browser::resolve_configured();
+    for entry in crate::browser::read_all_entries(&browser_sources) {
+        if entry.timestamp < range_start || entry.timestamp >= range_end {
+            continue;
+        }
+        let title = if entry.title.is_empty() {
+            entry.url.clone()
+        } else {
+            entry.title.clone()
+        };
+        visits.push(WebsiteVisit {
+            resolve_text: entry.url.clone(),
+            url: entry.url,
+            title,
+            timestamp: entry.timestamp,
+        });
+    }
+    for c in &commands {
+        if let Some(key) = crate::jira::extract_issue_key(&c.command)
+            && let Some(url) = extract_quoted_url(&c.command)
+        {
+            visits.push(WebsiteVisit {
+                resolve_text: c.command.clone(),
+                url: url.to_string(),
+                title: key.to_string(),
+                timestamp: c.timestamp,
+            });
+        }
+    }
+
+    let mut websites_by_slug: std::collections::BTreeMap<Option<String>, Vec<WebsiteLink>> =
+        std::collections::BTreeMap::new();
+    for visit in &visits {
+        let slug = resolve_project_for_website_visit(
+            cfg,
+            jira_client.as_deref(),
+            &mut label_cache,
+            &visit.resolve_text,
+            visit.timestamp,
+            &sessions,
+        );
+        // Auto-cluster by host (`github.com`, stripped of a leading
+        // `www.`) when no `weburlgroup.<name>.match` override
+        // applies — every visit ends up in some cluster, not just the
+        // ones an admin thought to configure ahead of time.
+        let cluster = cluster_label_for_url(cfg, &visit.url)
+            .unwrap_or_else(|| url_host(&visit.url).to_string());
+        websites_by_slug.entry(slug).or_default().push(WebsiteLink {
+            cluster,
+            title: visit.title.clone(),
+            url: visit.url.clone(),
+        });
+    }
+
+    let files_by_slug = report_file_events(conn, range_start, range_end)?;
+
+    // Slugs to report on, in a stable order: an explicit `project`
+    // narrows to just that one; otherwise every slug seen in either
+    // the session intervals or the command rows, plus a trailing
+    // "untracked" bucket for command rows with no resolved project.
+    let mut slugs: Vec<String> = Vec::new();
+    if let Some(p) = project {
+        slugs.push(p.to_string());
+    } else {
+        let mut seen = std::collections::BTreeSet::new();
+        for s in &sessions {
+            seen.insert(s.slug.clone());
+        }
+        for c in &commands {
+            if let Some(slug) = &c.project_slug {
+                seen.insert(slug.clone());
+            }
+        }
+        for slug in websites_by_slug.keys().flatten() {
+            seen.insert(slug.clone());
+        }
+        for slug in files_by_slug.keys().flatten() {
+            seen.insert(slug.clone());
+        }
+        slugs.extend(seen);
+    }
+
+    // One (slug, rows) pair per section — `None` is the trailing
+    // "untracked" bucket.
+    let mut sections: Vec<(Option<String>, Vec<&ReportCommandRow>)> = slugs
+        .iter()
+        .map(|slug| {
+            let rows: Vec<&ReportCommandRow> = commands
+                .iter()
+                .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
+                .collect();
+            (Some(slug.clone()), rows)
+        })
+        .collect();
+    if project.is_none() {
+        let untracked: Vec<&ReportCommandRow> = commands
+            .iter()
+            .filter(|c| c.project_slug.is_none())
+            .collect();
+        let untracked_websites = websites_by_slug.get(&None);
+        let untracked_files = files_by_slug.get(&None).is_some_and(|g| {
+            !g.viewed.is_empty()
+                || !g.modified.is_empty()
+                || !g.created.is_empty()
+                || !g.deleted.is_empty()
+        });
+        if !untracked.is_empty()
+            || untracked_websites.is_some_and(|v| !v.is_empty())
+            || untracked_files
+        {
+            sections.push((None, untracked));
+        }
+    }
+
+    let empty_file_groups = FileEventGroups::default();
+    let mut projects = Vec::new();
+    for (slug, rows) in &sections {
+        let label = slug.as_deref().unwrap_or("untracked");
+        let active_secs: i64 = rows.iter().map(|r| r.active_secs).sum();
+
+        let mut by_dir: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+        for r in rows {
+            *by_dir.entry(r.directory.as_str()).or_insert(0) += r.active_secs;
+        }
+        let mut directories: Vec<DirectoryTotal> = by_dir
+            .into_iter()
+            .map(|(d, s)| DirectoryTotal {
+                directory: d.to_string(),
+                active_secs: s,
+            })
+            .collect();
+        directories.sort_by_key(|d| std::cmp::Reverse(d.active_secs));
+
+        let filtered: Vec<&ReportCommandRow> = rows
+            .iter()
+            .filter(|r| r.active_secs >= min_duration)
+            .copied()
+            .collect();
+        // A single-occurrence command keeps its actual timestamp; a
+        // repeated one (same command, same directory, run across two
+        // or more shell sessions during the day — see
+        // `group_command_rows`) shows a "Nx" count instead, since
+        // there's no single timestamp left once the rows are folded
+        // together.
+        let commands_json: Vec<CommandGroupJson> = group_command_rows(&filtered)
+            .iter()
+            .map(|g| {
+                let (time_label, timestamp) = if g.count > 1 {
+                    (format!("{}x", g.count), None)
+                } else {
+                    let label = chrono::DateTime::from_timestamp(g.timestamp, 0)
+                        .map(|dt| {
+                            dt.with_timezone(&chrono::Local)
+                                .format("%H:%M:%S")
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| g.timestamp.to_string());
+                    (label, Some(g.timestamp))
+                };
+                CommandGroupJson {
+                    time_label,
+                    timestamp,
+                    count: g.count,
+                    active_secs: g.total_secs,
+                    directory: g.directory.to_string(),
+                    command: g.command.to_string(),
+                }
+            })
+            .collect();
+
+        let notes: Vec<String> = slug
+            .as_ref()
+            .and_then(|s| notes_by_slug.get(s))
+            .map(|ns| ns.iter().map(|n| note_basename(n).to_string()).collect())
+            .unwrap_or_default();
+
+        let file_groups = files_by_slug.get(slug).unwrap_or(&empty_file_groups);
+        let files = FileEventGroupsJson {
+            viewed: file_event_entries(&file_groups.viewed),
+            modified: file_event_entries(&file_groups.modified),
+            created: file_event_entries(&file_groups.created),
+            deleted: file_event_entries(&file_groups.deleted),
+        };
+
+        let websites = websites_by_slug
+            .get(slug)
+            .map(|items| website_clusters(items))
+            .unwrap_or_default();
+
+        projects.push(ProjectDaySummary {
+            slug: label.to_string(),
+            is_untracked: slug.is_none(),
+            active_secs,
+            directories,
+            commands: commands_json,
+            notes,
+            files,
+            websites,
+        });
+    }
+
+    Ok(DayReport {
+        date: date.format("%Y-%m-%d").to_string(),
+        projects,
+    })
+}
+
+/// One day's active-time total for a single project, within
+/// [`project_history`]'s trailing-N-days range.
+#[derive(Debug, Clone, Serialize)]
+struct DayTotal {
+    date: String,
+    active_secs: i64,
+}
+
+/// A project's active-time total for each of the trailing `days`
+/// calendar days (including today), oldest first — the data source
+/// for `smarthistory serve`'s `/api/history` 7-day search view.
+/// Reuses [`report_command_rows`] per day rather than a bespoke
+/// multi-day query, so the exact same per-command duration
+/// derivation `build_day_report`/`ProjectAction::Report` use stays
+/// the single source of truth for "how long was this command active".
+pub(crate) fn project_history(
+    conn: &Connection,
+    cfg: &Config,
+    slug: &str,
+    days: u32,
+) -> anyhow::Result<Vec<DayTotal>> {
+    let today = chrono::Local::now().date_naive();
+    let mut out = Vec::with_capacity(days as usize);
+    for offset in (0..days).rev() {
+        let date = today - chrono::Duration::days(offset as i64);
+        let (range_start, range_end) = day_range(date);
+        let commands =
+            report_command_rows(conn, range_start, range_end, cfg.project_idle_threshold_secs)?;
+        let active_secs: i64 = commands
+            .iter()
+            .filter(|c| c.project_slug.as_deref() == Some(slug))
+            .map(|c| c.active_secs)
+            .sum();
+        out.push(DayTotal {
+            date: date.format("%Y-%m-%d").to_string(),
+            active_secs,
+        });
+    }
+    Ok(out)
+}
+
+/// Every known project slug: every configured `project.<slug>.dir`
+/// entry (`Config::project_slugs`), unioned with every distinct slug
+/// that has ever appeared in `project_sessions` (covers a project
+/// whose config entry was since removed or renamed, so its historical
+/// time tracking is still browsable), sorted and deduplicated. The
+/// data source for `smarthistory serve`'s `/api/projects` endpoint
+/// and the dashboard's project search box.
+pub(crate) fn all_project_slugs(conn: &Connection, cfg: &Config) -> anyhow::Result<Vec<String>> {
+    let mut slugs: std::collections::BTreeSet<String> = cfg.project_slugs().into_iter().collect();
+    let mut stmt = conn.prepare("SELECT DISTINCT project_slug FROM project_sessions")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for r in rows {
+        slugs.insert(r?);
+    }
+    Ok(slugs.into_iter().collect())
 }
 
 /// If the `history` table still has a per-row `comment` column (from
@@ -8267,254 +8832,49 @@ fn main() -> anyhow::Result<()> {
                 min_duration,
             } => {
                 let cfg = Config::load();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
                 let (range_start, range_end, date) = parse_project_report_day(&day)?;
                 let min_duration = min_duration.unwrap_or(0);
 
-                let sessions =
-                    project_sessions_in_range(&conn, range_start, range_end, now)?;
-                let commands = report_command_rows(
+                let report = build_day_report(
                     &conn,
+                    &cfg,
                     range_start,
                     range_end,
-                    cfg.project_idle_threshold_secs,
+                    &date,
+                    project.as_deref(),
+                    min_duration,
                 )?;
 
-                // Notes created during a tracked window, bucketed by
-                // whichever project's interval contains their
-                // `created` timestamp. Notes outside every interval
-                // (or with no `created` timestamp) aren't shown —
-                // "untracked" is a bucket for command time, not for
-                // notes with no project to attribute them to.
-                let mut notes_by_slug: std::collections::BTreeMap<String, Vec<String>> =
-                    std::collections::BTreeMap::new();
-                if let Some(db_path) = cfg.notes_database() {
-                    let service = note_search::database_service::DatabaseService::new(
-                        &db_path.display().to_string(),
-                    );
-                    let criteria = note_search::SearchCriteria {
-                        list_only: true,
-                        ..Default::default()
-                    };
-                    match service.search_notes(&criteria) {
-                        Ok(notes) => {
-                            for note in notes {
-                                let Some(created) = note.created else {
-                                    continue;
-                                };
-                                if created < range_start || created >= range_end {
-                                    continue;
-                                }
-                                let hit = sessions.iter().find(|s| {
-                                    created >= s.start_ts
-                                        && (s.still_open || created < s.effective_end)
-                                });
-                                if let Some(session) = hit {
-                                    notes_by_slug
-                                        .entry(session.slug.clone())
-                                        .or_default()
-                                        .push(note.filename);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("warning: notes lookup failed, skipping notes section: {e}");
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "warning: notes.database is not configured; skipping notes section"
-                    );
-                }
-
-                // Website visits: browser bookmarks/history in range,
-                // plus `-` mode's JIRA REST visits (which land in
-                // `history.command` as `open "<browse_url>"`, not a
-                // separate table — see `resolve_project_for_website_visit`'s
-                // doc comment). Each visit is resolved through the
-                // full 3-tier priority and, independently, clustered
-                // for display via `weburlgroup`. The JIRA client is
-                // built once (`None` when JIRA isn't configured, in
-                // which case tier 1 is simply skipped for every
-                // visit) and the label cache is shared across every
-                // visit so a ticket referenced by multiple visits
-                // costs one REST round-trip, not one per visit.
-                let jira_client: Option<Box<dyn crate::jira::JiraClient>> =
-                    crate::jira::JiraConfig::from_env()
-                        .map(|c| Box::new(crate::jira::RestJiraClient::new(c)) as Box<_>);
-                let mut label_cache: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-
-                // `resolve_text` is what tier 1/2 resolution scans
-                // (a raw command still needs its embedded issue key
-                // / URL substring findable — see
-                // `resolve_project_for_website_visit`'s doc comment);
-                // `url`/`title` are the clean values used for
-                // display, clustering, and dedup, which a raw
-                // `open "<url>"` command string is not.
-                struct WebsiteVisit {
-                    resolve_text: String,
-                    url: String,
-                    title: String,
-                    timestamp: i64,
-                }
-                let mut visits: Vec<WebsiteVisit> = Vec::new();
-                let browser_sources = crate::browser::resolve_configured();
-                for entry in crate::browser::read_all_entries(&browser_sources) {
-                    if entry.timestamp < range_start || entry.timestamp >= range_end {
-                        continue;
-                    }
-                    let title = if entry.title.is_empty() {
-                        entry.url.clone()
-                    } else {
-                        entry.title.clone()
-                    };
-                    visits.push(WebsiteVisit {
-                        resolve_text: entry.url.clone(),
-                        url: entry.url,
-                        title,
-                        timestamp: entry.timestamp,
-                    });
-                }
-                for c in &commands {
-                    if let Some(key) = crate::jira::extract_issue_key(&c.command)
-                        && let Some(url) = extract_quoted_url(&c.command)
-                    {
-                        visits.push(WebsiteVisit {
-                            resolve_text: c.command.clone(),
-                            url: url.to_string(),
-                            title: key.to_string(),
-                            timestamp: c.timestamp,
-                        });
-                    }
-                }
-
-                let mut websites_by_slug: std::collections::BTreeMap<Option<String>, Vec<WebsiteLink>> =
-                    std::collections::BTreeMap::new();
-                for visit in &visits {
-                    let slug = resolve_project_for_website_visit(
-                        &cfg,
-                        jira_client.as_deref(),
-                        &mut label_cache,
-                        &visit.resolve_text,
-                        visit.timestamp,
-                        &sessions,
-                    );
-                    // Auto-cluster by host (`github.com`, stripped of
-                    // a leading `www.`) when no `weburlgroup.<name>.match`
-                    // override applies — every visit ends up in some
-                    // cluster, not just the ones an admin thought to
-                    // configure ahead of time.
-                    let cluster = cluster_label_for_url(&cfg, &visit.url)
-                        .unwrap_or_else(|| url_host(&visit.url).to_string());
-                    websites_by_slug.entry(slug).or_default().push(WebsiteLink {
-                        cluster,
-                        title: visit.title.clone(),
-                        url: visit.url.clone(),
-                    });
-                }
-
-                let files_by_slug = report_file_events(&conn, range_start, range_end)?;
-
-                // Slugs to report on, in a stable order: explicit
-                // `--project` narrows to just that one; otherwise
-                // every slug seen in either the session intervals or
-                // the command rows, plus a trailing "untracked"
-                // bucket for command rows with no resolved project.
-                let mut slugs: Vec<String> = Vec::new();
-                if let Some(p) = project.as_ref() {
-                    slugs.push(p.clone());
-                } else {
-                    let mut seen = std::collections::BTreeSet::new();
-                    for s in &sessions {
-                        seen.insert(s.slug.clone());
-                    }
-                    for c in &commands {
-                        if let Some(slug) = &c.project_slug {
-                            seen.insert(slug.clone());
-                        }
-                    }
-                    for slug in websites_by_slug.keys().flatten() {
-                        seen.insert(slug.clone());
-                    }
-                    for slug in files_by_slug.keys().flatten() {
-                        seen.insert(slug.clone());
-                    }
-                    slugs.extend(seen);
-                }
-
-                println!("# Project Report — {}", date.format("%Y-%m-%d"));
-
-                // One (slug, rows) pair per section — `None` is the
-                // trailing "untracked" bucket. Built once, up front,
-                // so the summary table below and each section's own
-                // total (`print_project_report_section` re-sums the
-                // same `rows` slice) can never drift apart.
-                let mut sections: Vec<(Option<String>, Vec<&ReportCommandRow>)> = slugs
-                    .iter()
-                    .map(|slug| {
-                        let rows: Vec<&ReportCommandRow> = commands
-                            .iter()
-                            .filter(|c| c.project_slug.as_deref() == Some(slug.as_str()))
-                            .collect();
-                        (Some(slug.clone()), rows)
-                    })
-                    .collect();
-                if project.is_none() {
-                    let untracked: Vec<&ReportCommandRow> = commands
-                        .iter()
-                        .filter(|c| c.project_slug.is_none())
-                        .collect();
-                    let untracked_websites = websites_by_slug.get(&None);
-                    let untracked_files = files_by_slug.get(&None).is_some_and(|g| {
-                        !g.viewed.is_empty()
-                            || !g.modified.is_empty()
-                            || !g.created.is_empty()
-                            || !g.deleted.is_empty()
-                    });
-                    if !untracked.is_empty()
-                        || untracked_websites.is_some_and(|v| !v.is_empty())
-                        || untracked_files
-                    {
-                        sections.push((None, untracked));
-                    }
-                }
+                println!("# Project Report — {}", report.date);
 
                 println!("\n## Summary");
                 println!("| Project | Active Time |");
                 println!("| --- | --- |");
-                for (slug, rows) in &sections {
-                    let label = slug.as_deref().unwrap_or("untracked");
-                    let total: i64 = rows.iter().map(|r| r.active_secs).sum();
+                for p in &report.projects {
                     println!(
                         "| {} | {} |",
-                        escape_md_table_cell(label),
-                        format_duration_secs(total)
+                        escape_md_table_cell(&p.slug),
+                        format_duration_secs(p.active_secs)
                     );
                 }
 
-                for (slug, rows) in &sections {
-                    let label = slug.as_deref().unwrap_or("untracked");
-                    print_project_report_section(label, rows, min_duration);
-                    if let Some(notes) = slug.as_ref().and_then(|s| notes_by_slug.get(s)) {
+                for p in &report.projects {
+                    print_project_report_section(p);
+                    if !p.notes.is_empty() {
                         println!("\n### Notes created");
-                        for n in notes {
-                            println!("- [[{}]]", note_basename(n));
+                        for n in &p.notes {
+                            println!("- [[{}]]", n);
                         }
                     }
-                    let empty_file_groups = FileEventGroups::default();
-                    let file_groups = files_by_slug.get(slug).unwrap_or(&empty_file_groups);
-                    print_file_events_section("viewed", &file_groups.viewed);
-                    print_file_events_section("modified", &file_groups.modified);
-                    print_file_events_section("created", &file_groups.created);
-                    print_file_events_section("deleted", &file_groups.deleted);
+                    print_file_events_section("viewed", &p.files.viewed);
+                    print_file_events_section("modified", &p.files.modified);
+                    print_file_events_section("created", &p.files.created);
+                    print_file_events_section("deleted", &p.files.deleted);
                     println!("\n### Websites");
-                    match websites_by_slug.get(slug) {
-                        Some(items) if !items.is_empty() => print_website_section(items),
-                        _ => println!("(none)"),
+                    if p.websites.is_empty() {
+                        println!("(none)");
+                    } else {
+                        print_website_section(&p.websites);
                     }
                     println!();
                 }
@@ -8639,10 +8999,10 @@ fn main() -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| start_ts.to_string());
                 println!("# {slug} — session started {started}");
-                print_file_events_section("viewed", &groups.viewed);
-                print_file_events_section("modified", &groups.modified);
-                print_file_events_section("created", &groups.created);
-                print_file_events_section("deleted", &groups.deleted);
+                print_file_events_section("viewed", &file_event_entries(&groups.viewed));
+                print_file_events_section("modified", &file_event_entries(&groups.modified));
+                print_file_events_section("created", &file_event_entries(&groups.created));
+                print_file_events_section("deleted", &file_event_entries(&groups.deleted));
             }
         },
         Commands::File { action } => {
@@ -9293,6 +9653,12 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             crate::daemon::run(&cfg, &conn, &watch, once)?;
+        }
+        Commands::Serve { port, host } => {
+            let cfg = Config::load();
+            let host = host.unwrap_or_else(|| cfg.serve_host().to_string());
+            let port = port.unwrap_or_else(|| cfg.serve_port());
+            crate::server::run(&host, port)?;
         }
         Commands::Check { prefix } => {
             tui::run_tui_check(prefix, false)?;

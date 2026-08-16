@@ -2561,10 +2561,32 @@ tmuxpaneoutputdir=~/custom-tmux
                  start_ts INTEGER NOT NULL,
                  end_ts INTEGER,
                  end_reason TEXT
+             );
+             CREATE TABLE file_events (
+                 id INTEGER PRIMARY KEY,
+                 path TEXT NOT NULL,
+                 event_kind TEXT NOT NULL,
+                 project_slug TEXT,
+                 timestamp INTEGER NOT NULL
              );",
         )
         .expect("schema");
         conn
+    }
+
+    fn insert_project_session(
+        conn: &Connection,
+        slug: &str,
+        start_ts: i64,
+        end_ts: Option<i64>,
+        end_reason: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO project_sessions (project_slug, start_ts, end_ts, end_reason) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![slug, start_ts, end_ts, end_reason],
+        )
+        .expect("insert project_sessions");
     }
 
     fn insert_history(conn: &Connection, command: &str, directory: &str, session_id: &str, ts: i64) {
@@ -2677,6 +2699,166 @@ tmuxpaneoutputdir=~/custom-tmux
             "gap capped at the idle threshold, same result whether or not the \
              CTE could see the far-away real successor"
         );
+    }
+
+    // --- build_day_report / project_history / all_project_slugs (`smarthistory serve`) ----
+
+    /// A command inside a `project_sessions` interval is attributed
+    /// to that project; one outside any interval lands in the
+    /// trailing "untracked" bucket — the same split
+    /// `ProjectAction::Report`'s CLI output has always had, now
+    /// sourced from `build_day_report` instead of inline code.
+    #[test]
+    fn build_day_report_includes_untracked_bucket_alongside_named_projects() {
+        let conn = report_test_conn();
+        insert_project_session(&conn, "acme", 1000, Some(2000), Some("idle"));
+        insert_history(&conn, "cargo build", "/repo/acme", "s1", 1100);
+        insert_history(&conn, "ls", "/tmp", "s2", 5000); // outside any session -> untracked
+
+        let cfg = Config::default();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let report = build_day_report(&conn, &cfg, 0, 10_000, &date, None, 0).expect("report");
+
+        let slugs: Vec<&str> = report.projects.iter().map(|p| p.slug.as_str()).collect();
+        assert!(slugs.contains(&"acme"), "got: {:?}", slugs);
+        assert!(slugs.contains(&"untracked"), "got: {:?}", slugs);
+
+        let acme = report.projects.iter().find(|p| p.slug == "acme").unwrap();
+        assert!(!acme.is_untracked);
+        assert_eq!(acme.directories.len(), 1);
+        assert_eq!(acme.directories[0].directory, "/repo/acme");
+
+        let untracked = report.projects.iter().find(|p| p.slug == "untracked").unwrap();
+        assert!(untracked.is_untracked);
+    }
+
+    /// `min_duration` only trims the `commands` table — the total
+    /// `active_secs` and `directories` breakdown must still reflect
+    /// every command in range, matching `ProjectAction::Report`'s
+    /// documented `--min-duration` semantics.
+    #[test]
+    fn build_day_report_min_duration_filters_commands_not_totals() {
+        let conn = report_test_conn();
+        insert_project_session(&conn, "acme", 0, None, None);
+        // "long-running"'s next event is far away -> capped at the
+        // 300s idle threshold. "quick"'s next event is a real 10s
+        // later -> active_secs=10, under the 300s floor. "trailing"
+        // has no successor in the still-open session -> also capped
+        // at 300s.
+        insert_history(&conn, "long-running", "/repo", "s1", 100);
+        insert_history(&conn, "quick", "/repo", "s1", 100_400);
+        insert_history(&conn, "trailing", "/repo", "s1", 100_410);
+
+        let cfg = {
+            let mut c = Config::default();
+            c.project_idle_threshold_secs = 300;
+            c
+        };
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let report =
+            build_day_report(&conn, &cfg, 0, 200_000, &date, Some("acme"), 300).expect("report");
+        let acme = &report.projects[0];
+
+        // Total/directories see all three commands regardless of
+        // min_duration: 300 (long-running) + 10 (quick) + 300 (trailing).
+        assert_eq!(acme.directories[0].active_secs, acme.active_secs);
+        assert_eq!(acme.active_secs, 610, "total must include every command's duration");
+        // The commands table only shows the two meeting the 300s floor.
+        let commands: Vec<&str> = acme.commands.iter().map(|c| c.command.as_str()).collect();
+        assert_eq!(commands, vec!["long-running", "trailing"], "got: {:?}", commands);
+    }
+
+    /// An explicit `project` filter narrows to exactly that slug and
+    /// drops the "untracked" bucket entirely, even when untracked
+    /// commands exist in range — matches `--project <slug>` on the
+    /// CLI, which the doc comment says "drops the untracked section".
+    #[test]
+    fn build_day_report_project_filter_excludes_untracked() {
+        let conn = report_test_conn();
+        insert_project_session(&conn, "acme", 1000, Some(2000), Some("idle"));
+        insert_history(&conn, "cargo build", "/repo/acme", "s1", 1100);
+        insert_history(&conn, "ls", "/tmp", "s2", 5000);
+
+        let cfg = Config::default();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let report =
+            build_day_report(&conn, &cfg, 0, 10_000, &date, Some("acme"), 0).expect("report");
+
+        assert_eq!(report.projects.len(), 1);
+        assert_eq!(report.projects[0].slug, "acme");
+    }
+
+    /// File events are grouped by kind and deduplicated by path with
+    /// an occurrence count, attributed to the right project bucket.
+    #[test]
+    fn build_day_report_groups_and_dedups_file_events() {
+        let conn = report_test_conn();
+        insert_file_event(&conn, "/repo/acme/main.rs", "modified", Some("acme"), 100);
+        insert_file_event(&conn, "/repo/acme/main.rs", "modified", Some("acme"), 200);
+        insert_file_event(&conn, "/repo/acme/lib.rs", "created", Some("acme"), 150);
+
+        let cfg = Config::default();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let report =
+            build_day_report(&conn, &cfg, 0, 1000, &date, Some("acme"), 0).expect("report");
+        let acme = &report.projects[0];
+
+        assert_eq!(acme.files.modified.len(), 1);
+        assert_eq!(acme.files.modified[0].path, "/repo/acme/main.rs");
+        assert_eq!(acme.files.modified[0].count, 2, "two modified events for the same path must dedup with count=2");
+        assert_eq!(acme.files.created.len(), 1);
+        assert_eq!(acme.files.created[0].path, "/repo/acme/lib.rs");
+    }
+
+    /// The trailing-N-days history sums a project's active time per
+    /// calendar day, oldest first, using the exact same per-command
+    /// duration derivation `report_command_rows` (and therefore
+    /// `build_day_report`) uses — a day with no activity for the
+    /// project is `0`, not missing.
+    #[test]
+    fn project_history_sums_active_time_per_day() {
+        let conn = report_test_conn();
+        let today = chrono::Local::now().date_naive();
+        insert_project_session(&conn, "acme", 0, None, None);
+        let (start_today, _) = day_range(today);
+        insert_history(&conn, "cargo build", "/repo", "s1", start_today + 100);
+        insert_history(&conn, "cargo test", "/repo", "s1", start_today + 400);
+
+        let cfg = Config::default();
+        let days = project_history(&conn, &cfg, "acme", 3).expect("history");
+
+        assert_eq!(days.len(), 3);
+        assert_eq!(days.last().unwrap().date, today.format("%Y-%m-%d").to_string());
+        assert!(
+            days.last().unwrap().active_secs > 0,
+            "today should have nonzero active time"
+        );
+        assert_eq!(
+            days[0].active_secs, 0,
+            "a day with no activity for this project must report 0, not be omitted"
+        );
+    }
+
+    /// The full known-slug set is every configured `project.<slug>.dir`
+    /// entry unioned with every distinct slug that has ever appeared
+    /// in `project_sessions` — covering a project whose config entry
+    /// was since removed, not just currently-configured ones.
+    #[test]
+    fn all_project_slugs_unions_config_and_session_history() {
+        let conn = report_test_conn();
+        insert_project_session(&conn, "from-db-only", 0, Some(100), Some("idle"));
+
+        let mut cfg = Config::default();
+        cfg.projects.push((
+            "from-config-only".to_string(),
+            ProjectDef {
+                dir: "/repo/from-config-only".to_string(),
+            },
+        ));
+
+        let slugs = all_project_slugs(&conn, &cfg).expect("slugs");
+        assert!(slugs.contains(&"from-db-only".to_string()), "got: {:?}", slugs);
+        assert!(slugs.contains(&"from-config-only".to_string()), "got: {:?}", slugs);
     }
 
     // --- next_command_candidates (Ctrl-S / `smarthistory next` / dropdown.predict) ----

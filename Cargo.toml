@@ -69,6 +69,18 @@ ureq = { version = "2", features = ["json"] }
 # no benefit `fancy-regex` doesn't already cover for the small,
 # single-line shell-command strings this highlights.
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# HTTP server for `smarthistory serve` (the time-tracking web
+# dashboard). `axum`/`tokio` are ALSO transitive deps of
+# `note_search` (its own JIRA-import feature uses `reqwest`, which
+# pulls in `hyper`/`tokio`; `axum` itself comes in via `note_search`'s
+# own dependency graph) — adding them directly here reuses the SAME
+# already-compiled crates (cargo unifies versions/features), so this
+# costs no extra binary weight in practice. `tokio`'s feature set is
+# scoped to just what a single blocking `Runtime::new().block_on(...)`
+# call needs — the rest of the CLI stays fully synchronous; only the
+# `serve` subcommand ever touches async.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
 
 # Feature flag for the
 # alternative `herdr`
