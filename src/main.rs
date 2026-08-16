@@ -590,9 +590,15 @@ enum Commands {
     /// Candidates are drawn from the global history and ordered by
     /// frequency (then lexicographically for ties). Used by the
     /// Ctrl-S line-editor widget to suggest likely next steps.
+    ///
+    /// If `command` is omitted (or empty) there's no predecessor to
+    /// pair from — e.g. a brand-new shell that hasn't run anything
+    /// yet — so candidates fall back to the most frequent commands
+    /// among the most recent 100 history rows instead.
     Next {
-        /// The command whose successors to look up.
-        command: String,
+        /// The command whose successors to look up. Omit to fall back
+        /// to the most frequent recent commands instead.
+        command: Option<String>,
         /// Maximum number of candidates to return. Default 5.
         #[arg(short, long)]
         limit: Option<usize>,
@@ -6717,6 +6723,69 @@ fn next_command_candidates(
     Ok(out)
 }
 
+/// Fallback for `next_command_candidates` when there's no predecessor
+/// command to pair from (a brand-new shell that hasn't run anything
+/// yet): ranks the most frequent commands among the most recent
+/// `window` history rows, `(command, frequency)`, ranked by frequency
+/// descending (alphabetical tie-break) — same shape as
+/// `next_command_candidates`' result, so callers (`Commands::Next`,
+/// the dropdown's `dropdown.predict`) don't need to special-case it.
+/// `directory`/`session_id` scope which rows count toward the most
+/// recent `window`, same as `next_command_candidates`. Only counts
+/// `mode = 'command'` rows — `smarthistory ask`/`?`-mode question
+/// entries (`mode = 'question'`) are real history rows too, but
+/// they're not something you'd ever want suggested back to you as a
+/// "command to run."
+fn frequent_commands(
+    conn: &Connection,
+    limit: usize,
+    window: usize,
+    directory: Option<&str>,
+    session_id: Option<&str>,
+) -> anyhow::Result<Vec<(String, i64)>> {
+    let mut scope_clause = String::new();
+    let mut scope_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(dir) = directory {
+        scope_clause.push_str(" AND directory = ?");
+        scope_params.push(Box::new(dir.to_string()));
+    }
+    if let Some(sid) = session_id {
+        scope_clause.push_str(" AND session_id = ?");
+        scope_params.push(Box::new(sid.to_string()));
+    }
+    let sql = format!(
+        "
+        SELECT command, COUNT(*) AS freq
+        FROM (
+            SELECT command FROM history
+            WHERE mode = 'command'{scope_clause}
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+        )
+        GROUP BY command
+        ORDER BY freq DESC, command ASC
+        LIMIT ?
+        "
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut all_params: Vec<&dyn rusqlite::ToSql> =
+        scope_params.iter().map(|p| p.as_ref()).collect();
+    let window_i64 = window as i64;
+    all_params.push(&window_i64);
+    let limit_i64 = limit as i64;
+    all_params.push(&limit_i64);
+    let rows = stmt.query_map(&all_params[..], |row| {
+        let cmd: String = row.get(0)?;
+        let freq: i64 = row.get(1)?;
+        Ok((cmd, freq))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Fetch every `file_events` row timestamped within `[range_start,
 /// range_end)` and group it by project (`None` = an event whose
 /// directory resolved to no project at record time — see
@@ -8596,13 +8665,22 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let candidates = next_command_candidates(
-                &conn,
-                &command,
-                limit,
-                directory_canonical.as_deref(),
-                session_id.as_deref(),
-            )?;
+            let candidates = match command.as_deref() {
+                Some(cmd) if !cmd.is_empty() => next_command_candidates(
+                    &conn,
+                    cmd,
+                    limit,
+                    directory_canonical.as_deref(),
+                    session_id.as_deref(),
+                )?,
+                _ => frequent_commands(
+                    &conn,
+                    limit,
+                    100,
+                    directory_canonical.as_deref(),
+                    session_id.as_deref(),
+                )?,
+            };
             for (next, freq) in candidates {
                 println!("{}\t{}", freq, crate::util::escape_field_for_output(&next));
             }

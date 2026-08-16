@@ -126,6 +126,33 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `Up` on an empty command line no longer gets hijacked by the
+  `dropdown.predict` prediction dropdown. With both `dropdown.enabled=on` and
+  `dropdown.predict=on`, an empty prompt after running a command shows a "what
+  usually comes next" hint — but `Up`/`Down` unconditionally routed into
+  navigating _that_ list whenever it was visible, so pressing `Up` to recall the
+  command you'd just run silently did nothing (or landed on an unrelated
+  predicted successor) whenever `smarthistory next` happened to have a
+  suggestion for it. `Up` now always walks real history first. `Down` keeps a
+  path to predictions, but only once real history is genuinely exhausted walking
+  forward (pressed first with nothing navigated yet, or `Down`'d all the way
+  back after `Up`'ing into history) — at that point it activates the prediction
+  dropdown and highlights its first candidate, same as navigating there
+  manually; `Up`/`Down` then cycle the predictions like a normal typed-search
+  dropdown until reset, and pressing `Up` again at the very top candidate exits
+  predictions back into real history right where `Down` left off, mirroring how
+  `Down` got in. `Up`/`Down` on a normal typed-search dropdown (non-empty line)
+  are unaffected. `Down`'s predictions also work on the very first empty prompt
+  of a brand-new shell now: with no last command run yet, `smarthistory next`
+  has no successor to predict from, so it falls back to the most frequent
+  commands among the last 100 history rows instead of showing nothing, excluding
+  `smarthistory ask`/`?`-mode question entries (also real `history` rows, but
+  not commands worth suggesting back) (DIR scope still applies; SESS scope is
+  skipped for this fallback specifically, since a session-scoped query is
+  guaranteed empty at that exact moment). `smarthistory next`'s `command`
+  argument is now optional for this. (Also fixed a pre-existing off-by-one in
+  `Down`'s "start of list" boundary check, masked until now because it happened
+  to produce the same empty-buffer result either way.)
 - Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
   `directory, timestamp`) that the schema was missing. The main history fetch
   sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by

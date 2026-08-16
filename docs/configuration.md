@@ -488,12 +488,48 @@ nothing. Predictions come from the same successor-frequency data
 followed the last command actually run in this shell — capped at 3 candidates
 regardless of [`dropdown.limit`](#dropdownlimit): a "what's next" hint at the
 very start of a line is meant to be a quick glance, not a long list to scan.
-With nothing run yet in the session, or with this off (the default), an empty
-line shows no dropdown, same as before this existed. The prediction appears on
-the very first empty prompt after a command finishes — not only after some other
-action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
-`zle-line-init` hook. Selecting a predicted candidate works exactly like
-selecting a normal search result (`Tab`/`Enter`/arrows all behave identically).
+With nothing run yet in the session — a brand-new shell, before any command has
+executed — there's no last command to predict a successor from, so the dropdown
+falls back to the most frequent commands among the last 100 history rows instead
+of showing nothing — `smarthistory ask`/`?`-mode question entries are real
+history rows too, but they're excluded here, since a question isn't something
+you'd want suggested back to you as a command to run. That fallback is never
+SESS-scoped, even in SESS mode: a session-scoped query is guaranteed to find
+nothing at that exact moment, since a row is only recorded under this session's
+id once a command actually completes in it — scoping to a session that's by
+definition still empty would defeat the fallback entirely. DIR mode still scopes
+to `$PWD` (prior sessions in the same directory are a genuinely useful signal
+here); GLOBAL is unscoped either way. With `dropdown.predict` off (the default),
+an empty line shows no dropdown, same as before this existed. The prediction
+appears on the very first empty prompt after a command finishes — not only after
+some other action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
+`zle-line-init` hook. `Tab`/`Enter` accept the top (most probable) prediction
+directly, same as a normal search result.
+
+**`Up`/`Down` treat predictions as one more step past the newest real history
+entry, not a competing menu.** On an empty line, a plain `Up` press always
+recalls your real command history exactly like it always has — it's the single
+most load-bearing place `Up` is expected to just recall your last command, so a
+_passively_-shown prediction (one you haven't navigated to) never diverts it, no
+matter how likely `smarthistory next` thinks one is. `Down` walks history in the
+opposite direction, and once it runs out of more-recent real history to show —
+either because you pressed `Down` first, with nothing navigated yet, or because
+you `Up`'d several times and `Down`'d all the way back — the next `Down`
+continues past "the most recent thing that happened" into "what usually happens
+next": it activates the prediction dropdown and highlights its first (most
+likely) candidate, exactly as if you'd navigated there with the arrow keys. From
+there, `Up`/`Down` cycle the (up to 3) predicted candidates like a normal
+typed-search dropdown — except pressing `Up` again at the very top (most likely)
+candidate exits predictions and resumes real history right where `Down` left
+off, the mirror image of how you got there. Typing, running a command, or
+cancelling (`Ctrl+C`/`Esc`) resets everything back to a fresh empty line.
+`Tab`/`Enter` accept whichever candidate is currently highlighted at any point
+along the way, same as a normal search result.
+
+Predictions are available from the very first empty prompt in a brand-new shell,
+even before any command has run — with no last command to predict a successor
+from, `Down` there activates the frequent-commands fallback above instead of a
+successor prediction, same candidate-cycling/exit behavior either way.
 
 Scoped to the current search mode, same as the normal search results shown once
 you start typing: SESS only predicts successors observed in

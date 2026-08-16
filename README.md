@@ -171,7 +171,7 @@ no equivalent of.
 
 ```bash
 smarthistory search [QUERY] [flags]     # print matching rows
-smarthistory next  <COMMAND>            # most-probable next command
+smarthistory next  [COMMAND]            # most-probable next command (omit for most-frequent recent)
 smarthistory clean [QUERY] [flags]      # bulk-delete matching entries
 smarthistory prune <DAYS> [-f]          # delete entries older than N days
 smarthistory prune-directories [-f]     # remove session.<key> entries whose directory no longer exists

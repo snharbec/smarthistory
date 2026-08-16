@@ -2982,6 +2982,98 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(candidates.len(), 2);
     }
 
+    // --- frequent_commands (dropdown.predict's no-`_smarthistory_last_cmd`
+    // fallback, e.g. a brand-new shell that hasn't run anything yet) ----
+
+    #[test]
+    fn frequent_commands_ranks_by_frequency_then_alphabetically() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repo", "p1", 1000);
+        insert_history(&conn, "ls", "/repo", "p1", 1010);
+        insert_history(&conn, "git status", "/repo", "p1", 1020);
+        insert_history(&conn, "ls", "/repo", "p1", 1030);
+        insert_history(&conn, "git status", "/repo", "p1", 1040);
+
+        let candidates = frequent_commands(&conn, 5, 100, None, None).expect("query");
+        assert_eq!(
+            candidates,
+            vec![("git status".to_string(), 3), ("ls".to_string(), 2)]
+        );
+    }
+
+    /// `window` bounds how far back the ranking looks -- rows older
+    /// than the most recent `window` must never count, even if
+    /// they'd otherwise change which command ranks first.
+    #[test]
+    fn frequent_commands_window_excludes_older_rows() {
+        let conn = report_test_conn();
+        // "old" dominates by far, but falls entirely outside the
+        // window once "recent" pushes it out.
+        for i in 0..10 {
+            insert_history(&conn, "old", "/repo", "p1", 1000 + i);
+        }
+        insert_history(&conn, "recent", "/repo", "p1", 2000);
+
+        let candidates = frequent_commands(&conn, 5, 1, None, None).expect("query");
+        assert_eq!(candidates, vec![("recent".to_string(), 1)]);
+    }
+
+    #[test]
+    fn frequent_commands_directory_scope_excludes_other_directories() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repoA", "p1", 1000);
+        insert_history(&conn, "npm install", "/repoB", "p1", 1010);
+
+        let candidates = frequent_commands(&conn, 5, 100, Some("/repoA"), None).expect("query");
+        assert_eq!(candidates, vec![("git status".to_string(), 1)]);
+    }
+
+    #[test]
+    fn frequent_commands_session_scope_excludes_other_sessions() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repo", "paneA", 1000);
+        insert_history(&conn, "npm install", "/repo", "paneB", 1010);
+
+        let candidates =
+            frequent_commands(&conn, 5, 100, None, Some("paneA")).expect("query");
+        assert_eq!(candidates, vec![("git status".to_string(), 1)]);
+    }
+
+    #[test]
+    fn frequent_commands_respects_limit() {
+        let conn = report_test_conn();
+        insert_history(&conn, "a", "/repo", "p1", 1000);
+        insert_history(&conn, "b", "/repo", "p1", 1010);
+        insert_history(&conn, "c", "/repo", "p1", 1020);
+
+        let candidates = frequent_commands(&conn, 2, 100, None, None).expect("query");
+        assert_eq!(candidates.len(), 2);
+    }
+
+    /// `smarthistory ask`/`?`-mode questions are real `history` rows
+    /// (`mode = 'question'`), but they're not commands -- suggesting
+    /// one back as a "frequent command" would be nonsensical.
+    #[test]
+    fn frequent_commands_excludes_question_mode_rows() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repo", "p1", 1000);
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, timestamp, mode) \
+             VALUES ('?why did that fail', '/repo', 'p1', 1010, 'question')",
+            [],
+        )
+        .expect("insert question row");
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, timestamp, mode) \
+             VALUES ('?why did that fail', '/repo', 'p1', 1020, 'question')",
+            [],
+        )
+        .expect("insert question row");
+
+        let candidates = frequent_commands(&conn, 5, 100, None, None).expect("query");
+        assert_eq!(candidates, vec![("git status".to_string(), 1)]);
+    }
+
     #[test]
     fn project_sessions_in_range_clamps_still_open_session_to_now() {
         let conn = report_test_conn();
