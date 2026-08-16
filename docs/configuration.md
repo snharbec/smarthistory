@@ -495,21 +495,30 @@ action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
 `zle-line-init` hook. `Tab`/`Enter` accept the top (most probable) prediction
 directly, same as a normal search result.
 
-**`Up` always recalls real history; `Down` can reach predictions once history
-runs out.** On an empty line, `Up` walks your real command history exactly like
-it always has — it's the single most load-bearing place `Up` is expected to just
-recall your last command, so it never gets diverted into a prediction, no matter
-how likely `smarthistory next` thinks one is. `Down` walks history in the
+**`Up`/`Down` treat predictions as one more step past the newest real history
+entry, not a competing menu.** On an empty line, a plain `Up` press always
+recalls your real command history exactly like it always has — it's the single
+most load-bearing place `Up` is expected to just recall your last command, so a
+_passively_-shown prediction (one you haven't navigated to) never diverts it, no
+matter how likely `smarthistory next` thinks one is. `Down` walks history in the
 opposite direction, and once it runs out of more-recent real history to show —
 either because you pressed `Down` first, with nothing navigated yet, or because
 you `Up`'d several times and `Down`'d all the way back — the next `Down`
 continues past "the most recent thing that happened" into "what usually happens
-next": it activates the prediction dropdown and highlights its first candidate,
-exactly as if you'd navigated there with the arrow keys. From that point,
-`Up`/`Down` cycle the (up to 3) predicted candidates like a normal typed-search
-dropdown, until you type, run a command, or cancel (`Ctrl+C`/ `Esc`) to reset.
-`Tab`/`Enter` accept the highlighted candidate at any point along the way, same
-as a normal search result.
+next": it activates the prediction dropdown and highlights its first (most
+likely) candidate, exactly as if you'd navigated there with the arrow keys. From
+there, `Up`/`Down` cycle the (up to 3) predicted candidates like a normal
+typed-search dropdown — except pressing `Up` again at the very top (most likely)
+candidate exits predictions and resumes real history right where `Down` left
+off, the mirror image of how you got there. Typing, running a command, or
+cancelling (`Ctrl+C`/`Esc`) resets everything back to a fresh empty line.
+`Tab`/`Enter` accept whichever candidate is currently highlighted at any point
+along the way, same as a normal search result.
+
+Predictions only ever exist once at least one command has actually run in the
+current session — `smarthistory next` has nothing to predict from a brand-new,
+empty shell, so a `Down` press there falls straight through to "no older
+history," same as if `dropdown.predict` were off.
 
 Scoped to the current search mode, same as the normal search results shown once
 you start typing: SESS only predicts successors observed in

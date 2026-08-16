@@ -2251,18 +2251,44 @@ _smarthistory_up_history() {
     # `chosen == 1` means the user (or `_smarthistory_down_history`'s
     # own fallthrough-into-predictions, below) already explicitly
     # entered the prediction list — Up continues cycling it backward,
-    # same as it would for a normal typed-search dropdown, rather
-    # than yanking the user back out mid-browse.
+    # same as it would for a normal typed-search dropdown, EXCEPT at
+    # the very top of the (up to 3-candidate) list: from there, one
+    # more Up exits predictions back into real history — the mirror
+    # image of Down's own "exhaust real history, fall into
+    # predictions" transition — instead of wrapping around to the
+    # bottom of the prediction list forever.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
-        _smarthistory_dropdown_navigate_prev
-        return
+        if [[ -z "$LBUFFER" && $_smarthistory_dropdown_chosen -eq 1 \
+            && $_smarthistory_dropdown_selected -eq 0 ]]; then
+            _smarthistory_dropdown_clear
+            # Resume real-history walking at exactly the entry Down
+            # couldn't get past (rather than skipping beyond it): the
+            # shared logic below always increments `_smarthistory_index`
+            # once before displaying, so pre-decrement it here first.
+            # `_smarthistory_index` is left untouched by
+            # `_smarthistory_down_history`'s boundary branch — it's
+            # still whatever real-history position triggered the
+            # transition into predictions (or 0, if Down was pressed
+            # first with nothing navigated at all, in which case
+            # there's nothing to "resume" and this just falls through
+            # to a normal first Up).
+            (( _smarthistory_index > 0 )) && _smarthistory_index=$((_smarthistory_index - 1))
+            _smarthistory_debug_log "up: exiting predictions at top, resuming real history"
+            # Falls through to the shared real-history logic below —
+            # no `return` here.
+        else
+            _smarthistory_dropdown_navigate_prev
+            return
+        fi
+    else
+        # Falling through to a real history recall on an empty line
+        # supersedes any *passively*-shown prediction dropdown (it
+        # was a hint for the now-abandoned empty line) — clear it so
+        # its ghost text doesn't linger stale over the recalled
+        # command.
+        [[ $_smarthistory_dropdown_visible -eq 1 ]] && _smarthistory_dropdown_clear
     fi
-    # Falling through to a real history recall on an empty line
-    # supersedes any *passively*-shown prediction dropdown (it was a
-    # hint for the now-abandoned empty line) — clear it so its ghost
-    # text doesn't linger stale over the recalled command.
-    [[ $_smarthistory_dropdown_visible -eq 1 ]] && _smarthistory_dropdown_clear
     # Always use smarthistory, even with an empty LBUFFER (an empty
     # query means "give me the oldest command in the current scope").
     _smarthistory_prime_cache

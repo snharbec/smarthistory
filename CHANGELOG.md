@@ -139,10 +139,12 @@ All notable changes to this project will be documented in this file.
   back after `Up`'ing into history) — at that point it activates the prediction
   dropdown and highlights its first candidate, same as navigating there
   manually; `Up`/`Down` then cycle the predictions like a normal typed-search
-  dropdown until reset. `Up`/`Down` on a normal typed-search dropdown (non-empty
-  line) are unaffected. (Also fixed a pre-existing off-by-one in `Down`'s "start
-  of list" boundary check, masked until now because it happened to produce the
-  same empty-buffer result either way.)
+  dropdown until reset, and pressing `Up` again at the very top candidate exits
+  predictions back into real history right where `Down` left off, mirroring how
+  `Down` got in. `Up`/`Down` on a normal typed-search dropdown (non-empty line)
+  are unaffected. (Also fixed a pre-existing off-by-one in `Down`'s "start of
+  list" boundary check, masked until now because it happened to produce the same
+  empty-buffer result either way.)
 - Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
   `directory, timestamp`) that the schema was missing. The main history fetch
   sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by
