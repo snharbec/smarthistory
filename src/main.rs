@@ -6731,7 +6731,11 @@ fn next_command_candidates(
 /// `next_command_candidates`' result, so callers (`Commands::Next`,
 /// the dropdown's `dropdown.predict`) don't need to special-case it.
 /// `directory`/`session_id` scope which rows count toward the most
-/// recent `window`, same as `next_command_candidates`.
+/// recent `window`, same as `next_command_candidates`. Only counts
+/// `mode = 'command'` rows — `smarthistory ask`/`?`-mode question
+/// entries (`mode = 'question'`) are real history rows too, but
+/// they're not something you'd ever want suggested back to you as a
+/// "command to run."
 fn frequent_commands(
     conn: &Connection,
     limit: usize,
@@ -6754,7 +6758,7 @@ fn frequent_commands(
         SELECT command, COUNT(*) AS freq
         FROM (
             SELECT command FROM history
-            WHERE 1=1{scope_clause}
+            WHERE mode = 'command'{scope_clause}
             ORDER BY timestamp DESC, id DESC
             LIMIT ?
         )

@@ -3050,6 +3050,30 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(candidates.len(), 2);
     }
 
+    /// `smarthistory ask`/`?`-mode questions are real `history` rows
+    /// (`mode = 'question'`), but they're not commands -- suggesting
+    /// one back as a "frequent command" would be nonsensical.
+    #[test]
+    fn frequent_commands_excludes_question_mode_rows() {
+        let conn = report_test_conn();
+        insert_history(&conn, "git status", "/repo", "p1", 1000);
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, timestamp, mode) \
+             VALUES ('?why did that fail', '/repo', 'p1', 1010, 'question')",
+            [],
+        )
+        .expect("insert question row");
+        conn.execute(
+            "INSERT INTO history (command, directory, session_id, timestamp, mode) \
+             VALUES ('?why did that fail', '/repo', 'p1', 1020, 'question')",
+            [],
+        )
+        .expect("insert question row");
+
+        let candidates = frequent_commands(&conn, 5, 100, None, None).expect("query");
+        assert_eq!(candidates, vec![("git status".to_string(), 1)]);
+    }
+
     #[test]
     fn project_sessions_in_range_clamps_still_open_session_to_now() {
         let conn = report_test_conn();

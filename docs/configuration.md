@@ -491,18 +491,20 @@ very start of a line is meant to be a quick glance, not a long list to scan.
 With nothing run yet in the session — a brand-new shell, before any command has
 executed — there's no last command to predict a successor from, so the dropdown
 falls back to the most frequent commands among the last 100 history rows instead
-of showing nothing. That fallback is never SESS-scoped, even in SESS mode: a
-session-scoped query is guaranteed to find nothing at that exact moment, since a
-row is only recorded under this session's id once a command actually completes
-in it — scoping to a session that's by definition still empty would defeat the
-fallback entirely. DIR mode still scopes to `$PWD` (prior sessions in the same
-directory are a genuinely useful signal here); GLOBAL is unscoped either way.
-With `dropdown.predict` off (the default), an empty line shows no dropdown, same
-as before this existed. The prediction appears on the very first empty prompt
-after a command finishes — not only after some other action (like `Ctrl+G`)
-happens to redraw the dropdown — via zsh's `zle-line-init` hook. `Tab`/`Enter`
-accept the top (most probable) prediction directly, same as a normal search
-result.
+of showing nothing — `smarthistory ask`/`?`-mode question entries are real
+history rows too, but they're excluded here, since a question isn't something
+you'd want suggested back to you as a command to run. That fallback is never
+SESS-scoped, even in SESS mode: a session-scoped query is guaranteed to find
+nothing at that exact moment, since a row is only recorded under this session's
+id once a command actually completes in it — scoping to a session that's by
+definition still empty would defeat the fallback entirely. DIR mode still scopes
+to `$PWD` (prior sessions in the same directory are a genuinely useful signal
+here); GLOBAL is unscoped either way. With `dropdown.predict` off (the default),
+an empty line shows no dropdown, same as before this existed. The prediction
+appears on the very first empty prompt after a command finishes — not only after
+some other action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
+`zle-line-init` hook. `Tab`/`Enter` accept the top (most probable) prediction
+directly, same as a normal search result.
 
 **`Up`/`Down` treat predictions as one more step past the newest real history
 entry, not a competing menu.** On an empty line, a plain `Up` press always
