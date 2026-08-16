@@ -71,12 +71,19 @@ where
 /// Open a fresh, read-only connection to the same database every CLI
 /// command uses (`crate::get_db_path`) — never a shared/mutable
 /// connection, since every dashboard request is read-only.
+///
+/// `smarthistory serve` is meant to run alongside `smarthistory
+/// daemon` and every shell's own `smarthistory add` writes — a
+/// dashboard request racing the exact instant one of those holds a
+/// write lock would otherwise fail immediately with `SQLITE_BUSY`
+/// instead of just waiting the (sub-millisecond, single-statement)
+/// moment out, so this sets the same busy_timeout the daemon's own
+/// connection uses.
 fn open_readonly_conn() -> anyhow::Result<Connection> {
     let path = crate::get_db_path();
-    Ok(Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?)
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(conn)
 }
 
 #[derive(Debug, Deserialize)]
