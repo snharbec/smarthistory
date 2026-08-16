@@ -2408,6 +2408,48 @@ pub(crate) fn labels_for_issue(
     labels
 }
 
+/// Process-lifetime cache of [`labels_for_issue`] results, shared
+/// across calls the way `label_cache` in [`labels_for_issue`] is
+/// shared across visits *within* one `build_day_report` call.
+/// `build_day_report` itself gets called fresh on every `/api/report`
+/// HTTP request in `smarthistory serve`, and used to hand
+/// `labels_for_issue` a brand-new, empty `HashMap` each time — so
+/// every request re-issued a live JIRA REST call for every distinct
+/// issue key that day, even for a day just viewed a second ago.
+/// Reset wholesale every `SHARED_LABEL_CACHE_TTL` (rather than tracked
+/// per key) so a label change in JIRA eventually shows up, without the
+/// bookkeeping of a per-entry expiry for what's expected to be a
+/// small, slow-changing set of keys.
+type SharedLabelCache = (std::time::Instant, std::collections::HashMap<String, Vec<String>>);
+static SHARED_LABEL_CACHE: std::sync::OnceLock<std::sync::Mutex<SharedLabelCache>> =
+    std::sync::OnceLock::new();
+
+const SHARED_LABEL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Snapshot the shared cache to seed a fresh call's local
+/// `label_cache` from. See [`merge_shared_label_cache`].
+pub(crate) fn shared_label_cache_snapshot() -> std::collections::HashMap<String, Vec<String>> {
+    let cache = SHARED_LABEL_CACHE
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Default::default())));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.0.elapsed() >= SHARED_LABEL_CACHE_TTL {
+        *guard = (std::time::Instant::now(), Default::default());
+    }
+    guard.1.clone()
+}
+
+/// Merge a call's local `label_cache` (now containing whatever it
+/// freshly fetched) back into the shared cache, so the next call
+/// reuses those entries instead of hitting JIRA again.
+pub(crate) fn merge_shared_label_cache(entries: &std::collections::HashMap<String, Vec<String>>) {
+    let cache = SHARED_LABEL_CACHE
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Default::default())));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    for (k, v) in entries {
+        guard.1.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+}
+
 /// Quote a string for use as a JQL string literal: wrap in
 /// double quotes, escape backslash → `\\` and double-quote →
 /// `\"` (the two characters JQL string literals treat as

@@ -86,6 +86,25 @@ fn open_readonly_conn() -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// Run `f` on tokio's blocking-thread pool instead of the async
+/// runtime's own worker thread. Every handler below is really a
+/// synchronous CLI-style call (SQLite + filesystem I/O), not
+/// `async`-native work — and `build_day_report` can, when JIRA is
+/// configured, build and drop a `reqwest::blocking::Client` to
+/// resolve a JIRA-linked website visit. `reqwest::blocking` spins up
+/// its own mini tokio runtime internally; doing that from a worker
+/// thread that's already inside `axum::serve`'s runtime panics
+/// ("Cannot drop a runtime in a context where blocking is not
+/// allowed") the instant a viewed day has a JIRA-linked visit.
+/// `spawn_blocking` runs `f` on a dedicated thread outside any async
+/// context, sidestepping that entirely — and, as a side effect, keeps
+/// the DB/filesystem work off the runtime's worker threads too.
+async fn spawn_blocking_result<T: Send + 'static>(
+    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(f).await?
+}
+
 #[derive(Debug, Deserialize)]
 struct ReportQuery {
     day: Option<String>,
@@ -94,19 +113,23 @@ struct ReportQuery {
 }
 
 async fn report_handler(Query(q): Query<ReportQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    let conn = open_readonly_conn()?;
-    let cfg = crate::Config::load();
-    let (range_start, range_end, date) = crate::parse_project_report_day(&q.day)?;
-    let report = crate::build_day_report(
-        &conn,
-        &cfg,
-        range_start,
-        range_end,
-        &date,
-        q.project.as_deref(),
-        q.min_duration.unwrap_or(0),
-    )?;
-    Ok(Json(serde_json::to_value(report)?))
+    let report = spawn_blocking_result(move || {
+        let conn = open_readonly_conn()?;
+        let cfg = crate::Config::load();
+        let (range_start, range_end, date) = crate::parse_project_report_day(&q.day)?;
+        let report = crate::build_day_report(
+            &conn,
+            &cfg,
+            range_start,
+            range_end,
+            &date,
+            q.project.as_deref(),
+            q.min_duration.unwrap_or(0),
+        )?;
+        Ok(serde_json::to_value(report)?)
+    })
+    .await?;
+    Ok(Json(report))
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,18 +141,26 @@ struct HistoryQuery {
 async fn history_handler(
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let conn = open_readonly_conn()?;
-    let cfg = crate::Config::load();
-    let days = q.days.unwrap_or(7).clamp(1, 366);
-    let history = crate::project_history(&conn, &cfg, &q.project, days)?;
-    Ok(Json(serde_json::to_value(history)?))
+    let history = spawn_blocking_result(move || {
+        let conn = open_readonly_conn()?;
+        let cfg = crate::Config::load();
+        let days = q.days.unwrap_or(7).clamp(1, 366);
+        let history = crate::project_history(&conn, &cfg, &q.project, days)?;
+        Ok(serde_json::to_value(history)?)
+    })
+    .await?;
+    Ok(Json(history))
 }
 
 async fn projects_handler() -> Result<Json<serde_json::Value>, AppError> {
-    let conn = open_readonly_conn()?;
-    let cfg = crate::Config::load();
-    let slugs = crate::all_project_slugs(&conn, &cfg)?;
-    Ok(Json(serde_json::to_value(slugs)?))
+    let slugs = spawn_blocking_result(|| {
+        let conn = open_readonly_conn()?;
+        let cfg = crate::Config::load();
+        let slugs = crate::all_project_slugs(&conn, &cfg)?;
+        Ok(serde_json::to_value(slugs)?)
+    })
+    .await?;
+    Ok(Json(slugs))
 }
 
 async fn dashboard_handler() -> Html<&'static str> {

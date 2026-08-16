@@ -126,6 +126,31 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `smarthistory serve`'s `/api/report` was slow to load a day, and could
+  outright fail to load one at all. Three separate issues, all in
+  `build_day_report`'s website-visits section:
+  - Every request re-copied each configured/auto-detected browser's _entire_
+    history database from scratch (Chrome/Firefox/Safari history files are
+    routinely tens to hundreds of MB) just to filter it down to one day's
+    entries in-process afterward. Now cached process-wide for 30 seconds, keyed
+    by the resolved source list — clicking through several days in one sitting
+    pays for the copy once, not once per click.
+  - Every request re-issued a live JIRA REST call for every distinct issue key
+    referenced that day, even for a day just viewed a second ago — the
+    label-lookup cache `resolve_project_for_website_visit` uses was rebuilt
+    empty on every call instead of persisting. Now cached process-wide for 5
+    minutes, shared across requests, so a ticket referenced across multiple days
+    only costs one round-trip for the life of the server.
+  - When JIRA is configured, resolving a JIRA-linked visit builds (and, at the
+    end of the request, drops) a `reqwest::blocking::Client` — which internally
+    spins up its own tokio runtime. Doing that from a worker thread already
+    inside `axum::serve`'s own runtime panicked ("Cannot drop a runtime in a
+    context where blocking is not allowed"), crashing the connection outright
+    for any day with a JIRA-linked visit. Every handler now runs its
+    (synchronous, DB/filesystem/network-bound) work via
+    `tokio::task::spawn_blocking` instead of directly on the async runtime's
+    worker thread, which fixes this and, incidentally, stops that same
+    synchronous work from blocking the runtime's worker threads in general.
 - `Up` on an empty command line no longer gets hijacked by the
   `dropdown.predict` prediction dropdown. With both `dropdown.enabled=on` and
   `dropdown.predict=on`, an empty prompt after running a command shows a "what

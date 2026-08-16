@@ -643,6 +643,38 @@ pub(crate) fn read_all_entries(sources: &[BrowserSource]) -> Vec<BrowserEntry> {
     entries
 }
 
+/// Process-lifetime cache for [`read_all_entries`], keyed by the
+/// resolved source list, with a short TTL. `read_source` pays for a
+/// full filesystem copy of the browser's history database (routinely
+/// tens to hundreds of MB after months of use, see
+/// [`copy_sqlite_snapshot`]) on every call — cheap for the one-shot
+/// `project report` CLI command this was originally written for, but
+/// `smarthistory serve`'s `/api/report` handler calls
+/// [`crate::build_day_report`] (and therefore this) fresh on every
+/// HTTP request, so clicking through a handful of days in one
+/// dashboard session paid for that copy every single click. A `Mutex`
+/// is fine here: the critical section is a plain lookup/clone, never
+/// held across an `.await`.
+type EntriesCacheEntry = (std::time::Instant, Vec<BrowserSource>, Vec<BrowserEntry>);
+static ENTRIES_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<EntriesCacheEntry>>> =
+    std::sync::OnceLock::new();
+
+const ENTRIES_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(crate) fn read_all_entries_cached(sources: &[BrowserSource]) -> Vec<BrowserEntry> {
+    let cache = ENTRIES_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_at, cached_sources, entries)) = guard.as_ref()
+        && cached_at.elapsed() < ENTRIES_CACHE_TTL
+        && cached_sources == sources
+    {
+        return entries.clone();
+    }
+    let entries = read_all_entries(sources);
+    *guard = Some((std::time::Instant::now(), sources.to_vec(), entries.clone()));
+    entries
+}
+
 /// Convert one entry into a `HistoryRow`. `command` is `"<tag>
 /// <title-or-url>"` — the literal tag word lets the user narrow the
 /// merged list to just bookmarks or just history by typing
