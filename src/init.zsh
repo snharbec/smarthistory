@@ -2197,6 +2197,36 @@ _smarthistory_unescape() {
 }
 
 
+# Populate the prediction dropdown (`dropdown.predict`'s "what
+# usually comes next" list — the same rendering
+# `_smarthistory_dropdown_render`'s `$#LBUFFER == 0` branch computes,
+# normally triggered automatically via `zle-line-init` on a fresh
+# prompt) and, if it found at least one candidate, immediately
+# highlight the first one — as if the user had explicitly navigated
+# there with Up/Down already. Called by `_smarthistory_down_history`
+# when it's about to hit "nothing more to show" walking real history
+# forward: rather than just clearing the line, Down continues past
+# the newest real command into "what usually comes after it," a
+# natural extension of "further forward than the most recent thing
+# that happened" into "the (predicted) future."
+#
+# Returns success (0) only when a candidate was actually found and
+# highlighted; the caller falls back to its own default behavior
+# (clearing the line) on failure (1). Guarded on `LBUFFER` being
+# empty here (not just inside `_smarthistory_dropdown_render`, which
+# would otherwise run its *typed-search* branch instead) — this must
+# never fire for a non-empty, no-real-matches search.
+_smarthistory_try_activate_predictions() {
+    [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return 1
+    [[ -z "$LBUFFER" ]] || return 1
+    _smarthistory_dropdown_render
+    if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
+        _smarthistory_dropdown_navigate_next
+        return 0
+    fi
+    return 1
+}
+
 _smarthistory_up_history() {
     # When the live dropdown is showing, Up navigates the candidate
     # list backward (`_smarthistory_dropdown_navigate_prev`) instead
@@ -2207,26 +2237,31 @@ _smarthistory_up_history() {
     # changed. Everything below this branch is completely unchanged
     # from before the dropdown feature existed.
     #
-    # EXCEPT when `LBUFFER` is empty: `_smarthistory_dropdown_render`
-    # only ever shows a dropdown on an empty line for
-    # `dropdown.predict` (a "what usually comes next" hint — see its
-    # own `$#LBUFFER == 0` branch there; the normal typed-search
-    # dropdown never activates with zero characters, even with
-    # `dropdown.minchars=0`). Routing Up into that prediction list
-    # meant Up could never recall the command you just ran — the most
-    # basic, universally-expected shell keybinding there is — the
-    # instant `dropdown.predict` happened to have a suggestion for it.
-    # An empty line always means "walk real history," never "browse
-    # predictions" — the prediction is a glance-hint, not a modal
-    # takeover of Up/Down.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 && -n "$LBUFFER" ]]; then
+    # EXCEPT when `LBUFFER` is empty AND the dropdown hasn't been
+    # explicitly navigated yet (`_smarthistory_dropdown_chosen == 0`):
+    # `_smarthistory_dropdown_render` shows a dropdown on an empty
+    # line only for `dropdown.predict` (a "what usually comes next"
+    # hint — the normal typed-search dropdown never activates with
+    # zero characters, even with `dropdown.minchars=0`). Routing Up
+    # into that PASSIVELY-shown hint meant Up could never recall the
+    # command you just ran — the most basic, universally-expected
+    # shell keybinding there is — the instant `dropdown.predict`
+    # happened to have a suggestion for it. An empty line with
+    # nothing explicitly selected always means "walk real history."
+    # `chosen == 1` means the user (or `_smarthistory_down_history`'s
+    # own fallthrough-into-predictions, below) already explicitly
+    # entered the prediction list — Up continues cycling it backward,
+    # same as it would for a normal typed-search dropdown, rather
+    # than yanking the user back out mid-browse.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
+        && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         _smarthistory_dropdown_navigate_prev
         return
     fi
     # Falling through to a real history recall on an empty line
-    # supersedes any prediction dropdown that happened to be showing
-    # (it was a hint for the now-abandoned empty line) — clear it so
-    # its ghost text doesn't linger stale over the recalled command.
+    # supersedes any *passively*-shown prediction dropdown (it was a
+    # hint for the now-abandoned empty line) — clear it so its ghost
+    # text doesn't linger stale over the recalled command.
     [[ $_smarthistory_dropdown_visible -eq 1 ]] && _smarthistory_dropdown_clear
     # Always use smarthistory, even with an empty LBUFFER (an empty
     # query means "give me the oldest command in the current scope").
@@ -2273,9 +2308,12 @@ _smarthistory_down_history() {
     # list forward (`_smarthistory_dropdown_navigate_next`) — see
     # `_smarthistory_up_history` above for the backward case, why
     # navigation lives here rather than in Tab, and why an empty
-    # `LBUFFER` (a `dropdown.predict` hint, never a normal search
-    # dropdown) always falls through to the real history walk instead.
-    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 && -n "$LBUFFER" ]]; then
+    # `LBUFFER` with nothing explicitly chosen yet (a passively-shown
+    # `dropdown.predict` hint, never a normal search dropdown) falls
+    # through to the real history walk below instead of being
+    # intercepted here.
+    if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
+        && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         _smarthistory_dropdown_navigate_next
         return
     fi
@@ -2283,8 +2321,10 @@ _smarthistory_down_history() {
     # Down walks the match list in the *opposite* direction of Up
     # (Up advances through the array from oldest to newest, Down
     # walks back from newest to oldest). At the very start of the
-    # list (index 0 in zsh's 1-based array), there's nothing older
-    # to show, so Down clears the line buffer.
+    # list (index 0 in zsh's 1-based array) there's nothing older
+    # (more recent) to show walking forward — either because Down was
+    # the very first key pressed, or because repeated Down presses
+    # walked all the way back to "now."
     _smarthistory_prime_cache
     local -a _smarthistory_lines
     _smarthistory_lines=("${(f)_smarthistory_matches}")
@@ -2293,12 +2333,43 @@ _smarthistory_down_history() {
         zle -M "no history matches"
         return
     fi
-    if [ $_smarthistory_index -le 0 ]; then
-        # At the start of the list (oldest entry, or fresh prompt).
-        # Clear the buffer to signal "nothing older than this."
+    # Boundary check is `-le 1`, not `-le 0`: valid array indices are
+    # 1..n (zsh arrays are 1-based), so once the index is already 1,
+    # decrementing would land on 0 — an invalid index that silently
+    # reads as empty rather than erroring, which used to produce the
+    # exact same visible "buffer cleared" result as this branch and
+    # so masked the off-by-one. It matters now because it would skip
+    # this branch (and therefore predictions) entirely on the press
+    # that should have triggered it.
+    if [ $_smarthistory_index -le 1 ]; then
+        # Nothing more recent to show walking forward through real
+        # history — rather than just clearing the line, continue past
+        # "the most recent thing that happened" into "what usually
+        # happens next" (`dropdown.predict`), if it's enabled and has
+        # a suggestion. This is the ONLY place predictions become
+        # reachable via Up/Down: never ambiently, only once real
+        # history has been genuinely exhausted going forward (or Down
+        # was pressed with nothing navigated at all yet, which is the
+        # same "index <= 0" state).
+        #
+        # BUFFER must be cleared BEFORE attempting this: it may still
+        # hold whatever the previous Up/Down press recalled (e.g. a
+        # non-empty command), and `_smarthistory_try_activate_predictions`
+        # (via `_smarthistory_dropdown_render`) only ever activates
+        # predictions for a genuinely empty `LBUFFER` — otherwise
+        # it'd run the normal typed-search branch instead (searching
+        # for whatever stale text was still in BUFFER) and correctly
+        # decline, silently skipping predictions on exactly the press
+        # meant to reach them.
         BUFFER=""
         CURSOR=0
         _smarthistory_last_match=""
+        if _smarthistory_try_activate_predictions; then
+            _smarthistory_debug_log "down: real history exhausted, activated predictions"
+            return
+        fi
+        # No prediction available (disabled, or nothing to predict) —
+        # buffer is already cleared, same as before predictions existed.
         zle -M "no older history (line cleared)"
         _smarthistory_debug_log "down: at start of list, cleared BUFFER"
         return

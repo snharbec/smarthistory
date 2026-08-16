@@ -495,16 +495,21 @@ action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
 `zle-line-init` hook. `Tab`/`Enter` accept the top (most probable) prediction
 directly, same as a normal search result.
 
-**`Up`/`Down` never browse predictions** — on an empty line they always walk
-your real command history instead, even while a prediction is showing. An empty
-line is the single most load-bearing place `Up` is expected to just recall your
-last command; letting a prediction dropdown intercept it meant `Up` could
-silently stop doing that the moment `smarthistory next` happened to have a
-suggestion for whatever you'd just run. The prediction dropdown is purely a
-glance-hint on this line — its top candidate is one `Tab`/`Enter` away, but the
-up-to-3-candidate list itself isn't arrow-navigable (unlike a normal
-typed-search dropdown, where `Up`/`Down` do navigate the candidates, since
-there's no competing "recall history" expectation once you've typed something).
+**`Up` always recalls real history; `Down` can reach predictions once history
+runs out.** On an empty line, `Up` walks your real command history exactly like
+it always has — it's the single most load-bearing place `Up` is expected to just
+recall your last command, so it never gets diverted into a prediction, no matter
+how likely `smarthistory next` thinks one is. `Down` walks history in the
+opposite direction, and once it runs out of more-recent real history to show —
+either because you pressed `Down` first, with nothing navigated yet, or because
+you `Up`'d several times and `Down`'d all the way back — the next `Down`
+continues past "the most recent thing that happened" into "what usually happens
+next": it activates the prediction dropdown and highlights its first candidate,
+exactly as if you'd navigated there with the arrow keys. From that point,
+`Up`/`Down` cycle the (up to 3) predicted candidates like a normal typed-search
+dropdown, until you type, run a command, or cancel (`Ctrl+C`/ `Esc`) to reset.
+`Tab`/`Enter` accept the highlighted candidate at any point along the way, same
+as a normal search result.
 
 Scoped to the current search mode, same as the normal search results shown once
 you start typing: SESS only predicts successors observed in
