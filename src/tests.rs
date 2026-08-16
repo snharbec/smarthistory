@@ -441,8 +441,10 @@
         assert!(!delete_comment(&conn, "nope").unwrap());
     }
 
-    /// Build the minimal schema `import_history_rows` needs
-    /// (`history` with its dedup index, plus the two side tables).
+    /// Build the minimal schema `import_history_rows` (and the other
+    /// `import_*` export/import helpers) needs: `history` with its
+    /// dedup index, its two side tables, plus `file_events`,
+    /// `project_sessions`, `project_current`, and `project_pause`.
     fn import_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -462,6 +464,30 @@
                 output TEXT NOT NULL,
                 captured_at INTEGER,
                 FOREIGN KEY (history_id) REFERENCES history(id)
+            );
+            CREATE TABLE file_events (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                project_slug TEXT,
+                timestamp INTEGER NOT NULL
+            );
+            CREATE TABLE project_sessions (
+                id INTEGER PRIMARY KEY,
+                project_slug TEXT NOT NULL,
+                start_ts INTEGER NOT NULL,
+                end_ts INTEGER,
+                end_reason TEXT
+            );
+            CREATE TABLE project_current (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                project_slug TEXT NOT NULL,
+                set_ts INTEGER NOT NULL
+            );
+            CREATE TABLE project_pause (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                paused_slug TEXT,
+                paused_at INTEGER NOT NULL
             );",
         )
         .unwrap();
@@ -525,6 +551,260 @@
         )
         .unwrap();
         assert_eq!((imported, updated), (1, 1));
+    }
+
+    /// `import_comments` must round-trip a comment on a command that
+    /// has NO matching `history` row at all — the exact "orphaned
+    /// comment" gap `CommentExportRow` exists to close (a comment
+    /// exported only via the old per-`history`-row `comment` field
+    /// would be silently dropped for a command outside `history`).
+    #[test]
+    fn import_comments_round_trips_a_comment_with_no_history_row() {
+        let conn = import_test_db();
+        let upserted = import_comments(
+            &conn,
+            &[CommentExportRow {
+                command: "never-run-command".to_string(),
+                comment: "RUST".to_string(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(upserted, 1);
+        let stored: String = conn
+            .query_row(
+                "SELECT comment FROM command_comments WHERE command = 'never-run-command'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "RUST");
+    }
+
+    #[test]
+    fn import_comments_overwrites_an_existing_comment_for_the_same_command() {
+        let conn = import_test_db();
+        import_comments(
+            &conn,
+            &[CommentExportRow {
+                command: "ls -la".to_string(),
+                comment: "first".to_string(),
+            }],
+        )
+        .unwrap();
+        import_comments(
+            &conn,
+            &[CommentExportRow {
+                command: "ls -la".to_string(),
+                comment: "second".to_string(),
+            }],
+        )
+        .unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT comment FROM command_comments WHERE command = 'ls -la'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "second");
+    }
+
+    fn file_event_row(
+        path: &str,
+        event_kind: &str,
+        project_slug: Option<&str>,
+        timestamp: i64,
+    ) -> FileEventExportRow {
+        FileEventExportRow {
+            path: path.to_string(),
+            event_kind: event_kind.to_string(),
+            project_slug: project_slug.map(|s| s.to_string()),
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn import_file_events_inserts_new_rows() {
+        let conn = import_test_db();
+        let inserted = import_file_events(
+            &conn,
+            &[file_event_row("/tmp/a.txt", "created", Some("acme"), 1000)],
+        )
+        .unwrap();
+        assert_eq!(inserted, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// Re-importing the exact same event (same path/kind/slug/ts)
+    /// must not duplicate it — `file_events` has no unique
+    /// constraint of its own, so the dedup has to happen in
+    /// `import_file_events` itself.
+    #[test]
+    fn import_file_events_is_idempotent_on_reimport() {
+        let conn = import_test_db();
+        let row = file_event_row("/tmp/a.txt", "created", Some("acme"), 1000);
+        import_file_events(&conn, std::slice::from_ref(&row)).unwrap();
+        let inserted_again = import_file_events(&conn, &[row]).unwrap();
+        assert_eq!(inserted_again, 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "must not duplicate the same event");
+    }
+
+    /// A `NULL` `project_slug` must dedup correctly too — the
+    /// existence check uses `IS ?` specifically so this doesn't
+    /// silently fail to match (plain `=` never matches `NULL`).
+    #[test]
+    fn import_file_events_dedups_correctly_with_a_null_project_slug() {
+        let conn = import_test_db();
+        let row = file_event_row("/tmp/a.txt", "created", None, 1000);
+        import_file_events(&conn, std::slice::from_ref(&row)).unwrap();
+        let inserted_again = import_file_events(&conn, &[row]).unwrap();
+        assert_eq!(inserted_again, 0);
+    }
+
+    #[test]
+    fn import_project_sessions_inserts_new_and_updates_existing() {
+        let conn = import_test_db();
+        let inserted = import_project_sessions(
+            &conn,
+            &[ProjectSessionExportRow {
+                project_slug: "acme".to_string(),
+                start_ts: 1000,
+                end_ts: None,
+                end_reason: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(inserted, 1);
+
+        // Re-importing the same (project_slug, start_ts) with the
+        // session now closed must update in place, not insert a
+        // second row.
+        let inserted_again = import_project_sessions(
+            &conn,
+            &[ProjectSessionExportRow {
+                project_slug: "acme".to_string(),
+                start_ts: 1000,
+                end_ts: Some(2000),
+                end_reason: Some("idle".to_string()),
+            }],
+        )
+        .unwrap();
+        assert_eq!(inserted_again, 0);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let (end_ts, end_reason): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT end_ts, end_reason FROM project_sessions WHERE project_slug = 'acme'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(end_ts, Some(2000));
+        assert_eq!(end_reason, Some("idle".to_string()));
+    }
+
+    #[test]
+    fn import_project_current_applies_when_nothing_exists_yet() {
+        let conn = import_test_db();
+        import_project_current(
+            &conn,
+            Some(&ProjectCurrentExportRow {
+                project_slug: "acme".to_string(),
+                set_ts: 1000,
+            }),
+        )
+        .unwrap();
+        let slug: String = conn
+            .query_row("SELECT project_slug FROM project_current WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(slug, "acme");
+    }
+
+    /// Importing a `project_current` snapshot OLDER than what's
+    /// already in the database must not overwrite the live value --
+    /// otherwise restoring an old backup onto an active database
+    /// would revert the actual current project to a stale one.
+    #[test]
+    fn import_project_current_does_not_overwrite_a_newer_existing_value() {
+        let conn = import_test_db();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'live-project', 5000)",
+            [],
+        )
+        .unwrap();
+        import_project_current(
+            &conn,
+            Some(&ProjectCurrentExportRow {
+                project_slug: "stale-project".to_string(),
+                set_ts: 1000,
+            }),
+        )
+        .unwrap();
+        let slug: String = conn
+            .query_row("SELECT project_slug FROM project_current WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(slug, "live-project", "an older import must not clobber the newer live value");
+    }
+
+    #[test]
+    fn import_project_current_is_a_no_op_when_absent_from_the_export() {
+        let conn = import_test_db();
+        import_project_current(&conn, None).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_current", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn import_project_pause_does_not_overwrite_a_newer_existing_value() {
+        let conn = import_test_db();
+        conn.execute(
+            "INSERT INTO project_pause (id, paused_slug, paused_at) VALUES (1, 'live', 5000)",
+            [],
+        )
+        .unwrap();
+        import_project_pause(
+            &conn,
+            Some(&ProjectPauseExportRow {
+                paused_slug: Some("stale".to_string()),
+                paused_at: 1000,
+            }),
+        )
+        .unwrap();
+        let slug: Option<String> = conn
+            .query_row("SELECT paused_slug FROM project_pause WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(slug, Some("live".to_string()));
+    }
+
+    #[test]
+    fn time_range_clause_with_no_bounds_is_empty() {
+        let c = time_range_clause("timestamp", None, None);
+        assert_eq!(c.clause, "");
+        assert_eq!(c.params.len(), 0);
+    }
+
+    #[test]
+    fn time_range_clause_with_both_bounds_uses_the_given_column() {
+        let c = time_range_clause("start_ts", Some(100), Some(200));
+        assert_eq!(c.clause, " AND start_ts >= ? AND start_ts <= ?");
+        assert_eq!(c.params.len(), 2);
     }
 
     #[test]
