@@ -142,9 +142,16 @@ All notable changes to this project will be documented in this file.
   dropdown until reset, and pressing `Up` again at the very top candidate exits
   predictions back into real history right where `Down` left off, mirroring how
   `Down` got in. `Up`/`Down` on a normal typed-search dropdown (non-empty line)
-  are unaffected. (Also fixed a pre-existing off-by-one in `Down`'s "start of
-  list" boundary check, masked until now because it happened to produce the same
-  empty-buffer result either way.)
+  are unaffected. `Down`'s predictions also work on the very first empty prompt
+  of a brand-new shell now: with no last command run yet, `smarthistory next`
+  has no successor to predict from, so it falls back to the most frequent
+  commands among the last 100 history rows instead of showing nothing (DIR scope
+  still applies; SESS scope is skipped for this fallback specifically, since a
+  session-scoped query is guaranteed empty at that exact moment).
+  `smarthistory next`'s `command` argument is now optional for this. (Also fixed
+  a pre-existing off-by-one in `Down`'s "start of list" boundary check, masked
+  until now because it happened to produce the same empty-buffer result either
+  way.)
 - Added three indexes on `history` (`timestamp`, `session_id, timestamp`,
   `directory, timestamp`) that the schema was missing. The main history fetch
   sorts by `timestamp DESC` and the SESS/DIR scopes additionally filter by

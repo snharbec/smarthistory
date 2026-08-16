@@ -1461,11 +1461,13 @@ _smarthistory_dropdown_render() {
     # `minchars=0` would otherwise also mean "show every history row
     # on an empty line," which is a different, unwanted feature).
     # With nothing typed there's no search to run at all; the only
-    # thing worth showing is a "what's next" prediction, and only
-    # when the user opted in and there's actually a last-run command
-    # to predict from.
+    # thing worth showing is a "what's next" prediction, gated only on
+    # opt-in — NOT on whether `_smarthistory_last_cmd` is set. A brand
+    # new shell (nothing run yet this session) has no successor to
+    # predict from, but still falls through to the frequent-commands
+    # fallback below rather than showing nothing.
     if (( $#LBUFFER == 0 )); then
-        if [[ "$_smarthistory_dropdown_predict_enabled" != "1" ]] || [[ -z "$_smarthistory_last_cmd" ]]; then
+        if [[ "$_smarthistory_dropdown_predict_enabled" != "1" ]]; then
             _smarthistory_dropdown_clear
             return
         fi
@@ -1476,10 +1478,9 @@ _smarthistory_dropdown_render() {
     local raw
     if (( $#LBUFFER == 0 )); then
         # Prediction branch (`dropdown.predict=on`, reached only when
-        # the gate above already confirmed it's enabled and
-        # `_smarthistory_last_cmd` is set): same successor-frequency
-        # data Ctrl-S (`_smarthistory_next_history`) uses, via
-        # `smarthistory next`. That command's output is
+        # the gate above already confirmed it's enabled): same
+        # successor-frequency data Ctrl-S (`_smarthistory_next_history`)
+        # uses, via `smarthistory next`. That command's output is
         # `<freq>\t<command>`, not the `<diff>  <exit_code>  <command>`
         # shape `smarthistory search` produces — `cut -f2` strips the
         # frequency column down to bare command lines. Those don't
@@ -1502,7 +1503,27 @@ _smarthistory_dropdown_render() {
             dir)    _sm_predict_scope_args=(--directory "$PWD") ;;
             global) _sm_predict_scope_args=() ;;
         esac
-        raw=$(smarthistory next "$_smarthistory_last_cmd" --limit 3 "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
+        if [[ -n "$_smarthistory_last_cmd" ]]; then
+            raw=$(smarthistory next "$_smarthistory_last_cmd" --limit 3 "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
+        else
+            # Nothing run yet this session — no successor to predict
+            # from. Fall back to the most frequent commands among the
+            # last 100 history rows, so the dropdown still has
+            # something useful instead of staying empty. NOT scoped
+            # by SESS here even in SESS mode: precmd only records a
+            # row under this session's id once a command actually
+            # completes, so a `--session`-scoped query is guaranteed
+            # to find zero rows at this exact moment, on every single
+            # new shell -- the scope itself would be self-defeating.
+            # DIR scope stays, since prior sessions in this same
+            # directory are a genuinely useful signal here.
+            local -a _sm_frequent_scope_args
+            case "$_smarthistory_mode" in
+                dir) _sm_frequent_scope_args=(--directory "$PWD") ;;
+                *)   _sm_frequent_scope_args=() ;;
+            esac
+            raw=$(smarthistory next --limit 3 "${_sm_frequent_scope_args[@]}" 2>/dev/null | cut -f2)
+        fi
     else
         local -a args
         # `--prefix`: match commands that START WITH what's typed, not a
