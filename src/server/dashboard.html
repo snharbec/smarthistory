@@ -16,6 +16,14 @@
     --danger: #d1495b;
     --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
     --radius: 10px;
+    --chart-1: #3b6fe0;
+    --chart-2: #ef7d3b;
+    --chart-3: #2fae6b;
+    --chart-4: #c34fd6;
+    --chart-5: #d6ad2b;
+    --chart-6: #3bbfe0;
+    --chart-7: #e0475f;
+    --chart-8: #7d8fe0;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -28,6 +36,14 @@
       --accent-bg: #1f2b47;
       --danger: #e0697a;
       --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.4);
+      --chart-1: #6f9bf5;
+      --chart-2: #f5975f;
+      --chart-3: #4fce8b;
+      --chart-4: #db7fe8;
+      --chart-5: #e8c65a;
+      --chart-6: #5fd3f0;
+      --chart-7: #e8748a;
+      --chart-8: #9fadf0;
     }
   }
   * { box-sizing: border-box; }
@@ -138,6 +154,67 @@
   .project-list {
     display: grid;
     gap: 10px;
+  }
+  .pie-wrap {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .pie {
+    position: relative;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .pie-hole {
+    position: absolute;
+    inset: 22px;
+    border-radius: 50%;
+    background: var(--card-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 4px;
+  }
+  .pie-total {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.3;
+  }
+  .pie-legend {
+    display: grid;
+    gap: 6px;
+    flex: 1;
+    min-width: 160px;
+  }
+  .pie-legend a {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+  }
+  .pie-legend a:hover { color: var(--accent); text-decoration: none; }
+  .pie-legend .swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .pie-legend .legend-slug {
+    font-weight: 600;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pie-legend .legend-pct {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .project-row {
     display: flex;
@@ -386,9 +463,58 @@
       })
       .join("");
     app.innerHTML = `
-      <div class="card"><h2>${esc(report.date)}</h2></div>
+      <div class="card"><h2>${esc(report.date)}</h2>${pieChart(date, report.projects)}</div>
       <div class="project-list">${rows}</div>
     `;
+  }
+
+  // Donut chart of active_secs per project, via a plain CSS
+  // conic-gradient (no chart library, no canvas/SVG math) — each
+  // color stop is a `var(--chart-N)` custom property, so the palette
+  // follows the page's own light/dark theme automatically instead of
+  // needing separate hardcoded hex values per mode. Zero-duration
+  // projects are skipped (a zero-width stop renders nothing anyway,
+  // but would still clutter the legend). The same `slices` array
+  // drives both the gradient stops and the legend rows, so a
+  // project's swatch color is always the same one used in its slice.
+  function pieChart(date, projects) {
+    const slices = projects.filter((p) => p.active_secs > 0);
+    const total = slices.reduce((sum, p) => sum + p.active_secs, 0);
+    if (!slices.length || total <= 0) return "";
+    let colorIdx = 0;
+    const colored = slices.map((p) => ({
+      p,
+      color: p.is_untracked ? "var(--text-dim)" : `var(--chart-${(colorIdx++ % 8) + 1})`,
+    }));
+    let cum = 0;
+    const stops = colored
+      .map(({ p, color }) => {
+        const start = (cum / total) * 100;
+        cum += p.active_secs;
+        const end = (cum / total) * 100;
+        return `${color} ${start.toFixed(3)}% ${end.toFixed(3)}%`;
+      })
+      .join(", ");
+    const legend = colored
+      .map(({ p, color }) => {
+        const href = `/day/${encodeURIComponent(date)}/project/${encodeURIComponent(p.slug)}`;
+        const pctVal = Math.round((p.active_secs / total) * 100);
+        const pct = pctVal === 0 ? "<1%" : `${pctVal}%`;
+        return `
+        <a href="${href}" data-link>
+          <span class="swatch" style="background:${color}"></span>
+          <span class="legend-slug">${esc(p.slug)}</span>
+          <span class="legend-pct">${pct}</span>
+        </a>`;
+      })
+      .join("");
+    return `
+      <div class="pie-wrap">
+        <div class="pie" style="background: conic-gradient(${stops})">
+          <div class="pie-hole"><span class="pie-total">${formatDuration(total)}</span></div>
+        </div>
+        <div class="pie-legend">${legend}</div>
+      </div>`;
   }
 
   async function renderDetail(date, slug) {

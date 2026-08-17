@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `smarthistory serve`'s day overview now shows a donut chart of that day's
+  active time per project, next to the existing project list — a plain CSS
+  `conic-gradient` (no chart library, no canvas/SVG), with a clickable legend
+  that links straight to each project's detail view for that day. Purely a
+  dashboard rendering change; the API response shape is unchanged.
 - New `smarthistory serve`: an HTTP server exposing the same time-tracking data
   `project report` prints as text — a JSON API
   (`/api/report`/`/api/history`/`/api/projects`) plus an embedded single-page
