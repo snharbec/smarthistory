@@ -155,6 +155,13 @@ plain JavaScript with no framework: file/note/link lists use native
 `<details>`/`<summary>` for collapse/expand, and the layout follows
 `prefers-color-scheme` for light/dark.
 
+The day overview shows a donut chart of that day's `active_secs` per project
+alongside the project list — a plain CSS `conic-gradient` (no chart library, no
+canvas/SVG), with a clickable legend that links straight to each project's
+detail view for that day. Projects with no tracked time that day are left out of
+the chart (a zero-width slice draws nothing anyway); a project with real but
+sub-1%-of-the-day time shows `<1%` in the legend rather than a misleading `0%`.
+
 ## Performance
 
 Loading a day with browser history or JIRA-linked activity is unavoidably slow
