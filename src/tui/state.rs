@@ -899,6 +899,58 @@ pub struct ZoxideSavePrompt {
     pub directory: String,
 }
 
+/// Pull an SSH connection target — `user@host`, or bare `host` — out
+/// of a command line, for pre-filling `F6`'s "add host" dialog from
+/// the selected history row (e.g. `ssh root@122.1.1.40` → `(Some("root"),
+/// "122.1.1.40")`). Only recognizes commands whose first word is a
+/// known remote-connection program (`ssh`/`scp`/`sftp`/`rsync`/`mosh`,
+/// path prefix stripped) — scanning arbitrary command text for
+/// anything `word@word`-shaped would false-positive on email
+/// addresses, `git commit --author`, etc. `host` must be either an
+/// IPv4 dotted-quad or a dotted hostname (`pve-1.local`); a bare
+/// single-label hostname with no dot (`ssh myserver`) isn't
+/// recognized — indistinguishable from any other bare word in the
+/// command without deeper flag-aware parsing, so it's left to the
+/// existing directory-basename fallback instead.
+///
+/// `scp`/`rsync` take a *pair* of paths (`scp LOCAL [user@]HOST:REMOTE`
+/// or the reverse), and a local path can easily look host-shaped by
+/// pure accident — `file.txt` parses as a two-label dotted hostname
+/// just as well as `pve-1.local` does. Their remote argument is the
+/// one place that's unambiguous: it always carries a literal `:`
+/// separating the target from the remote path, which a local path
+/// never does. So for those two programs specifically, only a
+/// colon-suffixed word is considered a candidate at all; `ssh`/
+/// `sftp`/`mosh` take a bare `[user@]host` with no such marker, so
+/// any non-flag word may match there. Scans left to right and returns
+/// the first non-flag word that matches (after that colon filter);
+/// an identity/port/option flag's VALUE (`-i ~/.ssh/id_rsa`,
+/// `-p 2222`) is naturally skipped too, since neither shape matches
+/// the host pattern.
+fn extract_ssh_target(command: &str) -> Option<(Option<String>, String)> {
+    let mut words = command.split_whitespace();
+    let program = words.next()?;
+    let program = program.rsplit('/').next().unwrap_or(program);
+    let requires_colon = match program {
+        "ssh" | "sftp" | "mosh" => false,
+        "scp" | "rsync" => true,
+        _ => return None,
+    };
+    let re = regex::Regex::new(
+        r"^(?:([A-Za-z0-9._-]+)@)?((?:[0-9]{1,3}\.){3}[0-9]{1,3}|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+)(:.*)?$",
+    )
+    .expect("static regex");
+    words.filter(|w| !w.starts_with('-')).find_map(|w| {
+        let caps = re.captures(w)?;
+        if requires_colon && caps.get(3).is_none() {
+            return None;
+        }
+        let user = caps.get(1).map(|m| m.as_str().to_string());
+        let host = caps.get(2).unwrap().as_str().to_string();
+        Some((user, host))
+    })
+}
+
 /// State for the "add session /
 /// host" dialog. Opens on
 /// `C-1` / `C-2`, walks the
@@ -934,12 +986,17 @@ pub struct AddEntryDialog {
     /// the dialog title).
     pub source_directory: String,
     /// The command from the
-    /// selected row (used
-    /// purely as a status
-    /// hint in the dialog
-    /// title — the entry
-    /// itself doesn't carry
-    /// the command).
+    /// selected row. Shown as a
+    /// status hint in the
+    /// dialog title (the entry
+    /// itself doesn't carry the
+    /// command), and — for a
+    /// `Host` dialog — scanned
+    /// by `extract_ssh_target`
+    /// to pre-fill the Host/User
+    /// fields when the row looks
+    /// like an SSH/SCP/etc.
+    /// invocation.
     pub source_command: String,
     /// Error message from the
     /// most recent commit
@@ -966,29 +1023,50 @@ impl AddEntryDialog {
                 DialogField::prefilled("Dir", ".dir", false, "~/path", source_directory.clone()),
                 DialogField::new("Exec", ".exec", false, "command to run after create"),
             ],
-            AddEntryKind::Host => vec![
-                DialogField::new("Name", "", true, "Proxmox"),
-                DialogField::prefilled(
-                    "Host",
-                    ".host",
-                    true,
-                    "pve-1",
-                    std::path::Path::new(&source_directory)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| source_directory.clone()),
-                ),
-                DialogField::new(
-                    "Hostname",
-                    ".hostname",
-                    false,
-                    "real.host (overrides SSH config)",
-                ),
-                DialogField::new("User", ".user", false, "alice (defaults to $USER)"),
-                DialogField::new("Port", ".port", false, "22"),
-                DialogField::new("Identity", ".identity", false, "~/.ssh/id_ed25519"),
-                DialogField::new("Exec", ".exec", false, "command to run after ssh"),
-            ],
+            AddEntryKind::Host => {
+                // If the selected row looks like an SSH/SCP/etc.
+                // invocation (`ssh root@122.1.1.40`), pre-fill Host
+                // (and User, when present) straight from it — a much
+                // more useful default than the directory basename,
+                // which for a `cd`-then-`ssh` workflow is usually
+                // unrelated to the remote host entirely. Falls back
+                // to the pre-existing basename-or-full-path default
+                // when the row doesn't match.
+                let ssh_target = extract_ssh_target(&source_command);
+                let host_value = ssh_target
+                    .as_ref()
+                    .map(|(_, host)| host.clone())
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(&source_directory)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| source_directory.clone())
+                    });
+                let user_field = match ssh_target.and_then(|(user, _)| user) {
+                    Some(user) => DialogField::prefilled(
+                        "User",
+                        ".user",
+                        false,
+                        "alice (defaults to $USER)",
+                        user,
+                    ),
+                    None => DialogField::new("User", ".user", false, "alice (defaults to $USER)"),
+                };
+                vec![
+                    DialogField::new("Name", "", true, "Proxmox"),
+                    DialogField::prefilled("Host", ".host", true, "pve-1", host_value),
+                    DialogField::new(
+                        "Hostname",
+                        ".hostname",
+                        false,
+                        "real.host (overrides SSH config)",
+                    ),
+                    user_field,
+                    DialogField::new("Port", ".port", false, "22"),
+                    DialogField::new("Identity", ".identity", false, "~/.ssh/id_ed25519"),
+                    DialogField::new("Exec", ".exec", false, "command to run after ssh"),
+                ]
+            }
         };
         AddEntryDialog {
             kind,

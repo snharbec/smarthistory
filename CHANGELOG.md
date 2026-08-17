@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `F6`'s "add host" dialog now pre-fills Host (and User, when present) from the
+  selected row's command when it looks like an SSH/SCP/SFTP/rsync/mosh
+  invocation, e.g. `ssh root@122.1.1.40` → Host `122.1.1.40`, User `root` — a
+  much more useful default than the directory basename for the common case of
+  pressing `F6` right on the `ssh` command itself. Falls back to the
+  pre-existing directory-basename default when the row doesn't match.
 - New `smarthistory serve`: an HTTP server exposing the same time-tracking data
   `project report` prints as text — a JSON API
   (`/api/report`/`/api/history`/`/api/projects`) plus an embedded single-page

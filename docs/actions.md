@@ -891,6 +891,13 @@ writes the entry to `~/.config/smarthistory/hosts` (creating the file if it
 doesn't exist yet) and reloads the in-memory host list. The new host appears in
 the `*` panes view under a `# hosts` header.
 
+If the selected row's command looks like an SSH/SCP/SFTP/rsync/mosh invocation
+(`ssh root@122.1.1.40`, `scp file.txt user@host:/path`, …), Host (and User, when
+present) is pre-filled straight from it instead of the directory basename — the
+far more useful default when the row that prompted `F6` is the `ssh` command
+itself, not some unrelated directory you happened to be in. Falls back to the
+directory basename when the row doesn't look like one of those commands.
+
 ### `ComposeNoteEntry`
 
 | Field        | Value                         |
