@@ -6,21 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- `F6`'s "add host" dialog now pre-fills Host (and User, when present) from the
-  selected row's command when it looks like an SSH/SCP/SFTP/rsync/mosh
-  invocation, e.g. `ssh root@122.1.1.40` → Host `122.1.1.40`, User `root` — a
-  much more useful default than the directory basename for the common case of
-  pressing `F6` right on the `ssh` command itself. A bare target with no
-  explicit user (`ssh machine`) fills Host with `machine` and defaults User to
-  the current OS login, the same default `ssh` itself uses — but only when the
-  bare word is the only thing left once command-line options are stripped out
-  (along with their value, for a flag that takes a separate one — `-p`, `-i`,
-  `-o`, `-l`, `-F`, `-J`, and a handful of others), so
-  `ssh -p 2222 -i ~/.ssh/id_ed25519 root@machine` still recognizes
-  `machine`/`root` despite the flags. A genuine second positional word (most
-  commonly a remote command to run, e.g. `ssh myserver uptime`) is still
-  ambiguous and isn't recognized. Falls back to the pre-existing
-  directory-basename default when the row doesn't match.
+- `smarthistory serve`'s day overview now shows a donut chart of that day's
+  active time per project, next to the existing project list — a plain CSS
+  `conic-gradient` (no chart library, no canvas/SVG), with a clickable legend
+  that links straight to each project's detail view for that day. Purely a
+  dashboard rendering change; the API response shape is unchanged.
 - New `smarthistory serve`: an HTTP server exposing the same time-tracking data
   `project report` prints as text — a JSON API
   (`/api/report`/`/api/history`/`/api/projects`) plus an embedded single-page
