@@ -906,41 +906,61 @@ pub struct ZoxideSavePrompt {
 /// known remote-connection program (`ssh`/`scp`/`sftp`/`rsync`/`mosh`,
 /// path prefix stripped) — scanning arbitrary command text for
 /// anything `word@word`-shaped would false-positive on email
-/// addresses, `git commit --author`, etc. `host` must be either an
-/// IPv4 dotted-quad or a dotted hostname (`pve-1.local`); a bare
-/// single-label hostname with no dot (`ssh myserver`) isn't
-/// recognized — indistinguishable from any other bare word in the
-/// command without deeper flag-aware parsing, so it's left to the
-/// existing directory-basename fallback instead.
+/// addresses, `git commit --author`, etc.
 ///
-/// `scp`/`rsync` take a *pair* of paths (`scp LOCAL [user@]HOST:REMOTE`
-/// or the reverse), and a local path can easily look host-shaped by
-/// pure accident — `file.txt` parses as a two-label dotted hostname
-/// just as well as `pve-1.local` does. Their remote argument is the
-/// one place that's unambiguous: it always carries a literal `:`
-/// separating the target from the remote path, which a local path
-/// never does. So for those two programs specifically, only a
-/// colon-suffixed word is considered a candidate at all; `ssh`/
-/// `sftp`/`mosh` take a bare `[user@]host` with no such marker, so
-/// any non-flag word may match there. Scans left to right and returns
-/// the first non-flag word that matches (after that colon filter);
-/// an identity/port/option flag's VALUE (`-i ~/.ssh/id_rsa`,
-/// `-p 2222`) is naturally skipped too, since neither shape matches
-/// the host pattern.
+/// Two cases, in order:
+///
+/// 1. **Exactly one word follows the program name** (`ssh machine`,
+///    `ssh root@machine`) — for `ssh`/`sftp`/`mosh`, which take a bare
+///    `[user@]host` and nothing else, that lone word has no other
+///    possible meaning, so it's accepted as the target whatever shape
+///    it's in — no dot or IPv4 pattern required, unlike case 2. This
+///    is what makes `ssh machine` recognize `machine` as the host
+///    even though it's a bare, undotted single-label name.
+/// 2. **Multiple words follow the program name** — the target could
+///    be any one of them (interleaved with flags, an identity path,
+///    a remote command to run, …), so a looser "any bare word" rule
+///    would false-positive on those. `host` must be either an IPv4
+///    dotted-quad or a dotted hostname (`pve-1.local`) in this case;
+///    a bare single-label hostname isn't recognized here — genuinely
+///    indistinguishable from any other bare word without deeper
+///    flag-aware parsing, so it falls back to the caller's own
+///    default instead. `scp`/`rsync` take a *pair* of paths (`scp
+///    LOCAL [user@]HOST:REMOTE` or the reverse), and a local path can
+///    easily look host-shaped by pure accident — `file.txt` parses as
+///    a two-label dotted hostname just as well as `pve-1.local` does
+///    — so for those two programs specifically, only a colon-suffixed
+///    word (the one place a remote target is unambiguous: it always
+///    carries the `:` separating it from the remote path, which a
+///    local path never does) is considered a candidate at all. Scans
+///    left to right and returns the first non-flag word that matches;
+///    an identity/port/option flag's VALUE (`-i ~/.ssh/id_rsa`,
+///    `-p 2222`) is naturally skipped too, since neither shape
+///    matches the host pattern.
 fn extract_ssh_target(command: &str) -> Option<(Option<String>, String)> {
     let mut words = command.split_whitespace();
     let program = words.next()?;
     let program = program.rsplit('/').next().unwrap_or(program);
-    let requires_colon = match program {
-        "ssh" | "sftp" | "mosh" => false,
-        "scp" | "rsync" => true,
+    let takes_bare_target = match program {
+        "ssh" | "sftp" | "mosh" => true,
+        "scp" | "rsync" => false,
         _ => return None,
     };
+    let rest: Vec<&str> = words.collect();
+    if takes_bare_target && rest.len() == 1 && !rest[0].starts_with('-') {
+        return Some(match rest[0].split_once('@') {
+            Some((user, host)) if !user.is_empty() && !host.is_empty() => {
+                (Some(user.to_string()), host.to_string())
+            }
+            _ => (None, rest[0].to_string()),
+        });
+    }
+    let requires_colon = !takes_bare_target;
     let re = regex::Regex::new(
         r"^(?:([A-Za-z0-9._-]+)@)?((?:[0-9]{1,3}\.){3}[0-9]{1,3}|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+)(:.*)?$",
     )
     .expect("static regex");
-    words.filter(|w| !w.starts_with('-')).find_map(|w| {
+    rest.into_iter().filter(|w| !w.starts_with('-')).find_map(|w| {
         let caps = re.captures(w)?;
         if requires_colon && caps.get(3).is_none() {
             return None;
@@ -1042,14 +1062,39 @@ impl AddEntryDialog {
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_else(|| source_directory.clone())
                     });
-                let user_field = match ssh_target.and_then(|(user, _)| user) {
-                    Some(user) => DialogField::prefilled(
+                // A matched target with no explicit `user@` (`ssh
+                // machine`) still has a real user: ssh itself
+                // defaults to the current OS login for that case, so
+                // mirror that here instead of leaving User blank.
+                // `ssh_target.is_none()` (no target matched at all)
+                // is the one case that leaves User empty.
+                let user_field = match &ssh_target {
+                    Some((Some(user), _)) => DialogField::prefilled(
                         "User",
                         ".user",
                         false,
                         "alice (defaults to $USER)",
-                        user,
+                        user.clone(),
                     ),
+                    Some((None, _)) => {
+                        match std::env::var("USER") {
+                            Ok(current_user) if !current_user.is_empty() => {
+                                DialogField::prefilled(
+                                    "User",
+                                    ".user",
+                                    false,
+                                    "alice (defaults to $USER)",
+                                    current_user,
+                                )
+                            }
+                            _ => DialogField::new(
+                                "User",
+                                ".user",
+                                false,
+                                "alice (defaults to $USER)",
+                            ),
+                        }
+                    }
                     None => DialogField::new("User", ".user", false, "alice (defaults to $USER)"),
                 };
                 vec![

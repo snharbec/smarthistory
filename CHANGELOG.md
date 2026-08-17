@@ -10,8 +10,13 @@ All notable changes to this project will be documented in this file.
   selected row's command when it looks like an SSH/SCP/SFTP/rsync/mosh
   invocation, e.g. `ssh root@122.1.1.40` → Host `122.1.1.40`, User `root` — a
   much more useful default than the directory basename for the common case of
-  pressing `F6` right on the `ssh` command itself. Falls back to the
-  pre-existing directory-basename default when the row doesn't match.
+  pressing `F6` right on the `ssh` command itself. A bare target with no
+  explicit user (`ssh machine`) fills Host with `machine` and defaults User to
+  the current OS login, the same default `ssh` itself uses — but only when that
+  bare word is the entire remaining command; with anything else present (a flag,
+  an identity path, a remote command to run, …) an undotted single-label host is
+  genuinely ambiguous and isn't recognized. Falls back to the pre-existing
+  directory-basename default when the row doesn't match.
 - New `smarthistory serve`: an HTTP server exposing the same time-tracking data
   `project report` prints as text — a JSON API
   (`/api/report`/`/api/history`/`/api/projects`) plus an embedded single-page

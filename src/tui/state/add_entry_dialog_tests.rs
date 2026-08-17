@@ -249,13 +249,30 @@
         assert_eq!(extract_ssh_target(""), None);
     }
 
-    /// A bare single-label hostname (no dot) is indistinguishable
-    /// from any other word without deeper flag-aware parsing, so
-    /// it's deliberately not recognized -- left to the existing
-    /// directory-basename fallback instead.
+    /// A bare single-label hostname (no dot) IS recognized when it's
+    /// the only word following the program name -- with nothing else
+    /// in the command, it has no other possible meaning.
     #[test]
-    fn extract_ssh_target_does_not_match_bare_unqualified_hostname() {
-        assert_eq!(extract_ssh_target("ssh myserver"), None);
+    fn extract_ssh_target_matches_bare_unqualified_hostname_when_its_the_only_word() {
+        assert_eq!(
+            extract_ssh_target("ssh myserver"),
+            Some((None, "myserver".to_string()))
+        );
+        assert_eq!(
+            extract_ssh_target("ssh root@myserver"),
+            Some((Some("root".to_string()), "myserver".to_string()))
+        );
+    }
+
+    /// The same bare, undotted word is NOT recognized once there's a
+    /// second word in play (a flag, an identity path, a remote
+    /// command, …) -- genuinely ambiguous which one is the target
+    /// without deeper flag-aware parsing, so it falls back to the
+    /// caller's own default instead.
+    #[test]
+    fn extract_ssh_target_does_not_match_bare_unqualified_hostname_with_other_words_present() {
+        assert_eq!(extract_ssh_target("ssh myserver uptime"), None);
+        assert_eq!(extract_ssh_target("ssh -p 2222 myserver"), None);
     }
 
     // --- Host dialog pre-fill from an SSH target ------------------------
@@ -274,6 +291,30 @@
         // The cursor lands at the end of the pre-filled value, same
         // as every other pre-filled field.
         assert_eq!(d.fields[3].cursor, "root".chars().count());
+    }
+
+    /// `ssh machine` (a bare, undotted single-word target, no
+    /// explicit `user@`): Host is `machine`, and User defaults to the
+    /// current OS login -- the same default `ssh` itself applies when
+    /// no `user@` is given. Reads the real `$USER` rather than
+    /// mutating it, to stay safe under parallel `cargo test` (see the
+    /// `HOME`-mutation caution elsewhere in this codebase's tests);
+    /// skips itself if `$USER` isn't set in this environment.
+    #[test]
+    fn host_dialog_defaults_user_to_current_os_user_for_bare_ssh_target() {
+        let Ok(current_user) = std::env::var("USER") else {
+            return;
+        };
+        if current_user.is_empty() {
+            return;
+        }
+        let d = AddEntryDialog::new(
+            AddEntryKind::Host,
+            "/home/user/unrelated-dir".to_string(),
+            "ssh machine".to_string(),
+        );
+        assert_eq!(d.fields[1].value, "machine");
+        assert_eq!(d.fields[3].value, current_user);
     }
 
     /// No SSH-shaped command: Host still falls back to the directory

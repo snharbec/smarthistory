@@ -898,6 +898,16 @@ far more useful default when the row that prompted `F6` is the `ssh` command
 itself, not some unrelated directory you happened to be in. Falls back to the
 directory basename when the row doesn't look like one of those commands.
 
+A bare target with no explicit user (`ssh machine`) fills Host with `machine`
+and User with the current OS login — the same default `ssh` itself uses when no
+`user@` is given. This bare-word form is only recognized when it's the _entire_
+remaining command (nothing else could be the target); once a second word is
+present (a flag, an identity path, a remote command to run, …), an undotted
+single-label host is genuinely ambiguous and is left to the directory-basename
+fallback instead — `ssh myserver uptime` and `ssh -p 2222 myserver` don't
+pre-fill Host from `myserver`, but `ssh root@122.1.1.40` and `ssh pve-1.local`
+(dotted or IPv4) still do, regardless of how many other words are present.
+
 ### `ComposeNoteEntry`
 
 | Field        | Value                         |
