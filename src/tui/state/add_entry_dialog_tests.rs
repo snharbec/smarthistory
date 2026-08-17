@@ -175,6 +175,27 @@
         );
     }
 
+    /// A value-taking flag's value is skipped even when it happens
+    /// to look host-shaped itself (`StrictHostKeyChecking=no` has no
+    /// dot, so wouldn't match the host pattern anyway here, but the
+    /// flag+value pair must still be recognized and skipped as a
+    /// unit, not just the flag word alone).
+    #[test]
+    fn extract_ssh_target_skips_value_taking_flag_and_its_value_as_a_pair() {
+        assert_eq!(
+            extract_ssh_target("ssh -o StrictHostKeyChecking=no root@122.1.1.40"),
+            Some((Some("root".to_string()), "122.1.1.40".to_string()))
+        );
+    }
+
+    /// `scp`/`rsync` never get the bare-word special case, no matter
+    /// how many flags are filtered out first -- they always require
+    /// the colon-suffixed remote form.
+    #[test]
+    fn extract_ssh_target_scp_never_uses_bare_word_case_even_with_only_flags_and_one_word() {
+        assert_eq!(extract_ssh_target("scp -P 2222 myserver"), None);
+    }
+
     /// `ssh`/`sftp`/`mosh` take a bare `[user@]host` (no `:` marker
     /// needed); `scp`/`rsync` only recognize their colon-suffixed
     /// remote argument — see `extract_ssh_target_scp_ignores_local_path_
@@ -264,15 +285,30 @@
         );
     }
 
-    /// The same bare, undotted word is NOT recognized once there's a
-    /// second word in play (a flag, an identity path, a remote
-    /// command, …) -- genuinely ambiguous which one is the target
-    /// without deeper flag-aware parsing, so it falls back to the
-    /// caller's own default instead.
+    /// Flags don't count as "other words" -- they're filtered out
+    /// before the one-word check, so a bare, undotted target is still
+    /// recognized alongside any number of them.
     #[test]
-    fn extract_ssh_target_does_not_match_bare_unqualified_hostname_with_other_words_present() {
+    fn extract_ssh_target_matches_bare_unqualified_hostname_past_flags() {
+        assert_eq!(
+            extract_ssh_target("ssh -p 2222 myserver"),
+            Some((None, "myserver".to_string()))
+        );
+        assert_eq!(
+            extract_ssh_target("ssh -4 -p 2222 -i ~/.ssh/id_ed25519 root@myserver"),
+            Some((Some("root".to_string()), "myserver".to_string()))
+        );
+    }
+
+    /// A genuine second POSITIONAL word (not a flag) is still
+    /// ambiguous -- e.g. a remote command to run, which is just as
+    /// plausibly "the thing this row is about" as the host is
+    /// without deeper parsing -- so it still falls back to the
+    /// caller's own default.
+    #[test]
+    fn extract_ssh_target_does_not_match_bare_unqualified_hostname_with_a_second_positional_word()
+    {
         assert_eq!(extract_ssh_target("ssh myserver uptime"), None);
-        assert_eq!(extract_ssh_target("ssh -p 2222 myserver"), None);
     }
 
     // --- Host dialog pre-fill from an SSH target ------------------------

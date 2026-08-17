@@ -900,13 +900,19 @@ directory basename when the row doesn't look like one of those commands.
 
 A bare target with no explicit user (`ssh machine`) fills Host with `machine`
 and User with the current OS login — the same default `ssh` itself uses when no
-`user@` is given. This bare-word form is only recognized when it's the _entire_
-remaining command (nothing else could be the target); once a second word is
-present (a flag, an identity path, a remote command to run, …), an undotted
-single-label host is genuinely ambiguous and is left to the directory-basename
-fallback instead — `ssh myserver uptime` and `ssh -p 2222 myserver` don't
-pre-fill Host from `myserver`, but `ssh root@122.1.1.40` and `ssh pve-1.local`
-(dotted or IPv4) still do, regardless of how many other words are present.
+`user@` is given. Command-line options are stripped out before this is decided
+(along with their value, for a flag that takes a separate one — `-p`, `-i`,
+`-o`, `-l`, `-F`, `-J`, and a handful of others), so
+`ssh -p 2222 -i ~/.ssh/id_ed25519 root@machine` still fills Host with `machine`
+and User with `root` — the flags don't count as "other words" in the way that
+determines whether the bare-word form applies. This bare-word form is only
+recognized when the target is the only thing left once flags are removed; a
+genuine second _positional_ word (most commonly a remote command to run, e.g.
+`ssh myserver uptime`) is still ambiguous and falls back to the
+directory-basename default instead. `ssh root@122.1.1.40` and `ssh pve-1.local`
+(dotted or IPv4) are recognized regardless of how many other words are present,
+flags or otherwise — only a bare, undotted single-label host needs this
+one-target check.
 
 ### `ComposeNoteEntry`
 

@@ -12,10 +12,14 @@ All notable changes to this project will be documented in this file.
   much more useful default than the directory basename for the common case of
   pressing `F6` right on the `ssh` command itself. A bare target with no
   explicit user (`ssh machine`) fills Host with `machine` and defaults User to
-  the current OS login, the same default `ssh` itself uses — but only when that
-  bare word is the entire remaining command; with anything else present (a flag,
-  an identity path, a remote command to run, …) an undotted single-label host is
-  genuinely ambiguous and isn't recognized. Falls back to the pre-existing
+  the current OS login, the same default `ssh` itself uses — but only when the
+  bare word is the only thing left once command-line options are stripped out
+  (along with their value, for a flag that takes a separate one — `-p`, `-i`,
+  `-o`, `-l`, `-F`, `-J`, and a handful of others), so
+  `ssh -p 2222 -i ~/.ssh/id_ed25519 root@machine` still recognizes
+  `machine`/`root` despite the flags. A genuine second positional word (most
+  commonly a remote command to run, e.g. `ssh myserver uptime`) is still
+  ambiguous and isn't recognized. Falls back to the pre-existing
   directory-basename default when the row doesn't match.
 - New `smarthistory serve`: an HTTP server exposing the same time-tracking data
   `project report` prints as text — a JSON API

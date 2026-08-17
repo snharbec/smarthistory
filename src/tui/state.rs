@@ -899,6 +899,27 @@ pub struct ZoxideSavePrompt {
     pub directory: String,
 }
 
+/// Short flags — across `ssh`/`scp`/`sftp`/`rsync`/`mosh` — that take
+/// a separate following argument (`-p 2222`, `-i ~/.ssh/id_ed25519`,
+/// …), as opposed to a bare boolean flag (`-4`, `-C`, …) or a flag
+/// with its value attached directly (`-p2222`, `-oKey=Val`) — those
+/// don't have a following word to skip in the first place, so only
+/// the separate-argument form needs handling in
+/// [`extract_ssh_target`]. Not exhaustive across every flag every one
+/// of these programs supports, but covers the common
+/// connection-tuning ones likely to appear ahead of the actual
+/// target: port (`-p`, and `scp`'s own `-P`), identity (`-i`), an
+/// arbitrary ssh option (`-o`), login name (`-l`), config file
+/// (`-F`), jump host (`-J`), cipher (`-c`), port forwarding
+/// (`-D`/`-L`/`-R`/`-W`/`-w`), escape char (`-e`), bind
+/// interface/address (`-B`/`-b`), log file (`-E`), a local-tunnel
+/// interface (`-I`), multiplex mode (`-m`/`-O`), and the query/control
+/// path pair (`-Q`/`-S`).
+const SSH_VALUE_TAKING_FLAGS: &[&str] = &[
+    "-p", "-P", "-i", "-o", "-l", "-F", "-J", "-c", "-D", "-L", "-R", "-W", "-w", "-e", "-B",
+    "-b", "-E", "-I", "-m", "-O", "-Q", "-S",
+];
+
 /// Pull an SSH connection target — `user@host`, or bare `host` — out
 /// of a command line, for pre-filling `F6`'s "add host" dialog from
 /// the selected history row (e.g. `ssh root@122.1.1.40` → `(Some("root"),
@@ -908,35 +929,38 @@ pub struct ZoxideSavePrompt {
 /// anything `word@word`-shaped would false-positive on email
 /// addresses, `git commit --author`, etc.
 ///
-/// Two cases, in order:
+/// Every word starting with `-` is stripped first — along with its
+/// value, for a word in [`SSH_VALUE_TAKING_FLAGS`] — so command-line
+/// options never factor into what's left to consider. What remains
+/// after that is handled in two cases:
 ///
-/// 1. **Exactly one word follows the program name** (`ssh machine`,
-///    `ssh root@machine`) — for `ssh`/`sftp`/`mosh`, which take a bare
-///    `[user@]host` and nothing else, that lone word has no other
-///    possible meaning, so it's accepted as the target whatever shape
-///    it's in — no dot or IPv4 pattern required, unlike case 2. This
-///    is what makes `ssh machine` recognize `machine` as the host
-///    even though it's a bare, undotted single-label name.
-/// 2. **Multiple words follow the program name** — the target could
-///    be any one of them (interleaved with flags, an identity path,
-///    a remote command to run, …), so a looser "any bare word" rule
-///    would false-positive on those. `host` must be either an IPv4
+/// 1. **Exactly one word remains** (`ssh machine`, `ssh -p 2222
+///    root@machine`) — for `ssh`/`sftp`/`mosh`, which take a bare
+///    `[user@]host` and nothing but flags besides, that lone word has
+///    no other possible meaning, so it's accepted as the target
+///    whatever shape it's in — no dot or IPv4 pattern required,
+///    unlike case 2. This is what makes `ssh machine` (and `ssh -p
+///    2222 machine`) recognize `machine` as the host even though it's
+///    a bare, undotted single-label name.
+/// 2. **More than one word remains** — even with flags already
+///    filtered out, the target could be any one of the words that are
+///    left (a remote command to run and its own arguments, most
+///    commonly), so a looser "any bare word" rule would
+///    false-positive on those. `host` must be either an IPv4
 ///    dotted-quad or a dotted hostname (`pve-1.local`) in this case;
 ///    a bare single-label hostname isn't recognized here — genuinely
 ///    indistinguishable from any other bare word without deeper
-///    flag-aware parsing, so it falls back to the caller's own
-///    default instead. `scp`/`rsync` take a *pair* of paths (`scp
-///    LOCAL [user@]HOST:REMOTE` or the reverse), and a local path can
-///    easily look host-shaped by pure accident — `file.txt` parses as
-///    a two-label dotted hostname just as well as `pve-1.local` does
-///    — so for those two programs specifically, only a colon-suffixed
-///    word (the one place a remote target is unambiguous: it always
-///    carries the `:` separating it from the remote path, which a
-///    local path never does) is considered a candidate at all. Scans
-///    left to right and returns the first non-flag word that matches;
-///    an identity/port/option flag's VALUE (`-i ~/.ssh/id_rsa`,
-///    `-p 2222`) is naturally skipped too, since neither shape
-///    matches the host pattern.
+///    parsing, so it falls back to the caller's own default instead.
+///    `scp`/`rsync` take a *pair* of paths (`scp LOCAL [user@]HOST:REMOTE`
+///    or the reverse), and a local path can easily look host-shaped
+///    by pure accident — `file.txt` parses as a two-label dotted
+///    hostname just as well as `pve-1.local` does — so for those two
+///    programs specifically, only a colon-suffixed word (the one
+///    place a remote target is unambiguous: it always carries the `:`
+///    separating it from the remote path, which a local path never
+///    does) is considered a candidate at all, and case 1 never applies
+///    to them regardless of word count. Scans left to right and
+///    returns the first word that matches.
 fn extract_ssh_target(command: &str) -> Option<(Option<String>, String)> {
     let mut words = command.split_whitespace();
     let program = words.next()?;
@@ -946,8 +970,17 @@ fn extract_ssh_target(command: &str) -> Option<(Option<String>, String)> {
         "scp" | "rsync" => false,
         _ => return None,
     };
-    let rest: Vec<&str> = words.collect();
-    if takes_bare_target && rest.len() == 1 && !rest[0].starts_with('-') {
+    let mut rest: Vec<&str> = Vec::new();
+    while let Some(w) = words.next() {
+        if w.starts_with('-') {
+            if SSH_VALUE_TAKING_FLAGS.contains(&w) {
+                words.next();
+            }
+            continue;
+        }
+        rest.push(w);
+    }
+    if takes_bare_target && rest.len() == 1 {
         return Some(match rest[0].split_once('@') {
             Some((user, host)) if !user.is_empty() && !host.is_empty() => {
                 (Some(user.to_string()), host.to_string())
@@ -960,7 +993,7 @@ fn extract_ssh_target(command: &str) -> Option<(Option<String>, String)> {
         r"^(?:([A-Za-z0-9._-]+)@)?((?:[0-9]{1,3}\.){3}[0-9]{1,3}|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+)(:.*)?$",
     )
     .expect("static regex");
-    rest.into_iter().filter(|w| !w.starts_with('-')).find_map(|w| {
+    rest.into_iter().find_map(|w| {
         let caps = re.captures(w)?;
         if requires_colon && caps.get(3).is_none() {
             return None;
