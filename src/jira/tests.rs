@@ -2244,3 +2244,44 @@
         // to the same key within one report/session.
         assert_eq!(cache.get("PROJ-1"), Some(&Vec::new()));
     }
+
+    /// `shared_label_cache_snapshot`/`merge_shared_label_cache`: the
+    /// process-wide cache `build_day_report` seeds/refills its local
+    /// `label_cache` from on every `smarthistory serve` request, so a
+    /// day's issue-label lookups only hit JIRA once across the
+    /// server's whole lifetime (not once per HTTP request). Uses a
+    /// key unlikely to collide with any other test sharing this
+    /// process-global cache.
+    #[test]
+    fn shared_label_cache_round_trips_across_snapshot_and_merge() {
+        let key = "SHARED-CACHE-TEST-1";
+        let mut local = shared_label_cache_snapshot();
+        assert!(
+            !local.contains_key(key),
+            "test key must not already be present from a prior run"
+        );
+        local.insert(key.to_string(), vec!["from-merge".to_string()]);
+        merge_shared_label_cache(&local);
+
+        let refreshed = shared_label_cache_snapshot();
+        assert_eq!(refreshed.get(key), Some(&vec!["from-merge".to_string()]));
+    }
+
+    /// `merge_shared_label_cache` must never clobber an existing
+    /// shared entry with a stale one from a call that started before
+    /// some other call already refreshed it — first-write-wins per
+    /// key, matching `labels_for_issue`'s own "insert on miss" idiom.
+    #[test]
+    fn shared_label_cache_merge_does_not_overwrite_existing_entry() {
+        let key = "SHARED-CACHE-TEST-2";
+        let mut first = std::collections::HashMap::new();
+        first.insert(key.to_string(), vec!["original".to_string()]);
+        merge_shared_label_cache(&first);
+
+        let mut stale = std::collections::HashMap::new();
+        stale.insert(key.to_string(), vec!["stale".to_string()]);
+        merge_shared_label_cache(&stale);
+
+        let snapshot = shared_label_cache_snapshot();
+        assert_eq!(snapshot.get(key), Some(&vec!["original".to_string()]));
+    }

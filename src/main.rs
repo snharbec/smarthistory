@@ -7283,7 +7283,7 @@ pub(crate) fn build_day_report(
     let jira_client: Option<Box<dyn crate::jira::JiraClient>> = crate::jira::JiraConfig::from_env()
         .map(|c| Box::new(crate::jira::RestJiraClient::new(c)) as Box<_>);
     let mut label_cache: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+        crate::jira::shared_label_cache_snapshot();
 
     // `resolve_text` is what tier 1/2 resolution scans (a raw command
     // still needs its embedded issue key / URL substring findable —
@@ -7298,7 +7298,7 @@ pub(crate) fn build_day_report(
     }
     let mut visits: Vec<WebsiteVisit> = Vec::new();
     let browser_sources = crate::browser::resolve_configured();
-    for entry in crate::browser::read_all_entries(&browser_sources) {
+    for entry in crate::browser::read_all_entries_cached(&browser_sources) {
         if entry.timestamp < range_start || entry.timestamp >= range_end {
             continue;
         }
@@ -7350,6 +7350,7 @@ pub(crate) fn build_day_report(
             url: visit.url.clone(),
         });
     }
+    crate::jira::merge_shared_label_cache(&label_cache);
 
     let files_by_slug = report_file_events(conn, range_start, range_end)?;
 

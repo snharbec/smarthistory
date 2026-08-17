@@ -154,3 +154,26 @@ The entire UI — HTML, CSS, and JS — is a single file compiled directly into 
 plain JavaScript with no framework: file/note/link lists use native
 `<details>`/`<summary>` for collapse/expand, and the layout follows
 `prefers-color-scheme` for light/dark.
+
+## Performance
+
+Loading a day with browser history or JIRA-linked activity is unavoidably slow
+_the first time_ in a while: assembling the websites section reads your
+browser's history database (a filesystem copy of the whole file — Chrome/
+Firefox/Safari history files are typically tens to hundreds of MB) and, for any
+JIRA-linked visit, looks up that issue's labels over the network. Both are
+cached process-wide (not per-request) for the life of the `smarthistory serve`
+process:
+
+- Browser history/bookmarks: cached 30 seconds, keyed by the resolved source
+  list. Clicking through several days in one sitting only pays for the copy once
+  every 30 seconds, not once per day.
+- JIRA issue labels: cached 5 minutes per issue key, shared across every
+  request. An issue referenced from multiple days' visits only costs one REST
+  round-trip.
+
+Every request still opens its own short-lived, read-only database connection
+(see above) and runs off the async runtime's own worker threads — `axum`
+dispatches each handler onto `tokio`'s blocking-thread pool, since the
+underlying work (SQLite queries, the browser history copy, and any JIRA REST
+call) is synchronous, not `async`-native.
