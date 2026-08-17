@@ -12682,10 +12682,18 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::AddHost => {
             // Same, but in "host"
-            // mode. The Host field
-            // is pre-filled with
-            // the selected row's
-            // directory basename.
+            // mode. Host (and User,
+            // when present) is
+            // pre-filled from an
+            // SSH/SCP/etc. target
+            // found in the selected
+            // row's command, when
+            // there is one — see
+            // `extract_ssh_target`.
+            // Otherwise Host falls
+            // back to the selected
+            // row's directory
+            // basename.
             app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Host);
             false
         }
