@@ -69,6 +69,7 @@ Response shape (one entry in `projects` per project, plus `"untracked"` when
 ```json
 {
   "date": "2026-08-16",
+  "standard_work_secs": 27300,
   "projects": [
     {
       "slug": "acme",
@@ -110,6 +111,15 @@ Response shape (one entry in `projects` per project, plus `"untracked"` when
 A `CommandGroupJson` entry's `timestamp` is only present when `count == 1` — a
 collapsed group (the same command run more than once that day, same `"Nx"`
 convention the CLI table uses) has no single timestamp left to show.
+
+`standard_work_secs` is day-level, not per-project — it doesn't narrow when
+`project` is given. It's the span from the day's first tracked activity (a
+command or a website visit, across every project or none) to its last, minus the
+excess of any gap beyond `project.idlethreshold` — the same idle-capping rule
+the per-command `active_secs` above and the `project_sessions` lifecycle already
+use, just applied across the whole day's activity at once instead of per-project
+or per-session/pane. A day with 0 or 1 tracked timestamps reports `0` (no gap to
+measure yet).
 
 ### `GET /api/history`
 

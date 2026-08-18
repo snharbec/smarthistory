@@ -2820,6 +2820,52 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(format_duration_secs(3665), "1h01m");
     }
 
+    // --- day_standard_work_secs -------------------------------------
+
+    #[test]
+    fn day_standard_work_secs_sums_consecutive_gaps_under_threshold() {
+        // 0 -> 100 -> 300: gaps of 100s and 200s, both well under the
+        // 1800s threshold, so the full span (300s) counts.
+        assert_eq!(day_standard_work_secs(&[0, 100, 300], 1800), 300);
+    }
+
+    /// A gap bigger than the threshold is capped at the threshold,
+    /// not counted in full -- the same idle-capping rule
+    /// `report_command_rows`/`switch_project` already use elsewhere,
+    /// just applied across the whole day instead of per-project.
+    #[test]
+    fn day_standard_work_secs_caps_gaps_over_threshold() {
+        // 0 -> 100 (gap 100, under threshold) -> 10100 (gap 10000, way
+        // over a 1800s threshold, capped to 1800).
+        assert_eq!(day_standard_work_secs(&[0, 100, 10_100], 1800), 100 + 1800);
+    }
+
+    #[test]
+    fn day_standard_work_secs_handles_unsorted_input() {
+        assert_eq!(
+            day_standard_work_secs(&[300, 0, 100], 1800),
+            day_standard_work_secs(&[0, 100, 300], 1800)
+        );
+    }
+
+    /// Zero or one tracked timestamps means there's no gap to
+    /// measure yet, so the total is 0 -- not an error, not a
+    /// fallback to "the whole day."
+    #[test]
+    fn day_standard_work_secs_zero_or_one_timestamp_is_zero() {
+        assert_eq!(day_standard_work_secs(&[], 1800), 0);
+        assert_eq!(day_standard_work_secs(&[500], 1800), 0);
+    }
+
+    /// Duplicate timestamps (e.g. a JIRA-linked command's own
+    /// timestamp reappearing as one of its derived website visits'
+    /// timestamps in `build_day_report`) contribute a zero-length gap
+    /// -- harmless, not double-counted.
+    #[test]
+    fn day_standard_work_secs_ignores_duplicate_timestamps() {
+        assert_eq!(day_standard_work_secs(&[0, 0, 100], 1800), 100);
+    }
+
     /// Fixture matching the subset of `history`'s real schema
     /// `report_command_rows` reads, plus `project_sessions` — a
     /// superset of `project_lifecycle_test_conn`'s history table

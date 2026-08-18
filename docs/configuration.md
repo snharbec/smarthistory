@@ -1423,29 +1423,40 @@ by this same underlying state, kept in sync by `_smarthistory_sync_prompt_env` �
 who'd rather render it as a persistent prompt segment instead of a one-off
 message.
 
-`SMARTHISTORY_PROJECT` is different: it's not already-held shell state, it's the
-[time-tracking](modes/project.md) project resolved for the current directory —
-computing it costs a real `smarthistory project current` subprocess call, so
-unlike the other two it's opt-in, via [`prompt.project=on`](#promptproject)
-(default `off`). When enabled, `_smarthistory_precmd` resolves and re-exports it
-after every command — a directory change, an explicit `project select`, or
-walking into/out of a [sticky](modes/project.md#sticky-project-directories)
-directory can all change it.
+`SMARTHISTORY_PROJECT`/`SMARTHISTORY_PROJECT_TIME`/`SMARTHISTORY_PROJECT_TIME_HM`
+are different: they're not already-held shell state, they're the
+[time-tracking](modes/project.md) project resolved for the current directory,
+and its accumulated active time for today
+(`smarthistory project current --with-time`'s two output lines) — computing them
+costs a real subprocess call, so unlike the other two they're opt-in, via
+[`prompt.project=on`](#promptproject) (default `off`). When enabled,
+`_smarthistory_precmd` resolves and re-exports all three after every command — a
+directory change, an explicit `project select`, walking into/out of a
+[sticky](modes/project.md#sticky-project-directories) directory, or simply more
+time having elapsed on the same project can all change them.
+`SMARTHISTORY_PROJECT_TIME` is raw seconds, not a formatted string — same
+convention `SMARTHISTORY_MODE` already uses (a raw value, not pre-rendered
+decoration) — for a prompt template to format however it wants; for the common
+case of just wanting `hh:mm`, `SMARTHISTORY_PROJECT_TIME_HM` is that computed
+for you (in zsh, plain integer arithmetic — no extra subprocess call over the
+raw-seconds version).
 
-| Variable                 | Values                      | Updated by                                                       |
-| ------------------------ | --------------------------- | ---------------------------------------------------------------- |
-| `SMARTHISTORY_MODE`      | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`)                            |
-| `SMARTHISTORY_MATCHMODE` | `prefix` \| `substring`     | `Ctrl-t` (`_smarthistory_cycle_matchmode`)                       |
-| `SMARTHISTORY_PROJECT`   | project slug, or empty      | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
+| Variable                       | Values                      | Updated by                                                       |
+| ------------------------------ | --------------------------- | ---------------------------------------------------------------- |
+| `SMARTHISTORY_MODE`            | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`)                            |
+| `SMARTHISTORY_MATCHMODE`       | `prefix` \| `substring`     | `Ctrl-t` (`_smarthistory_cycle_matchmode`)                       |
+| `SMARTHISTORY_PROJECT`         | project slug, or empty      | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
+| `SMARTHISTORY_PROJECT_TIME`    | seconds (raw int), or empty | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
+| `SMARTHISTORY_PROJECT_TIME_HM` | `hh:mm`, or empty           | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
 
-**oh-my-posh** example — a `text` segment reading all three via Go templates
-(add to your theme's `blocks[].segments`):
+**oh-my-posh** example — a `text` segment reading all five via Go templates (add
+to your theme's `blocks[].segments`):
 
 ```json
 {
   "type": "text",
   "style": "plain",
-  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | upper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}{{ if .Env.SMARTHISTORY_PROJECT }} · {{ .Env.SMARTHISTORY_PROJECT }}{{ end }}]"
+  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | upper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}{{ if .Env.SMARTHISTORY_PROJECT }} · {{ .Env.SMARTHISTORY_PROJECT }} ({{ .Env.SMARTHISTORY_PROJECT_TIME_HM }}){{ end }}]"
 }
 ```
 
@@ -1453,16 +1464,16 @@ directory can all change it.
 
 ```toml
 [custom.smarthistory]
-command = "printf '[smarthistory: %s%s%s]' \"$(echo $SMARTHISTORY_MODE | tr a-z A-Z)\" \"$([ \"$SMARTHISTORY_MATCHMODE\" = substring ] && echo '~')\" \"$([ -n \"$SMARTHISTORY_PROJECT\" ] && printf ' · %s' \"$SMARTHISTORY_PROJECT\")\""
+command = "printf '[smarthistory: %s%s%s]' \"$(echo $SMARTHISTORY_MODE | tr a-z A-Z)\" \"$([ \"$SMARTHISTORY_MATCHMODE\" = substring ] && echo '~')\" \"$([ -n \"$SMARTHISTORY_PROJECT\" ] && printf ' · %s (%s)' \"$SMARTHISTORY_PROJECT\" \"$SMARTHISTORY_PROJECT_TIME_HM\")\""
 when = true
 ```
 
-**Plain zsh prompt** (no external prompt framework) — reference the variable
-directly, with `PROMPT_SUBST` enabled so it re-expands on every prompt draw:
+**Plain zsh prompt** (no external prompt framework) — reference the variables
+directly, with `PROMPT_SUBST` enabled so they re-expand on every prompt draw:
 
 ```zsh
 setopt PROMPT_SUBST
-RPROMPT='${SMARTHISTORY_PROJECT:+[$SMARTHISTORY_PROJECT]}'
+RPROMPT='${SMARTHISTORY_PROJECT:+[$SMARTHISTORY_PROJECT $SMARTHISTORY_PROJECT_TIME_HM]}'
 ```
 
 All examples re-run their command/template/expansion on every prompt draw, so

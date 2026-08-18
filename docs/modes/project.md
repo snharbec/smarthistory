@@ -245,6 +245,15 @@ smarthistory project report [--day <YYYY-MM-DD>|today|yesterday] [--project <slu
 Prints a Markdown-ish report for one calendar day (local time, defaults to
 `today`), per project:
 
+- **Standard work time** — a day-level total, not per-project: the span from the
+  day's first tracked activity (a command or a website visit, across every
+  project or none) to its last, minus the excess of any gap beyond
+  `project.idlethreshold` — the same idle-capping rule the per-command duration
+  and session lifecycle below already use, just applied across the whole day's
+  activity at once. Answers "how much of today did I actually spend using the
+  computer, accounting for breaks," as distinct from any one project's own
+  active time. `--project <slug>` doesn't narrow this — it's always the whole
+  day's figure.
 - **Total active time** and a **directories** breakdown (both use every command
   in the window, unaffected by `--min-duration`).
 - **Commands**, filtered to those whose _derived_ active duration is at least
@@ -270,6 +279,7 @@ the `untracked` section).
 
 ```
 # Project Report — 2026-08-14
+Standard work time: 7h42m
 
 ## acme
 Total active time: 2h15m

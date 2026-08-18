@@ -909,7 +909,19 @@ enum ProjectAction {
     /// stdout (no trailing decoration) so it's easy to embed in a
     /// shell prompt or script; prints nothing (exit code 1) when
     /// unresolved.
-    Current,
+    Current {
+        /// Also print today's accumulated active time for the
+        /// resolved project, in raw seconds, as a second stdout
+        /// line — `<slug>\n<active_secs>\n`. Raw seconds (not a
+        /// formatted `1h23m` string) so a prompt template can format
+        /// it however it wants, same convention `SMARTHISTORY_MODE`
+        /// already uses (a raw value, not pre-rendered decoration).
+        /// One extra query, still cheap enough for a per-command
+        /// shell-prompt call — see `prompt.project` in
+        /// `docs/configuration.md`.
+        #[arg(long)]
+        with_time: bool,
+    },
     /// Toggle project tracking off/on: a manual "stop attributing
     /// time to any project" switch, e.g. for a lunch break or a
     /// meeting where you don't want the current directory's project
@@ -7074,7 +7086,30 @@ struct ProjectDaySummary {
 #[derive(Debug, Clone, Serialize)]
 struct DayReport {
     date: String,
+    /// The day's "standard work time" — see
+    /// [`day_standard_work_secs`]. Day-level, not per-project: spans
+    /// however many projects (or untracked activity) were touched
+    /// that day, unaffected by `--project`/`?project=` narrowing the
+    /// `projects` list below to one slug.
+    standard_work_secs: i64,
     projects: Vec<ProjectDaySummary>,
+}
+
+/// A day's "standard work time": the span from the day's first
+/// tracked activity to its last, minus the excess of any gap beyond
+/// `idle_threshold_secs` — the same idle-capping rule
+/// `report_command_rows`'s per-command `active_secs` and
+/// `switch_project`'s idle-close backdating already use elsewhere,
+/// just applied across ALL of a day's activity (every command AND
+/// every website visit, regardless of project, session, or pane)
+/// rather than per-project or per-session. Equivalently: sort every
+/// timestamp ascending and sum `min(gap, idle_threshold_secs)` over
+/// each consecutive pair — a day with 0 or 1 tracked timestamps has
+/// no gap to measure yet, so it contributes 0.
+fn day_standard_work_secs(timestamps: &[i64], idle_threshold_secs: i64) -> i64 {
+    let mut sorted: Vec<i64> = timestamps.to_vec();
+    sorted.sort_unstable();
+    sorted.windows(2).map(|w| (w[1] - w[0]).min(idle_threshold_secs)).sum()
 }
 
 fn print_project_report_section(summary: &ProjectDaySummary) {
@@ -7615,8 +7650,18 @@ pub(crate) fn build_day_report(
         });
     }
 
+    let standard_work_secs = day_standard_work_secs(
+        &commands
+            .iter()
+            .map(|c| c.timestamp)
+            .chain(visits.iter().map(|v| v.timestamp))
+            .collect::<Vec<i64>>(),
+        cfg.project_idle_threshold_secs,
+    );
+
     Ok(DayReport {
         date: date.format("%Y-%m-%d").to_string(),
+        standard_work_secs,
         projects,
     })
 }
@@ -9038,6 +9083,10 @@ fn main() -> anyhow::Result<()> {
                 )?;
 
                 println!("# Project Report — {}", report.date);
+                println!(
+                    "Standard work time: {}",
+                    format_duration_secs(report.standard_work_secs)
+                );
 
                 println!("\n## Summary");
                 println!("| Project | Active Time |");
@@ -9091,11 +9140,18 @@ fn main() -> anyhow::Result<()> {
                 )?;
                 eprintln!("smarthistory: current project set to {slug:?}");
             }
-            ProjectAction::Current => {
+            ProjectAction::Current { with_time } => {
                 let cfg = Config::load();
                 let pwd = crate::util::current_directory_for_storage();
                 match resolve_current_project(&conn, &cfg, &pwd)? {
-                    Some(slug) => println!("{slug}"),
+                    Some(slug) => {
+                        println!("{slug}");
+                        if with_time {
+                            let today = project_history(&conn, &cfg, &slug, 1)?;
+                            let active_secs = today.first().map(|d| d.active_secs).unwrap_or(0);
+                            println!("{active_secs}");
+                        }
+                    }
                     None => {
                         eprintln!("smarthistory: no active project");
                         std::process::exit(1);
