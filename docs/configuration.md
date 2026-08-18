@@ -1359,14 +1359,16 @@ or by explicit `.`-mode selection (`smarthistory project select <slug>`). Config
 is entirely optional: with none set, every command lands in the report's
 `untracked` bucket.
 
-| Key                        | Meaning                                                                                                   |
-| -------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `project.<slug>.dir`       | Directory-to-project binding, longest-prefix matched against the cwd.                                     |
-| `project.idlethreshold`    | Seconds of inactivity before an open project session closes. Default `1800`. Must be a positive integer.  |
-| `jiralabel.<slug>.match`   | A JIRA label that maps to `<slug>` — website-resolution tier 1 (requires `JIRA_SERVER`/`JIRA_API_TOKEN`). |
-| `weburl.<slug>.match`      | A URL host+path substring that maps to `<slug>` — website-resolution tier 2.                              |
-| `weburlgroup.<name>.match` | A URL host+path substring for display-only clustering in the report (independent of project assignment).  |
-| `weburlgroup.<name>.label` | The label printed for visits matching `weburlgroup.<name>.match`.                                         |
+| Key                        | Meaning                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `project.<slug>.dir`       | Directory-to-project binding, longest-prefix matched against the cwd.                                                                                                                                                                            |
+| `project.<slug>.sticky`    | `on`/`off` (default `off`). Entering this directory also persists `<slug>` as the background project (`project_current`), so it stays attributed after you leave. See [Sticky project directories](modes/project.md#sticky-project-directories). |
+| `project.idlethreshold`    | Seconds of inactivity before an open project session closes. Default `1800`. Must be a positive integer.                                                                                                                                         |
+| `prompt.project`           | `on`/`off` (default `off`). Publishes the resolved project as `$SMARTHISTORY_PROJECT` after every command, for a prompt segment. See [Published environment variables](#published-environment-variables).                                        |
+| `jiralabel.<slug>.match`   | A JIRA label that maps to `<slug>` — website-resolution tier 1 (requires `JIRA_SERVER`/`JIRA_API_TOKEN`).                                                                                                                                        |
+| `weburl.<slug>.match`      | A URL host+path substring that maps to `<slug>` — website-resolution tier 2.                                                                                                                                                                     |
+| `weburlgroup.<name>.match` | A URL host+path substring for display-only clustering in the report (independent of project assignment).                                                                                                                                         |
+| `weburlgroup.<name>.label` | The label printed for visits matching `weburlgroup.<name>.match`.                                                                                                                                                                                |
 
 ```ini
 project.acme.dir=~/work/acme
@@ -1407,7 +1409,7 @@ to keep secrets out of a dotfile repo or override per-invocation.
 
 ### Published environment variables
 
-The table above is env vars you set to configure smarthistory; these two go the
+The table above is env vars you set to configure smarthistory; these go the
 other way — `init.zsh` publishes them so a _separate_ prompt system (oh-my-posh,
 starship, a custom `precmd`, …) can show the current widget state without
 needing to know anything about `init.zsh`'s internal shell variables. A prompt
@@ -1417,22 +1419,33 @@ can only see real exported env vars — not zsh-internal state like
 [`dropdown.matchmode`](#dropdownmatchmode)/`Ctrl-t` widgets confirm each toggle
 with a transient `zle -M` status message ("smarthistory mode set to DIR") driven
 by this same underlying state, kept in sync by `_smarthistory_sync_prompt_env` —
-these two env vars are that state, exported for anyone who'd rather render it as
-a persistent prompt segment instead of a one-off message.
+`SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE` are that state, exported for anyone
+who'd rather render it as a persistent prompt segment instead of a one-off
+message.
 
-| Variable                 | Values                      | Updated by                                 |
-| ------------------------ | --------------------------- | ------------------------------------------ |
-| `SMARTHISTORY_MODE`      | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`)      |
-| `SMARTHISTORY_MATCHMODE` | `prefix` \| `substring`     | `Ctrl-t` (`_smarthistory_cycle_matchmode`) |
+`SMARTHISTORY_PROJECT` is different: it's not already-held shell state, it's the
+[time-tracking](modes/project.md) project resolved for the current directory —
+computing it costs a real `smarthistory project current` subprocess call, so
+unlike the other two it's opt-in, via [`prompt.project=on`](#promptproject)
+(default `off`). When enabled, `_smarthistory_precmd` resolves and re-exports it
+after every command — a directory change, an explicit `project select`, or
+walking into/out of a [sticky](modes/project.md#sticky-project-directories)
+directory can all change it.
 
-**oh-my-posh** example — a `text` segment reading both via Go templates (add to
-your theme's `blocks[].segments`):
+| Variable                 | Values                      | Updated by                                                       |
+| ------------------------ | --------------------------- | ---------------------------------------------------------------- |
+| `SMARTHISTORY_MODE`      | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`)                            |
+| `SMARTHISTORY_MATCHMODE` | `prefix` \| `substring`     | `Ctrl-t` (`_smarthistory_cycle_matchmode`)                       |
+| `SMARTHISTORY_PROJECT`   | project slug, or empty      | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
+
+**oh-my-posh** example — a `text` segment reading all three via Go templates
+(add to your theme's `blocks[].segments`):
 
 ```json
 {
   "type": "text",
   "style": "plain",
-  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | upper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}]"
+  "template": "[smarthistory: {{ .Env.SMARTHISTORY_MODE | upper }}{{ if eq .Env.SMARTHISTORY_MATCHMODE \"substring\" }}~{{ end }}{{ if .Env.SMARTHISTORY_PROJECT }} · {{ .Env.SMARTHISTORY_PROJECT }}{{ end }}]"
 }
 ```
 
@@ -1440,13 +1453,21 @@ your theme's `blocks[].segments`):
 
 ```toml
 [custom.smarthistory]
-command = "printf '[smarthistory: %s%s]' \"$(echo $SMARTHISTORY_MODE | tr a-z A-Z)\" \"$([ \"$SMARTHISTORY_MATCHMODE\" = substring ] && echo '~')\""
+command = "printf '[smarthistory: %s%s%s]' \"$(echo $SMARTHISTORY_MODE | tr a-z A-Z)\" \"$([ \"$SMARTHISTORY_MATCHMODE\" = substring ] && echo '~')\" \"$([ -n \"$SMARTHISTORY_PROJECT\" ] && printf ' · %s' \"$SMARTHISTORY_PROJECT\")\""
 when = true
 ```
 
-Both examples re-run their command/template on every prompt draw, so the
-indicator stays current as you toggle `Ctrl-g`/`Ctrl-t` — no shell restart
-needed.
+**Plain zsh prompt** (no external prompt framework) — reference the variable
+directly, with `PROMPT_SUBST` enabled so it re-expands on every prompt draw:
+
+```zsh
+setopt PROMPT_SUBST
+RPROMPT='${SMARTHISTORY_PROJECT:+[$SMARTHISTORY_PROJECT]}'
+```
+
+All examples re-run their command/template/expansion on every prompt draw, so
+the indicator stays current as you toggle `Ctrl-g`/`Ctrl-t` or change
+directories — no shell restart needed.
 
 ---
 
@@ -1540,7 +1561,9 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `browser.<id>.type`             | `chrome` \| `firefox` \| `safari` | — (auto-detected)                                                | [Browser (`^` mode)](#browser--mode)                                      |
 | `browser.<id>.profile`          | path                              | — (platform default)                                             | [Browser (`^` mode)](#browser--mode)                                      |
 | `project.<slug>.dir`            | path                              | —                                                                | [Project (`.` mode)](#project--mode)                                      |
+| `project.<slug>.sticky`         | `on` \| `off`                     | `off`                                                            | [Project (`.` mode)](#project--mode)                                      |
 | `project.idlethreshold`         | positive int (seconds)            | `1800`                                                           | [Project (`.` mode)](#project--mode)                                      |
+| `prompt.project`                | `on` \| `off`                     | `off`                                                            | [Published environment variables](#published-environment-variables)       |
 | `jiralabel.<slug>.match`        | JIRA label                        | —                                                                | [Project (`.` mode)](#project--mode)                                      |
 | `weburl.<slug>.match`           | URL substring                     | —                                                                | [Project (`.` mode)](#project--mode)                                      |
 | `weburlgroup.<name>.match`      | URL substring                     | —                                                                | [Project (`.` mode)](#project--mode)                                      |
