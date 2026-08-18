@@ -14,12 +14,21 @@ All notable changes to this project will be documented in this file.
   `project_current` was before. With `sticky` on, leaving the directory
   afterward, any subsequent directory with no marker file or `.dir` binding of
   its own keeps attributing to `<slug>` instead of reverting. Only fires from a
-  real shell command running in `pwd` (`smarthistory add`'s directory
-  resolution) — never from file-tracking events (which resolve a file's own
-  directory, not necessarily the shell's `pwd`), while paused, or when a
-  `.smarthistory-project` marker file is what actually won the resolution
-  instead of the sticky binding. See
+  real shell command running in `pwd` — never from file-tracking events (which
+  resolve a file's own directory, not necessarily the shell's `pwd`), while
+  paused, or when a `.smarthistory-project` marker file is what actually won the
+  resolution instead of the sticky binding. See
   [Sticky project directories](docs/modes/project.md#sticky-project-directories).
+- New `prompt.project = on` config key (default `off`): `_smarthistory_precmd`
+  resolves the current time-tracking project after every command and publishes
+  it as `$SMARTHISTORY_PROJECT` (kept in sync by
+  `_smarthistory_sync_prompt_env`, same as the existing
+  `$SMARTHISTORY_MODE`/`$SMARTHISTORY_MATCHMODE`), for a prompt segment showing
+  which project a directory tracks to — a `starship`/
+  `oh-my-posh`/plain-zsh-`RPROMPT` example is in
+  [Published environment variables](docs/configuration.md#published-environment-variables).
+  Off by default since, unlike the mode/matchmode vars, publishing it costs a
+  real `smarthistory project current` subprocess call per command.
 - `smarthistory serve`'s day overview now shows a donut chart of that day's
   active time per project, next to the existing project list — a plain CSS
   `conic-gradient` (no chart library, no canvas/SVG), with a clickable legend
@@ -145,6 +154,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Project time tracking (`project_sessions`, `project_current`, and the new
+  `sticky` behavior above) never actually ran for commands recorded via
+  `smarthistory capture-tmux`/`capture-herdr` — only the plain
+  `smarthistory add` path resolved a project and opened/closed sessions. Since
+  `_smarthistory_precmd` routes through `capture-tmux`/`capture-herdr` for
+  anyone inside a real tmux pane (with pipe-pane output logging set up) or a
+  herdr workspace — likely most interactive usage, not the exception — this
+  meant project tracking silently never engaged for a large share of users, with
+  `project report` always showing everything as `untracked` regardless of
+  `project.<slug>.dir` config. Both commands now call the same project
+  resolution/session-lifecycle sequence `add` always has, via a new shared
+  `track_project_for_pwd` helper, so tracking works the same no matter which of
+  the three recording paths a given command happens to take.
 - `smarthistory serve`'s `/api/report` was slow to load a day, and could
   outright fail to load one at all. Three separate issues, all in
   `build_day_report`'s website-visits section:

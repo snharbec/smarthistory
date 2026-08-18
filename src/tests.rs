@@ -2100,6 +2100,18 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(remove_session_lines(&path, &ids).expect("remove"), 0);
     }
 
+    // --- Time tracking: `prompt.project` ---------------------------
+
+    #[test]
+    fn prompt_project_enabled_defaults_off_and_parses_on() {
+        let cfg = Config::default();
+        assert!(!cfg.prompt_project_enabled);
+
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["prompt.project = on\n"]);
+        assert!(cfg.prompt_project_enabled);
+    }
+
     // --- Time tracking: project resolution + session lifecycle -----
 
     /// The most specific (longest) matching `project.<slug>.dir`
@@ -2209,6 +2221,71 @@ tmuxpaneoutputdir=~/custom-tmux
             resolve_sticky_project_dir(&cfg, "/tmp/work/subproj/src"),
             Some("subproj".to_string())
         );
+    }
+
+    fn track_project_for_pwd_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE history (id INTEGER PRIMARY KEY, timestamp INTEGER);
+             CREATE TABLE project_sessions (
+                 id INTEGER PRIMARY KEY,
+                 project_slug TEXT NOT NULL,
+                 start_ts INTEGER NOT NULL,
+                 end_ts INTEGER,
+                 end_reason TEXT
+             );
+             CREATE TABLE project_current (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 project_slug TEXT NOT NULL,
+                 set_ts INTEGER NOT NULL
+             );
+             CREATE TABLE project_pause (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 paused_slug TEXT,
+                 paused_at INTEGER NOT NULL
+             );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    /// `track_project_for_pwd` is the single shared entry point
+    /// `Commands::Add`/`Commands::CaptureTmux`/`Commands::CaptureHerdr`
+    /// all call before recording a command -- this is a regression
+    /// test for a real bug where `CaptureTmux`/`CaptureHerdr` recorded
+    /// history without ANY of this, meaning project time tracking
+    /// (sessions, `project_current`, sticky) silently never happened
+    /// for tmux/herdr users, who take those paths almost all the time
+    /// instead of `Commands::Add`'s own. One call must do all three
+    /// things together: resolve the project, open a `project_sessions`
+    /// row for it, AND (for a sticky directory) persist it into
+    /// `project_current`.
+    #[test]
+    fn track_project_for_pwd_opens_session_and_persists_sticky_project() {
+        use rusqlite::OptionalExtension;
+        let conn = track_project_for_pwd_test_conn();
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\nproject.demo.sticky = on\n"]);
+
+        track_project_for_pwd(&conn, &cfg, "/tmp/demo").expect("track");
+
+        let (slug, end_ts): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT project_slug, end_ts FROM project_sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("session row");
+        assert_eq!(slug, "demo");
+        assert_eq!(end_ts, None, "session must still be open");
+
+        let current: Option<String> = conn
+            .query_row("SELECT project_slug FROM project_current WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .expect("query");
+        assert_eq!(current, Some("demo".to_string()));
     }
 
     /// A marker file's first non-blank line is the slug, found from

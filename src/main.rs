@@ -2156,6 +2156,18 @@ pub struct Config {
     /// a quick glance, not a long list to scan. Set via
     /// `dropdown.predict=on|off`.
     dropdown_predict: bool,
+    /// Whether `_smarthistory_precmd` resolves the current
+    /// time-tracking project after each command and publishes it as
+    /// `$SMARTHISTORY_PROJECT` (for a separate prompt system to show
+    /// as a segment) and the zsh-internal
+    /// `$_smarthistory_current_project`. Default `false`, opt-in like
+    /// `dropdown_predict` above — unlike the mode/matchmode env vars
+    /// this mirrors, publishing the project costs a real
+    /// `smarthistory project current` subprocess call per command,
+    /// not just already-held shell state. Set via
+    /// `prompt.project=on|off`. See docs/configuration.md's
+    /// "Published environment variables" section.
+    prompt_project_enabled: bool,
     /// Whether the TUI's history list syntax-highlights each
     /// command's text (via `syntect`, in-process — no external
     /// binary, unlike `dropdown.highlight`'s zsh-side `bat` call)
@@ -2614,6 +2626,7 @@ impl Config {
             dropdown_highlight: false,
             dropdown_matchmode: "prefix".to_string(),
             dropdown_predict: false,
+            prompt_project_enabled: false,
             tui_highlight: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
@@ -2902,6 +2915,9 @@ impl Config {
                 },
                 "dropdown.predict" => {
                     self.dropdown_predict = crate::util::parse_bool(value, false);
+                }
+                "prompt.project" => {
+                    self.prompt_project_enabled = crate::util::parse_bool(value, false);
                 }
                 "tui.highlight" => {
                     self.tui_highlight = crate::util::parse_bool(value, false);
@@ -6201,6 +6217,32 @@ fn longest_project_dir_match<'a>(
         .map(|(slug, _)| slug)
 }
 
+/// Resolve which project `pwd` belongs to, open/close
+/// `project_sessions` accordingly (`switch_project`), and persist a
+/// `sticky` directory's project into `project_current` when it
+/// applies (`maybe_persist_sticky_project`) — the full sequence that
+/// means "a shell command just ran in this directory," called before
+/// the command itself gets recorded (a directory change or idle gap
+/// must close the prior session using ITS last real activity, not a
+/// timestamp that already reflects the command about to be
+/// inserted). Shared by every place a real command's history row gets
+/// written — `Commands::Add`'s plain path, and
+/// `Commands::CaptureTmux`/`Commands::CaptureHerdr`'s pane-output
+/// paths — so project tracking works the same regardless of which of
+/// those three a given `smarthistory` invocation happens to take
+/// (tmux/herdr users go through the capture-* commands almost all the
+/// time, not the plain path, so this can't live only in `Commands::Add`).
+fn track_project_for_pwd(conn: &Connection, cfg: &Config, pwd: &str) -> anyhow::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let resolved_project = resolve_current_project(conn, cfg, pwd)?;
+    switch_project(conn, resolved_project.as_deref(), now, cfg.project_idle_threshold_secs, None)?;
+    maybe_persist_sticky_project(conn, cfg, pwd, resolved_project.as_deref(), now)?;
+    Ok(())
+}
+
 /// If `pwd` matches a `sticky` project directory binding (see
 /// `ProjectDef::sticky`) AND that binding is genuinely what
 /// `resolve_current_project` resolved to — not overridden by a
@@ -6210,15 +6252,8 @@ fn longest_project_dir_match<'a>(
 /// performs. That makes it the new background project: leaving this
 /// directory afterward, any subsequent directory with no binding or
 /// marker of its own keeps attributing to this project instead of
-/// reverting to whatever `project_current` was before.
-///
-/// Deliberately called from exactly one place — `Commands::Add`'s
-/// `pwd` resolution, right after `switch_project` — since that's the
-/// only genuine "a shell command just ran in this directory" event in
-/// the codebase; the other `resolve_current_project` call sites
-/// resolve a *file's* directory (not `pwd` itself) or are read-only
-/// status/pause queries where writing `project_current` would be a
-/// surprising side effect.
+/// reverting to whatever `project_current` was before. Called from
+/// `track_project_for_pwd`, never on its own.
 fn maybe_persist_sticky_project(
     conn: &Connection,
     cfg: &Config,
@@ -8159,21 +8194,7 @@ fn main() -> anyhow::Result<()> {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             let project_cfg = Config::load();
-            let resolved_project = resolve_current_project(&conn, &project_cfg, &pwd)?;
-            switch_project(
-                &conn,
-                resolved_project.as_deref(),
-                now,
-                project_cfg.project_idle_threshold_secs,
-                None,
-            )?;
-            maybe_persist_sticky_project(
-                &conn,
-                &project_cfg,
-                &pwd,
-                resolved_project.as_deref(),
-                now,
-            )?;
+            track_project_for_pwd(&conn, &project_cfg, &pwd)?;
 
             // File tracking: a `less`/`bat`/`tail`/`head`-style
             // command (`fileviewcommands`, configurable) is itself
@@ -8896,6 +8917,7 @@ fn main() -> anyhow::Result<()> {
             let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+            track_project_for_pwd(&conn, &cfg, &pwd)?;
             let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
@@ -8915,6 +8937,8 @@ fn main() -> anyhow::Result<()> {
                 let pwd = crate::util::current_directory_for_storage();
                 let session_id =
                     env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+                let cfg = Config::load();
+                track_project_for_pwd(&conn, &cfg, &pwd)?;
                 upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
                 return Ok(());
             }
@@ -8989,6 +9013,7 @@ fn main() -> anyhow::Result<()> {
             let pwd = crate::util::current_directory_for_storage();
             let session_id =
                 env::var("SMART_HISTORY_SESSION").unwrap_or_else(|_| "default".to_string());
+            track_project_for_pwd(&conn, &cfg, &pwd)?;
             let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
@@ -9231,6 +9256,9 @@ fn main() -> anyhow::Result<()> {
                     "dropdown.matchmode" => println!("{}", cfg.dropdown_matchmode),
                     "dropdown.predict" => {
                         println!("{}", if cfg.dropdown_predict { "on" } else { "off" })
+                    }
+                    "prompt.project" => {
+                        println!("{}", if cfg.prompt_project_enabled { "on" } else { "off" })
                     }
                     "tui.highlight" => {
                         println!("{}", if cfg.tui_highlight { "on" } else { "off" })

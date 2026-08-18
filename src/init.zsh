@@ -92,6 +92,24 @@ _smarthistory_precmd() {
     else
         smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
     fi
+    # Resolve and publish the current time-tracking project
+    # (`prompt.project=on`, see its declaration above) — after
+    # whichever of the three branches above just ran, since any of
+    # them can change which project this directory resolves to
+    # (a `cd`, a directory-bound project, an explicit `project
+    # select`, `sticky` directories, …). A separate `smarthistory
+    # project current` call rather than threading the value through
+    # `add`/`capture-*`'s own output: those three call sites already
+    # diverge by environment (herdr/tmux/plain), and duplicating a
+    # `--print-project`-style flag across all of them would be a much
+    # larger change for what's an opt-in, off-by-default feature.
+    # `2>/dev/null` discards the "no active project" error message
+    # `project current` prints on stderr when nothing resolves —
+    # empty output in that case is exactly the value we want.
+    if [[ "$_smarthistory_prompt_project_enabled" = "1" ]]; then
+        _smarthistory_current_project=$(smarthistory project current 2>/dev/null)
+        _smarthistory_sync_prompt_env
+    fi
     # Remember the most recently executed command for the Ctrl-S
     # "next probable command" widget. Reset the cycle index so the
     # next press starts with the most probable candidate. The
@@ -244,19 +262,40 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     [[ "$(smarthistory config get dropdown.predict 2>/dev/null)" == "on" ]] \
         && _smarthistory_dropdown_predict_enabled="1"
 fi
-# Mirror the search-scope/match-mode state into real environment
-# variables, not just the zsh-internal `$_smarthistory_mode`/
-# `$_smarthistory_matchmode` shell variables above — a separate
+# Whether `_smarthistory_precmd` resolves and publishes the current
+# time-tracking project after each command. Off by default: unlike
+# `$_smarthistory_mode`/`$_smarthistory_matchmode` above (already-held
+# zsh state, free to export), this needs an actual `smarthistory
+# project current` subprocess call — a real cost per command, so it's
+# opt-in via `prompt.project=on` in ~/.config/smarthistory/config
+# (read once here at init time, same convention as `dropdown.enabled`
+# above). See `_smarthistory_precmd`'s use of this and
+# `_smarthistory_current_project` below.
+typeset -g _smarthistory_prompt_project_enabled="0"
+[[ "$(smarthistory config get prompt.project 2>/dev/null)" == "on" ]] \
+    && _smarthistory_prompt_project_enabled="1"
+# The most recently resolved project slug (empty string when no
+# project is active/tracking is paused) — updated in
+# `_smarthistory_precmd` right after every real command, since that's
+# the only thing that can actually change it (a directory change or
+# explicit `project select`). Only ever set when
+# `_smarthistory_prompt_project_enabled=1`; stays empty otherwise.
+typeset -g _smarthistory_current_project=""
+# Mirror the search-scope/match-mode/project state into real
+# environment variables, not just the zsh-internal
+# `$_smarthistory_mode`/`$_smarthistory_matchmode`/
+# `$_smarthistory_current_project` shell variables above — a separate
 # prompt system (oh-my-posh, starship, etc.) runs as its own
 # subprocess on every prompt render and can only see actual exported
 # env vars, not this shell's internal state. Kept in sync by
 # `_smarthistory_sync_prompt_env`, called here and again from
-# `_smarthistory_cycle_mode`/`_smarthistory_cycle_matchmode` whenever
-# either value changes. See docs/configuration.md for a sample
-# oh-my-posh segment reading these.
+# `_smarthistory_cycle_mode`/`_smarthistory_cycle_matchmode`/
+# `_smarthistory_precmd` whenever any of the three values changes. See
+# docs/configuration.md for a sample oh-my-posh segment reading these.
 _smarthistory_sync_prompt_env() {
     export SMARTHISTORY_MODE="$_smarthistory_mode"
     export SMARTHISTORY_MATCHMODE="$_smarthistory_matchmode"
+    export SMARTHISTORY_PROJECT="$_smarthistory_current_project"
 }
 _smarthistory_sync_prompt_env
 # Optional per-candidate syntax highlighting inside the dropdown box
