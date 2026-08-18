@@ -1359,14 +1359,15 @@ or by explicit `.`-mode selection (`smarthistory project select <slug>`). Config
 is entirely optional: with none set, every command lands in the report's
 `untracked` bucket.
 
-| Key                        | Meaning                                                                                                   |
-| -------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `project.<slug>.dir`       | Directory-to-project binding, longest-prefix matched against the cwd.                                     |
-| `project.idlethreshold`    | Seconds of inactivity before an open project session closes. Default `1800`. Must be a positive integer.  |
-| `jiralabel.<slug>.match`   | A JIRA label that maps to `<slug>` — website-resolution tier 1 (requires `JIRA_SERVER`/`JIRA_API_TOKEN`). |
-| `weburl.<slug>.match`      | A URL host+path substring that maps to `<slug>` — website-resolution tier 2.                              |
-| `weburlgroup.<name>.match` | A URL host+path substring for display-only clustering in the report (independent of project assignment).  |
-| `weburlgroup.<name>.label` | The label printed for visits matching `weburlgroup.<name>.match`.                                         |
+| Key                        | Meaning                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `project.<slug>.dir`       | Directory-to-project binding, longest-prefix matched against the cwd.                                                                                                                                                                            |
+| `project.<slug>.sticky`    | `on`/`off` (default `off`). Entering this directory also persists `<slug>` as the background project (`project_current`), so it stays attributed after you leave. See [Sticky project directories](modes/project.md#sticky-project-directories). |
+| `project.idlethreshold`    | Seconds of inactivity before an open project session closes. Default `1800`. Must be a positive integer.                                                                                                                                         |
+| `jiralabel.<slug>.match`   | A JIRA label that maps to `<slug>` — website-resolution tier 1 (requires `JIRA_SERVER`/`JIRA_API_TOKEN`).                                                                                                                                        |
+| `weburl.<slug>.match`      | A URL host+path substring that maps to `<slug>` — website-resolution tier 2.                                                                                                                                                                     |
+| `weburlgroup.<name>.match` | A URL host+path substring for display-only clustering in the report (independent of project assignment).                                                                                                                                         |
+| `weburlgroup.<name>.label` | The label printed for visits matching `weburlgroup.<name>.match`.                                                                                                                                                                                |
 
 ```ini
 project.acme.dir=~/work/acme
@@ -1540,6 +1541,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `browser.<id>.type`             | `chrome` \| `firefox` \| `safari` | — (auto-detected)                                                | [Browser (`^` mode)](#browser--mode)                                      |
 | `browser.<id>.profile`          | path                              | — (platform default)                                             | [Browser (`^` mode)](#browser--mode)                                      |
 | `project.<slug>.dir`            | path                              | —                                                                | [Project (`.` mode)](#project--mode)                                      |
+| `project.<slug>.sticky`         | `on` \| `off`                     | `off`                                                            | [Project (`.` mode)](#project--mode)                                      |
 | `project.idlethreshold`         | positive int (seconds)            | `1800`                                                           | [Project (`.` mode)](#project--mode)                                      |
 | `jiralabel.<slug>.match`        | JIRA label                        | —                                                                | [Project (`.` mode)](#project--mode)                                      |
 | `weburl.<slug>.match`           | URL substring                     | —                                                                | [Project (`.` mode)](#project--mode)                                      |

@@ -1993,6 +1993,19 @@ struct SessionDef {
 #[derive(Debug, Clone)]
 struct ProjectDef {
     dir: String,
+    /// `project.<slug>.sticky = on` (default `off`). A plain
+    /// `project.<slug>.dir` binding is transient: it only attributes
+    /// commands to `<slug>` while `pwd` is actually inside `dir`, and
+    /// leaving reverts to whatever `project_current` (the
+    /// `smarthistory project select`/`.`-mode "background" project)
+    /// already was. `sticky` changes that — entering `dir` also
+    /// persists `<slug>` into `project_current` itself (the same
+    /// upsert `ProjectAction::Select` does), so it becomes the new
+    /// background project: leaving `dir` afterward, any subsequent
+    /// directory with no binding/marker of its own keeps attributing
+    /// to `<slug>` instead of reverting to the pre-visit background.
+    /// See `maybe_persist_sticky_project`.
+    sticky: bool,
 }
 
 /// Display-only clustering for the `project report` website section:
@@ -3245,8 +3258,9 @@ impl Config {
                                 ),
                             }
                         } else if let Some((slug, field)) = rest.split_once('.') {
-                            // `project.<slug>.dir = "~/path"` — the
-                            // only recognized sub-field today (no
+                            // `project.<slug>.dir = "~/path"` /
+                            // `project.<slug>.sticky = on` — the only
+                            // two recognized sub-fields today (no
                             // display-name field: a project's name
                             // lives on its `type: project` note, not
                             // in this config entry — see `ProjectDef`'s
@@ -3259,7 +3273,20 @@ impl Config {
                                 ("dir", None) => {
                                     self.projects.push((
                                         slug.to_string(),
-                                        ProjectDef { dir: unquoted.to_string() },
+                                        ProjectDef { dir: unquoted.to_string(), sticky: false },
+                                    ));
+                                }
+                                ("sticky", Some(idx)) => {
+                                    self.projects[idx].1.sticky =
+                                        crate::util::parse_bool(unquoted, false);
+                                }
+                                ("sticky", None) => {
+                                    self.projects.push((
+                                        slug.to_string(),
+                                        ProjectDef {
+                                            dir: String::new(),
+                                            sticky: crate::util::parse_bool(unquoted, false),
+                                        },
                                     ));
                                 }
                                 _ => {
@@ -6141,11 +6168,26 @@ fn ensure_history_performance_indexes(conn: &Connection) -> anyhow::Result<()> {
 /// own binding). Same tilde-expansion helper `Config::sessions()`/
 /// `session_directories()` already use.
 fn resolve_project_dir(cfg: &Config, pwd: &str) -> Option<String> {
+    longest_project_dir_match(cfg.projects.iter(), pwd)
+}
+
+/// Same longest-prefix rule as `resolve_project_dir`, restricted to
+/// `project.<slug>.sticky = on` bindings only. Used by
+/// `maybe_persist_sticky_project` to decide whether entering `pwd`
+/// should also persist `<slug>` into `project_current` — see
+/// `ProjectDef::sticky`'s doc comment for what that means.
+fn resolve_sticky_project_dir(cfg: &Config, pwd: &str) -> Option<String> {
+    longest_project_dir_match(cfg.projects.iter().filter(|(_, def)| def.sticky), pwd)
+}
+
+fn longest_project_dir_match<'a>(
+    projects: impl Iterator<Item = &'a (String, ProjectDef)>,
+    pwd: &str,
+) -> Option<String> {
     let home_list: Vec<String> = std::iter::once(std::env::var("HOME").unwrap_or_default())
         .filter(|s| !s.is_empty())
         .collect();
-    cfg.projects
-        .iter()
+    projects
         .filter_map(|(slug, def)| {
             let expanded = crate::util::expand_home_to_absolute(&def.dir, &home_list);
             let expanded = expanded.trim_end_matches('/');
@@ -6157,6 +6199,45 @@ fn resolve_project_dir(cfg: &Config, pwd: &str) -> Option<String> {
         })
         .max_by_key(|(_, len)| *len)
         .map(|(slug, _)| slug)
+}
+
+/// If `pwd` matches a `sticky` project directory binding (see
+/// `ProjectDef::sticky`) AND that binding is genuinely what
+/// `resolve_current_project` resolved to — not overridden by a
+/// higher-priority `.smarthistory-project` marker file, and not
+/// skipped because tracking is paused — persist it into
+/// `project_current`, the same upsert `ProjectAction::Select`
+/// performs. That makes it the new background project: leaving this
+/// directory afterward, any subsequent directory with no binding or
+/// marker of its own keeps attributing to this project instead of
+/// reverting to whatever `project_current` was before.
+///
+/// Deliberately called from exactly one place — `Commands::Add`'s
+/// `pwd` resolution, right after `switch_project` — since that's the
+/// only genuine "a shell command just ran in this directory" event in
+/// the codebase; the other `resolve_current_project` call sites
+/// resolve a *file's* directory (not `pwd` itself) or are read-only
+/// status/pause queries where writing `project_current` would be a
+/// surprising side effect.
+fn maybe_persist_sticky_project(
+    conn: &Connection,
+    cfg: &Config,
+    pwd: &str,
+    resolved_project: Option<&str>,
+    now: i64,
+) -> anyhow::Result<()> {
+    let Some(sticky_slug) = resolve_sticky_project_dir(cfg, pwd) else {
+        return Ok(());
+    };
+    if resolved_project != Some(sticky_slug.as_str()) {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, ?1, ?2)
+         ON CONFLICT (id) DO UPDATE SET project_slug = excluded.project_slug, set_ts = excluded.set_ts",
+        params![sticky_slug, now],
+    )?;
+    Ok(())
 }
 
 /// Resolve a project slug from a JIRA issue's labels — the first
@@ -8085,6 +8166,13 @@ fn main() -> anyhow::Result<()> {
                 now,
                 project_cfg.project_idle_threshold_secs,
                 None,
+            )?;
+            maybe_persist_sticky_project(
+                &conn,
+                &project_cfg,
+                &pwd,
+                resolved_project.as_deref(),
+                now,
             )?;
 
             // File tracking: a `less`/`bat`/`tail`/`head`-style

@@ -2146,6 +2146,71 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(resolve_project_dir(&cfg, "/tmp/demo-other"), None);
     }
 
+    // --- Time tracking: `project.<slug>.sticky` -------------------------
+
+    #[test]
+    fn project_sticky_field_parses_on_and_defaults_off() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "project.demo.dir = /tmp/demo\n\
+             project.demo.sticky = on\n\
+             project.other.dir = /tmp/other\n",
+        ]);
+        let demo = &cfg.projects.iter().find(|(k, _)| k == "demo").unwrap().1;
+        assert!(demo.sticky);
+        let other = &cfg.projects.iter().find(|(k, _)| k == "other").unwrap().1;
+        assert!(!other.sticky, "sticky must default to off when not set");
+    }
+
+    /// `.sticky` can appear before `.dir` in the config file -- the
+    /// slug's `ProjectDef` gets created on first mention of either
+    /// field, same as `.dir` alone already does.
+    #[test]
+    fn project_sticky_field_can_precede_dir_field() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "project.demo.sticky = on\n\
+             project.demo.dir = /tmp/demo\n",
+        ]);
+        let demo = &cfg.projects.iter().find(|(k, _)| k == "demo").unwrap().1;
+        assert!(demo.sticky);
+        assert_eq!(demo.dir, "/tmp/demo");
+    }
+
+    #[test]
+    fn resolve_sticky_project_dir_only_matches_sticky_bindings() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "project.demo.dir = /tmp/demo\n\
+             project.demo.sticky = on\n\
+             project.plain.dir = /tmp/plain\n",
+        ]);
+        assert_eq!(
+            resolve_sticky_project_dir(&cfg, "/tmp/demo"),
+            Some("demo".to_string())
+        );
+        assert_eq!(
+            resolve_sticky_project_dir(&cfg, "/tmp/plain"),
+            None,
+            "a plain (non-sticky) dir binding must not match here"
+        );
+    }
+
+    #[test]
+    fn resolve_sticky_project_dir_prefers_longest_sticky_match() {
+        let mut cfg = Config::default();
+        cfg.parse_multi(&[
+            "project.monorepo.dir = /tmp/work\n\
+             project.monorepo.sticky = on\n\
+             project.subproj.dir = /tmp/work/subproj\n\
+             project.subproj.sticky = on\n",
+        ]);
+        assert_eq!(
+            resolve_sticky_project_dir(&cfg, "/tmp/work/subproj/src"),
+            Some("subproj".to_string())
+        );
+    }
+
     /// A marker file's first non-blank line is the slug, found from
     /// a directory several levels below it.
     #[test]
@@ -2400,6 +2465,146 @@ tmuxpaneoutputdir=~/custom-tmux
         let conn = resolve_current_project_test_conn();
         let cfg = Config::default();
         assert_eq!(resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(), None);
+    }
+
+    // --- Time tracking: `maybe_persist_sticky_project` -------------------
+
+    fn read_project_current(conn: &Connection) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        conn.query_row("SELECT project_slug FROM project_current WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .expect("query")
+    }
+
+    /// The whole point of `sticky`: entering a sticky-bound directory
+    /// persists it into `project_current`, so a LATER, unrelated
+    /// directory with no binding of its own keeps attributing to it
+    /// instead of reverting to whatever `project_current` was before
+    /// -- proven here by resolving that later directory through the
+    /// real `resolve_current_project`, not just inspecting the row.
+    #[test]
+    fn sticky_directory_becomes_the_new_background_project_after_leaving_it() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'old', 1000)",
+            [],
+        )
+        .expect("insert");
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\nproject.demo.sticky = on\n"]);
+
+        // Enter the sticky directory: resolve, then let the sticky
+        // write-through do its thing, same as `Commands::Add`'s call
+        // sequence.
+        let resolved = resolve_current_project(&conn, &cfg, "/tmp/demo").unwrap();
+        assert_eq!(resolved, Some("demo".to_string()));
+        maybe_persist_sticky_project(&conn, &cfg, "/tmp/demo", resolved.as_deref(), 2000)
+            .expect("persist");
+        assert_eq!(read_project_current(&conn), Some("demo".to_string()));
+
+        // Leave it: a later, completely unrelated, unbound directory
+        // must now resolve to "demo", not the original "old".
+        assert_eq!(
+            resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(),
+            Some("demo".to_string())
+        );
+    }
+
+    /// A PLAIN (non-sticky) `project.<slug>.dir` binding must keep its
+    /// existing, purely transient behavior unchanged: leaving it must
+    /// NOT alter `project_current` at all.
+    #[test]
+    fn non_sticky_directory_does_not_persist_to_project_current() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'old', 1000)",
+            [],
+        )
+        .expect("insert");
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\n"]);
+
+        let resolved = resolve_current_project(&conn, &cfg, "/tmp/demo").unwrap();
+        assert_eq!(resolved, Some("demo".to_string()));
+        maybe_persist_sticky_project(&conn, &cfg, "/tmp/demo", resolved.as_deref(), 2000)
+            .expect("persist");
+
+        assert_eq!(
+            read_project_current(&conn),
+            Some("old".to_string()),
+            "a non-sticky binding must never touch project_current"
+        );
+        assert_eq!(
+            resolve_current_project(&conn, &cfg, "/tmp/unrelated").unwrap(),
+            Some("old".to_string()),
+            "leaving a non-sticky directory must revert to the pre-existing background project"
+        );
+    }
+
+    /// A `.smarthistory-project` marker file outranks a sticky
+    /// directory binding in `resolve_current_project` itself (see its
+    /// priority order) -- when that happens, the sticky write-through
+    /// must not fire either, since the marker's slug is what actually
+    /// won, not the sticky binding's.
+    #[test]
+    fn sticky_directory_does_not_persist_when_a_marker_file_overrides_it() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'old', 1000)",
+            [],
+        )
+        .expect("insert");
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\nproject.demo.sticky = on\n"]);
+
+        // Simulate "the marker file won" by passing a DIFFERENT
+        // resolved_project than the sticky binding's own slug --
+        // exactly what `resolve_current_project` would produce if a
+        // marker file were present, without needing a real temp-dir
+        // marker file fixture here.
+        maybe_persist_sticky_project(&conn, &cfg, "/tmp/demo", Some("marker-slug"), 2000)
+            .expect("persist");
+        assert_eq!(
+            read_project_current(&conn),
+            Some("old".to_string()),
+            "must not persist when the sticky binding isn't what actually won"
+        );
+    }
+
+    /// While tracking is paused, `resolved_project` is `None` even
+    /// inside a sticky directory (see
+    /// `resolve_current_project_ignores_directory_and_explicit_selection_while_paused`)
+    /// -- the sticky write-through must not fire then either.
+    #[test]
+    fn sticky_directory_does_not_persist_while_resolved_project_is_none() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'old', 1000)",
+            [],
+        )
+        .expect("insert");
+        let mut cfg = Config::default();
+        cfg.parse_multi(&["project.demo.dir = /tmp/demo\nproject.demo.sticky = on\n"]);
+
+        maybe_persist_sticky_project(&conn, &cfg, "/tmp/demo", None, 2000).expect("persist");
+        assert_eq!(read_project_current(&conn), Some("old".to_string()));
+    }
+
+    /// A directory with no sticky binding at all is a no-op, same as
+    /// today's behavior with no `sticky` feature involved.
+    #[test]
+    fn maybe_persist_sticky_project_is_a_no_op_outside_any_sticky_directory() {
+        let conn = resolve_current_project_test_conn();
+        conn.execute(
+            "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, 'old', 1000)",
+            [],
+        )
+        .expect("insert");
+        let cfg = Config::default();
+        maybe_persist_sticky_project(&conn, &cfg, "/tmp/unrelated", None, 2000).expect("persist");
+        assert_eq!(read_project_current(&conn), Some("old".to_string()));
     }
 
     // --- Time tracking: `project pause` ---------------------------------
@@ -2853,6 +3058,7 @@ tmuxpaneoutputdir=~/custom-tmux
             "from-config-only".to_string(),
             ProjectDef {
                 dir: "/repo/from-config-only".to_string(),
+                sticky: false,
             },
         ));
 

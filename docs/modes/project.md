@@ -66,6 +66,41 @@ priority order:
 4. **None** — the command isn't attributed to any project; it's later reported
    under `untracked`.
 
+## Sticky project directories
+
+A plain `project.<slug>.dir` binding (step 2 above) is transient: it only
+attributes commands to `<slug>` while `pwd` is actually inside `dir`. Leave the
+directory, and the next command reverts to whatever `project_current` already
+was (step 3) — the directory has no lasting effect once you've left it.
+
+`project.<slug>.sticky = on` changes that. Entering a sticky directory does
+everything a plain binding does, but also performs step 1 of `project select`'s
+own sequence (see above): it upserts `project_current` to `<slug>`, making it
+the new "background" project. So after leaving a sticky directory, any
+subsequent directory with no marker file or `.dir` binding of its own keeps
+attributing to `<slug>` — the directory you just left, not whatever was set
+before you entered it — instead of reverting.
+
+```ini
+project.acme.dir = ~/work/acme
+project.acme.sticky = on
+```
+
+This is useful for a directory that represents "starting work on `acme`" in a
+broader sense than the directory itself — leaving it to check something in an
+unrelated, unbound scratch directory shouldn't lose that context the way a plain
+binding would.
+
+Sticky only fires from the one genuine "entered a directory" event: a shell
+command actually running in `pwd` (`smarthistory add`'s directory resolution).
+It does **not** fire from [file tracking](#file-tracking)
+(`smarthistory file viewed/modified/created`, or the `fileviewcommands`
+automatic-`viewed` path below) — those resolve a _file's_ directory, which may
+have nothing to do with the shell's own `pwd`, so treating a file event as
+"entering" a sticky directory would be surprising. It also never fires while
+[paused](#pausing-tracking) or when a marker file (step 1) is what actually won
+the resolution instead of the sticky binding.
+
 ## Session lifecycle
 
 Time is tracked in the `project_sessions` table: one open/close row per
@@ -112,7 +147,11 @@ file → `project.<slug>.dir` → last explicit selection), but resolved from th
 process's cwd isn't necessarily the file's directory (a single long-running
 editor instance with files open from several projects, an LSP server with its
 own cwd, …), so resolution has to follow the file, not the shell that happens to
-have invoked the hook.
+have invoked the hook. One difference from directory resolution: a
+[sticky `project.<slug>.dir`](#sticky-project-directories) binding never
+persists to `project_current` from a file event, even when the file's directory
+matches one — only a real shell command running in `pwd` counts as "entering" a
+sticky directory.
 
 Example Vim integration (`~/.vimrc`):
 

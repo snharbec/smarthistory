@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `project.<slug>.sticky = on` config key: entering a sticky
+  `project.<slug>.dir` directory also persists `<slug>` into `project_current`
+  (the same upsert `project select`/`.`-mode selection does), making it the new
+  background project — a plain (non-sticky) `.dir` binding is purely transient
+  and has no lasting effect once you leave it, reverting to whatever
+  `project_current` was before. With `sticky` on, leaving the directory
+  afterward, any subsequent directory with no marker file or `.dir` binding of
+  its own keeps attributing to `<slug>` instead of reverting. Only fires from a
+  real shell command running in `pwd` (`smarthistory add`'s directory
+  resolution) — never from file-tracking events (which resolve a file's own
+  directory, not necessarily the shell's `pwd`), while paused, or when a
+  `.smarthistory-project` marker file is what actually won the resolution
+  instead of the sticky binding. See
+  [Sticky project directories](docs/modes/project.md#sticky-project-directories).
 - `smarthistory serve`'s day overview now shows a donut chart of that day's
   active time per project, next to the existing project list — a plain CSS
   `conic-gradient` (no chart library, no canvas/SVG), with a clickable legend
