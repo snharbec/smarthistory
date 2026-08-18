@@ -118,6 +118,19 @@ _smarthistory_precmd() {
         _sm_project_lines=("${(f)$(smarthistory project current --with-time 2>/dev/null)}")
         _smarthistory_current_project="${_sm_project_lines[1]}"
         _smarthistory_current_project_secs="${_sm_project_lines[2]}"
+        # "hh:mm" rendering of the raw seconds above, computed here in
+        # zsh rather than round-tripping through another `smarthistory`
+        # call — plain integer arithmetic, no reason to pay a second
+        # subprocess for it. Empty when there's no active project
+        # (empty `_smarthistory_current_project_secs`), same as every
+        # other "nothing to show" case here.
+        if [[ -n "$_smarthistory_current_project_secs" ]]; then
+            _smarthistory_current_project_hm=$(printf '%02d:%02d' \
+                $((_smarthistory_current_project_secs / 3600)) \
+                $((_smarthistory_current_project_secs % 3600 / 60)))
+        else
+            _smarthistory_current_project_hm=""
+        fi
         _smarthistory_sync_prompt_env
     fi
     # Remember the most recently executed command for the Ctrl-S
@@ -285,32 +298,34 @@ typeset -g _smarthistory_prompt_project_enabled="0"
 [[ "$(smarthistory config get prompt.project 2>/dev/null)" == "on" ]] \
     && _smarthistory_prompt_project_enabled="1"
 # The most recently resolved project slug (empty string when no
-# project is active/tracking is paused), and its accumulated active
-# seconds for TODAY — both updated in `_smarthistory_precmd` right
-# after every real command, since that's the only thing that can
-# actually change either (a directory change, an explicit `project
-# select`, or simply more time having elapsed on the same project).
-# Only ever set when `_smarthistory_prompt_project_enabled=1`; stay
-# empty otherwise.
+# project is active/tracking is paused), its accumulated active
+# seconds for TODAY, and an "hh:mm" rendering of those seconds — all
+# three updated in `_smarthistory_precmd` right after every real
+# command, since that's the only thing that can actually change any
+# of them (a directory change, an explicit `project select`, or
+# simply more time having elapsed on the same project). Only ever set
+# when `_smarthistory_prompt_project_enabled=1`; stay empty otherwise.
 typeset -g _smarthistory_current_project=""
 typeset -g _smarthistory_current_project_secs=""
+typeset -g _smarthistory_current_project_hm=""
 # Mirror the search-scope/match-mode/project state into real
 # environment variables, not just the zsh-internal
 # `$_smarthistory_mode`/`$_smarthistory_matchmode`/
-# `$_smarthistory_current_project`/`$_smarthistory_current_project_secs`
-# shell variables above — a separate prompt system (oh-my-posh,
-# starship, etc.) runs as its own subprocess on every prompt render
-# and can only see actual exported env vars, not this shell's internal
-# state. Kept in sync by `_smarthistory_sync_prompt_env`, called here
-# and again from `_smarthistory_cycle_mode`/
-# `_smarthistory_cycle_matchmode`/`_smarthistory_precmd` whenever any
-# of these values changes. See docs/configuration.md for a sample
-# oh-my-posh segment reading these.
+# `$_smarthistory_current_project`/`$_smarthistory_current_project_secs`/
+# `$_smarthistory_current_project_hm` shell variables above — a
+# separate prompt system (oh-my-posh, starship, etc.) runs as its own
+# subprocess on every prompt render and can only see actual exported
+# env vars, not this shell's internal state. Kept in sync by
+# `_smarthistory_sync_prompt_env`, called here and again from
+# `_smarthistory_cycle_mode`/`_smarthistory_cycle_matchmode`/
+# `_smarthistory_precmd` whenever any of these values changes. See
+# docs/configuration.md for a sample oh-my-posh segment reading these.
 _smarthistory_sync_prompt_env() {
     export SMARTHISTORY_MODE="$_smarthistory_mode"
     export SMARTHISTORY_MATCHMODE="$_smarthistory_matchmode"
     export SMARTHISTORY_PROJECT="$_smarthistory_current_project"
     export SMARTHISTORY_PROJECT_TIME="$_smarthistory_current_project_secs"
+    export SMARTHISTORY_PROJECT_TIME_HM="$_smarthistory_current_project_hm"
 }
 _smarthistory_sync_prompt_env
 # Optional per-candidate syntax highlighting inside the dropdown box

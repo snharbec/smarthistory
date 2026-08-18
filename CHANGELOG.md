@@ -16,9 +16,11 @@ All notable changes to this project will be documented in this file.
   `/api/report`'s JSON response.
 - New `smarthistory project current --with-time` flag: also prints today's
   accumulated active seconds for the resolved project on a second stdout line.
-  New `prompt.project`-published env var `$SMARTHISTORY_PROJECT_TIME` (raw
-  seconds, kept in sync alongside the existing `$SMARTHISTORY_PROJECT` by
-  `_smarthistory_precmd`/`_smarthistory_sync_prompt_env`) — see
+  New `prompt.project`-published env vars `$SMARTHISTORY_PROJECT_TIME` (raw
+  seconds) and `$SMARTHISTORY_PROJECT_TIME_HM` (`hh:mm`, computed in zsh from
+  the raw-seconds value — no extra subprocess call), kept in sync alongside the
+  existing `$SMARTHISTORY_PROJECT` by
+  `_smarthistory_precmd`/`_smarthistory_sync_prompt_env` — see
   [Published environment variables](docs/configuration.md#published-environment-variables)
   for prompt examples.
 - New `project.<slug>.sticky = on` config key: entering a sticky
