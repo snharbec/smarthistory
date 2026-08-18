@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `smarthistory project report` and the web dashboard's day overview now show a
+  "Standard work time" total — the day's first tracked activity (a command or a
+  website visit) to its last, minus the excess of any gap beyond
+  `project.idlethreshold`, the same idle-capping rule the per-command duration
+  and `project_sessions` lifecycle already use, just applied across the whole
+  day at once instead of per-project or per-session. Day-level, not per-project
+  — `--project`/`?project=` don't narrow it. New `standard_work_secs` field on
+  `/api/report`'s JSON response.
+- New `smarthistory project current --with-time` flag: also prints today's
+  accumulated active seconds for the resolved project on a second stdout line.
+  New `prompt.project`-published env var `$SMARTHISTORY_PROJECT_TIME` (raw
+  seconds, kept in sync alongside the existing `$SMARTHISTORY_PROJECT` by
+  `_smarthistory_precmd`/`_smarthistory_sync_prompt_env`) — see
+  [Published environment variables](docs/configuration.md#published-environment-variables)
+  for prompt examples.
 - New `project.<slug>.sticky = on` config key: entering a sticky
   `project.<slug>.dir` directory also persists `<slug>` into `project_current`
   (the same upsert `project select`/`.`-mode selection does), making it the new

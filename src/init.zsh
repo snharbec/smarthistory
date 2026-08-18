@@ -106,8 +106,18 @@ _smarthistory_precmd() {
     # `2>/dev/null` discards the "no active project" error message
     # `project current` prints on stderr when nothing resolves —
     # empty output in that case is exactly the value we want.
+    # `--with-time` adds a second stdout line: today's accumulated
+    # active seconds for that project. `${(f)...}` splits the
+    # captured output into an array on newlines; on truly empty
+    # output (no active project) it yields a single empty element,
+    # so both `[1]` (project) and the out-of-bounds `[2]` (secs) come
+    # out as empty strings — exactly the "nothing to show" state we
+    # want, not an error.
     if [[ "$_smarthistory_prompt_project_enabled" = "1" ]]; then
-        _smarthistory_current_project=$(smarthistory project current 2>/dev/null)
+        local -a _sm_project_lines
+        _sm_project_lines=("${(f)$(smarthistory project current --with-time 2>/dev/null)}")
+        _smarthistory_current_project="${_sm_project_lines[1]}"
+        _smarthistory_current_project_secs="${_sm_project_lines[2]}"
         _smarthistory_sync_prompt_env
     fi
     # Remember the most recently executed command for the Ctrl-S
@@ -275,27 +285,32 @@ typeset -g _smarthistory_prompt_project_enabled="0"
 [[ "$(smarthistory config get prompt.project 2>/dev/null)" == "on" ]] \
     && _smarthistory_prompt_project_enabled="1"
 # The most recently resolved project slug (empty string when no
-# project is active/tracking is paused) — updated in
-# `_smarthistory_precmd` right after every real command, since that's
-# the only thing that can actually change it (a directory change or
-# explicit `project select`). Only ever set when
-# `_smarthistory_prompt_project_enabled=1`; stays empty otherwise.
+# project is active/tracking is paused), and its accumulated active
+# seconds for TODAY — both updated in `_smarthistory_precmd` right
+# after every real command, since that's the only thing that can
+# actually change either (a directory change, an explicit `project
+# select`, or simply more time having elapsed on the same project).
+# Only ever set when `_smarthistory_prompt_project_enabled=1`; stay
+# empty otherwise.
 typeset -g _smarthistory_current_project=""
+typeset -g _smarthistory_current_project_secs=""
 # Mirror the search-scope/match-mode/project state into real
 # environment variables, not just the zsh-internal
 # `$_smarthistory_mode`/`$_smarthistory_matchmode`/
-# `$_smarthistory_current_project` shell variables above — a separate
-# prompt system (oh-my-posh, starship, etc.) runs as its own
-# subprocess on every prompt render and can only see actual exported
-# env vars, not this shell's internal state. Kept in sync by
-# `_smarthistory_sync_prompt_env`, called here and again from
-# `_smarthistory_cycle_mode`/`_smarthistory_cycle_matchmode`/
-# `_smarthistory_precmd` whenever any of the three values changes. See
-# docs/configuration.md for a sample oh-my-posh segment reading these.
+# `$_smarthistory_current_project`/`$_smarthistory_current_project_secs`
+# shell variables above — a separate prompt system (oh-my-posh,
+# starship, etc.) runs as its own subprocess on every prompt render
+# and can only see actual exported env vars, not this shell's internal
+# state. Kept in sync by `_smarthistory_sync_prompt_env`, called here
+# and again from `_smarthistory_cycle_mode`/
+# `_smarthistory_cycle_matchmode`/`_smarthistory_precmd` whenever any
+# of these values changes. See docs/configuration.md for a sample
+# oh-my-posh segment reading these.
 _smarthistory_sync_prompt_env() {
     export SMARTHISTORY_MODE="$_smarthistory_mode"
     export SMARTHISTORY_MATCHMODE="$_smarthistory_matchmode"
     export SMARTHISTORY_PROJECT="$_smarthistory_current_project"
+    export SMARTHISTORY_PROJECT_TIME="$_smarthistory_current_project_secs"
 }
 _smarthistory_sync_prompt_env
 # Optional per-candidate syntax highlighting inside the dropdown box

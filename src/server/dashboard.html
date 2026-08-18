@@ -463,7 +463,11 @@
       })
       .join("");
     app.innerHTML = `
-      <div class="card"><h2>${esc(report.date)}</h2>${pieChart(date, report.projects)}</div>
+      <div class="card">
+        <h2>${esc(report.date)}</h2>
+        <p class="muted">Standard work time: <span class="duration">${formatDuration(report.standard_work_secs)}</span></p>
+        ${pieChart(date, report.projects)}
+      </div>
       <div class="project-list">${rows}</div>
     `;
   }
