@@ -1431,8 +1431,12 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
 /// where every field is a `DialogField`.
 fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: bool) -> Line<'a> {
     let style = if is_focused { Theme::highlight() } else { Style::default() };
+    // The field name is always bold — a dominant label the user can
+    // scan even when the field isn't focused — while its color still
+    // tracks focus like the value text does.
+    let label_style = style.add_modifier(Modifier::BOLD);
     let chars: Vec<char> = field.value.chars().collect();
-    let mut spans: Vec<Span> = vec![Span::styled(format!("{}: ", field.name), style)];
+    let mut spans: Vec<Span> = vec![Span::styled(format!("{}: ", field.name), label_style)];
     if field.value.is_empty() && is_focused {
         spans.push(Span::styled(field.placeholder.to_string(), Theme::dim()));
         spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
@@ -1467,8 +1471,10 @@ fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: 
 /// Render a Project/Issue Type selector row: `<name>: ◂ value ▸`.
 fn selector_line<'a>(name: &'a str, value: &'a str, is_focused: bool) -> Line<'a> {
     let style = if is_focused { Theme::highlight() } else { Style::default() };
+    // Bold name label, same dominance rule `dialog_field_line` uses.
+    let label_style = style.add_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(format!("{name}: "), style),
+        Span::styled(format!("{name}: "), label_style),
         Span::styled(if is_focused { "◂ " } else { "  " }, Theme::dim()),
         Span::styled(value.to_string(), style),
         Span::styled(if is_focused { " ▸" } else { "  " }, Theme::dim()),
@@ -1478,9 +1484,12 @@ fn selector_line<'a>(name: &'a str, value: &'a str, is_focused: bool) -> Line<'a
 fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::CreateJiraIssueDialog) {
     use crate::tui::state::CreateJiraIssueFocus;
 
-    // Layout: Project (1) + Subject (1) + Description (fill) +
-    // Labels (1) + Issue Type (1) + error (1, only when present) +
-    // footer (1) + borders (2). Capped at 80% of the viewport height
+    // Layout: Issue Type (1) + Project (1) + Subject (1) + Labels (1)
+    // + Description (fill) + error (1, only when present) + footer
+    // (1) + borders (2). Issue Type leads (the field most often
+    // changed away from its default) and Labels sits right after
+    // Subject so the two short fields are typed back-to-back before
+    // the long-form Description. Capped at 80% of the viewport height
     // the same way `draw_add_entry_dialog`/`draw_note_create` are,
     // for the same reason (leave the underlying TUI visible as a cue
     // this is a transient overlay).
@@ -1499,11 +1508,11 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     f.render_widget(block, area);
 
     let mut constraints = vec![
+        Constraint::Length(1), // Issue Type
         Constraint::Length(1), // Project
         Constraint::Length(1), // Subject
-        Constraint::Fill(1),   // Description
         Constraint::Length(1), // Labels
-        Constraint::Length(1), // Issue Type
+        Constraint::Fill(1),   // Description
     ];
     if has_error {
         constraints.push(Constraint::Length(1));
@@ -1513,15 +1522,27 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
 
     f.render_widget(
         Paragraph::new(selector_line(
-            "Project",
-            &dialog.projects[dialog.project_index],
-            dialog.focused == CreateJiraIssueFocus::Project,
+            "Issue Type",
+            &dialog.issue_types[dialog.issue_type_index],
+            dialog.focused == CreateJiraIssueFocus::IssueType,
         )),
         chunks[0],
     );
     f.render_widget(
-        Paragraph::new(dialog_field_line(&dialog.fields[0], dialog.focused == CreateJiraIssueFocus::Subject)),
+        Paragraph::new(selector_line(
+            "Project",
+            &dialog.projects[dialog.project_index],
+            dialog.focused == CreateJiraIssueFocus::Project,
+        )),
         chunks[1],
+    );
+    f.render_widget(
+        Paragraph::new(dialog_field_line(&dialog.fields[0], dialog.focused == CreateJiraIssueFocus::Subject)),
+        chunks[2],
+    );
+    f.render_widget(
+        Paragraph::new(dialog_field_line(&dialog.fields[2], dialog.focused == CreateJiraIssueFocus::Labels)),
+        chunks[3],
     );
 
     // Description: multi-line, wrapped. No rendered cursor glyph
@@ -1530,7 +1551,8 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     // not precise mid-text cursor placement; focus is shown via the
     // label's highlight color instead, same as every other field.
     let desc_focused = dialog.focused == CreateJiraIssueFocus::Description;
-    let desc_label_style = if desc_focused { Theme::highlight() } else { Style::default() };
+    let desc_label_style = (if desc_focused { Theme::highlight() } else { Style::default() })
+        .add_modifier(Modifier::BOLD);
     let desc_text = if dialog.fields[1].value.is_empty() {
         Line::from(vec![
             Span::styled("Description: ", desc_label_style),
@@ -1547,19 +1569,6 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     }
     f.render_widget(
         Paragraph::new(desc_lines).wrap(Wrap { trim: false }),
-        chunks[2],
-    );
-
-    f.render_widget(
-        Paragraph::new(dialog_field_line(&dialog.fields[2], dialog.focused == CreateJiraIssueFocus::Labels)),
-        chunks[3],
-    );
-    f.render_widget(
-        Paragraph::new(selector_line(
-            "Issue Type",
-            &dialog.issue_types[dialog.issue_type_index],
-            dialog.focused == CreateJiraIssueFocus::IssueType,
-        )),
         chunks[4],
     );
 
@@ -1578,7 +1587,7 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         Span::styled("S-Tab", Theme::highlight()),
         Span::raw(" next/prev field, "),
         Span::styled("←/→", Theme::highlight()),
-        Span::raw(" change Project/Issue Type, "),
+        Span::raw(" change Issue Type/Project, "),
         Span::styled("Ctrl-S", Theme::highlight()),
         Span::raw(" create, "),
         Span::styled("Esc", Theme::highlight()),

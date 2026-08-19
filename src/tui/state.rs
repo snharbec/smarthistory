@@ -1182,27 +1182,27 @@ impl AddEntryDialog {
 }
 
 /// The 5 focus positions of [`CreateJiraIssueDialog`], in display
-/// order. `Project`/`IssueType` are closed-set selectors (cycled
-/// with Left/Right, not typed); `Subject`/`Description`/`Labels` are
+/// order. `IssueType`/`Project` are closed-set selectors (cycled
+/// with Left/Right, not typed); `Subject`/`Labels`/`Description` are
 /// free-text `DialogField`s, indexed into
 /// `CreateJiraIssueDialog::fields` by `CreateJiraIssueFocus::field_index()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateJiraIssueFocus {
+    IssueType,
     Project,
     Subject,
-    Description,
     Labels,
-    IssueType,
+    Description,
 }
 
 impl CreateJiraIssueFocus {
     /// All 5 positions, in display/Tab order.
     const ALL: [CreateJiraIssueFocus; 5] = [
+        CreateJiraIssueFocus::IssueType,
         CreateJiraIssueFocus::Project,
         CreateJiraIssueFocus::Subject,
-        CreateJiraIssueFocus::Description,
         CreateJiraIssueFocus::Labels,
-        CreateJiraIssueFocus::IssueType,
+        CreateJiraIssueFocus::Description,
     ];
 
     fn next(self) -> Self {

@@ -1017,11 +1017,11 @@ auto-committed.
 | Category     | tools                                                                                      |
 
 Open a dialog to create a new JIRA issue via `POST /rest/api/2/issue`. Five
-fields: **Project** and **Issue Type** are closed-set selectors cycled with
+fields: **Issue Type** and **Project** are closed-set selectors cycled with
 `Left`/`Right` (not typed — a wrong value would just fail the POST); **Subject**,
-**Description**, and **Labels** are free text, `Tab`/`Shift-Tab` rotating focus
-through all five in that order (Project → Subject → Description → Labels →
-Issue Type → wraps). `Enter` inserts a literal newline only while Description is
+**Labels**, and **Description** are free text, `Tab`/`Shift-Tab` rotating focus
+through all five in that order (Issue Type → Project → Subject → Labels →
+Description → wraps). `Enter` inserts a literal newline only while Description is
 focused; `Ctrl-S` submits, `Esc` cancels.
 
 - **Project** comes from `JIRA_AVAILABLE_PROJECTS` (comma-separated), falling

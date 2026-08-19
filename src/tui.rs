@@ -9173,7 +9173,7 @@ impl App {
             project_index: 0,
             issue_types: config.available_issue_types.clone(),
             issue_type_index: 0,
-            focused: crate::tui::state::CreateJiraIssueFocus::Project,
+            focused: crate::tui::state::CreateJiraIssueFocus::IssueType,
             source_key: source_key.clone(),
             prefill_loading,
             error: None,
