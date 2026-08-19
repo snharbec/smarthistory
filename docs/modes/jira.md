@@ -54,6 +54,27 @@ by default) downloads **every** issue matching the current query.
   middle of a `field=` token, pressing `Tab` completes the field name from the
   list of fields returned by the JIRA `/rest/api/2/field` endpoint.
 
+## Creating a new issue
+
+`Action::CreateJiraIssue` (unbound by default — bind via
+`key.create-jira-issue=<spec>`, or open it through the command palette,
+`Ctrl-Q`) opens a dialog to create a new issue via `POST /rest/api/2/issue`.
+Full field reference, key bindings, and the two prefill behaviours (note row
+vs. JIRA row) are documented in
+[`docs/actions.md#createjiraissue`](../actions.md#createjiraissue); the short
+version:
+
+- **Project** and **Issue Type** are closed-set selectors (`Left`/`Right`),
+  sourced from `JIRA_AVAILABLE_PROJECTS`/`JIRA_AVAILABLE_ISSUE_TYPES` — see
+  [Configuration](../configuration.md#jira--mode).
+- Opened from a **note row**, Subject/Description/Labels are pre-filled from
+  the note's filename/content/`#tags`.
+- Opened from a **JIRA row**, Subject/Description/Labels are pre-filled from
+  the selected issue (Description/Labels via an async `search("key = <KEY>")`
+  re-fetch, since the cached row doesn't carry them), and on submit the new
+  issue gets a `Relates` link back to the selected one.
+- `Ctrl-S` submits, `Esc` cancels.
+
 ## Special tokens
 
 The body is parsed by [`src/jira.rs`](../src/jira.rs) using a shared token

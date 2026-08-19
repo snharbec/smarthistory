@@ -163,6 +163,13 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_add_entry_dialog(f, app, dialog);
     }
 
+    // The "create JIRA issue" dialog is a sibling of the add-entry
+    // dialog: also drawn last (topmost), also mutually exclusive
+    // with it in practice.
+    if let Some(dialog) = app.create_jira_issue_dialog.as_ref() {
+        draw_create_jira_issue_dialog(f, dialog);
+    }
+
     // The note/todo compose overlay is a sibling of the
     // add-entry dialog: also drawn last (topmost). The two are
     // mutually exclusive in practice (each opens via its own
@@ -1413,6 +1420,171 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
         Span::raw(" delete word"),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[footer_idx]);
+}
+
+/// Render a single-line `DialogField` as `<name>: <value>` with a
+/// cursor glyph, matching `draw_add_entry_dialog`'s per-field
+/// rendering exactly (same reversed-character/reversed-space cursor
+/// convention) — pulled out as its own function here since this
+/// dialog needs it for two fields (Subject, Labels) alongside
+/// non-`DialogField` selector rows, unlike `draw_add_entry_dialog`
+/// where every field is a `DialogField`.
+fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: bool) -> Line<'a> {
+    let style = if is_focused { Theme::highlight() } else { Style::default() };
+    let chars: Vec<char> = field.value.chars().collect();
+    let mut spans: Vec<Span> = vec![Span::styled(format!("{}: ", field.name), style)];
+    if field.value.is_empty() && is_focused {
+        spans.push(Span::styled(field.placeholder.to_string(), Theme::dim()));
+        spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+    } else {
+        let pre: String = chars.iter().take(field.cursor).collect();
+        spans.push(Span::styled(pre, style));
+        if is_focused {
+            if field.cursor < chars.len() {
+                spans.push(Span::styled(
+                    chars[field.cursor].to_string(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
+            } else {
+                spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+            }
+        }
+        let post: String = chars
+            .iter()
+            .skip(if is_focused {
+                field.cursor + if field.cursor < chars.len() { 1 } else { 0 }
+            } else {
+                field.cursor
+            })
+            .collect();
+        if !post.is_empty() {
+            spans.push(Span::styled(post, style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Render a Project/Issue Type selector row: `<name>: ◂ value ▸`.
+fn selector_line<'a>(name: &'a str, value: &'a str, is_focused: bool) -> Line<'a> {
+    let style = if is_focused { Theme::highlight() } else { Style::default() };
+    Line::from(vec![
+        Span::styled(format!("{name}: "), style),
+        Span::styled(if is_focused { "◂ " } else { "  " }, Theme::dim()),
+        Span::styled(value.to_string(), style),
+        Span::styled(if is_focused { " ▸" } else { "  " }, Theme::dim()),
+    ])
+}
+
+fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::CreateJiraIssueDialog) {
+    use crate::tui::state::CreateJiraIssueFocus;
+
+    // Layout: Project (1) + Subject (1) + Description (fill) +
+    // Labels (1) + Issue Type (1) + error (1, only when present) +
+    // footer (1) + borders (2). Capped at 80% of the viewport height
+    // the same way `draw_add_entry_dialog`/`draw_note_create` are,
+    // for the same reason (leave the underlying TUI visible as a cue
+    // this is a transient overlay).
+    let has_error = dialog.error.is_some();
+    let area = centered_rect(70, 75, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Create JIRA issue ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent())
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut constraints = vec![
+        Constraint::Length(1), // Project
+        Constraint::Length(1), // Subject
+        Constraint::Fill(1),   // Description
+        Constraint::Length(1), // Labels
+        Constraint::Length(1), // Issue Type
+    ];
+    if has_error {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1)); // footer
+    let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
+
+    f.render_widget(
+        Paragraph::new(selector_line(
+            "Project",
+            &dialog.projects[dialog.project_index],
+            dialog.focused == CreateJiraIssueFocus::Project,
+        )),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(dialog_field_line(&dialog.fields[0], dialog.focused == CreateJiraIssueFocus::Subject)),
+        chunks[1],
+    );
+
+    // Description: multi-line, wrapped. No rendered cursor glyph
+    // (unlike the single-line fields above) — the field is meant for
+    // reviewing/lightly editing a pre-filled multi-paragraph body,
+    // not precise mid-text cursor placement; focus is shown via the
+    // label's highlight color instead, same as every other field.
+    let desc_focused = dialog.focused == CreateJiraIssueFocus::Description;
+    let desc_label_style = if desc_focused { Theme::highlight() } else { Style::default() };
+    let desc_text = if dialog.fields[1].value.is_empty() {
+        Line::from(vec![
+            Span::styled("Description: ", desc_label_style),
+            Span::styled(dialog.fields[1].placeholder, Theme::dim()),
+        ])
+    } else {
+        Line::from(vec![Span::styled("Description: ", desc_label_style)])
+    };
+    let mut desc_lines = vec![desc_text];
+    if !dialog.fields[1].value.is_empty() {
+        for line in dialog.fields[1].value.lines() {
+            desc_lines.push(Line::from(line.to_string()));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(desc_lines).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+
+    f.render_widget(
+        Paragraph::new(dialog_field_line(&dialog.fields[2], dialog.focused == CreateJiraIssueFocus::Labels)),
+        chunks[3],
+    );
+    f.render_widget(
+        Paragraph::new(selector_line(
+            "Issue Type",
+            &dialog.issue_types[dialog.issue_type_index],
+            dialog.focused == CreateJiraIssueFocus::IssueType,
+        )),
+        chunks[4],
+    );
+
+    let mut next_idx = 5;
+    if let Some(err) = &dialog.error {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(err.clone(), Theme::error()))),
+            chunks[next_idx],
+        );
+        next_idx += 1;
+    }
+
+    let footer = Line::from(vec![
+        Span::styled("Tab", Theme::highlight()),
+        Span::raw("/"),
+        Span::styled("S-Tab", Theme::highlight()),
+        Span::raw(" next/prev field, "),
+        Span::styled("←/→", Theme::highlight()),
+        Span::raw(" change Project/Issue Type, "),
+        Span::styled("Ctrl-S", Theme::highlight()),
+        Span::raw(" create, "),
+        Span::styled("Esc", Theme::highlight()),
+        Span::raw(" cancel"),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[next_idx]);
 }
 
 fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {

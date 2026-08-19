@@ -1879,6 +1879,24 @@ pub(crate) struct App {
     /// from queuing a duplicate POST.
     jira_add_comment_in_flight: bool,
 
+    /// The "create JIRA issue" dialog (`Action::CreateJiraIssue`),
+    /// when open. `None` otherwise.
+    create_jira_issue_dialog: Option<crate::tui::state::CreateJiraIssueDialog>,
+    /// `Some` while a create-issue submit (and, when opened from a
+    /// JIRA row, the follow-up link POST) is in flight. Mirrors
+    /// `jira_add_comment_request`.
+    create_jira_issue_request: Option<crate::tui::mode::jira::JiraCreateIssueRequest>,
+    /// Whether a create-issue submit is currently in flight.
+    /// Prevents a second `Ctrl-S` from queuing a duplicate POST.
+    create_jira_issue_in_flight: bool,
+    /// `Some` while the dialog's source-issue prefill fetch (opened
+    /// from a JIRA row) is in flight. Separate from
+    /// `create_jira_issue_request` — this one starts the moment the
+    /// dialog opens, not on submit.
+    jira_prefill_fetch_request: Option<crate::tui::mode::jira::JiraPrefillFetchRequest>,
+    /// Whether the prefill fetch above is currently in flight.
+    jira_prefill_fetch_in_flight: bool,
+
     /// Per-pane `last_touched` map (Unix
     /// epoch seconds, keyed by `pane_id`).
     /// Populated from the session file at
@@ -5046,6 +5064,11 @@ impl App {
             jira_add_comment_target: None,
             jira_add_comment_request: None,
             jira_add_comment_in_flight: false,
+            create_jira_issue_dialog: None,
+            create_jira_issue_request: None,
+            create_jira_issue_in_flight: false,
+            jira_prefill_fetch_request: None,
+            jira_prefill_fetch_in_flight: false,
             smart_open_file_commands,
             tags_source_cache: std::collections::HashMap::new(),
             // Per-pane `last_touched` map.
@@ -9064,6 +9087,224 @@ impl App {
         }
     }
 
+    /// Open the "create JIRA issue" dialog (`Action::CreateJiraIssue`),
+    /// pre-filled from the currently-selected row when it's a note or
+    /// a JIRA issue (see the `match` below), empty otherwise.
+    ///
+    /// Refuses to open (status message only) when JIRA isn't
+    /// configured, or when there are no selectable projects
+    /// (`JiraConfig::available_projects` empty — nothing for the
+    /// Project field to select from).
+    fn open_create_jira_issue_dialog(&mut self) {
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            return;
+        };
+        if config.available_projects.is_empty() {
+            self.set_status_message(
+                "no JIRA projects configured — set JIRA_AVAILABLE_PROJECTS or JIRA_PROJECT"
+                    .to_string(),
+            );
+            return;
+        }
+        let mut fields = vec![
+            crate::tui::state::DialogField::new("Subject", "", false, "Short summary"),
+            crate::tui::state::DialogField::new(
+                "Description",
+                "",
+                false,
+                "What's this issue about?",
+            ),
+            crate::tui::state::DialogField::new(
+                "Labels",
+                "",
+                false,
+                "comma-separated, e.g. backend, urgent",
+            ),
+        ];
+        let mut source_key = None;
+        let mut prefill_loading = false;
+        // Pre-fill differently depending on what's selected — same
+        // "match on row.mode" shape `note_create_prefill_from_selection`
+        // above already uses, just with different (and in the JIRA
+        // case, async) content per branch.
+        if let Some(row) = self.selected_row() {
+            match row.mode.as_str() {
+                "note" => {
+                    let content = self.read_note_preview(&row.command);
+                    let name = row.command.strip_suffix(".md").unwrap_or(&row.command);
+                    fields[0].value = name.to_string();
+                    fields[0].cursor = fields[0].value.chars().count();
+                    let (_, tags) = crate::tui::state::extract_links_and_tags(&content);
+                    fields[2].value = tags.join(", ");
+                    fields[2].cursor = fields[2].value.chars().count();
+                    fields[1].value = content;
+                    fields[1].cursor = fields[1].value.chars().count();
+                }
+                "jira" => {
+                    // `row`'s cached data doesn't carry labels at
+                    // all (dropped when the row was built — see
+                    // `process_jira_result`), and its `description`
+                    // is embedded in a hand-formatted text blob
+                    // alongside Status/Priority/Due/Assignee lines,
+                    // not the clean plain text `JiraIssue.description`
+                    // carries. Rather than fragile-parse that blob,
+                    // Subject is filled immediately from `row.comment`
+                    // (already the clean summary, no fetch needed);
+                    // Description/Labels start with a loading
+                    // placeholder and get a fresh `search(key = ...)`
+                    // fetch kicked off below, which returns a full
+                    // `JiraIssue` (search already requests
+                    // `description,labels`).
+                    fields[0].value = row.comment.clone();
+                    fields[0].cursor = fields[0].value.chars().count();
+                    fields[1].value =
+                        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER.to_string();
+                    fields[1].cursor = fields[1].value.chars().count();
+                    source_key = Some(row.command.clone());
+                    prefill_loading = true;
+                }
+                _ => {}
+            }
+        }
+        self.create_jira_issue_dialog = Some(crate::tui::state::CreateJiraIssueDialog {
+            fields,
+            projects: config.available_projects.clone(),
+            project_index: 0,
+            issue_types: config.available_issue_types.clone(),
+            issue_type_index: 0,
+            focused: crate::tui::state::CreateJiraIssueFocus::Project,
+            source_key: source_key.clone(),
+            prefill_loading,
+            error: None,
+        });
+        if let Some(key) = source_key {
+            self.start_jira_prefill_fetch(key);
+        }
+    }
+
+    /// Fire the background fetch `open_create_jira_issue_dialog`
+    /// kicks off when opened from a JIRA row. Mirrors
+    /// `start_jira_comments_fetch`'s shape (test-seam sync path when
+    /// `self.jira_client` is set, else spawn a thread against a
+    /// fresh `RestJiraClient`).
+    fn start_jira_prefill_fetch(&mut self, key: String) {
+        let jql = format!("key = {}", crate::jira::escape_jql_string(&key));
+        if let Some(client) = self.jira_client.clone() {
+            let result = client.search(&jql).map(|mut issues| {
+                if issues.is_empty() {
+                    crate::jira::JiraIssue::default()
+                } else {
+                    issues.remove(0)
+                }
+            });
+            let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+                receiver: mpsc::channel().1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            self.jira_prefill_fetch_in_flight = true;
+            self.process_jira_prefill_fetch_result(request, key, result);
+            return;
+        }
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        std::thread::spawn(move || {
+            let client = crate::jira::RestJiraClient::new(config);
+            let result = client.search(&jql).map(|mut issues| {
+                if issues.is_empty() {
+                    crate::jira::JiraIssue::default()
+                } else {
+                    issues.remove(0)
+                }
+            });
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+            }
+        });
+        self.jira_prefill_fetch_in_flight = true;
+        self.jira_prefill_fetch_request =
+            Some(crate::tui::mode::jira::JiraPrefillFetchRequest { receiver: rx, cancelled });
+    }
+
+    /// Close the dialog without submitting, cancelling any in-flight
+    /// prefill fetch so a late result can never resurrect a
+    /// closed/reopened dialog's fields.
+    fn close_create_jira_issue_dialog(&mut self) {
+        if let Some(request) = self.jira_prefill_fetch_request.take() {
+            request.cancelled.store(true, Ordering::Relaxed);
+        }
+        self.jira_prefill_fetch_in_flight = false;
+        self.create_jira_issue_dialog = None;
+    }
+
+    /// Validate and submit the "create JIRA issue" dialog (`Ctrl-S`).
+    /// Mirrors `save_comment_edit`'s JIRA branch: a test-seam sync
+    /// path when `self.jira_client` is set, else `JiraConfig::from_env()`
+    /// gate → in-flight debounce → background thread → `mpsc` channel.
+    /// The thread calls `create_issue`, then — only when the dialog
+    /// has a `source_key` and creation succeeded — `link_issues`,
+    /// folding a link failure into `link_warning` rather than failing
+    /// the whole submit (the issue really was created either way).
+    fn create_jira_issue_dialog_submit(&mut self) -> bool {
+        let Some(dialog) = self.create_jira_issue_dialog.as_ref() else {
+            return false;
+        };
+        let subject = dialog.fields[0].value.trim().to_string();
+        if subject.is_empty() {
+            if let Some(d) = self.create_jira_issue_dialog.as_mut() {
+                d.error = Some("Subject is required".to_string());
+            }
+            return false;
+        }
+        let project = dialog.projects[dialog.project_index].clone();
+        let issuetype = dialog.issue_types[dialog.issue_type_index].clone();
+        let description = dialog.fields[1].value.clone();
+        let labels: Vec<String> = dialog.fields[2]
+            .value
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let source_key = dialog.source_key.clone();
+
+        if let Some(client) = self.jira_client.clone() {
+            let result = crate::tui::mode::jira::create_and_maybe_link(client.as_ref(), &project, &issuetype, &subject, &description, &labels, source_key.as_deref());
+            let request = crate::tui::mode::jira::JiraCreateIssueRequest {
+                receiver: mpsc::channel().1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            self.create_jira_issue_in_flight = true;
+            self.process_create_jira_issue_result(request, result);
+            return false;
+        }
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            return false;
+        };
+        if self.create_jira_issue_in_flight {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        std::thread::spawn(move || {
+            let client = crate::jira::RestJiraClient::new(config);
+            let result = crate::tui::mode::jira::create_and_maybe_link(&client, &project, &issuetype, &subject, &description, &labels, source_key.as_deref());
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+            }
+        });
+        self.create_jira_issue_in_flight = true;
+        self.create_jira_issue_request =
+            Some(crate::tui::mode::jira::JiraCreateIssueRequest { receiver: rx, cancelled });
+        self.set_status_message("Creating JIRA issue…".to_string());
+        false
+    }
+
     /// Insert `c` at the cursor in the compose buffer. Unlike
     /// every single-line input in the TUI (where `Enter`
     /// commits), the compose dialog's key handler routes
@@ -11769,6 +12010,35 @@ fn run_loop(
             }
         }
 
+        // Check for a "create JIRA issue" submit result. Mirrors the
+        // add-comment poll above.
+        if let Some(request) = app.create_jira_issue_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+            && let Some(request) = app.create_jira_issue_request.take()
+        {
+            app.process_create_jira_issue_result(request, result);
+        }
+
+        // Check for the "create JIRA issue" dialog's source-issue
+        // prefill fetch result. The key is on the DIALOG (not the
+        // request struct — nothing about the fetch itself needs to
+        // remember it beyond matching results back to the right
+        // dialog), so it's read from there before the request is
+        // taken.
+        if let Some(request) = app.jira_prefill_fetch_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+        {
+            let source_key = app
+                .create_jira_issue_dialog
+                .as_ref()
+                .and_then(|d| d.source_key.clone());
+            if let Some(request) = app.jira_prefill_fetch_request.take()
+                && let Some(source_key) = source_key
+            {
+                app.process_jira_prefill_fetch_result(request, source_key, result);
+            }
+        }
+
         // Drain the background pane-cmdline lookup
         // (only in the herdr backend). Each ready
         // `(pane_id, cmdline)` pair patches the
@@ -11943,6 +12213,42 @@ fn run_loop(
             }
             app.jira_add_comment_in_flight = false;
             app.set_status_message("JIRA add-comment cancelled".to_string());
+            continue;
+        }
+
+        // Same cancel handling for an in-flight "create JIRA issue"
+        // submit.
+        if app.create_jira_issue_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+            && matches!(action, Action::Cancel)
+        {
+            if let Some(request) = app.create_jira_issue_request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            app.create_jira_issue_in_flight = false;
+            app.set_status_message("JIRA create-issue cancelled".to_string());
+            continue;
+        }
+
+        // Same cancel handling for an in-flight "create JIRA issue"
+        // dialog's source-issue prefill fetch. Cancelling this alone
+        // (Esc while the dialog itself is still open, before it's
+        // resolved) doesn't close the dialog — closing the dialog is
+        // `close_create_jira_issue_dialog`'s job, reached via
+        // `handle_create_jira_issue_dialog_key`'s own `Esc` arm,
+        // which cancels this same request itself; this block only
+        // matters when a NON-dialog overlay's `Esc` handling
+        // happened to run first and this request is still somehow
+        // live (defensive, matches the belt-and-suspenders style of
+        // the other cancel blocks here).
+        if app.jira_prefill_fetch_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+            && matches!(action, Action::Cancel)
+        {
+            if let Some(request) = app.jira_prefill_fetch_request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            app.jira_prefill_fetch_in_flight = false;
             continue;
         }
 
@@ -12217,6 +12523,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // fields, Esc cancels.
     if app.is_add_entry_dialog_open() {
         return handle_add_entry_dialog_key(app, key);
+    }
+
+    // The "create JIRA issue" dialog is a sibling of the add-entry
+    // dialog: same precedence, same reasoning (printable characters
+    // type into the focused field, not the search query).
+    if app.create_jira_issue_dialog.is_some() {
+        return handle_create_jira_issue_dialog_key(app, key);
     }
 
     // The note/todo compose overlay is a sibling of the
@@ -12703,6 +13016,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CreateNote => {
             app.open_note_create_dialog();
+            false
+        }
+        Action::CreateJiraIssue => {
+            app.open_create_jira_issue_dialog();
             false
         }
         Action::FilterPanesWindows => {
@@ -15204,6 +15521,165 @@ fn handle_add_entry_dialog_key(app: &mut App, key: KeyEvent) -> bool {
                 // to a byte
                 // index
                 // first.
+                let byte_idx = char_to_byte_idx(&field.value, field.cursor);
+                field.value.insert(byte_idx, c);
+                field.cursor += 1;
+                d.error = None;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Key handling for the "create JIRA issue" dialog. Same generic
+/// text-editing primitives as `handle_add_entry_dialog_key`
+/// (Backspace/Ctrl-U/Ctrl-W/Left/Right/Home/End/insert-char) for
+/// whichever `DialogField` is focused, plus two differences that
+/// dialog doesn't need: `Left`/`Right` cycle the Project/Issue Type
+/// selectors instead of moving a text cursor when one of those is
+/// focused, and `Enter` inserts a literal newline ONLY in the
+/// Description field (it's the one multi-line field — `Ctrl-S` is
+/// the commit key here instead, same choice `NoteCreateDialog`/
+/// `NoteComposeDialog` already made for the same reason).
+fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
+    use crate::tui::state::CreateJiraIssueFocus;
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.cancelled = true;
+                return true;
+            }
+            KeyCode::Char('s') => {
+                return app.create_jira_issue_dialog_submit();
+            }
+            KeyCode::Char('u') => {
+                if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+                    if let Some(field) = d.focused_field_mut() {
+                        field.value.clear();
+                        field.cursor = 0;
+                    }
+                    d.error = None;
+                }
+                return false;
+            }
+            KeyCode::Char('w') => {
+                if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+                    if let Some(field) = d.focused_field_mut() {
+                        delete_field_word_backward(field);
+                    }
+                    d.error = None;
+                }
+                return false;
+            }
+            _ => return false,
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.close_create_jira_issue_dialog();
+            app.set_status_message("create-jira-issue: cancelled".to_string());
+            false
+        }
+        KeyCode::Tab => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+                d.focus_next();
+                d.error = None;
+            }
+            false
+        }
+        KeyCode::BackTab => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+                d.focus_prev();
+                d.error = None;
+            }
+            false
+        }
+        KeyCode::Left => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+                match d.focused {
+                    CreateJiraIssueFocus::Project => d.cycle_project(false),
+                    CreateJiraIssueFocus::IssueType => d.cycle_issue_type(false),
+                    _ => {
+                        if let Some(field) = d.focused_field_mut()
+                            && field.cursor > 0
+                        {
+                            field.cursor -= 1;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        KeyCode::Right => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+                match d.focused {
+                    CreateJiraIssueFocus::Project => d.cycle_project(true),
+                    CreateJiraIssueFocus::IssueType => d.cycle_issue_type(true),
+                    _ => {
+                        if let Some(field) = d.focused_field_mut()
+                            && field.cursor < field.value.chars().count()
+                        {
+                            field.cursor += 1;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        KeyCode::Home => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && let Some(field) = d.focused_field_mut()
+            {
+                field.cursor = 0;
+            }
+            false
+        }
+        KeyCode::End => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && let Some(field) = d.focused_field_mut()
+            {
+                field.cursor = field.value.chars().count();
+            }
+            false
+        }
+        KeyCode::Backspace => {
+            if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && let Some(field) = d.focused_field_mut()
+                && field.cursor > 0
+            {
+                let byte_idx = char_to_byte_idx(&field.value, field.cursor - 1);
+                if let Some(next) = field.value[byte_idx..].chars().next() {
+                    field.value.replace_range(byte_idx..byte_idx + next.len_utf8(), "");
+                }
+                field.cursor -= 1;
+                d.error = None;
+            }
+            false
+        }
+        KeyCode::Enter => {
+            // Newline only in Description (index 1, the one
+            // multi-line field) — everywhere else Enter is a no-op,
+            // Tab is how you move on.
+            if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && d.focused == CreateJiraIssueFocus::Description
+                && let Some(field) = d.focused_field_mut()
+            {
+                let byte_idx = char_to_byte_idx(&field.value, field.cursor);
+                field.value.insert(byte_idx, '\n');
+                field.cursor += 1;
+                d.error = None;
+            }
+            false
+        }
+        KeyCode::Char(c) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && let Some(field) = d.focused_field_mut()
+            {
                 let byte_idx = char_to_byte_idx(&field.value, field.cursor);
                 field.value.insert(byte_idx, c);
                 field.cursor += 1;

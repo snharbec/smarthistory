@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `Action::CreateJiraIssue` (unbound by default; bind via
+  `key.create-jira-issue=<spec>` or open via the command palette): opens a
+  dialog to create a JIRA issue (Project, Subject, Description, Labels, Issue
+  Type) via `POST /rest/api/2/issue`. Project and Issue Type are closed-set
+  selectors cycled with `Left`/`Right`, sourced from the new
+  `JIRA_AVAILABLE_PROJECTS`/`JIRA_AVAILABLE_ISSUE_TYPES` env vars (the latter
+  defaulting to `Epic, Initiative, Story, Task, Bug`). Opened from a selected
+  note row, Subject/Description/Labels are pre-filled from the note's
+  filename/content/tags; opened from a selected JIRA row, they're pre-filled
+  from the selected issue and the new issue gets a `Relates` link back to it
+  on creation. See
+  [docs/actions.md#createjiraissue](docs/actions.md#createjiraissue) and
+  [docs/modes/jira.md](docs/modes/jira.md#creating-a-new-issue).
 - `smarthistory project report` and the web dashboard's day overview now show a
   "Standard work time" total — the day's first tracked activity (a command or a
   website visit) to its last, minus the excess of any gap beyond
