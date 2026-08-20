@@ -18232,6 +18232,8 @@ fn fetch_directories_tmux_pane_path_is_a_real_path() {
 /// `FakeJira::create_issue` call's arguments, recorded for tests to
 /// assert on.
 type CreatedIssueCall = (String, String, String, String, Vec<String>);
+/// One `create_issue` call's `custom_fields` argument, cloned.
+type CreatedIssueCustomFields = Vec<(String, String)>;
 
 #[derive(Default)]
 struct FakeJira {
@@ -18245,6 +18247,11 @@ struct FakeJira {
     created_issue_key: String,
     /// One entry per `create_issue` call, in call order.
     created_issues: std::sync::Arc<std::sync::Mutex<Vec<CreatedIssueCall>>>,
+    /// One entry (the `custom_fields` slice, cloned) per `create_issue`
+    /// call, in call order — parallel to `created_issues`. Lets a
+    /// "create JIRA issue from template" test assert on the `cf[N]`
+    /// custom fields a submit actually sent.
+    created_issue_custom_fields: std::sync::Arc<std::sync::Mutex<Vec<CreatedIssueCustomFields>>>,
     /// `(inward_key, outward_key, link_type)` tuples `link_issues`
     /// was called with, in call order.
     linked_issues: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
@@ -18280,6 +18287,7 @@ impl crate::jira::JiraClient for FakeJira {
         summary: &str,
         description: &str,
         labels: &[String],
+        custom_fields: &[(String, String)],
     ) -> Result<String, crate::jira::JiraError> {
         self.created_issues.lock().unwrap().push((
             project.to_string(),
@@ -18288,6 +18296,7 @@ impl crate::jira::JiraClient for FakeJira {
             description.to_string(),
             labels.to_vec(),
         ));
+        self.created_issue_custom_fields.lock().unwrap().push(custom_fields.to_vec());
         if self.created_issue_key.is_empty() {
             return Err(crate::jira::JiraError::Http("boom".to_string()));
         }
@@ -29831,6 +29840,8 @@ fn test_create_jira_issue_dialog(
                 labels.to_string(),
             ),
         ],
+        extra_fields: Vec::new(),
+        extra_field_kinds: Vec::new(),
         projects: vec!["PROJ".to_string()],
         project_index: 0,
         issue_types: vec!["Task".to_string()],
@@ -30294,6 +30305,207 @@ fn create_jira_issue_dialog_description_renders_cursor_glyph_at_correct_position
         reversed_cells,
         vec!["w"],
         "exactly one reversed cell, on the 'w' the cursor sits on: {reversed_cells:?}"
+    );
+}
+
+// ---- "Create JIRA issue from template" (`Action::CreateJiraIssueFromTemplate`) ----
+
+/// `parse_jira_template` against the real example already on disk at
+/// `~/.config/smarthistory/templates/jira/standard.md` — frontmatter
+/// pairs come back in declaration order with the right scalar/list
+/// shapes, and the body is the frontmatter-stripped remainder.
+#[test]
+fn parse_jira_template_parses_real_example() {
+    use crate::tui::mode::jira::FrontmatterValue;
+
+    let content = "---\nproject: ENG\nlabels:\n- project\n- test\ncf[11601]: \"Team ComS\"\nupdated: 2026-08-20 18:49:51\nsummary: SUMMARY\nassigne: \"HAR\"\n---\nDescription Content\n";
+    let (pairs, body) = crate::tui::mode::jira::parse_jira_template(content);
+
+    assert_eq!(
+        pairs,
+        vec![
+            ("project".to_string(), FrontmatterValue::Scalar("ENG".to_string())),
+            (
+                "labels".to_string(),
+                FrontmatterValue::List(vec!["project".to_string(), "test".to_string()])
+            ),
+            ("cf[11601]".to_string(), FrontmatterValue::Scalar("Team ComS".to_string())),
+            (
+                "updated".to_string(),
+                FrontmatterValue::Scalar("2026-08-20 18:49:51".to_string())
+            ),
+            ("summary".to_string(), FrontmatterValue::Scalar("SUMMARY".to_string())),
+            ("assigne".to_string(), FrontmatterValue::Scalar("HAR".to_string())),
+        ]
+    );
+    assert_eq!(body, "Description Content");
+}
+
+/// Content with no leading `---` line has zero fields — the whole file
+/// is the body, same "degrade gracefully" fallback `strip_note_frontmatter`
+/// uses.
+#[test]
+fn parse_jira_template_no_frontmatter_returns_whole_file_as_body() {
+    let content = "# Just a template\n\nNo frontmatter here.";
+    let (pairs, body) = crate::tui::mode::jira::parse_jira_template(content);
+    assert!(pairs.is_empty());
+    assert_eq!(body, content);
+}
+
+/// A `---` that never closes falls back to the whole file as the body
+/// with zero fields, rather than losing content.
+#[test]
+fn parse_jira_template_unclosed_frontmatter_falls_back_to_whole_file() {
+    let content = "---\nproject: ENG\n# never closes";
+    let (pairs, body) = crate::tui::mode::jira::parse_jira_template(content);
+    assert!(pairs.is_empty());
+    assert_eq!(body, content);
+}
+
+/// `classify_template_key` buckets every key the real example (and the
+/// design doc) calls out: reserved metadata, the 4 standard-field
+/// names, a `cf[<digits>]` custom field, and the generic-parameter
+/// fallback.
+#[test]
+fn classify_template_key_buckets() {
+    use crate::tui::mode::jira::TemplateFieldKind;
+
+    assert_eq!(crate::tui::mode::jira::classify_template_key("created"), TemplateFieldKind::Reserved);
+    assert_eq!(crate::tui::mode::jira::classify_template_key("updated"), TemplateFieldKind::Reserved);
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("project"),
+        TemplateFieldKind::StandardProject
+    );
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("issuetype"),
+        TemplateFieldKind::StandardIssueType
+    );
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("summary"),
+        TemplateFieldKind::StandardSummary
+    );
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("labels"),
+        TemplateFieldKind::StandardLabels
+    );
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("cf[11601]"),
+        TemplateFieldKind::CustomField("customfield_11601".to_string())
+    );
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("assigne"),
+        TemplateFieldKind::Parameter
+    );
+    // Not a valid cf[] — non-digit inside the brackets — falls through
+    // to a generic parameter rather than being treated as a custom field.
+    assert_eq!(
+        crate::tui::mode::jira::classify_template_key("cf[abc]"),
+        TemplateFieldKind::Parameter
+    );
+}
+
+/// `jira_dialog_row_prefill` returns the template-provided defaults
+/// unchanged when nothing is selected — the "cold open" / "non-note/jira
+/// row" fallback case.
+#[test]
+fn jira_dialog_row_prefill_uses_defaults_when_nothing_selected() {
+    let mut app = directories_test_app(&[]);
+    let (subject, description, labels, source_key, prefill_loading) = app.jira_dialog_row_prefill(
+        "Template Subject".to_string(),
+        "Template body".to_string(),
+        "template, labels".to_string(),
+    );
+    assert_eq!(subject, "Template Subject");
+    assert_eq!(description, "Template body");
+    assert_eq!(labels, "template, labels");
+    assert_eq!(source_key, None);
+    assert!(!prefill_loading);
+}
+
+/// A selected note row's own content wins over the template's defaults
+/// for Subject/Description/Labels — the confirmed precedence rule.
+#[test]
+fn jira_dialog_row_prefill_note_row_wins_over_template_defaults() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-jira-template-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp notes dir");
+    std::fs::write(dir.join("my-note.md"), "Real note body").expect("write note file");
+
+    let mut app = directories_test_app(&[]);
+    app.notes_dir = Some(dir.clone());
+    app.merged_rows.insert(
+        0,
+        crate::tui::state::HistoryRow {
+            id: 1,
+            command: "my-note.md".to_string(),
+            mode: "note".to_string(),
+            ..Default::default()
+        },
+    );
+    app.list_state.select(Some(0));
+
+    let (subject, description, labels, source_key, prefill_loading) = app.jira_dialog_row_prefill(
+        "Template Subject".to_string(),
+        "Template body".to_string(),
+        "template, labels".to_string(),
+    );
+    assert_eq!(subject, "my-note", "row's filename wins over the template default");
+    assert_eq!(description, "Real note body", "row's content wins over the template body");
+    assert_eq!(source_key, None);
+    assert!(!prefill_loading);
+    // Labels comes from the note's own #tags (none here), NOT the
+    // template's "template, labels" default — row prefill wins even
+    // though it resolves to empty.
+    assert_eq!(labels, "");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Submitting with a mix of `CustomField`/`Parameter` extra fields:
+/// non-empty `CustomField` values are sent to `create_issue` as real
+/// custom fields; non-empty `Parameter` values are folded into
+/// Description as a prepended block, in field order, above the
+/// original Description text.
+#[test]
+fn create_jira_issue_dialog_submit_with_template_extra_fields() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        created_issue_key: "PROJ-42".to_string(),
+        ..FakeJira::default()
+    };
+    let created = fake.created_issues.clone();
+    let created_custom_fields = fake.created_issue_custom_fields.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    let mut dialog = test_create_jira_issue_dialog("New bug", "Original description", "", None);
+    dialog.extra_fields = vec![
+        crate::tui::state::DialogField::prefilled("cf[11601]", "", false, "", "Team ComS".to_string()),
+        crate::tui::state::DialogField::prefilled("assigne", "", false, "", "HAR".to_string()),
+        crate::tui::state::DialogField::prefilled("empty-param", "", false, "", "".to_string()),
+    ];
+    dialog.extra_field_kinds = vec![
+        crate::tui::state::ExtraFieldKind::CustomField("customfield_11601".to_string()),
+        crate::tui::state::ExtraFieldKind::Parameter,
+        crate::tui::state::ExtraFieldKind::Parameter,
+    ];
+    app.create_jira_issue_dialog = Some(dialog);
+    app.create_jira_issue_dialog_submit();
+
+    let calls = created.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let (_, _, _, description, _) = &calls[0];
+    assert_eq!(
+        description, "**assigne:** HAR\n\nOriginal description",
+        "the empty parameter is skipped; the non-empty one is prepended above the original description"
+    );
+
+    let custom_fields = created_custom_fields.lock().unwrap();
+    assert_eq!(custom_fields.len(), 1);
+    assert_eq!(
+        custom_fields[0],
+        vec![("customfield_11601".to_string(), "Team ComS".to_string())]
     );
 }
 

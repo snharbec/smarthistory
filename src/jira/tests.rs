@@ -2293,6 +2293,7 @@
             _summary: &str,
             _description: &str,
             _labels: &[String],
+            _custom_fields: &[(String, String)],
         ) -> Result<String, JiraError> {
             Ok("PROJ-1".to_string())
         }
@@ -2355,6 +2356,7 @@
             _summary: &str,
             _description: &str,
             _labels: &[String],
+            _custom_fields: &[(String, String)],
         ) -> Result<String, JiraError> {
             Err(JiraError::Http("boom".to_string()))
         }

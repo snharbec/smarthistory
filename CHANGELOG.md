@@ -22,6 +22,18 @@ All notable changes to this project will be documented in this file.
   appendable off-screen. See
   [docs/actions.md#createjiraissue](docs/actions.md#createjiraissue) and
   [docs/modes/jira.md](docs/modes/jira.md#creating-a-new-issue).
+- New `Action::CreateJiraIssueFromTemplate` (unbound by default): opens a
+  picker over the markdown files in `~/.config/smarthistory/templates/jira/`,
+  then the same create-issue dialog above, pre-filled with the template's
+  frontmatter-defined fields. Frontmatter keys are classified into 4 buckets:
+  `project`/`issuetype`/`summary`/`labels` set that standard field's starting
+  value; `cf[<digits>]` becomes an editable field sent as a real JIRA custom
+  field (`customfield_<digits>`) on submit; `created`/`updated` are silently
+  dropped (note-tooling metadata); anything else becomes an editable
+  "parameter" field folded into Description as a prepended `**name:** value`
+  line on submit. Row-based prefill (note/JIRA row) always wins over a
+  template's `summary:`/`labels:`/body when a row is selected. See
+  [docs/actions.md#createjiraissuefromtemplate](docs/actions.md#createjiraissuefromtemplate).
 - `smarthistory project report` and the web dashboard's day overview now show a
   "Standard work time" total — the day's first tracked activity (a command or a
   website visit) to its last, minus the excess of any gap beyond

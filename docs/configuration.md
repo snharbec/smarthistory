@@ -1261,6 +1261,16 @@ export JIRA_PROJECT=ENG
 export JIRA_MAX_RESULTS=20
 ```
 
+#### Template directory
+
+`Action::CreateJiraIssueFromTemplate` (see
+[`docs/actions.md#createjiraissuefromtemplate`](actions.md#createjiraissuefromtemplate))
+reads template files from a fixed path, not an env var —
+`~/.config/smarthistory/templates/jira/` — the same `$HOME`-based resolution
+`~/.config/smarthistory/config` itself uses. Every `.md` file directly inside
+it is a selectable template; there are no subdirectories or naming
+conventions beyond the `.md` extension.
+
 #### `jira.search.<name>`
 
 |                  |              |

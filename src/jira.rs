@@ -232,6 +232,13 @@ pub trait JiraClient: Send + Sync {
     /// both to show the user what was created and, when the dialog
     /// was opened from a selected JIRA row, to link the two issues
     /// together right afterward.
+    ///
+    /// `custom_fields` is a list of `(field_id, value)` pairs — e.g.
+    /// `("customfield_11601", "Team ComS")` — sourced from a "create JIRA
+    /// issue from template" `cf[<id>]` frontmatter key (see
+    /// `mode::jira::classify_template_key`). Sent verbatim as extra
+    /// top-level entries in the `fields` object; empty for every
+    /// caller that isn't template-sourced.
     fn create_issue(
         &self,
         project: &str,
@@ -239,6 +246,7 @@ pub trait JiraClient: Send + Sync {
         summary: &str,
         description: &str,
         labels: &[String],
+        custom_fields: &[(String, String)],
     ) -> Result<String, JiraError>;
 
     /// Link two existing issues together (JIRA's `issueLink`
@@ -933,17 +941,19 @@ impl JiraClient for RestJiraClient {
         summary: &str,
         description: &str,
         labels: &[String],
+        custom_fields: &[(String, String)],
     ) -> Result<String, JiraError> {
         let url = format!("{}/rest/api/2/issue", self.config.server);
-        let payload = serde_json::json!({
-            "fields": {
-                "project": { "key": project },
-                "summary": summary,
-                "description": description,
-                "issuetype": { "name": issuetype },
-                "labels": labels,
-            }
-        });
+        let mut fields = serde_json::Map::new();
+        fields.insert("project".to_string(), serde_json::json!({ "key": project }));
+        fields.insert("summary".to_string(), serde_json::json!(summary));
+        fields.insert("description".to_string(), serde_json::json!(description));
+        fields.insert("issuetype".to_string(), serde_json::json!({ "name": issuetype }));
+        fields.insert("labels".to_string(), serde_json::json!(labels));
+        for (id, value) in custom_fields {
+            fields.insert(id.clone(), serde_json::json!(value));
+        }
+        let payload = serde_json::json!({ "fields": fields });
         let client = self.build_blocking_client()?;
         let resp = client
             .post(&url)
