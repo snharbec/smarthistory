@@ -1139,6 +1139,11 @@ pub(crate) struct App {
     help_view: Option<HelpView>,
     /// When `Some`, the command-palette overlay is open.
     command_menu: Option<CommandMenu>,
+    /// Actions previously run FROM the command palette (via Enter, not
+    /// any other keybinding), most-recent-first, deduplicated —
+    /// determines the palette's default row order on the next open
+    /// (`CommandMenu::new`). Session-only, not persisted to disk.
+    command_menu_recent: Vec<Action>,
     /// When `Some`, the prefix-picker overlay is open. The
     /// picker is the `Action::PickPrefix` counterpart
     /// to the command palette: a centred list of every
@@ -4247,11 +4252,23 @@ struct CommandMenu {
 }
 
 impl CommandMenu {
-    fn new() -> Self {
+    /// `recent` is `App::command_menu_recent` — actions previously run
+    /// from THIS palette, most-recent-first (deduplicated). The
+    /// displayed list starts with `recent` in that order, then every
+    /// other action in `ALL_ACTIONS`' declaration order — so an action
+    /// you've picked before rises to the top, and everything else keeps
+    /// a stable, predictable fallback order instead of jumping around.
+    fn new(recent: &[Action]) -> Self {
+        let mut actions: Vec<Action> = recent.to_vec();
+        for action in ALL_ACTIONS {
+            if !actions.contains(action) {
+                actions.push(*action);
+            }
+        }
         CommandMenu {
             query: String::new(),
             selected: 0,
-            actions: ALL_ACTIONS.to_vec(),
+            actions,
             touched: false,
         }
     }
@@ -4924,6 +4941,7 @@ impl App {
             question_view: None,
             help_view: None,
             command_menu: None,
+            command_menu_recent: Vec::new(),
             prefix_picker: None,
             codegraph_relations_picker: None,
             theme_picker: None,
@@ -8342,7 +8360,7 @@ impl App {
     }
 
     fn open_command_menu(&mut self) {
-        self.command_menu = Some(CommandMenu::new());
+        self.command_menu = Some(CommandMenu::new(&self.command_menu_recent));
     }
 
     fn close_command_menu(&mut self) {
@@ -13826,6 +13844,11 @@ fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
             let indices = menu.filtered_indices();
             if let Some(&idx) = indices.get(menu.selected) {
                 let action = menu.actions[idx];
+                // Record it as most-recently-used BEFORE closing —
+                // move-to-front, deduplicated — so the next palette
+                // open shows it at the top.
+                app.command_menu_recent.retain(|a| *a != action);
+                app.command_menu_recent.insert(0, action);
                 // Close the palette BEFORE dispatching so the
                 // action runs against the un-modified app state.
                 app.close_command_menu();

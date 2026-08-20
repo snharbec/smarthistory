@@ -465,13 +465,13 @@ fn key_bindings_from_config_multi_key_bad_spec_drops_all() {
 
 #[test]
 fn command_menu_filter_matches() {
-    let menu = CommandMenu::new();
+    let menu = CommandMenu::new(&[]);
     // Empty query returns every action.
     assert_eq!(menu.filtered_indices().len(), ALL_ACTIONS.len());
     // Substring match against the display name.
     let m = CommandMenu {
         query: "delete".into(),
-        ..CommandMenu::new()
+        ..CommandMenu::new(&[])
     };
     let filtered = m.filtered_indices();
     assert!(filtered.iter().all(|&i| {
@@ -491,7 +491,7 @@ fn command_menu_filter_matches() {
     // it doesn't, so only OpenHelp should match).
     let m = CommandMenu {
         query: "open help".into(),
-        ..CommandMenu::new()
+        ..CommandMenu::new(&[])
     };
     let filtered = m.filtered_indices();
     assert!(filtered.iter().any(|&i| ALL_ACTIONS[i] == Action::OpenHelp));
@@ -500,11 +500,81 @@ fn command_menu_filter_matches() {
         .any(|&i| ALL_ACTIONS[i] == Action::ShowOutput));
     // `clamp_selection` keeps the cursor inside the filtered
     // list when items disappear (e.g. user deletes the last char).
-    let mut m = CommandMenu::new();
+    let mut m = CommandMenu::new(&[]);
     m.selected = ALL_ACTIONS.len() - 1;
     m.query = "no-such-action".into();
     m.clamp_selection();
     assert_eq!(m.selected, 0);
+}
+
+/// `CommandMenu::new` puts `recent` first, in the order given, then
+/// every other action in `ALL_ACTIONS`' own declaration order —
+/// including actions never used (they don't just vanish).
+#[test]
+fn command_menu_new_orders_recent_actions_first() {
+    let recent = vec![Action::DeleteSelected, Action::OpenHelp];
+    let menu = CommandMenu::new(&recent);
+    assert_eq!(menu.actions[0], Action::DeleteSelected);
+    assert_eq!(menu.actions[1], Action::OpenHelp);
+    assert_eq!(menu.actions.len(), ALL_ACTIONS.len(), "no action is dropped or duplicated");
+    // Every action still appears exactly once.
+    for action in ALL_ACTIONS {
+        assert_eq!(
+            menu.actions.iter().filter(|a| *a == action).count(),
+            1,
+            "{:?} should appear exactly once",
+            action
+        );
+    }
+    // The remaining (non-recent) actions keep ALL_ACTIONS' own
+    // relative order.
+    let remaining: Vec<Action> = menu.actions[2..].to_vec();
+    let expected_remaining: Vec<Action> = ALL_ACTIONS
+        .iter()
+        .copied()
+        .filter(|a| !recent.contains(a))
+        .collect();
+    assert_eq!(remaining, expected_remaining);
+}
+
+/// Pressing Enter on a highlighted palette action records it at the
+/// front of `App::command_menu_recent`, so the next `open_command_menu`
+/// shows it first.
+#[test]
+fn command_menu_enter_records_action_as_recent() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_command_menu();
+    let m = app.command_menu.as_mut().unwrap();
+    m.query = "open help".into();
+    m.selected = 0;
+    assert_eq!(m.filtered_indices().len(), 1, "query should narrow to exactly OpenHelp");
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_key(&mut app, enter);
+
+    assert_eq!(app.command_menu_recent, vec![Action::OpenHelp]);
+    assert!(!app.is_command_menu_open(), "the palette should close after Enter");
+}
+
+/// Running the same action twice moves it to the front rather than
+/// appending a duplicate.
+#[test]
+fn command_menu_enter_moves_repeated_action_to_front_without_duplicating() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.command_menu_recent = vec![Action::DeleteSelected, Action::OpenHelp];
+
+    app.open_command_menu();
+    let m = app.command_menu.as_mut().unwrap();
+    m.query = "open help".into();
+    m.selected = 0;
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_key(&mut app, enter);
+
+    assert_eq!(
+        app.command_menu_recent,
+        vec![Action::OpenHelp, Action::DeleteSelected],
+        "OpenHelp moves to front; DeleteSelected stays, not duplicated"
+    );
 }
 
 #[test]

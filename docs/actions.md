@@ -594,6 +594,16 @@ with its current binding displayed. Useful when the user has forgotten (or
 rebound) a shortcut. Typing filters the list (case-insensitive substring AND);
 Up/Down navigates, Enter runs the highlighted action, Esc closes.
 
+Three aligned columns: key binding, description (display name — word-wrapped
+onto extra lines when it doesn't fit the column, rather than truncated), and
+the internal action name (its `config_key`, useful for writing
+`key.<name>=<spec>` bindings). Row order is most-recently-used first: running
+an action from the palette (Enter, not any other keybinding) moves it to the
+top of the list for next time — deduplicated, so re-running the same action
+doesn't create a second entry. Actions never run from the palette keep
+`ALL_ACTIONS`' own declaration order at the bottom. Not persisted across TUI
+restarts.
+
 ### `ThemePicker`
 
 | Field        | Value          |
