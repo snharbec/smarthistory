@@ -1458,6 +1458,18 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::SmartOpen,
 ];
 
+/// The inverse of `Action::config_key()` — look up an action by its
+/// config-key string (e.g. `"create-note"` → `Action::CreateNote`).
+/// Used by the command palette's persisted most-recently-used list
+/// (`TuiSession::command_menu_recent`), which stores actions as their
+/// config-key strings on disk so the session file survives an
+/// `Action` variant being renamed/reordered across versions. Returns
+/// `None` for an unrecognized string (a stale entry from a removed
+/// action, or a hand-edited typo) rather than panicking.
+pub(crate) fn action_from_config_key(key: &str) -> Option<Action> {
+    ALL_ACTIONS.iter().find(|a| a.config_key() == key).copied()
+}
+
 /// Build a `KeyBindings` table from a parsed config map of
 /// `key.<action>` → `<spec-list>` strings. Each spec-list is a
 /// comma-separated list of key specs (e.g. `"C-h,F1"` or

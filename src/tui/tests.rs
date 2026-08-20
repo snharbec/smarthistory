@@ -609,6 +609,70 @@ fn command_menu_enter_moves_repeated_action_to_front_without_duplicating() {
     );
 }
 
+/// `action_from_config_key` is the exact inverse of
+/// `Action::config_key()` for every known action, and returns `None`
+/// for a string that isn't one (a stale/hand-edited session-file
+/// entry) instead of panicking.
+#[test]
+fn action_from_config_key_round_trips_every_action() {
+    for action in ALL_ACTIONS {
+        assert_eq!(
+            crate::tui::bindings::action_from_config_key(action.config_key()),
+            Some(*action)
+        );
+    }
+    assert_eq!(
+        crate::tui::bindings::action_from_config_key("not-a-real-action"),
+        None
+    );
+    assert_eq!(crate::tui::bindings::action_from_config_key(""), None);
+}
+
+/// The command palette's most-recently-used order survives a real
+/// save→load round-trip through `TuiSession`, and a stale config-key
+/// entry (as if an action were renamed/removed since the file was
+/// written) is silently dropped rather than resurrected as a bogus
+/// `Action` or failing the load.
+#[test]
+fn session_round_trips_command_menu_recent_and_drops_unknown_entries() {
+    let tmp = std::env::temp_dir().join(format!(
+        "smarthistory_session_test_cmr_{}.ini",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let original = super::TuiSession {
+        command_menu_recent: vec!["create-note".to_string(), "delete-selected".to_string()],
+        ..Default::default()
+    };
+    let _ = original.save_to(&tmp);
+    let mut contents = std::fs::read_to_string(&tmp).unwrap();
+    // Simulate a stale entry from a removed/renamed action.
+    contents.push_str("commandmenurecent=this-action-no-longer-exists\n");
+    std::fs::write(&tmp, contents).unwrap();
+
+    let loaded = super::TuiSession::load_from(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(
+        loaded.command_menu_recent,
+        vec![
+            "create-note".to_string(),
+            "delete-selected".to_string(),
+            "this-action-no-longer-exists".to_string(),
+        ],
+        "TuiSession stores raw strings — filtering happens when App seeds itself"
+    );
+    let resolved: Vec<Action> = loaded
+        .command_menu_recent
+        .iter()
+        .filter_map(|k| crate::tui::bindings::action_from_config_key(k))
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![Action::CreateNote, Action::DeleteSelected],
+        "the unknown entry must be dropped, not turned into a bogus Action"
+    );
+}
+
 #[test]
 fn command_action_has_default_binding_and_routes() {
     let bindings = KeyBindings::defaults();
@@ -5597,6 +5661,7 @@ fn session_round_trips_sort_order() {
         pane_height: None,
         scheme: None,
         pane_last_touched: std::collections::HashMap::new(),
+        command_menu_recent: Vec::new(),
     };
     let rendered = format!("{:?}", s);
     // The `Debug` output includes the

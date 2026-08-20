@@ -601,8 +601,13 @@ and the internal action name (its `config_key`, useful for writing
 an action from the palette (Enter, not any other keybinding) moves it to the
 top of the list for next time — deduplicated, so re-running the same action
 doesn't create a second entry. Actions never run from the palette keep
-`ALL_ACTIONS`' own declaration order further down. Not persisted across TUI
-restarts.
+`ALL_ACTIONS`' own declaration order further down. This order is saved to
+`~/.local/cache/smarthistory/session` (`commandmenurecent=<config_key>` lines,
+one per entry, most-recent-first) on exit and reloaded on the next TUI
+launch, so it survives across restarts — the same session file `theme=`/
+`sortorder=`/etc. already live in. An unrecognized entry (e.g. from an
+action that's since been renamed or removed) is silently dropped on load
+rather than treated as an error.
 
 The palette's own housekeeping keys (`Cancel`, `ClearQuery`, `Run`) and raw
 query-cursor editing (`EditStart`/`EditEnd`/`MoveCursorLeft`/`MoveCursorRight`/

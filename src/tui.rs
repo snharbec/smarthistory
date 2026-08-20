@@ -143,6 +143,15 @@ pub(crate) struct TuiSession {
     /// deleted panes don't accumulate
     /// forever in the session file.
     pane_last_touched: std::collections::HashMap<String, i64>,
+    /// The command palette's most-recently-used action order at the
+    /// end of the last session (`App::command_menu_recent`),
+    /// most-recent-first — each entry is an `Action::config_key()`
+    /// string rather than a serialized `Action` so the session file
+    /// survives an `Action` variant being renamed/reordered across
+    /// versions (see `action_from_config_key`). Empty means "no
+    /// history yet", same as an unset `Option` field elsewhere in
+    /// this struct.
+    command_menu_recent: Vec<String>,
 }
 
 /// Flags the user passed to `smarthistory tui <flags>...` on
@@ -425,6 +434,17 @@ impl TuiSession {
                             .insert(pane_id.to_string(), ts);
                     }
                 }
+                // One line per remembered action, in
+                // most-recent-first order — repeated key, appended in
+                // file order (which is always the order `save_to`
+                // wrote them in). Values that don't resolve to a
+                // known action are still kept here (as plain
+                // strings); `action_from_config_key` filters them out
+                // when the App seeds its own state from this list, so
+                // a stale/hand-edited entry never wedges startup.
+                "commandmenurecent" if !value.is_empty() => {
+                    s.command_menu_recent.push(value.to_string());
+                }
                 _ => {}
             }
         }
@@ -506,6 +526,14 @@ impl TuiSession {
                     pane_id, ts
                 ));
             }
+        }
+        // Command palette most-recently-used order, one line per
+        // entry, most-recent-first (the order they're already stored
+        // in — `load_from`'s parser rebuilds the same order by
+        // appending in file order, so writing top-to-bottom here is
+        // what makes the round-trip work).
+        for config_key in &self.command_menu_recent {
+            out.push_str(&format!("commandmenurecent={}\n", config_key));
         }
         std::fs::write(path, out)
     }
@@ -11812,6 +11840,16 @@ pub fn run_tui_to_stdout(
     if !session.pane_last_touched.is_empty() {
         app.pane_last_touched = session.pane_last_touched.clone();
     }
+    // Load the command palette's persisted most-recently-used action
+    // order. Each entry is a config-key string; unrecognized ones
+    // (a stale entry from a removed/renamed action, or a hand-edited
+    // typo) are silently dropped rather than wedging startup — same
+    // "degrade gracefully" policy every other session field uses.
+    app.command_menu_recent = session
+        .command_menu_recent
+        .iter()
+        .filter_map(|k| crate::tui::bindings::action_from_config_key(k))
+        .collect();
     // Load named sessions from the config file
     // (`session.<id>=...`, `session.<id>.dir=...`).
     app.sessions = app_cfg.sessions();
@@ -12131,6 +12169,14 @@ pub fn run_tui_to_stdout(
         // so deleted panes don't accumulate
         // forever.
         pane_last_touched: app.pane_last_touched.clone(),
+        // Always persisted (no "only if non-default" gate — an empty
+        // history is already the implicit default, same as an empty
+        // `pane_last_touched` map).
+        command_menu_recent: app
+            .command_menu_recent
+            .iter()
+            .map(|a| a.config_key().to_string())
+            .collect(),
     };
     session.save();
 
@@ -16249,6 +16295,10 @@ mod tui_session_tests {
                 m.insert("%5".to_string(), 1_736_200_050);
                 m
             },
+            command_menu_recent: vec![
+                "create-note".to_string(),
+                "delete-selected".to_string(),
+            ],
         };
         let _ = original.save_to(&tmp);
         let loaded = TuiSession::load_from(&tmp);
@@ -16272,6 +16322,11 @@ mod tui_session_tests {
             Some(1_736_200_050)
         );
         assert_eq!(loaded.pane_last_touched.len(), 2);
+        assert_eq!(
+            loaded.command_menu_recent,
+            vec!["create-note".to_string(), "delete-selected".to_string()],
+            "order must round-trip exactly (most-recent-first)"
+        );
     }
 
     /// The save function should not write a `query=`
@@ -16600,6 +16655,7 @@ mod tui_session_tests {
             },
             scheme: None,
             pane_last_touched: std::collections::HashMap::new(),
+            command_menu_recent: Vec::new(),
         }
     }
 }

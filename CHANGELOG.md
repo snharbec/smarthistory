@@ -15,7 +15,9 @@ All notable changes to this project will be documented in this file.
   never run from the palette keep their original declaration order.
   `Cancel`/`ClearQuery`/`Run` and raw query-cursor editing actions
   (`MoveCursorLeft`, `Home`, `Backspace`, etc.) always sink to the very
-  bottom regardless of recency. Not persisted across restarts.
+  bottom regardless of recency. This order is now persisted to the
+  session file (`~/.local/cache/smarthistory/session`) on exit and
+  restored on the next launch, so it survives across restarts.
 - New `Action::CreateJiraIssue` (unbound by default; bind via
   `key.create-jira-issue=<spec>` or open via the command palette): opens a
   dialog to create a JIRA issue (Project, Subject, Description, Labels, Issue
