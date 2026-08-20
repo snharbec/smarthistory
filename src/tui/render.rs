@@ -8,11 +8,11 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use super::bindings::{Action, format_key_specs};
+use super::bindings::{ALL_ACTIONS, Action, format_key_specs};
 use super::state::{
     ExitFilter, HistoryRow, Mode, NoteComposeDialog, NoteCreateDialog, NoteCreateField, SortOrder,
 };
@@ -1166,23 +1166,6 @@ fn overlay(
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
-}
-
-/// Compute the visible-scroll window for a list of `total` items
-/// where the `selected` item must be on screen. Returns
-/// `(start, end)` — a half-open range into a zero-indexed slice.
-///
-/// Used by every overlay's scrollable list to avoid repeating the
-/// 6-line `visible_rows / start / end` calculation.
-fn scroll_window(selected: usize, total: usize, visible_rows: usize) -> (usize, usize) {
-    if total == 0 || visible_rows == 0 {
-        return (0, 0);
-    }
-    let start = selected
-        .saturating_sub(visible_rows.saturating_sub(1))
-        .min(total.saturating_sub(visible_rows));
-    let end = (start + visible_rows).min(total);
-    (start, end)
 }
 
 /// Draw the add-session /
@@ -3014,8 +2997,6 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
-    use ratatui::widgets::List;
-
     let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
     let title = if cancel_keys.is_empty() {
         String::from(" Command palette ")
@@ -3083,102 +3064,97 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     }
 
     // ---- Action list ----
+    // Three columns: key binding, description (display name — wrapped
+    // when it doesn't fit), internal action name (config key). Key/name
+    // column widths are sized once from the longest value across EVERY
+    // action (not just the filtered/visible ones) so they don't jitter
+    // narrower/wider as the user types a filter or scrolls; Description
+    // gets whatever's left.
     let filtered = menu.filtered_indices();
-    let highlight_style = Style::default()
-        .bg(Theme::selection_color())
-        .fg(fg)
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(Modifier::UNDERLINED);
+    let highlight_style = Style::default().bg(Theme::selection_color()).fg(fg).add_modifier(Modifier::BOLD);
     let dim_style = Style::default().fg(Theme::dim_color());
     let accent_style = Theme::accent();
     let warning_style = Style::default().fg(Theme::warning_color());
 
-    // Show only what fits, scrolling so the selected row is
-    // always visible.
-    let visible_rows = chunks[1].height as usize;
-    let (start, end) = scroll_window(menu.selected, filtered.len(), visible_rows);
-
-    let mut items: Vec<ListItem> = Vec::new();
-    for (row_pos, &idx) in filtered.iter().enumerate().skip(start).take(end - start) {
-        let action = menu.actions[idx];
-        let label = action.display_name();
-        let config_key = action.config_key();
-        let key = if app.bindings.is_unbound(action) {
-            " (unbound)".to_string()
+    fn key_text(app: &App, action: Action) -> String {
+        if app.bindings.is_unbound(action) {
+            "unbound".to_string()
         } else {
             let specs = app.bindings.specs(action);
             if specs.is_empty() {
-                " (?)".to_string()
+                "?".to_string()
             } else {
-                format!(" {}", format_key_specs(specs))
+                format_key_specs(specs)
             }
-        };
-        let is_selected = row_pos == menu.selected;
-        let category = action.category();
-        // Pad the action label so the key column lines up.
-        // Width 22 is enough for "Edit (cursor at start)"
-        // plus a space; the key column is 24 so two-spec
-        // bindings like "C-w, M-Backspace" fit without
-        // overflowing into the category bracket.
-        let mut spans = vec![
-            Span::styled(
-                format!("  {:<22} ({})", label, config_key),
-                if is_selected {
-                    highlight_style
-                } else {
-                    Style::default().fg(fg)
-                },
-            ),
-            Span::styled(
-                format!("{:>24}", key),
-                if is_selected {
-                    highlight_style
-                } else {
-                    accent_style
-                },
-            ),
-            Span::styled(
-                format!("  [{}]", category),
-                if is_selected {
-                    highlight_style
-                } else {
-                    dim_style
-                },
-            ),
-        ];
-        if app.bindings.is_unbound(action) {
-            spans.insert(
-                1,
-                Span::styled(
-                    " ⚠ ",
-                    if is_selected {
-                        highlight_style
-                    } else {
-                        warning_style
-                    },
-                ),
-            );
         }
-        items.push(ListItem::new(Line::from(spans)));
-    }
-    if items.is_empty() {
-        items.push(ListItem::new(Line::from(vec![Span::styled(
-            "  (no action matches your query)",
-            dim_style,
-        )])));
     }
 
-    let list = List::new(items)
-        .style(Style::default().bg(bg))
-        .highlight_style(highlight_style)
-        .highlight_symbol("> ")
-        .repeat_highlight_symbol(false);
+    let key_width = ALL_ACTIONS
+        .iter()
+        .map(|a| key_text(app, *a).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("key".len());
+    let name_width = ALL_ACTIONS
+        .iter()
+        .map(|a| a.config_key().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("action".len());
+    // 2 gaps (description↔key, key↔name) at 1 column each —
+    // `Table`'s default column spacing.
+    let desc_width = (chunks[1].width as usize)
+        .saturating_sub(key_width + name_width + 2)
+        .max(1);
 
-    let mut list_state = ListState::default();
+    let mut rows: Vec<Row> = Vec::new();
+    for &idx in &filtered {
+        let action = menu.actions[idx];
+        let key = key_text(app, action);
+        let key_style = if app.bindings.is_unbound(action) { warning_style } else { accent_style };
+
+        let desc_chars: Vec<char> = action.display_name().chars().collect();
+        let wrapped = wrap_chars_to_rows(&desc_chars, desc_width);
+        let row_height = wrapped.len().max(1);
+
+        let mut key_lines: Vec<Line> = vec![Line::styled(key, key_style)];
+        let mut name_lines: Vec<Line> = vec![Line::styled(action.config_key(), dim_style)];
+        let mut desc_lines: Vec<Line> = Vec::new();
+        for (text, _) in &wrapped {
+            desc_lines.push(Line::raw(text.clone()));
+        }
+        while key_lines.len() < row_height {
+            key_lines.push(Line::raw(""));
+        }
+        while name_lines.len() < row_height {
+            name_lines.push(Line::raw(""));
+        }
+
+        rows.push(
+            Row::new(vec![
+                Cell::from(Text::from(desc_lines)),
+                Cell::from(Text::from(key_lines)),
+                Cell::from(Text::from(name_lines)),
+            ])
+            .height(row_height as u16),
+        );
+    }
+    if rows.is_empty() {
+        rows.push(Row::new(vec![Cell::from(Span::styled("(no action matches your query)", dim_style)), Cell::from(""), Cell::from("")]));
+    }
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(desc_width as u16), Constraint::Length(key_width as u16), Constraint::Length(name_width as u16)],
+    )
+    .style(Style::default().bg(bg))
+    .row_highlight_style(highlight_style);
+
+    let mut table_state = TableState::default();
     if !filtered.is_empty() {
-        list_state.select(Some(menu.selected.saturating_sub(start)));
+        table_state.select(Some(menu.selected));
     }
-    f.render_stateful_widget(list, chunks[1], &mut list_state);
+    f.render_stateful_widget(table, chunks[1], &mut table_state);
 
     // ---- Footer ----
     // Render the actual `Cancel`

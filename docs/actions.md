@@ -594,6 +594,27 @@ with its current binding displayed. Useful when the user has forgotten (or
 rebound) a shortcut. Typing filters the list (case-insensitive substring AND);
 Up/Down navigates, Enter runs the highlighted action, Esc closes.
 
+Three aligned columns: description (display name — word-wrapped onto extra
+lines when it doesn't fit the column, rather than truncated), key binding,
+and the internal action name (its `config_key`, useful for writing
+`key.<name>=<spec>` bindings). Row order is most-recently-used first: running
+an action from the palette (Enter, not any other keybinding) moves it to the
+top of the list for next time — deduplicated, so re-running the same action
+doesn't create a second entry. Actions never run from the palette keep
+`ALL_ACTIONS`' own declaration order further down. This order is saved to
+`~/.local/cache/smarthistory/session` (`commandmenurecent=<config_key>` lines,
+one per entry, most-recent-first) on exit and reloaded on the next TUI
+launch, so it survives across restarts — the same session file `theme=`/
+`sortorder=`/etc. already live in. An unrecognized entry (e.g. from an
+action that's since been renamed or removed) is silently dropped on load
+rather than treated as an error.
+
+The palette's own housekeeping keys (`Cancel`, `ClearQuery`, `Run`) and raw
+query-cursor editing (`EditStart`/`EditEnd`/`MoveCursorLeft`/`MoveCursorRight`/
+`Home`/`End`/`Backspace`/`DeleteWordBackward`) always sink to the very bottom
+of the list, even if run recently — they're not things anyone browses the
+palette looking for.
+
 ### `ThemePicker`
 
 | Field        | Value          |

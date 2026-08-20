@@ -143,6 +143,15 @@ pub(crate) struct TuiSession {
     /// deleted panes don't accumulate
     /// forever in the session file.
     pane_last_touched: std::collections::HashMap<String, i64>,
+    /// The command palette's most-recently-used action order at the
+    /// end of the last session (`App::command_menu_recent`),
+    /// most-recent-first — each entry is an `Action::config_key()`
+    /// string rather than a serialized `Action` so the session file
+    /// survives an `Action` variant being renamed/reordered across
+    /// versions (see `action_from_config_key`). Empty means "no
+    /// history yet", same as an unset `Option` field elsewhere in
+    /// this struct.
+    command_menu_recent: Vec<String>,
 }
 
 /// Flags the user passed to `smarthistory tui <flags>...` on
@@ -425,6 +434,17 @@ impl TuiSession {
                             .insert(pane_id.to_string(), ts);
                     }
                 }
+                // One line per remembered action, in
+                // most-recent-first order — repeated key, appended in
+                // file order (which is always the order `save_to`
+                // wrote them in). Values that don't resolve to a
+                // known action are still kept here (as plain
+                // strings); `action_from_config_key` filters them out
+                // when the App seeds its own state from this list, so
+                // a stale/hand-edited entry never wedges startup.
+                "commandmenurecent" if !value.is_empty() => {
+                    s.command_menu_recent.push(value.to_string());
+                }
                 _ => {}
             }
         }
@@ -506,6 +526,14 @@ impl TuiSession {
                     pane_id, ts
                 ));
             }
+        }
+        // Command palette most-recently-used order, one line per
+        // entry, most-recent-first (the order they're already stored
+        // in — `load_from`'s parser rebuilds the same order by
+        // appending in file order, so writing top-to-bottom here is
+        // what makes the round-trip work).
+        for config_key in &self.command_menu_recent {
+            out.push_str(&format!("commandmenurecent={}\n", config_key));
         }
         std::fs::write(path, out)
     }
@@ -1139,6 +1167,11 @@ pub(crate) struct App {
     help_view: Option<HelpView>,
     /// When `Some`, the command-palette overlay is open.
     command_menu: Option<CommandMenu>,
+    /// Actions previously run FROM the command palette (via Enter, not
+    /// any other keybinding), most-recent-first, deduplicated —
+    /// determines the palette's default row order on the next open
+    /// (`CommandMenu::new`). Session-only, not persisted to disk.
+    command_menu_recent: Vec<Action>,
     /// When `Some`, the prefix-picker overlay is open. The
     /// picker is the `Action::PickPrefix` counterpart
     /// to the command palette: a centred list of every
@@ -4247,11 +4280,31 @@ struct CommandMenu {
 }
 
 impl CommandMenu {
-    fn new() -> Self {
+    /// `recent` is `App::command_menu_recent` — actions previously run
+    /// from THIS palette, most-recent-first (deduplicated). The
+    /// displayed list starts with `recent` in that order, then every
+    /// other action in `ALL_ACTIONS`' declaration order — so an action
+    /// you've picked before rises to the top, and everything else keeps
+    /// a stable, predictable fallback order instead of jumping around.
+    /// `command_menu_always_last` actions sink to the bottom of the list
+    /// regardless of recency — they're the palette's own housekeeping
+    /// keys (`Cancel`, `ClearQuery`, `Run`) and raw query-cursor editing
+    /// (`MoveCursorLeft`/`Home`/`Backspace`/etc.), not things anyone
+    /// browses the palette looking for.
+    fn new(recent: &[Action]) -> Self {
+        let mut actions: Vec<Action> = recent.to_vec();
+        for action in ALL_ACTIONS {
+            if !actions.contains(action) {
+                actions.push(*action);
+            }
+        }
+        let (normal, always_last): (Vec<Action>, Vec<Action>) =
+            actions.into_iter().partition(|a| !command_menu_always_last(*a));
+        let actions: Vec<Action> = normal.into_iter().chain(always_last).collect();
         CommandMenu {
             query: String::new(),
             selected: 0,
-            actions: ALL_ACTIONS.to_vec(),
+            actions,
             touched: false,
         }
     }
@@ -4288,6 +4341,31 @@ impl CommandMenu {
             self.selected = n - 1;
         }
     }
+}
+
+/// Actions that always sink to the bottom of the command palette,
+/// regardless of recency: the palette's own housekeeping keys
+/// (`Cancel`/`ClearQuery`/`Run` — closing, clearing, and running are
+/// already bound to dedicated always-available keys, not things worth
+/// hunting for by name) and raw query-cursor editing (`EditStart`/
+/// `EditEnd`/`MoveCursorLeft`/`MoveCursorRight`/`Home`/`End`/
+/// `Backspace`/`DeleteWordBackward` — text-cursor bookkeeping, not
+/// something a user browses the palette looking for).
+fn command_menu_always_last(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Cancel
+            | Action::ClearQuery
+            | Action::Run
+            | Action::EditStart
+            | Action::EditEnd
+            | Action::MoveCursorLeft
+            | Action::MoveCursorRight
+            | Action::Home
+            | Action::End
+            | Action::Backspace
+            | Action::DeleteWordBackward
+    )
 }
 
 /// The prefix picker — a centred list of every
@@ -4924,6 +5002,7 @@ impl App {
             question_view: None,
             help_view: None,
             command_menu: None,
+            command_menu_recent: Vec::new(),
             prefix_picker: None,
             codegraph_relations_picker: None,
             theme_picker: None,
@@ -8342,7 +8421,7 @@ impl App {
     }
 
     fn open_command_menu(&mut self) {
-        self.command_menu = Some(CommandMenu::new());
+        self.command_menu = Some(CommandMenu::new(&self.command_menu_recent));
     }
 
     fn close_command_menu(&mut self) {
@@ -11761,6 +11840,16 @@ pub fn run_tui_to_stdout(
     if !session.pane_last_touched.is_empty() {
         app.pane_last_touched = session.pane_last_touched.clone();
     }
+    // Load the command palette's persisted most-recently-used action
+    // order. Each entry is a config-key string; unrecognized ones
+    // (a stale entry from a removed/renamed action, or a hand-edited
+    // typo) are silently dropped rather than wedging startup — same
+    // "degrade gracefully" policy every other session field uses.
+    app.command_menu_recent = session
+        .command_menu_recent
+        .iter()
+        .filter_map(|k| crate::tui::bindings::action_from_config_key(k))
+        .collect();
     // Load named sessions from the config file
     // (`session.<id>=...`, `session.<id>.dir=...`).
     app.sessions = app_cfg.sessions();
@@ -12080,6 +12169,14 @@ pub fn run_tui_to_stdout(
         // so deleted panes don't accumulate
         // forever.
         pane_last_touched: app.pane_last_touched.clone(),
+        // Always persisted (no "only if non-default" gate — an empty
+        // history is already the implicit default, same as an empty
+        // `pane_last_touched` map).
+        command_menu_recent: app
+            .command_menu_recent
+            .iter()
+            .map(|a| a.config_key().to_string())
+            .collect(),
     };
     session.save();
 
@@ -13826,6 +13923,11 @@ fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
             let indices = menu.filtered_indices();
             if let Some(&idx) = indices.get(menu.selected) {
                 let action = menu.actions[idx];
+                // Record it as most-recently-used BEFORE closing —
+                // move-to-front, deduplicated — so the next palette
+                // open shows it at the top.
+                app.command_menu_recent.retain(|a| *a != action);
+                app.command_menu_recent.insert(0, action);
                 // Close the palette BEFORE dispatching so the
                 // action runs against the un-modified app state.
                 app.close_command_menu();
@@ -16193,6 +16295,10 @@ mod tui_session_tests {
                 m.insert("%5".to_string(), 1_736_200_050);
                 m
             },
+            command_menu_recent: vec![
+                "create-note".to_string(),
+                "delete-selected".to_string(),
+            ],
         };
         let _ = original.save_to(&tmp);
         let loaded = TuiSession::load_from(&tmp);
@@ -16216,6 +16322,11 @@ mod tui_session_tests {
             Some(1_736_200_050)
         );
         assert_eq!(loaded.pane_last_touched.len(), 2);
+        assert_eq!(
+            loaded.command_menu_recent,
+            vec!["create-note".to_string(), "delete-selected".to_string()],
+            "order must round-trip exactly (most-recent-first)"
+        );
     }
 
     /// The save function should not write a `query=`
@@ -16544,6 +16655,7 @@ mod tui_session_tests {
             },
             scheme: None,
             pane_last_touched: std::collections::HashMap::new(),
+            command_menu_recent: Vec::new(),
         }
     }
 }

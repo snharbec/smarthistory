@@ -465,46 +465,212 @@ fn key_bindings_from_config_multi_key_bad_spec_drops_all() {
 
 #[test]
 fn command_menu_filter_matches() {
-    let menu = CommandMenu::new();
+    let menu = CommandMenu::new(&[]);
     // Empty query returns every action.
     assert_eq!(menu.filtered_indices().len(), ALL_ACTIONS.len());
     // Substring match against the display name.
     let m = CommandMenu {
         query: "delete".into(),
-        ..CommandMenu::new()
+        ..CommandMenu::new(&[])
     };
     let filtered = m.filtered_indices();
     assert!(filtered.iter().all(|&i| {
-        ALL_ACTIONS[i]
+        m.actions[i]
             .display_name()
             .to_lowercase()
             .contains("delete")
     }));
     assert!(filtered
         .iter()
-        .any(|&i| ALL_ACTIONS[i] == Action::DeleteSelected));
+        .any(|&i| m.actions[i] == Action::DeleteSelected));
     assert!(filtered
         .iter()
-        .any(|&i| ALL_ACTIONS[i] == Action::DeleteMatching));
+        .any(|&i| m.actions[i] == Action::DeleteMatching));
     // Multi-word AND: "open help" matches OpenHelp (also
     // ShowOutput because its name contains "open"? — actually
     // it doesn't, so only OpenHelp should match).
     let m = CommandMenu {
         query: "open help".into(),
-        ..CommandMenu::new()
+        ..CommandMenu::new(&[])
     };
     let filtered = m.filtered_indices();
-    assert!(filtered.iter().any(|&i| ALL_ACTIONS[i] == Action::OpenHelp));
+    assert!(filtered.iter().any(|&i| m.actions[i] == Action::OpenHelp));
     assert!(!filtered
         .iter()
-        .any(|&i| ALL_ACTIONS[i] == Action::ShowOutput));
+        .any(|&i| m.actions[i] == Action::ShowOutput));
     // `clamp_selection` keeps the cursor inside the filtered
     // list when items disappear (e.g. user deletes the last char).
-    let mut m = CommandMenu::new();
+    let mut m = CommandMenu::new(&[]);
     m.selected = ALL_ACTIONS.len() - 1;
     m.query = "no-such-action".into();
     m.clamp_selection();
     assert_eq!(m.selected, 0);
+}
+
+/// `CommandMenu::new` puts `recent` first, in the order given, then
+/// every other action in `ALL_ACTIONS`' own declaration order —
+/// including actions never used (they don't just vanish).
+#[test]
+fn command_menu_new_orders_recent_actions_first() {
+    let recent = vec![Action::DeleteSelected, Action::OpenHelp];
+    let menu = CommandMenu::new(&recent);
+    assert_eq!(menu.actions[0], Action::DeleteSelected);
+    assert_eq!(menu.actions[1], Action::OpenHelp);
+    assert_eq!(menu.actions.len(), ALL_ACTIONS.len(), "no action is dropped or duplicated");
+    // Every action still appears exactly once.
+    for action in ALL_ACTIONS {
+        assert_eq!(
+            menu.actions.iter().filter(|a| *a == action).count(),
+            1,
+            "{:?} should appear exactly once",
+            action
+        );
+    }
+    // The remaining (non-recent) actions keep ALL_ACTIONS' own relative
+    // order, split into "normal" then "always-last" (neither
+    // `DeleteSelected` nor `OpenHelp` is in the always-last set, so
+    // they're untouched at the front).
+    let remaining: Vec<Action> = menu.actions[2..].to_vec();
+    let mut expected_remaining: Vec<Action> = ALL_ACTIONS
+        .iter()
+        .copied()
+        .filter(|a| !recent.contains(a) && !command_menu_always_last(*a))
+        .collect();
+    expected_remaining.extend(
+        ALL_ACTIONS
+            .iter()
+            .copied()
+            .filter(|a| !recent.contains(a) && command_menu_always_last(*a)),
+    );
+    assert_eq!(remaining, expected_remaining);
+}
+
+/// The palette's own housekeeping keys and raw cursor-editing actions
+/// always sink to the very end of the list, even when they're the most
+/// recently used action.
+#[test]
+fn command_menu_always_last_actions_sink_to_the_bottom_even_when_recent() {
+    let recent = vec![Action::Cancel, Action::DeleteSelected];
+    let menu = CommandMenu::new(&recent);
+    assert_eq!(
+        menu.actions[0],
+        Action::DeleteSelected,
+        "Cancel must not lead the list just because it's the most recent"
+    );
+    assert_eq!(
+        menu.actions.last().copied(),
+        Some(Action::DeleteWordBackward),
+        "the always-last set's own ALL_ACTIONS order is preserved at the tail"
+    );
+    let cancel_pos = menu.actions.iter().position(|a| *a == Action::Cancel).unwrap();
+    assert!(
+        cancel_pos >= menu.actions.len() - 11,
+        "Cancel should be somewhere in the trailing always-last block, got position {cancel_pos}"
+    );
+}
+
+/// Pressing Enter on a highlighted palette action records it at the
+/// front of `App::command_menu_recent`, so the next `open_command_menu`
+/// shows it first.
+#[test]
+fn command_menu_enter_records_action_as_recent() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_command_menu();
+    let m = app.command_menu.as_mut().unwrap();
+    m.query = "open help".into();
+    m.selected = 0;
+    assert_eq!(m.filtered_indices().len(), 1, "query should narrow to exactly OpenHelp");
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_key(&mut app, enter);
+
+    assert_eq!(app.command_menu_recent, vec![Action::OpenHelp]);
+    assert!(!app.is_command_menu_open(), "the palette should close after Enter");
+}
+
+/// Running the same action twice moves it to the front rather than
+/// appending a duplicate.
+#[test]
+fn command_menu_enter_moves_repeated_action_to_front_without_duplicating() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.command_menu_recent = vec![Action::DeleteSelected, Action::OpenHelp];
+
+    app.open_command_menu();
+    let m = app.command_menu.as_mut().unwrap();
+    m.query = "open help".into();
+    m.selected = 0;
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_key(&mut app, enter);
+
+    assert_eq!(
+        app.command_menu_recent,
+        vec![Action::OpenHelp, Action::DeleteSelected],
+        "OpenHelp moves to front; DeleteSelected stays, not duplicated"
+    );
+}
+
+/// `action_from_config_key` is the exact inverse of
+/// `Action::config_key()` for every known action, and returns `None`
+/// for a string that isn't one (a stale/hand-edited session-file
+/// entry) instead of panicking.
+#[test]
+fn action_from_config_key_round_trips_every_action() {
+    for action in ALL_ACTIONS {
+        assert_eq!(
+            crate::tui::bindings::action_from_config_key(action.config_key()),
+            Some(*action)
+        );
+    }
+    assert_eq!(
+        crate::tui::bindings::action_from_config_key("not-a-real-action"),
+        None
+    );
+    assert_eq!(crate::tui::bindings::action_from_config_key(""), None);
+}
+
+/// The command palette's most-recently-used order survives a real
+/// save→load round-trip through `TuiSession`, and a stale config-key
+/// entry (as if an action were renamed/removed since the file was
+/// written) is silently dropped rather than resurrected as a bogus
+/// `Action` or failing the load.
+#[test]
+fn session_round_trips_command_menu_recent_and_drops_unknown_entries() {
+    let tmp = std::env::temp_dir().join(format!(
+        "smarthistory_session_test_cmr_{}.ini",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let original = super::TuiSession {
+        command_menu_recent: vec!["create-note".to_string(), "delete-selected".to_string()],
+        ..Default::default()
+    };
+    let _ = original.save_to(&tmp);
+    let mut contents = std::fs::read_to_string(&tmp).unwrap();
+    // Simulate a stale entry from a removed/renamed action.
+    contents.push_str("commandmenurecent=this-action-no-longer-exists\n");
+    std::fs::write(&tmp, contents).unwrap();
+
+    let loaded = super::TuiSession::load_from(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(
+        loaded.command_menu_recent,
+        vec![
+            "create-note".to_string(),
+            "delete-selected".to_string(),
+            "this-action-no-longer-exists".to_string(),
+        ],
+        "TuiSession stores raw strings — filtering happens when App seeds itself"
+    );
+    let resolved: Vec<Action> = loaded
+        .command_menu_recent
+        .iter()
+        .filter_map(|k| crate::tui::bindings::action_from_config_key(k))
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![Action::CreateNote, Action::DeleteSelected],
+        "the unknown entry must be dropped, not turned into a bogus Action"
+    );
 }
 
 #[test]
@@ -5495,6 +5661,7 @@ fn session_round_trips_sort_order() {
         pane_height: None,
         scheme: None,
         pane_last_touched: std::collections::HashMap::new(),
+        command_menu_recent: Vec::new(),
     };
     let rendered = format!("{:?}", s);
     // The `Debug` output includes the
