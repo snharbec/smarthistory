@@ -30184,3 +30184,72 @@ fn strip_note_frontmatter_empty_body_yields_empty_string() {
     assert_eq!(strip_note_frontmatter(content), "");
 }
 
+/// `Up`/`Down` move the cursor a line at a time through Description
+/// (the one multi-line field), preserving column — same behavior
+/// `NoteCreateDialog`'s Content field already has, added so a
+/// pre-filled multi-paragraph Description (from a note or a JIRA
+/// issue) is actually navigable, not just append-only at whatever
+/// the cursor happened to be left at.
+#[test]
+fn create_jira_issue_dialog_description_up_down_move_by_line() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Subject",
+        "AB\nC",
+        "",
+        None,
+    ));
+    if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+        d.focused = crate::tui::state::CreateJiraIssueFocus::Description;
+        // Cursor at the end: line 1 ("C"), column 1.
+        d.fields[1].cursor = d.fields[1].value.chars().count();
+    }
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+    handle_key(&mut app, up);
+    // Line 1 -> line 0, column min(1, len("AB")=2) = 1: right after "A".
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().fields[1].cursor,
+        1
+    );
+    // `Up` again: already on line 0 — no-op.
+    handle_key(&mut app, up);
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().fields[1].cursor,
+        1
+    );
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+    handle_key(&mut app, down);
+    // Back to line 1, column 1 (clamped to "C"'s length of 1) — char
+    // index 3 (start of "C") + 1 = 4, i.e. right after "C".
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().fields[1].cursor,
+        4
+    );
+}
+
+/// `Up`/`Down` are a no-op when a field OTHER than Description is
+/// focused — they don't apply to the single-line fields or the
+/// Project/Issue Type selectors.
+#[test]
+fn create_jira_issue_dialog_up_down_noop_outside_description() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Subject text",
+        "AB\nC",
+        "",
+        None,
+    ));
+    if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+        d.focused = crate::tui::state::CreateJiraIssueFocus::Subject;
+        d.fields[0].cursor = 3;
+    }
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+    handle_key(&mut app, up);
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(dialog.fields[0].cursor, 3, "Subject cursor should be untouched");
+    assert_eq!(
+        dialog.focused,
+        crate::tui::state::CreateJiraIssueFocus::Subject
+    );
+}
+

@@ -15652,6 +15652,39 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
+        KeyCode::Up => {
+            // Move a line at a time within Description (the one
+            // multi-line field), preserving column — same
+            // `line_col_from_cursor`/`cursor_from_line_col` pair
+            // `note_create_move_up` uses for `NoteCreateDialog`'s
+            // Content field. A no-op everywhere else (the other
+            // fields are single-line; `Left`/`Right` already cover
+            // them, and the selectors use `Left`/`Right` too).
+            if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && d.focused == CreateJiraIssueFocus::Description
+            {
+                let field = &mut d.fields[1];
+                let (line, col) = line_col_from_cursor(&field.value, field.cursor);
+                if line > 0 {
+                    field.cursor = cursor_from_line_col(&field.value, line - 1, col);
+                }
+            }
+            false
+        }
+        KeyCode::Down => {
+            // Mirror of `Up` above.
+            if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && d.focused == CreateJiraIssueFocus::Description
+            {
+                let field = &mut d.fields[1];
+                let (line, col) = line_col_from_cursor(&field.value, field.cursor);
+                let total_lines = field.value.split('\n').count();
+                if line + 1 < total_lines {
+                    field.cursor = cursor_from_line_col(&field.value, line + 1, col);
+                }
+            }
+            false
+        }
         KeyCode::Backspace => {
             if let Some(d) = app.create_jira_issue_dialog.as_mut()
                 && let Some(field) = d.focused_field_mut()

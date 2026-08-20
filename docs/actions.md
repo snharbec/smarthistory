@@ -1024,6 +1024,12 @@ through all five in that order (Issue Type → Project → Subject → Labels �
 Description → wraps). `Enter` inserts a literal newline only while Description is
 focused; `Ctrl-S` submits, `Esc` cancels.
 
+Description is fully editable even when pre-filled with a long body (from a
+note or a JIRA issue — see below): it word-wraps, `Up`/`Down` move the cursor a
+line at a time (preserving column, same as `CreateNote`'s Content field), and
+the view auto-scrolls to keep the cursor's line visible, so editing deep into a
+long pre-filled body doesn't happen invisibly off-screen.
+
 - **Project** comes from `JIRA_AVAILABLE_PROJECTS` (comma-separated), falling
   back to a single entry from `JIRA_PROJECT` when unset, or an empty list when
   neither is set — in which case the dialog refuses to open at all (status

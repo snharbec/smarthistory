@@ -1545,30 +1545,60 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         chunks[3],
     );
 
-    // Description: multi-line, wrapped. No rendered cursor glyph
-    // (unlike the single-line fields above) — the field is meant for
-    // reviewing/lightly editing a pre-filled multi-paragraph body,
-    // not precise mid-text cursor placement; focus is shown via the
-    // label's highlight color instead, same as every other field.
+    // Description: multi-line, word-wrapped, with the same
+    // bottom-anchored auto-scroll `draw_note_create`'s Content field
+    // uses (`wrap_chars_to_rows`/`content_display_position`) — so a
+    // long pre-filled body (a note's full content, or a JIRA issue's
+    // description) can actually be scrolled to and edited throughout,
+    // not just typed into invisibly off-screen at whatever the cursor
+    // happens to sit at. Still no rendered cursor glyph — same as
+    // `draw_note_create`'s Content field — focus/edit position is
+    // conveyed by the label's highlight color plus the scroll
+    // tracking the cursor's line, not a literal glyph.
     let desc_focused = dialog.focused == CreateJiraIssueFocus::Description;
     let desc_label_style = (if desc_focused { Theme::highlight() } else { Style::default() })
         .add_modifier(Modifier::BOLD);
-    let desc_text = if dialog.fields[1].value.is_empty() {
-        Line::from(vec![
+    let desc_field = &dialog.fields[1];
+    let mut desc_lines: Vec<Line> = Vec::new();
+    let mut scroll_y_desc: u16 = 0;
+    if desc_field.value.is_empty() {
+        desc_lines.push(Line::from(vec![
             Span::styled("Description: ", desc_label_style),
-            Span::styled(dialog.fields[1].placeholder, Theme::dim()),
-        ])
+            Span::styled(desc_field.placeholder, Theme::dim()),
+        ]));
     } else {
-        Line::from(vec![Span::styled("Description: ", desc_label_style)])
-    };
-    let mut desc_lines = vec![desc_text];
-    if !dialog.fields[1].value.is_empty() {
-        for line in dialog.fields[1].value.lines() {
-            desc_lines.push(Line::from(line.to_string()));
+        desc_lines.push(Line::from(Span::styled("Description: ", desc_label_style)));
+        // Unlike `draw_note_create`'s Content field, this chunk has no
+        // border of its own (it's a plain slice of the outer dialog's
+        // already-bordered inner area) — no `-2` padding needed.
+        let inner_width_desc = chunks[4].width.max(1) as usize;
+        let line_chars: Vec<Vec<char>> =
+            desc_field.value.split('\n').map(|l| l.chars().collect()).collect();
+        let wrapped_lines: Vec<Vec<(String, usize)>> =
+            line_chars.iter().map(|chars| wrap_chars_to_rows(chars, inner_width_desc)).collect();
+        for rows in &wrapped_lines {
+            for (text, _) in rows {
+                desc_lines.push(Line::from(text.clone()));
+            }
+        }
+        if desc_focused {
+            let cursor_byte = char_to_byte_index(&desc_field.value, desc_field.cursor);
+            let before_cursor = &desc_field.value[..cursor_byte];
+            let cursor_line = before_cursor.matches('\n').count();
+            let cursor_col = before_cursor.rsplit('\n').next().unwrap_or("").chars().count();
+            let (cursor_row_in_line, _) =
+                content_display_position(&wrapped_lines[cursor_line], cursor_col);
+            // +1 for the "Description: " label row always at the top.
+            let cursor_display_row: usize = 1
+                + wrapped_lines[..cursor_line].iter().map(|rows| rows.len()).sum::<usize>()
+                + cursor_row_in_line;
+            let inner_height_desc = chunks[4].height.max(1) as usize;
+            scroll_y_desc =
+                cursor_display_row.saturating_sub(inner_height_desc.saturating_sub(1)) as u16;
         }
     }
     f.render_widget(
-        Paragraph::new(desc_lines).wrap(Wrap { trim: false }),
+        Paragraph::new(desc_lines).scroll((scroll_y_desc, 0)),
         chunks[4],
     );
 
@@ -1588,6 +1618,8 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         Span::raw(" next/prev field, "),
         Span::styled("←/→", Theme::highlight()),
         Span::raw(" change Issue Type/Project, "),
+        Span::styled("↑/↓", Theme::highlight()),
+        Span::raw(" move line in Description, "),
         Span::styled("Ctrl-S", Theme::highlight()),
         Span::raw(" create, "),
         Span::styled("Esc", Theme::highlight()),
