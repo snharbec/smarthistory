@@ -6938,44 +6938,26 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Ag-mode, tags-mode, codegraph-mode, JIRA-mode, notes-mode,
-    // todo-mode, files-mode, panes-mode, segments-mode, and
-    // similar-mode rows carry more than 4 lines of context.
-    // Ag/tags/codegraph/segments/similar carry up to
-    // [`SOURCE_CONTEXT_LINES`] (50) lines of source context
-    // CENTERED on the matched line (segments AND similar mode via
-    // the same syntax-highlighted window, see
-    // `crate::tui::mode::segments::ensure_selected_context` /
-    // `crate::tui::mode::similar::ensure_selected_context`) plus,
-    // for tags/codegraph, a callers/callees overlay. JIRA rows
-    // carry a 3-line header (Status/Priority, Due/Assignee,
-    // Description label) followed by the full issue description
-    // body. Notes / todo / files rows carry the first 50 lines of
-    // the referenced file (syntax-highlighted). Pane rows carry
-    // the last 50 visible lines of
-    // the underlying herdr pane (from `herdr pane read <pane_id>
-    // --lines 50`).
-    // The inline pane's height caps the actually-visible count
-    // (ratatui renders only what fits), but we don't clamp the
-    // slice here so a tall terminal / a scrolled `Ctrl-O` overlay
-    // can show every loaded line. Plain history rows keep their
-    // tighter 4-line preview.
-    let take_n = if row.mode == "ag"
-        || row.mode == "tags"
-        || row.mode == "codegraph"
-        || row.mode == "jira"
-        || row.mode == "note"
-        || row.mode == "todo"
-        || row.mode == "file"
-        || row.mode == "pane"
-        || row.mode == "segment"
-        || row.mode == "similar"
-        || row.mode == "process"
-    {
-        crate::tui::SOURCE_CONTEXT_LINES
-    } else {
-        4
-    };
+    // Every mode's preview text is already bounded at its own
+    // fetch/capture site (windowed source-context modes load at most
+    // `SOURCE_CONTEXT_LINES`; plain history rows' captured command
+    // output is bounded by `capturelines=`; note/todo/file rows load
+    // at most `SOURCE_CONTEXT_LINES` of the referenced file; pane rows
+    // by `herdr pane read --lines 50`) — so there's no need for a
+    // second, render-time cap here on top of that. We render every
+    // line the mode already loaded; the `Paragraph`'s own render area
+    // only actually draws `visible_height` of them, and the `scroll`
+    // computed below (from the real `area.height`, not a hardcoded
+    // constant) is what determines which window of lines is on
+    // screen — so a taller terminal genuinely shows more without any
+    // mode-specific code, and every prefix mode benefits equally
+    // instead of only the modes that happened to be on an
+    // allow-list for the historical 50-line cap (plain history rows,
+    // and any mode not on that list, used to be hard-capped at 4
+    // lines regardless of how much room the pane actually had, and
+    // — since `total_lines` was computed from that same truncated
+    // slice — couldn't be scrolled into either).
+    //
     // `highlight_with_bat`/`highlight_with_bat_auto` (`syntect`,
     // in-process — see `src/highlight.rs`) emit 24-bit-color ANSI
     // escape codes for tags/codegraph rows, and `ag` itself emits
@@ -6995,14 +6977,12 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     let preview_lines: Vec<Line> = if has_ansi {
         preview_text
             .lines()
-            .take(take_n)
             .map(parse_ansi_line)
             .map(Line::from)
             .collect()
     } else {
         preview_text
             .lines()
-            .take(take_n)
             .map(render_preview_line)
             .collect()
     };

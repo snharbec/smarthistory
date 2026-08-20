@@ -318,6 +318,18 @@ All notable changes to this project will be documented in this file.
   default `BINARY` collation): `rust` stays a normal command-line word, only the
   exact-case `RUST` triggers expansion.
 
+### Fixed
+
+- The inline "Output Preview" pane hard-capped plain history rows (and any
+  prefix mode not on a specific allow-list) at 4 lines of preview text,
+  regardless of how tall the pane actually was — a second, render-time cap on
+  top of each mode's own fetch-time bound (`SOURCE_CONTEXT_LINES`,
+  `capturelines=`, etc.), which also made scrolling inside the preview
+  effectively dead for those rows (the truncated line count made the scroll
+  range compute to zero). Removed the cap: every prefix mode now renders as
+  many lines as it already loaded, and the pane's own height (not a hardcoded
+  constant) determines how much is actually visible.
+
 ## 2.0.0 - 2026-08-14
 
 ### Added
