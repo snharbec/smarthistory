@@ -475,17 +475,17 @@ fn command_menu_filter_matches() {
     };
     let filtered = m.filtered_indices();
     assert!(filtered.iter().all(|&i| {
-        ALL_ACTIONS[i]
+        m.actions[i]
             .display_name()
             .to_lowercase()
             .contains("delete")
     }));
     assert!(filtered
         .iter()
-        .any(|&i| ALL_ACTIONS[i] == Action::DeleteSelected));
+        .any(|&i| m.actions[i] == Action::DeleteSelected));
     assert!(filtered
         .iter()
-        .any(|&i| ALL_ACTIONS[i] == Action::DeleteMatching));
+        .any(|&i| m.actions[i] == Action::DeleteMatching));
     // Multi-word AND: "open help" matches OpenHelp (also
     // ShowOutput because its name contains "open"? — actually
     // it doesn't, so only OpenHelp should match).
@@ -494,10 +494,10 @@ fn command_menu_filter_matches() {
         ..CommandMenu::new(&[])
     };
     let filtered = m.filtered_indices();
-    assert!(filtered.iter().any(|&i| ALL_ACTIONS[i] == Action::OpenHelp));
+    assert!(filtered.iter().any(|&i| m.actions[i] == Action::OpenHelp));
     assert!(!filtered
         .iter()
-        .any(|&i| ALL_ACTIONS[i] == Action::ShowOutput));
+        .any(|&i| m.actions[i] == Action::ShowOutput));
     // `clamp_selection` keeps the cursor inside the filtered
     // list when items disappear (e.g. user deletes the last char).
     let mut m = CommandMenu::new(&[]);
@@ -526,15 +526,47 @@ fn command_menu_new_orders_recent_actions_first() {
             action
         );
     }
-    // The remaining (non-recent) actions keep ALL_ACTIONS' own
-    // relative order.
+    // The remaining (non-recent) actions keep ALL_ACTIONS' own relative
+    // order, split into "normal" then "always-last" (neither
+    // `DeleteSelected` nor `OpenHelp` is in the always-last set, so
+    // they're untouched at the front).
     let remaining: Vec<Action> = menu.actions[2..].to_vec();
-    let expected_remaining: Vec<Action> = ALL_ACTIONS
+    let mut expected_remaining: Vec<Action> = ALL_ACTIONS
         .iter()
         .copied()
-        .filter(|a| !recent.contains(a))
+        .filter(|a| !recent.contains(a) && !command_menu_always_last(*a))
         .collect();
+    expected_remaining.extend(
+        ALL_ACTIONS
+            .iter()
+            .copied()
+            .filter(|a| !recent.contains(a) && command_menu_always_last(*a)),
+    );
     assert_eq!(remaining, expected_remaining);
+}
+
+/// The palette's own housekeeping keys and raw cursor-editing actions
+/// always sink to the very end of the list, even when they're the most
+/// recently used action.
+#[test]
+fn command_menu_always_last_actions_sink_to_the_bottom_even_when_recent() {
+    let recent = vec![Action::Cancel, Action::DeleteSelected];
+    let menu = CommandMenu::new(&recent);
+    assert_eq!(
+        menu.actions[0],
+        Action::DeleteSelected,
+        "Cancel must not lead the list just because it's the most recent"
+    );
+    assert_eq!(
+        menu.actions.last().copied(),
+        Some(Action::DeleteWordBackward),
+        "the always-last set's own ALL_ACTIONS order is preserved at the tail"
+    );
+    let cancel_pos = menu.actions.iter().position(|a| *a == Action::Cancel).unwrap();
+    assert!(
+        cancel_pos >= menu.actions.len() - 11,
+        "Cancel should be somewhere in the trailing always-last block, got position {cancel_pos}"
+    );
 }
 
 /// Pressing Enter on a highlighted palette action records it at the

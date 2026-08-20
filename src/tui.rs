@@ -4258,6 +4258,11 @@ impl CommandMenu {
     /// other action in `ALL_ACTIONS`' declaration order — so an action
     /// you've picked before rises to the top, and everything else keeps
     /// a stable, predictable fallback order instead of jumping around.
+    /// `command_menu_always_last` actions sink to the bottom of the list
+    /// regardless of recency — they're the palette's own housekeeping
+    /// keys (`Cancel`, `ClearQuery`, `Run`) and raw query-cursor editing
+    /// (`MoveCursorLeft`/`Home`/`Backspace`/etc.), not things anyone
+    /// browses the palette looking for.
     fn new(recent: &[Action]) -> Self {
         let mut actions: Vec<Action> = recent.to_vec();
         for action in ALL_ACTIONS {
@@ -4265,6 +4270,9 @@ impl CommandMenu {
                 actions.push(*action);
             }
         }
+        let (normal, always_last): (Vec<Action>, Vec<Action>) =
+            actions.into_iter().partition(|a| !command_menu_always_last(*a));
+        let actions: Vec<Action> = normal.into_iter().chain(always_last).collect();
         CommandMenu {
             query: String::new(),
             selected: 0,
@@ -4305,6 +4313,31 @@ impl CommandMenu {
             self.selected = n - 1;
         }
     }
+}
+
+/// Actions that always sink to the bottom of the command palette,
+/// regardless of recency: the palette's own housekeeping keys
+/// (`Cancel`/`ClearQuery`/`Run` — closing, clearing, and running are
+/// already bound to dedicated always-available keys, not things worth
+/// hunting for by name) and raw query-cursor editing (`EditStart`/
+/// `EditEnd`/`MoveCursorLeft`/`MoveCursorRight`/`Home`/`End`/
+/// `Backspace`/`DeleteWordBackward` — text-cursor bookkeeping, not
+/// something a user browses the palette looking for).
+fn command_menu_always_last(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Cancel
+            | Action::ClearQuery
+            | Action::Run
+            | Action::EditStart
+            | Action::EditEnd
+            | Action::MoveCursorLeft
+            | Action::MoveCursorRight
+            | Action::Home
+            | Action::End
+            | Action::Backspace
+            | Action::DeleteWordBackward
+    )
 }
 
 /// The prefix picker — a centred list of every

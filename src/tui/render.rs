@@ -3101,7 +3101,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         .max()
         .unwrap_or(0)
         .max("action".len());
-    // 2 gaps (key↔description, description↔name) at 1 column each —
+    // 2 gaps (description↔key, key↔name) at 1 column each —
     // `Table`'s default column spacing.
     let desc_width = (chunks[1].width as usize)
         .saturating_sub(key_width + name_width + 2)
@@ -3132,20 +3132,20 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
 
         rows.push(
             Row::new(vec![
-                Cell::from(Text::from(key_lines)),
                 Cell::from(Text::from(desc_lines)),
+                Cell::from(Text::from(key_lines)),
                 Cell::from(Text::from(name_lines)),
             ])
             .height(row_height as u16),
         );
     }
     if rows.is_empty() {
-        rows.push(Row::new(vec![Cell::from(""), Cell::from(Span::styled("(no action matches your query)", dim_style)), Cell::from("")]));
+        rows.push(Row::new(vec![Cell::from(Span::styled("(no action matches your query)", dim_style)), Cell::from(""), Cell::from("")]));
     }
 
     let table = Table::new(
         rows,
-        [Constraint::Length(key_width as u16), Constraint::Length(desc_width as u16), Constraint::Length(name_width as u16)],
+        [Constraint::Length(desc_width as u16), Constraint::Length(key_width as u16), Constraint::Length(name_width as u16)],
     )
     .style(Style::default().bg(bg))
     .row_highlight_style(highlight_style);

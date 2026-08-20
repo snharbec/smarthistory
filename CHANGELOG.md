@@ -7,13 +7,15 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Command palette (`Action::CommandAction`): rows now render as three
-  aligned columns — key binding, description (word-wrapped onto extra
-  lines instead of truncated when it's too long for the column), and the
+  aligned columns — description (word-wrapped onto extra lines instead of
+  truncated when it's too long for the column), key binding, and the
   internal action name (`config_key`) — instead of one flat line per
   action. Row order is most-recently-used first: running an action from
   the palette moves it to the top for next time (deduplicated); actions
-  never run from the palette keep their original declaration order at
-  the bottom. Not persisted across restarts.
+  never run from the palette keep their original declaration order.
+  `Cancel`/`ClearQuery`/`Run` and raw query-cursor editing actions
+  (`MoveCursorLeft`, `Home`, `Backspace`, etc.) always sink to the very
+  bottom regardless of recency. Not persisted across restarts.
 - New `Action::CreateJiraIssue` (unbound by default; bind via
   `key.create-jira-issue=<spec>` or open via the command palette): opens a
   dialog to create a JIRA issue (Project, Subject, Description, Labels, Issue
