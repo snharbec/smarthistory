@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 2.1.0 - 2026-08-20
+
 ### Added
 
 - Command palette (`Action::CommandAction`): rows now render as three
@@ -317,9 +319,6 @@ All notable changes to this project will be documented in this file.
   with different casing (e.g. `RUST`). Matching is now case-sensitive (SQLite's
   default `BINARY` collation): `rust` stays a normal command-line word, only the
   exact-case `RUST` triggers expansion.
-
-### Fixed
-
 - The inline "Output Preview" pane hard-capped plain history rows (and any
   prefix mode not on a specific allow-list) at 4 lines of preview text,
   regardless of how tall the pane actually was — a second, render-time cap on
