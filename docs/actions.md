@@ -52,7 +52,7 @@ Actions are grouped in the command palette by their `category()`:
 | [`search`](#search)         | CycleMode, CycleNavPrefix, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix                                                              |
 | [`todo`](#todo)             | MarkTodoDone                                                                                                                                                                                                   |
 | [`theme`](#theme)           | CycleThemeNext, CycleThemePrev                                                                                                                                                                                 |
-| [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry, CreateNote, CreateJiraIssue |
+| [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry, CreateNote, CreateJiraIssue, CreateJiraIssueFromTemplate |
 | [`llm`](#llm)               | Describe, Correct                                                                                                                                                                                              |
 | [`delete`](#delete)         | DeleteSelected, DeleteMatching, ToggleMark, ClearMarks, BulkDeleteMarked                                                                                                                                       |
 | [`config`](#config)         | AddSession, AddHost                                                                                                                                                                                            |
@@ -1007,6 +1007,44 @@ was selected), so the note captures what you were just looking at:
 The user can edit or clear either field before saving; nothing is
 auto-committed.
 
+Also launchable standalone via `smarthistory tui --create-note`, which implies
+`--exec` (runs the staged command itself instead of just printing it) so it
+works from a bare shell invocation, a herdr keybinding, or a shell alias without
+needing `eval "$(...)"`.
+
+**Inline link/tag completion** — in either field, `Tab` on a word starting with
+one of these prefixes opens a completion menu:
+
+| Prefix        | Matches                                                                                                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@`           | note **links** — real link targets from the vault's `note_links` table (same source and helper, `crate::jira::notes_link_matches`, as the Notes (`@`) prefix mode's own Tab completion), candidate `[[link]]` |
+| `[[`          | same as `@` — link completion, for the user who typed the literal wiki-link brackets instead of the `@` shorthand                                                                                             |
+| `#`           | note **tags** — real tag names from the vault's `note_tags` table (`crate::jira::notes_tag_matches`), candidate `#tag`                                                                                        |
+| `@p:`         | notes with frontmatter `type: project`, candidate `[[basename]]`                                                                                                                                              |
+| `@e:`         | notes with frontmatter `type: people`, candidate `[[basename]]`                                                                                                                                               |
+| `@d:`         | notes created today (frontmatter `created:` date), candidate `[[basename]]`                                                                                                                                   |
+| `@7:` / `@w:` | notes created in the last 7 days (today and the 6 days before it — a rolling window, not the previous calendar week), candidate `[[basename]]`                                                                |
+| `@n:`         | all notes, candidate `[[basename]]`                                                                                                                                                                           |
+
+`@`/`[[`/`#` require at least one character typed after the prefix (an empty
+prefix returns no candidates, same as the Notes (`@`) prefix mode's query
+input); the `@p:`/`@e:`/`@d:`/`@7:`/`@w:`/`@n:` variants list every match with
+no text typed. Typed text after any prefix narrows the candidates by a
+case-insensitive prefix match, live — while the menu is open, printable
+characters and `Backspace` keep filtering the list instead of being swallowed. A
+single match is inserted directly (no menu to confirm). Navigate a multi-match
+menu with `Up`/`Down`, `Tab`/`Shift-Tab` (`BackTab`), `Home`/`End`; `Enter`
+commits the selected candidate, `Esc` dismisses the menu (keeping whatever was
+typed) without closing the dialog.
+
+`Ctrl-D` / `Ctrl-N` / `Ctrl-7` are one-keystroke shortcuts for `@d:` / `@n:` /
+`@7:` — same as typing the prefix and pressing `Tab`. (`Ctrl-W` was the natural
+mnemonic for "last 7 days" but was already taken by delete-word-backward, so
+`Ctrl-7` is used instead.)
+
+A no-op (dialog stays open, status message) when both fields are
+empty/whitespace-only, or when `notes.database` / `notes.dir` aren't configured.
+
 ### `CreateJiraIssue`
 
 | Field        | Value                                                                                    |
@@ -1061,43 +1099,63 @@ created, so the status message shows the new key alongside a warning that the
 link didn't take. A create failure keeps the dialog open (with the error
 shown) so the user can retry without retyping.
 
-Also launchable standalone via `smarthistory tui --create-note`, which implies
-`--exec` (runs the staged command itself instead of just printing it) so it
-works from a bare shell invocation, a herdr keybinding, or a shell alias without
-needing `eval "$(...)"`.
+### `CreateJiraIssueFromTemplate`
 
-**Inline link/tag completion** — in either field, `Tab` on a word starting with
-one of these prefixes opens a completion menu:
+| Field        | Value                                                                                                    |
+| ------------ | --------------------------------------------------------------------------------------------------------- |
+| Config key   | `create-jira-issue-from-template`                                                                          |
+| Display name | Create JIRA issue from template                                                                            |
+| Default key  | none (open it via the command palette, `Ctrl-Q`, or bind `key.create-jira-issue-from-template=<spec>`)    |
+| Category     | tools                                                                                                      |
 
-| Prefix        | Matches                                                                                                                                                                                                       |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@`           | note **links** — real link targets from the vault's `note_links` table (same source and helper, `crate::jira::notes_link_matches`, as the Notes (`@`) prefix mode's own Tab completion), candidate `[[link]]` |
-| `[[`          | same as `@` — link completion, for the user who typed the literal wiki-link brackets instead of the `@` shorthand                                                                                             |
-| `#`           | note **tags** — real tag names from the vault's `note_tags` table (`crate::jira::notes_tag_matches`), candidate `#tag`                                                                                        |
-| `@p:`         | notes with frontmatter `type: project`, candidate `[[basename]]`                                                                                                                                              |
-| `@e:`         | notes with frontmatter `type: people`, candidate `[[basename]]`                                                                                                                                               |
-| `@d:`         | notes created today (frontmatter `created:` date), candidate `[[basename]]`                                                                                                                                   |
-| `@7:` / `@w:` | notes created in the last 7 days (today and the 6 days before it — a rolling window, not the previous calendar week), candidate `[[basename]]`                                                                |
-| `@n:`         | all notes, candidate `[[basename]]`                                                                                                                                                                           |
+Opens a picker listing the markdown files under
+`~/.config/smarthistory/templates/jira/` (arrow keys to move, `Enter` to pick,
+`Esc`/`Ctrl-C` to cancel — no search/filter). Selecting one opens the same
+dialog `CreateJiraIssue` does, pre-filled with the template's
+frontmatter-defined fields in addition to the usual fields. Refuses to open
+(status message) under the same conditions `CreateJiraIssue` does (JIRA not
+configured, no selectable projects), plus when the templates directory is
+missing or has no `.md` files in it.
 
-`@`/`[[`/`#` require at least one character typed after the prefix (an empty
-prefix returns no candidates, same as the Notes (`@`) prefix mode's query
-input); the `@p:`/`@e:`/`@d:`/`@7:`/`@w:`/`@n:` variants list every match with
-no text typed. Typed text after any prefix narrows the candidates by a
-case-insensitive prefix match, live — while the menu is open, printable
-characters and `Backspace` keep filtering the list instead of being swallowed. A
-single match is inserted directly (no menu to confirm). Navigate a multi-match
-menu with `Up`/`Down`, `Tab`/`Shift-Tab` (`BackTab`), `Home`/`End`; `Enter`
-commits the selected candidate, `Esc` dismisses the menu (keeping whatever was
-typed) without closing the dialog.
+**Template file format** — a markdown file with a YAML frontmatter block
+followed by the Description body:
 
-`Ctrl-D` / `Ctrl-N` / `Ctrl-7` are one-keystroke shortcuts for `@d:` / `@n:` /
-`@7:` — same as typing the prefix and pressing `Tab`. (`Ctrl-W` was the natural
-mnemonic for "last 7 days" but was already taken by delete-word-backward, so
-`Ctrl-7` is used instead.)
+```markdown
+---
+project: ENG
+labels:
+- project
+- test
+cf[11601]: "Team ComS"
+summary: SUMMARY
+assigne: "HAR"
+---
+Description Content
+```
 
-A no-op (dialog stays open, status message) when both fields are
-empty/whitespace-only, or when `notes.database` / `notes.dir` aren't configured.
+Each frontmatter key is classified into one of four buckets:
+
+| Key                                       | Meaning                                                                                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `project`, `issuetype`, `summary`, `labels` | Sets that standard field's starting value (Project/Issue Type only when the value matches an entry in the configured selector list). |
+| `cf[<digits>]` (e.g. `cf[11601]`)          | A real JIRA custom field (`customfield_<digits>`) — becomes an editable dialog field, sent as-is on submit.                          |
+| `created`, `updated`                        | Reserved — silently dropped, never shown (metadata this note-tooling format stamps automatically).                                    |
+| anything else (e.g. `assigne`)              | A "parameter" field — editable, but its value is folded into Description as a prepended `**name:** value` line on submit, rather than sent as a JIRA field. |
+
+Only scalar values (optionally `"`-quoted) and flat block sequences
+(`key:` then indented `- item` lines, e.g. `labels:` above) are supported —
+this is a minimal, purpose-built frontmatter reader, not a general YAML
+parser.
+
+Extra fields (`cf[...]`/parameter) render between Labels and Description, so
+Description always stays last regardless of how many a template defines.
+
+**Precedence when a row is selected**: the row-based prefill (note content,
+or a source JIRA issue's summary/description/labels) always wins over a
+template's `summary:`/`labels:`/body for Subject/Labels/Description — the
+template's values for those three only apply as the fallback (the same case
+`CreateJiraIssue` would otherwise leave blank). `project:`/`issuetype:` and
+every `cf[...]`/parameter field always apply regardless of row selection.
 
 ---
 

@@ -3555,6 +3555,7 @@ tmuxpaneoutputdir=~/custom-tmux
             _summary: &str,
             _description: &str,
             _labels: &[String],
+            _custom_fields: &[(String, String)],
         ) -> Result<String, crate::jira::JiraError> {
             Ok("PROJ-1".to_string())
         }

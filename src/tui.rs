@@ -1897,6 +1897,12 @@ pub(crate) struct App {
     /// Whether the prefill fetch above is currently in flight.
     jira_prefill_fetch_in_flight: bool,
 
+    /// The "create JIRA issue from template" picker
+    /// (`Action::CreateJiraIssueFromTemplate`), when open. `None`
+    /// otherwise. Selecting an entry opens `create_jira_issue_dialog`
+    /// (above) via `open_create_jira_issue_dialog_from_template`.
+    jira_template_picker: Option<crate::tui::state::JiraTemplatePicker>,
+
     /// Per-pane `last_touched` map (Unix
     /// epoch seconds, keyed by `pane_id`).
     /// Populated from the session file at
@@ -5069,6 +5075,7 @@ impl App {
             create_jira_issue_in_flight: false,
             jira_prefill_fetch_request: None,
             jira_prefill_fetch_in_flight: false,
+            jira_template_picker: None,
             smart_open_file_commands,
             tags_source_cache: std::collections::HashMap::new(),
             // Per-pane `last_touched` map.
@@ -9107,21 +9114,41 @@ impl App {
             );
             return;
         }
-        let mut fields = vec![
-            crate::tui::state::DialogField::new("Subject", "", false, "Short summary"),
-            crate::tui::state::DialogField::new(
-                "Description",
-                "",
-                false,
-                "What's this issue about?",
-            ),
-            crate::tui::state::DialogField::new(
-                "Labels",
-                "",
-                false,
-                "comma-separated, e.g. backend, urgent",
-            ),
-        ];
+        let (subject, description, labels, source_key, prefill_loading) = self
+            .jira_dialog_row_prefill(String::new(), String::new(), String::new());
+        self.open_create_jira_issue_dialog_with(
+            config,
+            subject,
+            description,
+            labels,
+            0,
+            0,
+            Vec::new(),
+            Vec::new(),
+            source_key,
+            prefill_loading,
+        );
+    }
+
+    /// Pre-fill (subject, description, labels, source_key,
+    /// prefill_loading) from the currently-selected row — extracted from
+    /// `open_create_jira_issue_dialog` so
+    /// `open_create_jira_issue_dialog_from_template` can reuse the
+    /// identical row-prefill logic, just seeded with different starting
+    /// defaults for the "nothing selected / non-note/jira row" fallback
+    /// case (a template's own `summary:`/`labels:`/body, instead of
+    /// always empty). Per the confirmed design, row-based prefill always
+    /// wins over a template's values when a note/JIRA row IS selected —
+    /// the `defaults` are only ever used in the `_ => {}` fallback below.
+    fn jira_dialog_row_prefill(
+        &mut self,
+        subject_default: String,
+        description_default: String,
+        labels_default: String,
+    ) -> (String, String, String, Option<String>, bool) {
+        let mut subject = subject_default;
+        let mut description = description_default;
+        let mut labels = labels_default;
         let mut source_key = None;
         let mut prefill_loading = false;
         // Pre-fill differently depending on what's selected — same
@@ -9133,8 +9160,7 @@ impl App {
                 "note" => {
                     let content = self.read_note_preview(&row.command);
                     let name = row.command.strip_suffix(".md").unwrap_or(&row.command);
-                    fields[0].value = name.to_string();
-                    fields[0].cursor = fields[0].value.chars().count();
+                    subject = name.to_string();
                     // Tags are extracted from the FULL content (including
                     // frontmatter) — a note's `type:`/other frontmatter
                     // fields are a common place for `#tags` to live (see
@@ -9143,10 +9169,8 @@ impl App {
                     // block below — JIRA has no use for a note's metadata
                     // header, just its body.
                     let (_, tags) = crate::tui::state::extract_links_and_tags(&content);
-                    fields[2].value = tags.join(", ");
-                    fields[2].cursor = fields[2].value.chars().count();
-                    fields[1].value = strip_note_frontmatter(&content);
-                    fields[1].cursor = fields[1].value.chars().count();
+                    labels = tags.join(", ");
+                    description = strip_note_frontmatter(&content);
                 }
                 "jira" => {
                     // `row`'s cached data doesn't carry labels at
@@ -9163,23 +9187,60 @@ impl App {
                     // fetch kicked off below, which returns a full
                     // `JiraIssue` (search already requests
                     // `description,labels`).
-                    fields[0].value = row.comment.clone();
-                    fields[0].cursor = fields[0].value.chars().count();
-                    fields[1].value =
-                        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER.to_string();
-                    fields[1].cursor = fields[1].value.chars().count();
+                    subject = row.comment.clone();
+                    description = crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER.to_string();
                     source_key = Some(row.command.clone());
                     prefill_loading = true;
                 }
                 _ => {}
             }
         }
+        (subject, description, labels, source_key, prefill_loading)
+    }
+
+    /// Shared dialog-construction tail for `open_create_jira_issue_dialog`
+    /// and `open_create_jira_issue_dialog_from_template` — builds the
+    /// `CreateJiraIssueDialog`, stores it, and kicks off the async JIRA-row
+    /// prefill fetch if `source_key` is `Some`.
+    #[allow(clippy::too_many_arguments)]
+    fn open_create_jira_issue_dialog_with(
+        &mut self,
+        config: crate::jira::JiraConfig,
+        subject: String,
+        description: String,
+        labels: String,
+        project_index: usize,
+        issue_type_index: usize,
+        extra_fields: Vec<crate::tui::state::DialogField>,
+        extra_field_kinds: Vec<crate::tui::state::ExtraFieldKind>,
+        source_key: Option<String>,
+        prefill_loading: bool,
+    ) {
+        let fields = vec![
+            crate::tui::state::DialogField::prefilled("Subject", "", false, "Short summary", subject),
+            crate::tui::state::DialogField::prefilled(
+                "Description",
+                "",
+                false,
+                "What's this issue about?",
+                description,
+            ),
+            crate::tui::state::DialogField::prefilled(
+                "Labels",
+                "",
+                false,
+                "comma-separated, e.g. backend, urgent",
+                labels,
+            ),
+        ];
         self.create_jira_issue_dialog = Some(crate::tui::state::CreateJiraIssueDialog {
             fields,
+            extra_fields,
+            extra_field_kinds,
             projects: config.available_projects.clone(),
-            project_index: 0,
+            project_index,
             issue_types: config.available_issue_types.clone(),
-            issue_type_index: 0,
+            issue_type_index,
             focused: crate::tui::state::CreateJiraIssueFocus::IssueType,
             source_key: source_key.clone(),
             prefill_loading,
@@ -9248,6 +9309,152 @@ impl App {
         self.create_jira_issue_dialog = None;
     }
 
+    /// Open the "create JIRA issue from template" picker
+    /// (`Action::CreateJiraIssueFromTemplate`) — lists the markdown files
+    /// under `jira_templates_dir()`. Selecting one opens the same
+    /// create-issue dialog `open_create_jira_issue_dialog` does, via
+    /// `open_create_jira_issue_dialog_from_template`.
+    ///
+    /// Refuses to open (status message only) when JIRA isn't configured
+    /// or has no selectable projects — same early gates
+    /// `open_create_jira_issue_dialog` has, checked here too so the user
+    /// isn't asked to pick a template only to be told afterward that the
+    /// dialog itself can't open — and when the templates directory is
+    /// missing or has no `.md` files in it.
+    fn open_jira_template_picker(&mut self) {
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            return;
+        };
+        if config.available_projects.is_empty() {
+            self.set_status_message(
+                "no JIRA projects configured — set JIRA_AVAILABLE_PROJECTS or JIRA_PROJECT"
+                    .to_string(),
+            );
+            return;
+        }
+        let Some(dir) = jira_templates_dir() else {
+            self.set_status_message("no JIRA templates found — $HOME is unset".to_string());
+            return;
+        };
+        let mut entries: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md") && path.is_file())
+            .filter_map(|path| {
+                let name = path.file_stem()?.to_string_lossy().to_string();
+                Some((name, path))
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        if entries.is_empty() {
+            self.set_status_message(format!(
+                "no JIRA templates found — add markdown files to {}",
+                dir.display()
+            ));
+            return;
+        }
+        self.jira_template_picker =
+            Some(crate::tui::state::JiraTemplatePicker { entries, selected: 0 });
+    }
+
+    /// Open the "create JIRA issue" dialog pre-filled from `path` (a
+    /// template file chosen in the picker), closing the picker. Mirrors
+    /// `open_create_jira_issue_dialog`'s own gates/shape — see
+    /// `open_create_jira_issue_dialog_with` for the shared tail both
+    /// call.
+    fn open_create_jira_issue_dialog_from_template(&mut self, path: &std::path::Path) {
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            return;
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_status_message(format!(
+                    "couldn't read template {}: {}",
+                    path.display(),
+                    e
+                ));
+                return;
+            }
+        };
+        let (pairs, body) = crate::tui::mode::jira::parse_jira_template(&content);
+
+        let mut project_index = 0;
+        let mut issue_type_index = 0;
+        let mut subject_default = String::new();
+        let mut labels_default = String::new();
+        let mut extra_fields: Vec<crate::tui::state::DialogField> = Vec::new();
+        let mut extra_field_kinds: Vec<crate::tui::state::ExtraFieldKind> = Vec::new();
+        for (key, value) in pairs {
+            use crate::tui::mode::jira::TemplateFieldKind;
+            match crate::tui::mode::jira::classify_template_key(&key) {
+                TemplateFieldKind::Reserved => {}
+                TemplateFieldKind::StandardProject => {
+                    if let Some(i) = config.available_projects.iter().position(|p| *p == value.as_display_string()) {
+                        project_index = i;
+                    }
+                }
+                TemplateFieldKind::StandardIssueType => {
+                    if let Some(i) = config.available_issue_types.iter().position(|t| *t == value.as_display_string()) {
+                        issue_type_index = i;
+                    }
+                }
+                TemplateFieldKind::StandardSummary => {
+                    subject_default = value.as_display_string();
+                }
+                TemplateFieldKind::StandardLabels => {
+                    labels_default = value.as_display_string();
+                }
+                TemplateFieldKind::CustomField(id) => {
+                    extra_fields.push(crate::tui::state::DialogField::prefilled(
+                        leak_field_name(&key),
+                        "",
+                        false,
+                        "",
+                        value.as_display_string(),
+                    ));
+                    extra_field_kinds.push(crate::tui::state::ExtraFieldKind::CustomField(id));
+                }
+                TemplateFieldKind::Parameter => {
+                    extra_fields.push(crate::tui::state::DialogField::prefilled(
+                        leak_field_name(&key),
+                        "",
+                        false,
+                        "",
+                        value.as_display_string(),
+                    ));
+                    extra_field_kinds.push(crate::tui::state::ExtraFieldKind::Parameter);
+                }
+            }
+        }
+
+        // Row-based prefill always wins over the template's own
+        // summary:/labels:/body for Subject/Labels/Description when a
+        // note/JIRA row is selected — the template's values only apply
+        // as the fallback (same case the plain action would otherwise
+        // leave blank). See `jira_dialog_row_prefill`'s doc comment.
+        let (subject, description, labels, source_key, prefill_loading) =
+            self.jira_dialog_row_prefill(subject_default, body, labels_default);
+
+        self.jira_template_picker = None;
+        self.open_create_jira_issue_dialog_with(
+            config,
+            subject,
+            description,
+            labels,
+            project_index,
+            issue_type_index,
+            extra_fields,
+            extra_field_kinds,
+            source_key,
+            prefill_loading,
+        );
+    }
+
     /// Validate and submit the "create JIRA issue" dialog (`Ctrl-S`).
     /// Mirrors `save_comment_edit`'s JIRA branch: a test-seam sync
     /// path when `self.jira_client` is set, else `JiraConfig::from_env()`
@@ -9269,7 +9476,6 @@ impl App {
         }
         let project = dialog.projects[dialog.project_index].clone();
         let issuetype = dialog.issue_types[dialog.issue_type_index].clone();
-        let description = dialog.fields[1].value.clone();
         let labels: Vec<String> = dialog.fields[2]
             .value
             .split(|c: char| c == ',' || c.is_whitespace())
@@ -9278,8 +9484,36 @@ impl App {
             .collect();
         let source_key = dialog.source_key.clone();
 
+        // Extra template fields: a non-empty `CustomField` value is sent
+        // as a real JIRA field on create; a non-empty `Parameter` value
+        // is rendered as a "**name:** value" line and prepended to
+        // Description (blank-line separated from the template body) —
+        // see `ExtraFieldKind`'s doc comment for why these two buckets
+        // are handled differently.
+        let mut custom_fields: Vec<(String, String)> = Vec::new();
+        let mut param_lines: Vec<String> = Vec::new();
+        for (field, kind) in dialog.extra_fields.iter().zip(dialog.extra_field_kinds.iter()) {
+            let value = field.value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match kind {
+                crate::tui::state::ExtraFieldKind::CustomField(id) => {
+                    custom_fields.push((id.clone(), value.to_string()));
+                }
+                crate::tui::state::ExtraFieldKind::Parameter => {
+                    param_lines.push(format!("**{}:** {}", field.name, value));
+                }
+            }
+        }
+        let description = if param_lines.is_empty() {
+            dialog.fields[1].value.clone()
+        } else {
+            format!("{}\n\n{}", param_lines.join("\n"), dialog.fields[1].value)
+        };
+
         if let Some(client) = self.jira_client.clone() {
-            let result = crate::tui::mode::jira::create_and_maybe_link(client.as_ref(), &project, &issuetype, &subject, &description, &labels, source_key.as_deref());
+            let result = crate::tui::mode::jira::create_and_maybe_link(client.as_ref(), &project, &issuetype, &subject, &description, &labels, &custom_fields, source_key.as_deref());
             let request = crate::tui::mode::jira::JiraCreateIssueRequest {
                 receiver: mpsc::channel().1,
                 cancelled: Arc::new(AtomicBool::new(false)),
@@ -9300,7 +9534,7 @@ impl App {
         let cancelled_clone = cancelled.clone();
         std::thread::spawn(move || {
             let client = crate::jira::RestJiraClient::new(config);
-            let result = crate::tui::mode::jira::create_and_maybe_link(&client, &project, &issuetype, &subject, &description, &labels, source_key.as_deref());
+            let result = crate::tui::mode::jira::create_and_maybe_link(&client, &project, &issuetype, &subject, &description, &labels, &custom_fields, source_key.as_deref());
             if !cancelled_clone.load(Ordering::Relaxed) {
                 let _ = tx.send(result);
             }
@@ -12539,6 +12773,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_create_jira_issue_dialog_key(app, key);
     }
 
+    // The "create JIRA issue from template" picker — same precedence as
+    // the dialog it opens.
+    if app.jira_template_picker.is_some() {
+        return handle_jira_template_picker_key(app, key);
+    }
+
     // The note/todo compose overlay is a sibling of the
     // add-entry dialog: it also takes precedence over action
     // dispatch so printable characters (AND `Enter`, which
@@ -13027,6 +13267,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CreateJiraIssue => {
             app.open_create_jira_issue_dialog();
+            false
+        }
+        Action::CreateJiraIssueFromTemplate => {
+            app.open_jira_template_picker();
             false
         }
         Action::FilterPanesWindows => {
@@ -15539,6 +15783,46 @@ fn handle_add_entry_dialog_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Key handling for the "create JIRA issue from template" picker.
+/// Deliberately minimal (no search/filter, unlike `handle_theme_picker_key`)
+/// — `Up`/`Down` move the selection, `Enter` opens the create-issue
+/// dialog pre-filled from the selected template, `Esc`/`Ctrl-C` close the
+/// picker without opening anything (`Ctrl-C` additionally quits the TUI,
+/// matching every other overlay's panic-button convention).
+fn handle_jira_template_picker_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.jira_template_picker = None;
+        app.cancelled = true;
+        return true;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.jira_template_picker = None;
+            false
+        }
+        KeyCode::Up => {
+            if let Some(picker) = app.jira_template_picker.as_mut() {
+                picker.move_by(-1);
+            }
+            false
+        }
+        KeyCode::Down => {
+            if let Some(picker) = app.jira_template_picker.as_mut() {
+                picker.move_by(1);
+            }
+            false
+        }
+        KeyCode::Enter => {
+            if let Some((_, path)) = app.jira_template_picker.as_ref().and_then(|p| p.current()) {
+                let path = path.clone();
+                app.open_create_jira_issue_dialog_from_template(&path);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Key handling for the "create JIRA issue" dialog. Same generic
 /// text-editing primitives as `handle_add_entry_dialog_key`
 /// (Backspace/Ctrl-U/Ctrl-W/Left/Right/Home/End/insert-char) for
@@ -15791,6 +16075,36 @@ fn strip_note_frontmatter(content: &str) -> String {
         body_lines.remove(0);
     }
     body_lines.join("\n")
+}
+
+/// Directory scanned by `App::open_jira_template_picker` for "create JIRA
+/// issue from template" template files:
+/// `$HOME/.config/smarthistory/templates/jira/`. Same `HOME`-based
+/// resolution `main::config_path()` uses for
+/// `~/.config/smarthistory/config` — a fixed path, not an env var.
+fn jira_templates_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("smarthistory")
+            .join("templates")
+            .join("jira"),
+    )
+}
+
+/// `DialogField::name` is `&'static str` — every existing dialog's field
+/// names are compile-time literals, so that's never been a problem
+/// before. A "create JIRA issue from template" extra field's name is a
+/// frontmatter key read at runtime, which can't naturally be `'static`.
+/// Leaking it (`Box::leak`) is the pragmatic fix here rather than
+/// widening `DialogField::name` to `String` everywhere it's used
+/// (`AddEntryDialog`'s fields included) for a single, bounded-in-practice
+/// caller: at most a handful of extra fields, leaked once per dialog
+/// open, for a TUI a human opens interactively — not a hot loop, and not
+/// unbounded growth.
+fn leak_field_name(key: &str) -> &'static str {
+    Box::leak(key.to_string().into_boxed_str())
 }
 
 /// Delete one word backward

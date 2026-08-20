@@ -75,6 +75,16 @@ version:
   issue gets a `Relates` link back to the selected one.
 - `Ctrl-S` submits, `Esc` cancels.
 
+### Creating from a template
+
+`Action::CreateJiraIssueFromTemplate` (unbound by default) opens a picker
+over the markdown files in `~/.config/smarthistory/templates/jira/`; picking
+one opens the same dialog above, pre-filled with the template's
+frontmatter-defined fields alongside the usual ones. Full format reference
+(the 4 frontmatter-key buckets, the precedence rule when a row is selected)
+is in
+[`docs/actions.md#createjiraissuefromtemplate`](../actions.md#createjiraissuefromtemplate).
+
 ## Special tokens
 
 The body is parsed by [`src/jira.rs`](../src/jira.rs) using a shared token

@@ -1181,51 +1181,95 @@ impl AddEntryDialog {
     }
 }
 
-/// The 5 focus positions of [`CreateJiraIssueDialog`], in display
-/// order. `IssueType`/`Project` are closed-set selectors (cycled
-/// with Left/Right, not typed); `Subject`/`Labels`/`Description` are
+/// The focus positions of [`CreateJiraIssueDialog`], in display order.
+/// `IssueType`/`Project` are closed-set selectors (cycled with
+/// Left/Right, not typed); `Subject`/`Labels`/`Description` are
 /// free-text `DialogField`s, indexed into
 /// `CreateJiraIssueDialog::fields` by `CreateJiraIssueFocus::field_index()`.
+/// `Extra(i)` is the `i`th "create JIRA issue from template" extra field
+/// (`CreateJiraIssueDialog::extra_fields`) — positioned between `Labels`
+/// and `Description` in Tab order, so `Description` (the base dialog's
+/// existing last variant) stays last regardless of how many extra fields
+/// a template contributes. `next`/`prev` take the current extra-field
+/// count since that's per-dialog-instance (a plain, template-less dialog
+/// has zero) — unlike the fixed 5-variant shape this replaces, the full
+/// sequence can no longer be a `const` lookup table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateJiraIssueFocus {
     IssueType,
     Project,
     Subject,
     Labels,
+    Extra(usize),
     Description,
 }
 
 impl CreateJiraIssueFocus {
-    /// All 5 positions, in display/Tab order.
-    const ALL: [CreateJiraIssueFocus; 5] = [
-        CreateJiraIssueFocus::IssueType,
-        CreateJiraIssueFocus::Project,
-        CreateJiraIssueFocus::Subject,
-        CreateJiraIssueFocus::Labels,
-        CreateJiraIssueFocus::Description,
-    ];
-
-    fn next(self) -> Self {
-        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
+    fn next(self, extra_count: usize) -> Self {
+        match self {
+            CreateJiraIssueFocus::IssueType => CreateJiraIssueFocus::Project,
+            CreateJiraIssueFocus::Project => CreateJiraIssueFocus::Subject,
+            CreateJiraIssueFocus::Subject => CreateJiraIssueFocus::Labels,
+            CreateJiraIssueFocus::Labels => {
+                if extra_count > 0 {
+                    CreateJiraIssueFocus::Extra(0)
+                } else {
+                    CreateJiraIssueFocus::Description
+                }
+            }
+            CreateJiraIssueFocus::Extra(i) if i + 1 < extra_count => {
+                CreateJiraIssueFocus::Extra(i + 1)
+            }
+            CreateJiraIssueFocus::Extra(_) => CreateJiraIssueFocus::Description,
+            CreateJiraIssueFocus::Description => CreateJiraIssueFocus::IssueType,
+        }
     }
 
-    fn prev(self) -> Self {
-        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    fn prev(self, extra_count: usize) -> Self {
+        match self {
+            CreateJiraIssueFocus::IssueType => CreateJiraIssueFocus::Description,
+            CreateJiraIssueFocus::Project => CreateJiraIssueFocus::IssueType,
+            CreateJiraIssueFocus::Subject => CreateJiraIssueFocus::Project,
+            CreateJiraIssueFocus::Labels => CreateJiraIssueFocus::Subject,
+            CreateJiraIssueFocus::Extra(0) => CreateJiraIssueFocus::Labels,
+            CreateJiraIssueFocus::Extra(i) => CreateJiraIssueFocus::Extra(i - 1),
+            CreateJiraIssueFocus::Description => {
+                if extra_count > 0 {
+                    CreateJiraIssueFocus::Extra(extra_count - 1)
+                } else {
+                    CreateJiraIssueFocus::Labels
+                }
+            }
+        }
     }
 
     /// The index into `CreateJiraIssueDialog::fields` this focus
     /// position corresponds to, or `None` for the two selectors
-    /// (`Project`/`IssueType`), which aren't `DialogField`s at all.
+    /// (`Project`/`IssueType`) and `Extra` (which indexes
+    /// `CreateJiraIssueDialog::extra_fields` instead — see
+    /// `CreateJiraIssueDialog::focused_field_mut`).
     fn field_index(self) -> Option<usize> {
         match self {
             CreateJiraIssueFocus::Subject => Some(0),
             CreateJiraIssueFocus::Description => Some(1),
             CreateJiraIssueFocus::Labels => Some(2),
-            CreateJiraIssueFocus::Project | CreateJiraIssueFocus::IssueType => None,
+            CreateJiraIssueFocus::Project
+            | CreateJiraIssueFocus::IssueType
+            | CreateJiraIssueFocus::Extra(_) => None,
         }
     }
+}
+
+/// What a `CreateJiraIssueDialog::extra_fields` entry means on submit —
+/// see `crate::tui::mode::jira::TemplateFieldKind` for the frontmatter
+/// classification this is built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtraFieldKind {
+    /// Sent as a real JIRA custom field (`fields.<id>`) on create.
+    CustomField(String),
+    /// Folded into Description as a prepended `**name:** value` line on
+    /// submit, rather than sent as its own JIRA API field.
+    Parameter,
 }
 
 /// State for the "create JIRA issue" dialog (`Action::CreateJiraIssue`).
@@ -1246,6 +1290,16 @@ pub struct CreateJiraIssueDialog {
     /// `DialogField::required`, since Project/`IssueType` — which
     /// also can't be blank — aren't `DialogField`s at all).
     pub fields: Vec<DialogField>,
+    /// Extra fields contributed by a "create JIRA issue from template"
+    /// template's frontmatter (`cf[<id>]` custom fields and generic
+    /// parameters — see `crate::tui::mode::jira::TemplateFieldKind`).
+    /// Empty for a plain (non-template) dialog. Parallel to
+    /// `extra_field_kinds`; rendered between Labels and Description
+    /// (`CreateJiraIssueFocus::Extra`).
+    pub extra_fields: Vec<DialogField>,
+    /// What each `extra_fields` entry means on submit — parallel to
+    /// `extra_fields` (same index).
+    pub extra_field_kinds: Vec<ExtraFieldKind>,
     /// From `JiraConfig::available_projects` at dialog-open time.
     /// Never empty — `open_create_jira_issue_dialog` refuses to
     /// open the dialog at all when this would be empty (nothing to
@@ -1274,11 +1328,11 @@ pub struct CreateJiraIssueDialog {
 
 impl CreateJiraIssueDialog {
     pub fn focus_next(&mut self) {
-        self.focused = self.focused.next();
+        self.focused = self.focused.next(self.extra_fields.len());
     }
 
     pub fn focus_prev(&mut self) {
-        self.focused = self.focused.prev();
+        self.focused = self.focused.prev(self.extra_fields.len());
     }
 
     /// Cycle the Project selector, wrapping. No-op when `focused`
@@ -1301,6 +1355,9 @@ impl CreateJiraIssueDialog {
     /// The `DialogField` the current focus points at, or `None` when
     /// a selector (Project/Issue Type) is focused.
     pub fn focused_field_mut(&mut self) -> Option<&mut DialogField> {
+        if let CreateJiraIssueFocus::Extra(i) = self.focused {
+            return self.extra_fields.get_mut(i);
+        }
         self.focused.field_index().and_then(|i| self.fields.get_mut(i))
     }
 }
@@ -1310,6 +1367,45 @@ fn cycle_index(current: usize, len: usize, forward: bool) -> usize {
         (current + 1) % len
     } else {
         (current + len - 1) % len
+    }
+}
+
+/// State for the "create JIRA issue from template" picker
+/// (`Action::CreateJiraIssueFromTemplate`) — pick one of the markdown
+/// files under `~/.config/smarthistory/templates/jira/`, opened by
+/// `App::open_jira_template_picker`. Deliberately minimal compared to
+/// `ThemePicker` (`src/tui/theme/picker.rs`) — no live search/filter,
+/// just an arrow-key list, since template counts are expected to be
+/// small; the shape otherwise mirrors it (a `Vec` snapshotted at
+/// picker-open time plus a clamped `selected` index).
+#[derive(Debug, Clone)]
+pub struct JiraTemplatePicker {
+    /// `(display name, file path)` pairs — display name is the
+    /// filename with `.md` stripped, sorted alphabetically. Snapshotted
+    /// once at picker-open time; adding/removing template files while
+    /// the picker is open isn't picked up until it's reopened.
+    pub entries: Vec<(String, std::path::PathBuf)>,
+    /// Always a valid index into `entries` (or `0` when `entries` is
+    /// empty — though `open_jira_template_picker` refuses to open the
+    /// picker at all in that case, so this shouldn't be observed).
+    pub selected: usize,
+}
+
+impl JiraTemplatePicker {
+    /// Move the selection by `delta`, clamped to `entries`' bounds.
+    pub fn move_by(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let n = self.entries.len() as isize;
+        let next = (self.selected as isize + delta).clamp(0, n - 1);
+        self.selected = next as usize;
+    }
+
+    /// The currently-selected entry, or `None` when `entries` is empty.
+    pub fn current(&self) -> Option<&(String, std::path::PathBuf)> {
+        self.entries.get(self.selected)
     }
 }
 

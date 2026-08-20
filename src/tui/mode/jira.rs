@@ -28,6 +28,167 @@ use std::sync::mpsc;
 /// started typing, so the fetch result is discarded instead.
 pub(crate) const JIRA_PREFILL_LOADING_PLACEHOLDER: &str = "(loading…)";
 
+/// A single frontmatter value from a "create JIRA issue from template"
+/// template file — either a plain scalar (`key: value`) or a YAML block
+/// sequence (`key:` followed by indented `- item` lines, e.g. `labels:`).
+/// `parse_jira_template` never produces any other shape — this is a
+/// deliberately minimal frontmatter reader, not a general YAML parser
+/// (see its doc comment for exactly what's supported).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FrontmatterValue {
+    Scalar(String),
+    List(Vec<String>),
+}
+
+impl FrontmatterValue {
+    /// Render as a single-line string, for feeding into a `DialogField`
+    /// or a standard field's starting value — a `List` is comma-joined,
+    /// matching the Labels field's own `", "`-separated convention.
+    pub(crate) fn as_display_string(&self) -> String {
+        match self {
+            FrontmatterValue::Scalar(s) => s.clone(),
+            FrontmatterValue::List(items) => items.join(", "),
+        }
+    }
+}
+
+/// Strip a leading `"..."`-quoted scalar down to its inner text; anything
+/// else (no quotes, or unbalanced) passes through trimmed and unchanged.
+fn unquote_scalar(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Parse a "create JIRA issue from template" file: a leading YAML
+/// frontmatter block (`---` / `---`) of `key: value` pairs, in
+/// declaration order, followed by the markdown body (the Description
+/// default). Deliberately minimal — no new YAML-parsing dependency,
+/// since the format this feature needs is simple: scalar values
+/// (optionally `"`-quoted) and flat block sequences (`key:` then
+/// indented `- item` lines) are the only two shapes supported. Nested
+/// maps, flow sequences (`[a, b]`), anchors, and multi-line scalars
+/// are NOT supported — a template using them will just have those
+/// specific lines silently dropped (no `:` on the continuation lines
+/// means `split_once(':')` finds nothing to parse).
+///
+/// Falls back to `(vec![], content)` — the whole file as the body, no
+/// fields — when the file doesn't start with a `---` line or the
+/// frontmatter block is never closed, the same "degrade gracefully
+/// rather than lose content" fallback `strip_note_frontmatter` (in
+/// `src/tui.rs`) uses for the unrelated note-prefill path. That
+/// function isn't reused here (different contract — this one also
+/// needs the parsed pairs, not just the body).
+pub(crate) fn parse_jira_template(content: &str) -> (Vec<(String, FrontmatterValue)>, String) {
+    let mut lines = content.lines().peekable();
+    let Some(first) = lines.next() else {
+        return (Vec::new(), content.to_string());
+    };
+    if first.trim_end() != "---" {
+        return (Vec::new(), content.to_string());
+    }
+    let mut pairs: Vec<(String, FrontmatterValue)> = Vec::new();
+    let mut closed = false;
+    while let Some(line) = lines.next() {
+        if line.trim_end() == "---" {
+            closed = true;
+            break;
+        }
+        let Some((key, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_string();
+        let rest = rest.trim();
+        if rest.is_empty() {
+            // Possibly a block sequence: consume any immediately-following
+            // `- item` lines as this key's value.
+            let mut items: Vec<String> = Vec::new();
+            while let Some(next) = lines.peek() {
+                let trimmed = next.trim_start();
+                let Some(item) = trimmed.strip_prefix("- ").or_else(|| {
+                    (trimmed == "-").then_some("")
+                }) else {
+                    break;
+                };
+                items.push(unquote_scalar(item));
+                lines.next();
+            }
+            if items.is_empty() {
+                pairs.push((key, FrontmatterValue::Scalar(String::new())));
+            } else {
+                pairs.push((key, FrontmatterValue::List(items)));
+            }
+        } else {
+            pairs.push((key, FrontmatterValue::Scalar(unquote_scalar(rest))));
+        }
+    }
+    if !closed {
+        return (Vec::new(), content.to_string());
+    }
+    let body: String = lines.collect::<Vec<_>>().join("\n");
+    let body = body.trim_start_matches('\n');
+    (pairs, body.to_string())
+}
+
+/// What a "create JIRA issue from template" frontmatter key means for
+/// the dialog. See `parse_jira_template`'s doc comment for the file
+/// format; this classifies each parsed key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TemplateFieldKind {
+    /// `project:` — sets the Project selector's starting value (only
+    /// applied when the value is found in `JiraConfig::available_projects`
+    /// — an unrecognized value is silently left at the default, same
+    /// "closed set, no invalid selection possible" rule the selector
+    /// itself already enforces).
+    StandardProject,
+    /// `issuetype:` — same as `StandardProject`, for Issue Type.
+    StandardIssueType,
+    /// `summary:` — a fallback default for Subject, applied only when
+    /// there's no row-based prefill to take precedence (see
+    /// `App::jira_dialog_row_prefill`).
+    StandardSummary,
+    /// `labels:` — same as `StandardSummary`, for Labels.
+    StandardLabels,
+    /// `created`/`updated` — metadata this note-tooling format stamps
+    /// automatically on every file (frontmatter or not); never shown as
+    /// an editable field.
+    Reserved,
+    /// `cf[<digits>]` — a literal JIRA custom-field id
+    /// (`customfield_<digits>`). Becomes an editable dialog field whose
+    /// value is sent as a real custom field on submit.
+    CustomField(String),
+    /// Anything else — a freely-editable "parameter" field whose value
+    /// is folded into the Description text (as a prepended
+    /// `**name:** value` line) on submit, rather than sent as a
+    /// distinct JIRA API field.
+    Parameter,
+}
+
+/// Classify a single frontmatter key — see `TemplateFieldKind`'s variants
+/// for what each bucket means downstream.
+pub(crate) fn classify_template_key(key: &str) -> TemplateFieldKind {
+    match key {
+        "created" | "updated" => TemplateFieldKind::Reserved,
+        "project" => TemplateFieldKind::StandardProject,
+        "issuetype" => TemplateFieldKind::StandardIssueType,
+        "summary" => TemplateFieldKind::StandardSummary,
+        "labels" => TemplateFieldKind::StandardLabels,
+        _ => {
+            if let Some(id) = key.strip_prefix("cf[").and_then(|s| s.strip_suffix(']'))
+                && !id.is_empty()
+                && id.chars().all(|c| c.is_ascii_digit())
+            {
+                TemplateFieldKind::CustomField(format!("customfield_{id}"))
+            } else {
+                TemplateFieldKind::Parameter
+            }
+        }
+    }
+}
+
 /// Whether the query is a JIRA issue-search request:
 /// the query starts with the jira prefix (`-` by
 /// default). The body is parsed into a JQL query by
@@ -322,9 +483,11 @@ pub(crate) fn create_and_maybe_link(
     summary: &str,
     description: &str,
     labels: &[String],
+    custom_fields: &[(String, String)],
     source_key: Option<&str>,
 ) -> Result<CreateJiraIssueOutcome, crate::jira::JiraError> {
-    let new_key = client.create_issue(project, issuetype, summary, description, labels)?;
+    let new_key =
+        client.create_issue(project, issuetype, summary, description, labels, custom_fields)?;
     let link_warning = match source_key {
         Some(source_key) => client
             .link_issues(&new_key, source_key, "Relates")

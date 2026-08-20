@@ -170,6 +170,13 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_create_jira_issue_dialog(f, dialog);
     }
 
+    // The "create JIRA issue from template" picker is a sibling of the
+    // dialog it opens: also drawn last, mutually exclusive with it (the
+    // picker closes itself before the dialog opens).
+    if let Some(picker) = app.jira_template_picker.as_ref() {
+        draw_jira_template_picker(f, picker);
+    }
+
     // The note/todo compose overlay is a sibling of the
     // add-entry dialog: also drawn last (topmost). The two are
     // mutually exclusive in practice (each opens via its own
@@ -1468,6 +1475,29 @@ fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: 
     Line::from(spans)
 }
 
+/// The "create JIRA issue from template" picker — a plain arrow-key list
+/// (no search/filter, unlike `draw_theme_picker`; see
+/// `JiraTemplatePicker`'s doc comment for why).
+fn draw_jira_template_picker(f: &mut Frame, picker: &crate::tui::state::JiraTemplatePicker) {
+    use ratatui::widgets::{List, ListItem};
+
+    let inner = overlay(f, " Create JIRA issue from template — ↑/↓ select, Enter open, Esc cancel ", 50, 60);
+
+    let items: Vec<ListItem> = picker
+        .entries
+        .iter()
+        .map(|(name, _)| ListItem::new(name.as_str()))
+        .collect();
+    let highlight_style = Style::default()
+        .bg(Theme::selection_color())
+        .add_modifier(Modifier::BOLD);
+    let mut list_state = ratatui::widgets::ListState::default().with_selected(Some(picker.selected));
+    let list = List::new(items)
+        .highlight_style(highlight_style)
+        .highlight_symbol("▌");
+    f.render_stateful_widget(list, inner, &mut list_state);
+}
+
 /// Render a Project/Issue Type selector row: `<name>: ◂ value ▸`.
 fn selector_line<'a>(name: &'a str, value: &'a str, is_focused: bool) -> Line<'a> {
     let style = if is_focused { Theme::highlight() } else { Style::default() };
@@ -1507,18 +1537,25 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let extra_count = dialog.extra_fields.len();
     let mut constraints = vec![
         Constraint::Length(1), // Issue Type
         Constraint::Length(1), // Project
         Constraint::Length(1), // Subject
         Constraint::Length(1), // Labels
-        Constraint::Fill(1),   // Description
     ];
+    for _ in 0..extra_count {
+        constraints.push(Constraint::Length(1)); // one row per template extra field
+    }
+    constraints.push(Constraint::Fill(1)); // Description — always last
     if has_error {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(1)); // footer
     let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
+    // Description's chunk index shifts by however many extra fields a
+    // template contributed (rendered between Labels and Description).
+    let desc_idx = 4 + extra_count;
 
     f.render_widget(
         Paragraph::new(selector_line(
@@ -1544,6 +1581,12 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         Paragraph::new(dialog_field_line(&dialog.fields[2], dialog.focused == CreateJiraIssueFocus::Labels)),
         chunks[3],
     );
+    for (i, field) in dialog.extra_fields.iter().enumerate() {
+        f.render_widget(
+            Paragraph::new(dialog_field_line(field, dialog.focused == CreateJiraIssueFocus::Extra(i))),
+            chunks[4 + i],
+        );
+    }
 
     // Description: multi-line, word-wrapped, with the same
     // bottom-anchored auto-scroll `draw_note_create`'s Content field
@@ -1571,7 +1614,7 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         // Unlike `draw_note_create`'s Content field, this chunk has no
         // border of its own (it's a plain slice of the outer dialog's
         // already-bordered inner area) — no `-2` padding needed.
-        let inner_width_desc = chunks[4].width.max(1) as usize;
+        let inner_width_desc = chunks[desc_idx].width.max(1) as usize;
         let line_chars: Vec<Vec<char>> =
             desc_field.value.split('\n').map(|l| l.chars().collect()).collect();
         let wrapped_lines: Vec<Vec<(String, usize)>> =
@@ -1622,17 +1665,17 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
             let cursor_display_row: usize = 1
                 + wrapped_lines[..cursor_line].iter().map(|rows| rows.len()).sum::<usize>()
                 + cursor_row_in_line;
-            let inner_height_desc = chunks[4].height.max(1) as usize;
+            let inner_height_desc = chunks[desc_idx].height.max(1) as usize;
             scroll_y_desc =
                 cursor_display_row.saturating_sub(inner_height_desc.saturating_sub(1)) as u16;
         }
     }
     f.render_widget(
         Paragraph::new(desc_lines).scroll((scroll_y_desc, 0)),
-        chunks[4],
+        chunks[desc_idx],
     );
 
-    let mut next_idx = 5;
+    let mut next_idx = desc_idx + 1;
     if let Some(err) = &dialog.error {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(err.clone(), Theme::error()))),
