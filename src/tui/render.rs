@@ -1551,10 +1551,10 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     // long pre-filled body (a note's full content, or a JIRA issue's
     // description) can actually be scrolled to and edited throughout,
     // not just typed into invisibly off-screen at whatever the cursor
-    // happens to sit at. Still no rendered cursor glyph — same as
-    // `draw_note_create`'s Content field — focus/edit position is
-    // conveyed by the label's highlight color plus the scroll
-    // tracking the cursor's line, not a literal glyph.
+    // happens to sit at. The cursor's own wrapped row gets a rendered
+    // glyph (same reversed-character/reversed-space convention
+    // `dialog_field_line` uses for the single-line fields above) —
+    // every other row renders as plain text.
     let desc_focused = dialog.focused == CreateJiraIssueFocus::Description;
     let desc_label_style = (if desc_focused { Theme::highlight() } else { Style::default() })
         .add_modifier(Modifier::BOLD);
@@ -1576,18 +1576,48 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
             desc_field.value.split('\n').map(|l| l.chars().collect()).collect();
         let wrapped_lines: Vec<Vec<(String, usize)>> =
             line_chars.iter().map(|chars| wrap_chars_to_rows(chars, inner_width_desc)).collect();
-        for rows in &wrapped_lines {
-            for (text, _) in rows {
-                desc_lines.push(Line::from(text.clone()));
+
+        // Cursor's logical (line, col), plus its position within that
+        // line's wrapped rows — computed up front (before building
+        // `desc_lines`) so the row-building loop below knows which
+        // single row to render with a cursor glyph instead of plain
+        // text.
+        let cursor_byte = char_to_byte_index(&desc_field.value, desc_field.cursor);
+        let before_cursor = &desc_field.value[..cursor_byte];
+        let cursor_line = before_cursor.matches('\n').count();
+        let cursor_col = before_cursor.rsplit('\n').next().unwrap_or("").chars().count();
+        let (cursor_row_in_line, cursor_col_in_row) =
+            content_display_position(&wrapped_lines[cursor_line], cursor_col);
+
+        for (line_idx, rows) in wrapped_lines.iter().enumerate() {
+            for (row_idx, (text, _)) in rows.iter().enumerate() {
+                if desc_focused && line_idx == cursor_line && row_idx == cursor_row_in_line {
+                    let chars: Vec<char> = text.chars().collect();
+                    let pre: String = chars.iter().take(cursor_col_in_row).collect();
+                    let mut spans = vec![Span::raw(pre)];
+                    if cursor_col_in_row < chars.len() {
+                        spans.push(Span::styled(
+                            chars[cursor_col_in_row].to_string(),
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        ));
+                        let post: String = chars.iter().skip(cursor_col_in_row + 1).collect();
+                        if !post.is_empty() {
+                            spans.push(Span::raw(post));
+                        }
+                    } else {
+                        spans.push(Span::styled(
+                            " ",
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        ));
+                    }
+                    desc_lines.push(Line::from(spans));
+                } else {
+                    desc_lines.push(Line::from(text.clone()));
+                }
             }
         }
+
         if desc_focused {
-            let cursor_byte = char_to_byte_index(&desc_field.value, desc_field.cursor);
-            let before_cursor = &desc_field.value[..cursor_byte];
-            let cursor_line = before_cursor.matches('\n').count();
-            let cursor_col = before_cursor.rsplit('\n').next().unwrap_or("").chars().count();
-            let (cursor_row_in_line, _) =
-                content_display_position(&wrapped_lines[cursor_line], cursor_col);
             // +1 for the "Description: " label row always at the top.
             let cursor_display_row: usize = 1
                 + wrapped_lines[..cursor_line].iter().map(|rows| rows.len()).sum::<usize>()

@@ -30253,3 +30253,47 @@ fn create_jira_issue_dialog_up_down_noop_outside_description() {
     );
 }
 
+/// The Description field renders an actual reversed-video cursor
+/// glyph on the character it sits on, at the correct row within a
+/// multi-line body — not just an auto-scroll to the right line.
+/// Since `dialog_field_line` only ever reverses the cursor of the
+/// FOCUSED field, and no other field is focused here, this is the
+/// only source of a reversed cell in the whole dialog: a clean signal
+/// this is exercising the new cursor-glyph code, not some other
+/// field's own cursor.
+#[test]
+fn create_jira_issue_dialog_description_renders_cursor_glyph_at_correct_position() {
+    let mut app = directories_test_app(&[]);
+    let content = "Line one\nLine two";
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Subject",
+        content,
+        "",
+        None,
+    ));
+    if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+        d.focused = crate::tui::state::CreateJiraIssueFocus::Description;
+        // Land the cursor exactly on the 'w' of "two" (second line).
+        d.fields[1].cursor = content.chars().position(|c| c == 'w').unwrap();
+    }
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+
+    let reversed_cells: Vec<&str> = buffer
+        .content
+        .iter()
+        .filter(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED))
+        .map(|c| c.symbol())
+        .collect();
+    assert_eq!(
+        reversed_cells,
+        vec!["w"],
+        "exactly one reversed cell, on the 'w' the cursor sits on: {reversed_cells:?}"
+    );
+}
+

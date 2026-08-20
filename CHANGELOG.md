@@ -16,9 +16,10 @@ All notable changes to this project will be documented in this file.
   note row, Subject/Description/Labels are pre-filled from the note's
   filename/content/tags; opened from a selected JIRA row, they're pre-filled
   from the selected issue and the new issue gets a `Relates` link back to it
-  on creation. Description word-wraps and auto-scrolls to keep the cursor's
-  line visible (`Up`/`Down` move a line at a time), so a long pre-filled body
-  stays fully editable rather than only appendable off-screen. See
+  on creation. Description word-wraps, renders a reversed-video cursor glyph,
+  and auto-scrolls to keep the cursor's line visible (`Up`/`Down` move a line
+  at a time), so a long pre-filled body stays fully editable rather than only
+  appendable off-screen. See
   [docs/actions.md#createjiraissue](docs/actions.md#createjiraissue) and
   [docs/modes/jira.md](docs/modes/jira.md#creating-a-new-issue).
 - `smarthistory project report` and the web dashboard's day overview now show a
