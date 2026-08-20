@@ -1588,10 +1588,13 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         );
     }
 
-    // Description: multi-line, word-wrapped, with the same
-    // bottom-anchored auto-scroll `draw_note_create`'s Content field
-    // uses (`wrap_chars_to_rows`/`content_display_position`) — so a
-    // long pre-filled body (a note's full content, or a JIRA issue's
+    // Description: its own bordered box (unlike the flat single-line
+    // fields above), title doubling as the "Description:" label — same
+    // border-as-label convention `draw_note_create`'s Content field
+    // uses. Multi-line, word-wrapped, with the same bottom-anchored
+    // auto-scroll that field uses too
+    // (`wrap_chars_to_rows`/`content_display_position`) — so a long
+    // pre-filled body (a note's full content, or a JIRA issue's
     // description) can actually be scrolled to and edited throughout,
     // not just typed into invisibly off-screen at whatever the cursor
     // happens to sit at. The cursor's own wrapped row gets a rendered
@@ -1599,22 +1602,23 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     // `dialog_field_line` uses for the single-line fields above) —
     // every other row renders as plain text.
     let desc_focused = dialog.focused == CreateJiraIssueFocus::Description;
-    let desc_label_style = (if desc_focused { Theme::highlight() } else { Style::default() })
-        .add_modifier(Modifier::BOLD);
+    let desc_border_style = if desc_focused { Theme::highlight() } else { Theme::dim() };
+    let desc_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Description ")
+        .title_style(desc_border_style)
+        .border_style(desc_border_style);
+    let desc_inner = desc_block.inner(chunks[desc_idx]);
+    f.render_widget(desc_block, chunks[desc_idx]);
+
     let desc_field = &dialog.fields[1];
     let mut desc_lines: Vec<Line> = Vec::new();
     let mut scroll_y_desc: u16 = 0;
     if desc_field.value.is_empty() {
-        desc_lines.push(Line::from(vec![
-            Span::styled("Description: ", desc_label_style),
-            Span::styled(desc_field.placeholder, Theme::dim()),
-        ]));
+        desc_lines.push(Line::from(Span::styled(desc_field.placeholder, Theme::dim())));
     } else {
-        desc_lines.push(Line::from(Span::styled("Description: ", desc_label_style)));
-        // Unlike `draw_note_create`'s Content field, this chunk has no
-        // border of its own (it's a plain slice of the outer dialog's
-        // already-bordered inner area) — no `-2` padding needed.
-        let inner_width_desc = chunks[desc_idx].width.max(1) as usize;
+        let inner_width_desc = desc_inner.width.max(1) as usize;
         let line_chars: Vec<Vec<char>> =
             desc_field.value.split('\n').map(|l| l.chars().collect()).collect();
         let wrapped_lines: Vec<Vec<(String, usize)>> =
@@ -1661,18 +1665,19 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         }
 
         if desc_focused {
-            // +1 for the "Description: " label row always at the top.
-            let cursor_display_row: usize = 1
-                + wrapped_lines[..cursor_line].iter().map(|rows| rows.len()).sum::<usize>()
+            let cursor_display_row: usize = wrapped_lines[..cursor_line]
+                .iter()
+                .map(|rows| rows.len())
+                .sum::<usize>()
                 + cursor_row_in_line;
-            let inner_height_desc = chunks[desc_idx].height.max(1) as usize;
+            let inner_height_desc = desc_inner.height.max(1) as usize;
             scroll_y_desc =
                 cursor_display_row.saturating_sub(inner_height_desc.saturating_sub(1)) as u16;
         }
     }
     f.render_widget(
         Paragraph::new(desc_lines).scroll((scroll_y_desc, 0)),
-        chunks[desc_idx],
+        desc_inner,
     );
 
     let mut next_idx = desc_idx + 1;
