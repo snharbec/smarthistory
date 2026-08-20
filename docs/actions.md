@@ -52,7 +52,7 @@ Actions are grouped in the command palette by their `category()`:
 | [`search`](#search)         | CycleMode, CycleNavPrefix, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix                                                              |
 | [`todo`](#todo)             | MarkTodoDone                                                                                                                                                                                                   |
 | [`theme`](#theme)           | CycleThemeNext, CycleThemePrev                                                                                                                                                                                 |
-| [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry                       |
+| [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry, CreateNote, CreateJiraIssue |
 | [`llm`](#llm)               | Describe, Correct                                                                                                                                                                                              |
 | [`delete`](#delete)         | DeleteSelected, DeleteMatching, ToggleMark, ClearMarks, BulkDeleteMarked                                                                                                                                       |
 | [`config`](#config)         | AddSession, AddHost                                                                                                                                                                                            |
@@ -1006,6 +1006,60 @@ was selected), so the note captures what you were just looking at:
 
 The user can edit or clear either field before saving; nothing is
 auto-committed.
+
+### `CreateJiraIssue`
+
+| Field        | Value                                                                                    |
+| ------------ | ----------------------------------------------------------------------------------------- |
+| Config key   | `create-jira-issue`                                                                        |
+| Display name | Create JIRA issue                                                                          |
+| Default key  | none (open it via the command palette, `Ctrl-Q`, or bind `key.create-jira-issue=<spec>`)  |
+| Category     | tools                                                                                      |
+
+Open a dialog to create a new JIRA issue via `POST /rest/api/2/issue`. Five
+fields: **Issue Type** and **Project** are closed-set selectors cycled with
+`Left`/`Right` (not typed — a wrong value would just fail the POST); **Subject**,
+**Labels**, and **Description** are free text, `Tab`/`Shift-Tab` rotating focus
+through all five in that order (Issue Type → Project → Subject → Labels →
+Description → wraps). `Enter` inserts a literal newline only while Description is
+focused; `Ctrl-S` submits, `Esc` cancels.
+
+Description is fully editable even when pre-filled with a long body (from a
+note or a JIRA issue — see below): it word-wraps, `Up`/`Down` move the cursor a
+line at a time (preserving column, same as `CreateNote`'s Content field), a
+reversed-video cursor glyph is rendered on the character it sits on, and the
+view auto-scrolls to keep that line visible — so editing deep into a long
+pre-filled body doesn't happen invisibly off-screen.
+
+- **Project** comes from `JIRA_AVAILABLE_PROJECTS` (comma-separated), falling
+  back to a single entry from `JIRA_PROJECT` when unset, or an empty list when
+  neither is set — in which case the dialog refuses to open at all (status
+  message; nothing to select).
+- **Issue Type** comes from `JIRA_AVAILABLE_ISSUE_TYPES` (comma-separated),
+  defaulting to `Epic, Initiative, Story, Task, Bug` when unset.
+
+See [`docs/configuration.md`](configuration.md#jira--mode) for both env vars.
+
+**Pre-filled from the selected row**, same convention as `CreateNote` above:
+
+| Selected row     | Subject                        | Description                                         | Labels                    |
+| ----------------- | ------------------------------- | ---------------------------------------------------- | -------------------------- |
+| Note (`@` mode)   | the note's filename (no `.md`) | the note's full file content                          | the note's own `#tags`     |
+| JIRA (`-` mode)   | the issue's summary (immediate) | the issue's description (async, see below)            | the issue's labels (async) |
+| Everything else   | _(blank)_                       | _(blank)_                                             | _(blank)_                  |
+
+The JIRA-row case needs a fresh `search("key = <KEY>")` call — the cached
+row only carries a hand-formatted output blob, not structured
+description/labels — so Description shows a `(loading…)` placeholder until
+that background fetch resolves. The fetch only overwrites a field still at
+its placeholder/empty state, never once the user has started typing into it.
+
+On submit, the issue is created first; if the dialog was opened from a JIRA
+row, a second call links the new issue to that source issue with a `Relates`
+link. A link failure doesn't undo or fail the create — the issue really was
+created, so the status message shows the new key alongside a warning that the
+link didn't take. A create failure keeps the dialog open (with the error
+shown) so the user can retry without retyping.
 
 Also launchable standalone via `smarthistory tui --create-note`, which implies
 `--exec` (runs the staged command itself instead of just printing it) so it

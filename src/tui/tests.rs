@@ -18228,6 +18228,11 @@ fn fetch_directories_tmux_pane_path_is_a_real_path() {
 /// routes JIRA rows through the add-comment
 /// path (not the local SQLite `command_comments`
 /// path).
+/// `(project, issuetype, summary, description, labels)` — one
+/// `FakeJira::create_issue` call's arguments, recorded for tests to
+/// assert on.
+type CreatedIssueCall = (String, String, String, String, Vec<String>);
+
 #[derive(Default)]
 struct FakeJira {
     issues: Vec<crate::jira::JiraIssue>,
@@ -18235,6 +18240,18 @@ struct FakeJira {
     comments: Vec<crate::jira::JiraComment>,
     comment_keys: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     posted_comments: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// The key `create_issue` returns on success. Empty (the
+    /// default) means "fail the call" — see `create_issue` below.
+    created_issue_key: String,
+    /// One entry per `create_issue` call, in call order.
+    created_issues: std::sync::Arc<std::sync::Mutex<Vec<CreatedIssueCall>>>,
+    /// `(inward_key, outward_key, link_type)` tuples `link_issues`
+    /// was called with, in call order.
+    linked_issues: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    /// When `true`, `link_issues` returns an error instead of
+    /// succeeding — for testing the "issue created but link failed"
+    /// partial-success path.
+    fail_link: bool,
 }
 
 impl crate::jira::JiraClient for FakeJira {
@@ -18254,6 +18271,42 @@ impl crate::jira::JiraClient for FakeJira {
             .lock()
             .unwrap()
             .push((key.to_string(), body.to_string()));
+        Ok(())
+    }
+    fn create_issue(
+        &self,
+        project: &str,
+        issuetype: &str,
+        summary: &str,
+        description: &str,
+        labels: &[String],
+    ) -> Result<String, crate::jira::JiraError> {
+        self.created_issues.lock().unwrap().push((
+            project.to_string(),
+            issuetype.to_string(),
+            summary.to_string(),
+            description.to_string(),
+            labels.to_vec(),
+        ));
+        if self.created_issue_key.is_empty() {
+            return Err(crate::jira::JiraError::Http("boom".to_string()));
+        }
+        Ok(self.created_issue_key.clone())
+    }
+    fn link_issues(
+        &self,
+        inward_key: &str,
+        outward_key: &str,
+        link_type: &str,
+    ) -> Result<(), crate::jira::JiraError> {
+        self.linked_issues.lock().unwrap().push((
+            inward_key.to_string(),
+            outward_key.to_string(),
+            link_type.to_string(),
+        ));
+        if self.fail_link {
+            return Err(crate::jira::JiraError::Http("boom".to_string()));
+        }
         Ok(())
     }
 }
@@ -29738,5 +29791,509 @@ fn select_for_run_in_project_pick_mode_ignores_non_project_row() {
     app.list_state.select(Some(0));
     app.select_for_run();
     assert_eq!(app.selection, None);
+}
+
+// ---- "Create JIRA issue" dialog (`Action::CreateJiraIssue`) ----
+
+/// Builds a `CreateJiraIssueDialog` with Subject/Description/Labels
+/// prefilled and a given `source_key`, matching the shape
+/// `open_create_jira_issue_dialog` produces — used by the
+/// `create_jira_issue_dialog_submit`/prefill tests below so they
+/// don't need to go through the real dialog-open path (which touches
+/// `JiraConfig::from_env()` unconditionally and isn't test-seamed).
+fn test_create_jira_issue_dialog(
+    subject: &str,
+    description: &str,
+    labels: &str,
+    source_key: Option<&str>,
+) -> crate::tui::state::CreateJiraIssueDialog {
+    crate::tui::state::CreateJiraIssueDialog {
+        fields: vec![
+            crate::tui::state::DialogField::prefilled(
+                "Subject",
+                "",
+                true,
+                "",
+                subject.to_string(),
+            ),
+            crate::tui::state::DialogField::prefilled(
+                "Description",
+                "",
+                false,
+                "",
+                description.to_string(),
+            ),
+            crate::tui::state::DialogField::prefilled(
+                "Labels",
+                "",
+                false,
+                "",
+                labels.to_string(),
+            ),
+        ],
+        projects: vec!["PROJ".to_string()],
+        project_index: 0,
+        issue_types: vec!["Task".to_string()],
+        issue_type_index: 0,
+        focused: crate::tui::state::CreateJiraIssueFocus::Subject,
+        source_key: source_key.map(|s| s.to_string()),
+        prefill_loading: false,
+        error: None,
+    }
+}
+
+/// Submitting with a non-empty Subject and no `source_key` calls
+/// `create_issue` with the dialog's fields, clears the dialog on
+/// success, and shows the new key in the status message. No
+/// `link_issues` call is made since there's no source issue to link
+/// to.
+#[test]
+fn create_jira_issue_dialog_submit_creates_issue_without_link() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        created_issue_key: "PROJ-42".to_string(),
+        ..FakeJira::default()
+    };
+    let created = fake.created_issues.clone();
+    let linked = fake.linked_issues.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "New bug",
+        "Steps to reproduce",
+        "backend, urgent",
+        None,
+    ));
+    app.create_jira_issue_dialog_submit();
+
+    let calls = created.lock().unwrap();
+    assert_eq!(calls.len(), 1, "create_issue should be called once");
+    let (project, issuetype, summary, description, labels) = &calls[0];
+    assert_eq!(project, "PROJ");
+    assert_eq!(issuetype, "Task");
+    assert_eq!(summary, "New bug");
+    assert_eq!(description, "Steps to reproduce");
+    assert_eq!(labels, &vec!["backend".to_string(), "urgent".to_string()]);
+    assert!(
+        linked.lock().unwrap().is_empty(),
+        "link_issues should not be called without a source_key"
+    );
+    assert!(
+        app.create_jira_issue_dialog.is_none(),
+        "dialog should close on success"
+    );
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("PROJ-42"),
+        "status should show the new key: {:?}",
+        status
+    );
+}
+
+/// Submitting with a `source_key` set (dialog opened from a selected
+/// JIRA row) links the newly-created issue back to the source with a
+/// "Relates" link, after the create succeeds.
+#[test]
+fn create_jira_issue_dialog_submit_links_to_source_issue() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        created_issue_key: "PROJ-42".to_string(),
+        ..FakeJira::default()
+    };
+    let linked = fake.linked_issues.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Follow-up",
+        "Related work",
+        "",
+        Some("PROJ-1"),
+    ));
+    app.create_jira_issue_dialog_submit();
+
+    let calls = linked.lock().unwrap();
+    assert_eq!(calls.len(), 1, "link_issues should be called once");
+    assert_eq!(
+        calls[0],
+        (
+            "PROJ-42".to_string(),
+            "PROJ-1".to_string(),
+            "Relates".to_string()
+        )
+    );
+    assert!(app.create_jira_issue_dialog.is_none());
+}
+
+/// When `create_issue` succeeds but the follow-up `link_issues` call
+/// fails, the outcome is a partial success: the dialog still closes
+/// (the issue really was created) and the status message surfaces
+/// both the new key and the link failure.
+#[test]
+fn create_jira_issue_dialog_submit_link_failure_is_partial_success() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        created_issue_key: "PROJ-42".to_string(),
+        fail_link: true,
+        ..FakeJira::default()
+    };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Follow-up",
+        "Related work",
+        "",
+        Some("PROJ-1"),
+    ));
+    app.create_jira_issue_dialog_submit();
+
+    assert!(
+        app.create_jira_issue_dialog.is_none(),
+        "dialog should still close — the issue was created"
+    );
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("PROJ-42") && status.contains("link to PROJ-1 failed"),
+        "status should mention both the new key and the link failure: {:?}",
+        status
+    );
+}
+
+/// When `create_issue` itself fails, the dialog stays open with the
+/// error set (so the user can retry without retyping) instead of
+/// closing.
+#[test]
+fn create_jira_issue_dialog_submit_create_failure_keeps_dialog_open() {
+    use std::sync::Arc;
+    // Empty `created_issue_key` (the `FakeJira` default) means
+    // `create_issue` fails.
+    let fake = FakeJira::default();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.create_jira_issue_dialog =
+        Some(test_create_jira_issue_dialog("New bug", "", "", None));
+    app.create_jira_issue_dialog_submit();
+
+    let dialog = app
+        .create_jira_issue_dialog
+        .as_ref()
+        .expect("dialog should stay open on failure");
+    assert!(
+        dialog.error.is_some(),
+        "dialog should carry the error for display"
+    );
+}
+
+/// An empty Subject is rejected client-side — no `create_issue` call
+/// is made at all, and the dialog's error explains why.
+#[test]
+fn create_jira_issue_dialog_submit_rejects_empty_subject() {
+    use std::sync::Arc;
+    let fake = FakeJira::default();
+    let created = fake.created_issues.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog("", "", "", None));
+    app.create_jira_issue_dialog_submit();
+
+    assert!(
+        created.lock().unwrap().is_empty(),
+        "create_issue should not be called with an empty Subject"
+    );
+    let dialog = app
+        .create_jira_issue_dialog
+        .as_ref()
+        .expect("dialog should stay open");
+    assert_eq!(dialog.error.as_deref(), Some("Subject is required"));
+}
+
+/// `process_jira_prefill_fetch_result` fills in Description/Labels
+/// when they're still at their "(loading…)"/empty placeholder state
+/// — the normal case for a fetch that resolves before the user has
+/// touched either field.
+#[test]
+fn jira_prefill_fetch_fills_placeholder_fields() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-1 summary",
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "",
+        Some("PROJ-1"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        description: "Full description".to_string(),
+        labels: vec!["backend".to_string(), "urgent".to_string()],
+        ..Default::default()
+    };
+    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(issue));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(dialog.fields[1].value, "Full description");
+    assert_eq!(dialog.fields[2].value, "backend, urgent");
+    assert!(!dialog.prefill_loading);
+}
+
+/// If the user has already started typing into Description before
+/// the fetch resolves, the fetch result must NOT clobber what they
+/// typed — the field no longer holds the placeholder, so it's left
+/// alone.
+#[test]
+fn jira_prefill_fetch_does_not_overwrite_user_edited_description() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-1 summary",
+        "user's own text",
+        "",
+        Some("PROJ-1"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        description: "Fetched description".to_string(),
+        labels: vec!["backend".to_string()],
+        ..Default::default()
+    };
+    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(issue));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(
+        dialog.fields[1].value, "user's own text",
+        "user-typed Description must not be overwritten by a late-arriving fetch"
+    );
+}
+
+/// A stale fetch result — for a `source_key` that no longer matches
+/// the dialog's current `source_key` (dialog closed and reopened for
+/// something else while the fetch was in flight) — is ignored
+/// entirely rather than clobbering the current dialog's fields.
+#[test]
+fn jira_prefill_fetch_stale_source_key_is_ignored() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-2 summary",
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "",
+        Some("PROJ-2"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        description: "Stale fetch for a different issue".to_string(),
+        ..Default::default()
+    };
+    // Result is for "PROJ-1" but the dialog's source_key is now "PROJ-2".
+    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(issue));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(
+        dialog.fields[1].value,
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "a stale fetch must not touch a dialog opened for a different source issue"
+    );
+}
+
+/// A failed prefill fetch clears the placeholder (rather than
+/// leaving "(loading…)" stuck in the field) and tells the user via
+/// the status bar, but does not close the dialog — Subject is still
+/// usable on its own.
+#[test]
+fn jira_prefill_fetch_error_clears_placeholder() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-3 summary",
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "",
+        Some("PROJ-3"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    app.process_jira_prefill_fetch_result(
+        request,
+        "PROJ-3".to_string(),
+        Err(crate::jira::JiraError::Http("boom".to_string())),
+    );
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(dialog.fields[1].value, "");
+    let status = app
+        .status_message
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        status.contains("PROJ-3"),
+        "status should mention the source key that failed to fetch: {:?}",
+        status
+    );
+}
+
+/// `strip_note_frontmatter` drops a well-formed YAML frontmatter
+/// block (delimiters + everything between them) plus the blank line
+/// separating it from the body, leaving only the body.
+#[test]
+fn strip_note_frontmatter_removes_well_formed_block() {
+    let content = "---\ntype: #project\ncreated: [[2026-08-14]]\n---\n\n# Body heading\n\nSome text.";
+    assert_eq!(
+        strip_note_frontmatter(content),
+        "# Body heading\n\nSome text."
+    );
+}
+
+/// Content with no frontmatter at all (doesn't start with a `---`
+/// line) passes through unchanged.
+#[test]
+fn strip_note_frontmatter_passes_through_content_without_frontmatter() {
+    let content = "# Just a note\n\nNo frontmatter here.";
+    assert_eq!(strip_note_frontmatter(content), content);
+}
+
+/// A malformed block — starts with `---` but never closes — is left
+/// untouched rather than silently discarding the whole note (better
+/// to show the raw content, `---` and all, than to lose it).
+#[test]
+fn strip_note_frontmatter_passes_through_unclosed_block() {
+    let content = "---\ntype: #project\n# never closes";
+    assert_eq!(strip_note_frontmatter(content), content);
+}
+
+/// An empty body after the closing `---` (frontmatter-only note)
+/// strips down to an empty string, not a stray blank line.
+#[test]
+fn strip_note_frontmatter_empty_body_yields_empty_string() {
+    let content = "---\ntype: #project\n---\n";
+    assert_eq!(strip_note_frontmatter(content), "");
+}
+
+/// `Up`/`Down` move the cursor a line at a time through Description
+/// (the one multi-line field), preserving column — same behavior
+/// `NoteCreateDialog`'s Content field already has, added so a
+/// pre-filled multi-paragraph Description (from a note or a JIRA
+/// issue) is actually navigable, not just append-only at whatever
+/// the cursor happened to be left at.
+#[test]
+fn create_jira_issue_dialog_description_up_down_move_by_line() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Subject",
+        "AB\nC",
+        "",
+        None,
+    ));
+    if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+        d.focused = crate::tui::state::CreateJiraIssueFocus::Description;
+        // Cursor at the end: line 1 ("C"), column 1.
+        d.fields[1].cursor = d.fields[1].value.chars().count();
+    }
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+    handle_key(&mut app, up);
+    // Line 1 -> line 0, column min(1, len("AB")=2) = 1: right after "A".
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().fields[1].cursor,
+        1
+    );
+    // `Up` again: already on line 0 — no-op.
+    handle_key(&mut app, up);
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().fields[1].cursor,
+        1
+    );
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+    handle_key(&mut app, down);
+    // Back to line 1, column 1 (clamped to "C"'s length of 1) — char
+    // index 3 (start of "C") + 1 = 4, i.e. right after "C".
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().fields[1].cursor,
+        4
+    );
+}
+
+/// `Up`/`Down` are a no-op when a field OTHER than Description is
+/// focused — they don't apply to the single-line fields or the
+/// Project/Issue Type selectors.
+#[test]
+fn create_jira_issue_dialog_up_down_noop_outside_description() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Subject text",
+        "AB\nC",
+        "",
+        None,
+    ));
+    if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+        d.focused = crate::tui::state::CreateJiraIssueFocus::Subject;
+        d.fields[0].cursor = 3;
+    }
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+    handle_key(&mut app, up);
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(dialog.fields[0].cursor, 3, "Subject cursor should be untouched");
+    assert_eq!(
+        dialog.focused,
+        crate::tui::state::CreateJiraIssueFocus::Subject
+    );
+}
+
+/// The Description field renders an actual reversed-video cursor
+/// glyph on the character it sits on, at the correct row within a
+/// multi-line body — not just an auto-scroll to the right line.
+/// Since `dialog_field_line` only ever reverses the cursor of the
+/// FOCUSED field, and no other field is focused here, this is the
+/// only source of a reversed cell in the whole dialog: a clean signal
+/// this is exercising the new cursor-glyph code, not some other
+/// field's own cursor.
+#[test]
+fn create_jira_issue_dialog_description_renders_cursor_glyph_at_correct_position() {
+    let mut app = directories_test_app(&[]);
+    let content = "Line one\nLine two";
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "Subject",
+        content,
+        "",
+        None,
+    ));
+    if let Some(d) = app.create_jira_issue_dialog.as_mut() {
+        d.focused = crate::tui::state::CreateJiraIssueFocus::Description;
+        // Land the cursor exactly on the 'w' of "two" (second line).
+        d.fields[1].cursor = content.chars().position(|c| c == 'w').unwrap();
+    }
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+
+    let reversed_cells: Vec<&str> = buffer
+        .content
+        .iter()
+        .filter(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED))
+        .map(|c| c.symbol())
+        .collect();
+    assert_eq!(
+        reversed_cells,
+        vec!["w"],
+        "exactly one reversed cell, on the 'w' the cursor sits on: {reversed_cells:?}"
+    );
 }
 

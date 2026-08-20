@@ -216,6 +216,45 @@ pub trait JiraClient: Send + Sync {
     /// minimal and ensures all clients
     /// produce the same wire format.
     fn add_comment(&self, key: &str, body: &str) -> Result<(), JiraError>;
+
+    /// Create a new issue. `project` is a project KEY (not name,
+    /// e.g. `"ENG"`), `issuetype` an issue-type NAME (e.g.
+    /// `"Task"`) — both selected from `JiraConfig::available_projects`/
+    /// `available_issue_types` by the TUI's "create JIRA issue"
+    /// dialog, so a caller-side typo isn't a concern in practice.
+    /// `description` is plain text, not pre-built ADF — same
+    /// reasoning as `add_comment`'s `body`, and JIRA's `POST
+    /// /issue` accepts a plain string for `description` on REST
+    /// v2 the same way `POST .../comment` does for `body`.
+    ///
+    /// Returns the new issue's key (e.g. `"ENG-457"`) on success —
+    /// unlike `add_comment`, the caller genuinely needs this back,
+    /// both to show the user what was created and, when the dialog
+    /// was opened from a selected JIRA row, to link the two issues
+    /// together right afterward.
+    fn create_issue(
+        &self,
+        project: &str,
+        issuetype: &str,
+        summary: &str,
+        description: &str,
+        labels: &[String],
+    ) -> Result<String, JiraError>;
+
+    /// Link two existing issues together (JIRA's `issueLink`
+    /// resource). `link_type` is a link-type NAME as configured on
+    /// the JIRA instance (e.g. `"Relates"` — present by default on
+    /// every stock JIRA install, which is what the "create JIRA
+    /// issue" dialog uses when creating from a selected issue).
+    /// `inward_key`/`outward_key` follow JIRA's own inward/outward
+    /// terminology for the link direction; for a symmetric type
+    /// like "Relates" the direction is cosmetic.
+    fn link_issues(
+        &self,
+        inward_key: &str,
+        outward_key: &str,
+        link_type: &str,
+    ) -> Result<(), JiraError>;
 }
 
 /// Configuration read from the environment. `None` means
@@ -261,6 +300,71 @@ pub struct JiraConfig {
     /// `JIRA_CA_CERTIFICATE`. Useful when the JIRA server uses
     /// an internal CA not in the system trust store.
     pub ca_certificate_path: Option<std::path::PathBuf>,
+    /// The project keys selectable in the TUI's "create JIRA
+    /// issue" dialog's Project field (a closed-set selector,
+    /// cycled with Left/Right — not free text, since a typo'd
+    /// project key would just fail the create-issue POST).
+    /// Read from `JIRA_AVAILABLE_PROJECTS` (comma-separated,
+    /// each entry trimmed, empty entries dropped). Falls back to
+    /// a single-entry list containing `project` (the existing
+    /// `JIRA_PROJECT` value) when `JIRA_AVAILABLE_PROJECTS` is
+    /// unset/empty but `JIRA_PROJECT` is set, or an empty `Vec`
+    /// when neither is set — unlike `available_issue_types`,
+    /// there's no universal default project key to fall back to,
+    /// so an empty list here means the dialog has nothing to
+    /// select and refuses to open until one of these is
+    /// configured.
+    pub available_projects: Vec<String>,
+    /// The issue-type names selectable in the same dialog's Issue
+    /// Type field, same closed-set-selector reasoning as
+    /// `available_projects`. Read from `JIRA_AVAILABLE_ISSUE_TYPES`
+    /// (same comma-separated parsing), falling back to
+    /// `["Epic", "Initiative", "Story", "Task", "Bug"]` — JIRA's
+    /// own standard issue-type set — when unset/empty.
+    pub available_issue_types: Vec<String>,
+}
+
+/// Parse a comma-separated env var value into a trimmed,
+/// empty-entry-dropped list — the shared parsing rule
+/// `available_projects`/`available_issue_types` both use.
+fn parse_comma_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// `JiraConfig::available_projects`' resolution rule, pulled out as a
+/// pure function so it's testable without touching real env vars
+/// (mutating process env is racy under `cargo test`'s default
+/// parallel execution — see the `HOME`-mutation caution elsewhere in
+/// this codebase's tests). `available_projects_env`/`project` are
+/// the raw `JIRA_AVAILABLE_PROJECTS`/`JIRA_PROJECT` values (already
+/// read from the environment by the caller).
+fn resolve_available_projects(
+    available_projects_env: Option<&str>,
+    project: Option<&str>,
+) -> Vec<String> {
+    available_projects_env
+        .map(parse_comma_list)
+        .filter(|v| !v.is_empty())
+        .or_else(|| project.map(|p| vec![p.to_string()]))
+        .unwrap_or_default()
+}
+
+/// `JiraConfig::available_issue_types`' resolution rule — same
+/// "pure function for testability" reasoning as
+/// `resolve_available_projects`.
+fn resolve_available_issue_types(available_issue_types_env: Option<&str>) -> Vec<String> {
+    available_issue_types_env
+        .map(parse_comma_list)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            ["Epic", "Initiative", "Story", "Task", "Bug"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        })
 }
 
 impl JiraConfig {
@@ -301,6 +405,13 @@ impl JiraConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
+        let available_projects = resolve_available_projects(
+            std::env::var("JIRA_AVAILABLE_PROJECTS").ok().as_deref(),
+            project.as_deref(),
+        );
+        let available_issue_types = resolve_available_issue_types(
+            std::env::var("JIRA_AVAILABLE_ISSUE_TYPES").ok().as_deref(),
+        );
         Some(JiraConfig {
             server: server.trim_end_matches('/').to_string(),
             token,
@@ -310,6 +421,8 @@ impl JiraConfig {
             certificate_path,
             certificate_password,
             ca_certificate_path,
+            available_projects,
+            available_issue_types,
         })
     }
 
@@ -809,6 +922,87 @@ impl JiraClient for RestJiraClient {
         // body so the connection
         // can be returned to the
         // pool.
+        let _ = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
+        Ok(())
+    }
+
+    fn create_issue(
+        &self,
+        project: &str,
+        issuetype: &str,
+        summary: &str,
+        description: &str,
+        labels: &[String],
+    ) -> Result<String, JiraError> {
+        let url = format!("{}/rest/api/2/issue", self.config.server);
+        let payload = serde_json::json!({
+            "fields": {
+                "project": { "key": project },
+                "summary": summary,
+                "description": description,
+                "issuetype": { "name": issuetype },
+                "labels": labels,
+            }
+        });
+        let client = self.build_blocking_client()?;
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .map_err(|e| JiraError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            let excerpt: String = body.chars().take(200).collect();
+            return Err(JiraError::Api(format!("{}: {}", status, excerpt.trim())));
+        }
+        // Unlike `add_comment`, the response body genuinely matters
+        // here — JIRA's `POST /issue` returns `{"id": ..., "key":
+        // "PROJ-124", "self": ...}` and that key is the only way to
+        // learn what was actually created (JIRA assigns it, the
+        // caller doesn't get to choose).
+        #[derive(serde::Deserialize)]
+        struct CreateIssueResponse {
+            key: String,
+        }
+        let body = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
+        let parsed: CreateIssueResponse = serde_json::from_str(&body)
+            .map_err(|e| JiraError::Parse(format!("{e}: {body}")))?;
+        Ok(parsed.key)
+    }
+
+    fn link_issues(
+        &self,
+        inward_key: &str,
+        outward_key: &str,
+        link_type: &str,
+    ) -> Result<(), JiraError> {
+        let url = format!("{}/rest/api/2/issueLink", self.config.server);
+        let payload = serde_json::json!({
+            "type": { "name": link_type },
+            "inwardIssue": { "key": inward_key },
+            "outwardIssue": { "key": outward_key },
+        });
+        let client = self.build_blocking_client()?;
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .map_err(|e| JiraError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            let excerpt: String = body.chars().take(200).collect();
+            return Err(JiraError::Api(format!("{}: {}", status, excerpt.trim())));
+        }
+        // `POST /issueLink` returns 201 with an empty body — same as
+        // `add_comment`, nothing in the response the caller needs.
         let _ = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
         Ok(())
     }
@@ -2454,7 +2648,7 @@ pub(crate) fn merge_shared_label_cache(entries: &std::collections::HashMap<Strin
 /// double quotes, escape backslash → `\\` and double-quote →
 /// `\"` (the two characters JQL string literals treat as
 /// escapes). Everything else passes through verbatim.
-fn escape_jql_string(s: &str) -> String {
+pub(crate) fn escape_jql_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

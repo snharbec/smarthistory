@@ -19,6 +19,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+/// Placeholder shown in the "create JIRA issue" dialog's Description
+/// field while the source issue's full details are still being
+/// fetched (dialog opened from a selected JIRA row). Exact-matched
+/// (not just "non-empty") by `process_jira_prefill_fetch_result` to
+/// decide whether it's still safe to overwrite the field with the
+/// real description — anything else in there means the user already
+/// started typing, so the fetch result is discarded instead.
+pub(crate) const JIRA_PREFILL_LOADING_PLACEHOLDER: &str = "(loading…)";
+
 /// Whether the query is a JIRA issue-search request:
 /// the query starts with the jira prefix (`-` by
 /// default). The body is parsed into a JQL query by
@@ -270,6 +279,73 @@ pub(crate) struct JiraAddCommentRequest {
     /// re-fire the same body without
     /// re-reading the buffer.
     pub(crate) body: String,
+}
+
+/// The outcome of a successful "create JIRA issue" submit — always
+/// carries the new key (that part cannot fail once `create_issue`
+/// itself succeeds), plus an optional warning when the FOLLOW-UP
+/// "link to the source issue" step failed. The dialog was opened
+/// from a selected JIRA row → `create_issue` succeeds → `link_issues`
+/// fails is treated as a partial success, not a hard failure: the
+/// issue genuinely was created, the user should see its key, just
+/// also be told the link didn't take.
+pub(crate) struct CreateJiraIssueOutcome {
+    pub(crate) new_key: String,
+    pub(crate) link_warning: Option<String>,
+}
+
+/// An in-flight "create JIRA issue" submit. Mirrors
+/// `JiraAddCommentRequest`'s shape exactly (background thread →
+/// channel → run-loop poll → `cancelled` flag for `Esc`), except the
+/// background thread does up to two REST calls in sequence
+/// (`create_issue`, then — only when the dialog has a `source_key` —
+/// `link_issues`) before sending a single combined result.
+pub(crate) struct JiraCreateIssueRequest {
+    pub(crate) receiver: std::sync::mpsc::Receiver<Result<CreateJiraIssueOutcome, crate::jira::JiraError>>,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The shared "create, then maybe link" sequence both the sync
+/// (test-seam) and background-thread submit paths in
+/// `App::create_jira_issue_dialog_submit` run. `source_key` is
+/// `Some` only when the dialog was opened from a selected JIRA row.
+/// A `link_issues` failure AFTER a successful `create_issue` is
+/// folded into `CreateJiraIssueOutcome::link_warning` rather than
+/// returned as an `Err` — the issue really was created, so the
+/// caller must not treat this as a hard failure (that would leave
+/// the user thinking nothing happened and re-submitting, creating a
+/// duplicate issue).
+pub(crate) fn create_and_maybe_link(
+    client: &dyn crate::jira::JiraClient,
+    project: &str,
+    issuetype: &str,
+    summary: &str,
+    description: &str,
+    labels: &[String],
+    source_key: Option<&str>,
+) -> Result<CreateJiraIssueOutcome, crate::jira::JiraError> {
+    let new_key = client.create_issue(project, issuetype, summary, description, labels)?;
+    let link_warning = match source_key {
+        Some(source_key) => client
+            .link_issues(&new_key, source_key, "Relates")
+            .err()
+            .map(|e| format!("link to {} failed: {}", source_key, e)),
+        None => None,
+    };
+    Ok(CreateJiraIssueOutcome { new_key, link_warning })
+}
+
+/// An in-flight fetch of a source JIRA issue's full details
+/// (description, labels), kicked off when the "create JIRA issue"
+/// dialog is opened from a selected JIRA row. Separate from
+/// `JiraCreateIssueRequest` — this one fires the moment the dialog
+/// opens, before the user has done anything, to fill in the
+/// Description/Labels fields the cached row data doesn't carry (see
+/// `App::open_create_jira_issue_dialog`'s doc comment for why a
+/// fresh `search` call is needed here at all).
+pub(crate) struct JiraPrefillFetchRequest {
+    pub(crate) receiver: std::sync::mpsc::Receiver<Result<crate::jira::JiraIssue, crate::jira::JiraError>>,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Test-injection seam for [`App::open_jira_in_background`]'s real
@@ -1382,6 +1458,109 @@ impl App {
                 // without
                 // retyping.
                 self.set_status_message(format!("JIRA add-comment to {} failed: {}", key, e));
+            }
+        }
+    }
+
+    /// Mirrors `process_jira_add_comment_result`'s shape. On
+    /// success, closes the dialog and shows the new issue's key (a
+    /// clickable-looking browse URL, same style `note_create_prefill_from_selection`'s
+    /// JIRA-row branch already uses) — plus, when `link_warning` is
+    /// `Some`, a trailing note that the issue was created but the
+    /// link to the source issue didn't take (the issue itself is
+    /// real either way, so this is never treated as a hard failure).
+    /// On failure, the dialog stays open with the error so the user
+    /// can retry without retyping.
+    pub(crate) fn process_create_jira_issue_result(
+        &mut self,
+        request: crate::tui::mode::jira::JiraCreateIssueRequest,
+        result: Result<crate::tui::mode::jira::CreateJiraIssueOutcome, crate::jira::JiraError>,
+    ) {
+        self.create_jira_issue_in_flight = false;
+        self.create_jira_issue_request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            self.set_status_message("JIRA create-issue cancelled".to_string());
+            return;
+        }
+        match result {
+            Ok(outcome) => {
+                let browse_url = crate::jira::JiraConfig::from_env()
+                    .map(|cfg| cfg.browse_url(&outcome.new_key))
+                    .unwrap_or_else(|| outcome.new_key.clone());
+                self.create_jira_issue_dialog = None;
+                match outcome.link_warning {
+                    Some(warning) => self.set_status_message(format!(
+                        "Created {} ({}) — {}",
+                        outcome.new_key, browse_url, warning
+                    )),
+                    None => {
+                        self.set_status_message(format!("Created {} ({})", outcome.new_key, browse_url))
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(dialog) = self.create_jira_issue_dialog.as_mut() {
+                    dialog.error = Some(e.to_string());
+                }
+                self.set_status_message(format!("JIRA create-issue failed: {}", e));
+            }
+        }
+    }
+
+    /// Fills in the "create JIRA issue" dialog's Description/Labels
+    /// fields once the source issue's full details resolve. Only
+    /// overwrites a field that's still exactly what
+    /// `open_create_jira_issue_dialog` set as its "(loading…)"
+    /// placeholder — never once the user has actually typed
+    /// something else into it while the fetch was in flight, and
+    /// never if the dialog was closed (or reopened for something
+    /// else) before this resolved, which the `key` match guards
+    /// against (a stale fetch for a since-abandoned source issue
+    /// must not clobber a fresh dialog's fields).
+    pub(crate) fn process_jira_prefill_fetch_result(
+        &mut self,
+        request: crate::tui::mode::jira::JiraPrefillFetchRequest,
+        source_key: String,
+        result: Result<crate::jira::JiraIssue, crate::jira::JiraError>,
+    ) {
+        self.jira_prefill_fetch_in_flight = false;
+        self.jira_prefill_fetch_request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(dialog) = self.create_jira_issue_dialog.as_mut() else {
+            return;
+        };
+        if dialog.source_key.as_deref() != Some(source_key.as_str()) {
+            return;
+        }
+        dialog.prefill_loading = false;
+        match result {
+            Ok(issue) => {
+                if let Some(description_field) = dialog.fields.get_mut(1)
+                    && description_field.value == JIRA_PREFILL_LOADING_PLACEHOLDER
+                {
+                    description_field.value = issue.description;
+                    description_field.cursor = description_field.value.chars().count();
+                }
+                if let Some(labels_field) = dialog.fields.get_mut(2)
+                    && labels_field.value.is_empty()
+                {
+                    labels_field.value = issue.labels.join(", ");
+                    labels_field.cursor = labels_field.value.chars().count();
+                }
+            }
+            Err(e) => {
+                if let Some(description_field) = dialog.fields.get_mut(1)
+                    && description_field.value == JIRA_PREFILL_LOADING_PLACEHOLDER
+                {
+                    description_field.value.clear();
+                    description_field.cursor = 0;
+                }
+                self.set_status_message(format!(
+                    "Couldn't fetch {} for prefill: {} (Description/Labels left blank)",
+                    source_key, e
+                ));
             }
         }
     }

@@ -1004,6 +1004,8 @@
             certificate_path: None,
             certificate_password: None,
             ca_certificate_path: None,
+            available_projects: Vec::new(),
+            available_issue_types: Vec::new(),
         };
         assert_eq!(
             cfg.browse_url("PROJ-123"),
@@ -1024,8 +1026,104 @@
             certificate_path: None,
             certificate_password: None,
             ca_certificate_path: None,
+            available_projects: Vec::new(),
+            available_issue_types: Vec::new(),
         };
         assert_eq!(cfg.browse_url("X-1"), "https://jira/browse/X-1");
+    }
+
+    // ---- parse_comma_list / resolve_available_projects / resolve_available_issue_types ----
+
+    #[test]
+    fn parse_comma_list_trims_and_drops_empties() {
+        assert_eq!(
+            parse_comma_list(" Epic, Task ,, Bug"),
+            vec!["Epic".to_string(), "Task".to_string(), "Bug".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_comma_list_empty_string_is_empty_vec() {
+        assert_eq!(parse_comma_list(""), Vec::<String>::new());
+    }
+
+    /// The create-JIRA-issue dialog's Project selector's list. When
+    /// `JIRA_AVAILABLE_PROJECTS` is set (and non-empty after
+    /// parsing), it wins outright — `JIRA_PROJECT` is not merged in.
+    #[test]
+    fn resolve_available_projects_prefers_available_projects_env() {
+        assert_eq!(
+            resolve_available_projects(Some("ENG, OPS"), Some("DEFAULT")),
+            vec!["ENG".to_string(), "OPS".to_string()]
+        );
+    }
+
+    /// Unlike `available_issue_types`, there's no universal default
+    /// project list — falling back to the single already-configured
+    /// `JIRA_PROJECT` value is the closest thing to a sensible
+    /// default.
+    #[test]
+    fn resolve_available_projects_falls_back_to_single_project_when_unset() {
+        assert_eq!(
+            resolve_available_projects(None, Some("ENG")),
+            vec!["ENG".to_string()]
+        );
+    }
+
+    /// An explicitly-set but empty/whitespace-only
+    /// `JIRA_AVAILABLE_PROJECTS` falls back the same way an unset one
+    /// does -- "on" with nothing parseable in it shouldn't produce
+    /// an unselectable empty dialog when a plain `JIRA_PROJECT` is
+    /// available as a fallback.
+    #[test]
+    fn resolve_available_projects_falls_back_when_env_parses_empty() {
+        assert_eq!(
+            resolve_available_projects(Some("  ,  ,"), Some("ENG")),
+            vec!["ENG".to_string()]
+        );
+    }
+
+    /// With neither env var set, there's genuinely nothing to
+    /// select from -- an empty `Vec`, not a panic or a made-up
+    /// default (project keys are installation-specific, unlike
+    /// issue types).
+    #[test]
+    fn resolve_available_projects_empty_when_neither_env_set() {
+        assert_eq!(resolve_available_projects(None, None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn resolve_available_issue_types_uses_env_when_set() {
+        assert_eq!(
+            resolve_available_issue_types(Some("Bug, Task")),
+            vec!["Bug".to_string(), "Task".to_string()]
+        );
+    }
+
+    /// Unlike projects, issue types DO have a sensible universal
+    /// default -- JIRA's own standard set -- so an unset (or
+    /// empty-after-parsing) env var falls back to that instead of an
+    /// empty list.
+    #[test]
+    fn resolve_available_issue_types_defaults_when_unset() {
+        assert_eq!(
+            resolve_available_issue_types(None),
+            vec![
+                "Epic".to_string(),
+                "Initiative".to_string(),
+                "Story".to_string(),
+                "Task".to_string(),
+                "Bug".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_available_issue_types_defaults_when_env_parses_empty() {
+        assert_eq!(
+            resolve_available_issue_types(Some(" , ,")),
+            resolve_available_issue_types(None)
+        );
     }
 
     // ---- JSON parsing ----
@@ -2188,6 +2286,24 @@
         fn add_comment(&self, _key: &str, _body: &str) -> Result<(), JiraError> {
             Ok(())
         }
+        fn create_issue(
+            &self,
+            _project: &str,
+            _issuetype: &str,
+            _summary: &str,
+            _description: &str,
+            _labels: &[String],
+        ) -> Result<String, JiraError> {
+            Ok("PROJ-1".to_string())
+        }
+        fn link_issues(
+            &self,
+            _inward_key: &str,
+            _outward_key: &str,
+            _link_type: &str,
+        ) -> Result<(), JiraError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -2231,6 +2347,24 @@
         }
         fn add_comment(&self, _key: &str, _body: &str) -> Result<(), JiraError> {
             Ok(())
+        }
+        fn create_issue(
+            &self,
+            _project: &str,
+            _issuetype: &str,
+            _summary: &str,
+            _description: &str,
+            _labels: &[String],
+        ) -> Result<String, JiraError> {
+            Err(JiraError::Http("boom".to_string()))
+        }
+        fn link_issues(
+            &self,
+            _inward_key: &str,
+            _outward_key: &str,
+            _link_type: &str,
+        ) -> Result<(), JiraError> {
+            Err(JiraError::Http("boom".to_string()))
         }
     }
 

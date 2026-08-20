@@ -1181,6 +1181,138 @@ impl AddEntryDialog {
     }
 }
 
+/// The 5 focus positions of [`CreateJiraIssueDialog`], in display
+/// order. `IssueType`/`Project` are closed-set selectors (cycled
+/// with Left/Right, not typed); `Subject`/`Labels`/`Description` are
+/// free-text `DialogField`s, indexed into
+/// `CreateJiraIssueDialog::fields` by `CreateJiraIssueFocus::field_index()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateJiraIssueFocus {
+    IssueType,
+    Project,
+    Subject,
+    Labels,
+    Description,
+}
+
+impl CreateJiraIssueFocus {
+    /// All 5 positions, in display/Tab order.
+    const ALL: [CreateJiraIssueFocus; 5] = [
+        CreateJiraIssueFocus::IssueType,
+        CreateJiraIssueFocus::Project,
+        CreateJiraIssueFocus::Subject,
+        CreateJiraIssueFocus::Labels,
+        CreateJiraIssueFocus::Description,
+    ];
+
+    fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    /// The index into `CreateJiraIssueDialog::fields` this focus
+    /// position corresponds to, or `None` for the two selectors
+    /// (`Project`/`IssueType`), which aren't `DialogField`s at all.
+    fn field_index(self) -> Option<usize> {
+        match self {
+            CreateJiraIssueFocus::Subject => Some(0),
+            CreateJiraIssueFocus::Description => Some(1),
+            CreateJiraIssueFocus::Labels => Some(2),
+            CreateJiraIssueFocus::Project | CreateJiraIssueFocus::IssueType => None,
+        }
+    }
+}
+
+/// State for the "create JIRA issue" dialog (`Action::CreateJiraIssue`).
+/// Deliberately its own struct rather than a third [`AddEntryKind`] on
+/// [`AddEntryDialog`] — that dialog's commit path
+/// (`write_new_entry_to_config`) is hard-wired to appending lines to a
+/// local config file, the wrong fit for a REST `POST`. See
+/// `App::open_create_jira_issue_dialog`/`App::create_jira_issue_dialog_submit`
+/// in `src/tui.rs` for how this gets populated and submitted.
+#[derive(Debug, Clone)]
+pub struct CreateJiraIssueDialog {
+    /// `[Subject, Description, Labels]`, in that order — see
+    /// `CreateJiraIssueFocus::field_index`. Reuses the plain
+    /// `DialogField` type; `config_suffix`/`required` are unused
+    /// here (this dialog never writes to a config file, and the
+    /// only required field, Subject, is checked directly by
+    /// `create_jira_issue_dialog_submit` rather than via
+    /// `DialogField::required`, since Project/`IssueType` — which
+    /// also can't be blank — aren't `DialogField`s at all).
+    pub fields: Vec<DialogField>,
+    /// From `JiraConfig::available_projects` at dialog-open time.
+    /// Never empty — `open_create_jira_issue_dialog` refuses to
+    /// open the dialog at all when this would be empty (nothing to
+    /// select).
+    pub projects: Vec<String>,
+    pub project_index: usize,
+    /// From `JiraConfig::available_issue_types`. Never empty — always
+    /// has at least the built-in default set.
+    pub issue_types: Vec<String>,
+    pub issue_type_index: usize,
+    pub focused: CreateJiraIssueFocus,
+    /// `Some(key)` when the dialog was opened with a JIRA row
+    /// selected — the issue the new one gets a "Relates" link to on
+    /// successful creation. `None` for a note-sourced or cold-opened
+    /// dialog.
+    pub source_key: Option<String>,
+    /// `true` while `source_key.is_some()` and the background fetch
+    /// for that issue's full description/labels
+    /// (`JiraPrefillFetchRequest`) hasn't resolved yet — used to
+    /// decide whether the async result is still allowed to overwrite
+    /// the Description/Labels fields (never once the user has typed
+    /// into them) and to render a "(loading…)" hint.
+    pub prefill_loading: bool,
+    pub error: Option<String>,
+}
+
+impl CreateJiraIssueDialog {
+    pub fn focus_next(&mut self) {
+        self.focused = self.focused.next();
+    }
+
+    pub fn focus_prev(&mut self) {
+        self.focused = self.focused.prev();
+    }
+
+    /// Cycle the Project selector, wrapping. No-op when `focused`
+    /// isn't `Project` — callers gate on that themselves, this just
+    /// keeps the wrapping-index math in one place.
+    pub fn cycle_project(&mut self, forward: bool) {
+        if self.projects.is_empty() {
+            return;
+        }
+        self.project_index = cycle_index(self.project_index, self.projects.len(), forward);
+    }
+
+    pub fn cycle_issue_type(&mut self, forward: bool) {
+        if self.issue_types.is_empty() {
+            return;
+        }
+        self.issue_type_index = cycle_index(self.issue_type_index, self.issue_types.len(), forward);
+    }
+
+    /// The `DialogField` the current focus points at, or `None` when
+    /// a selector (Project/Issue Type) is focused.
+    pub fn focused_field_mut(&mut self) -> Option<&mut DialogField> {
+        self.focused.field_index().and_then(|i| self.fields.get_mut(i))
+    }
+}
+
+fn cycle_index(current: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (current + 1) % len
+    } else {
+        (current + len - 1) % len
+    }
+}
+
 /// State for the in-TUI multi-line note/todo compose overlay
 /// (`Action::ComposeNoteEntry`, `F2` by default). Opens in `@`
 /// (Notes) or `!` (Todo) mode and lets the user type a body

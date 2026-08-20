@@ -437,6 +437,13 @@ pub enum Action {
     /// switching to
     /// notes mode.
     CreateNote,
+    /// Open the "create JIRA issue" dialog (Project, Subject,
+    /// Description, Labels, Issue Type). Pre-filled from the
+    /// selected row when it's a note (subject/description/labels
+    /// from the note's own filename/content/`#tags`) or a JIRA issue
+    /// (copied from the selected issue, which also gets a "Relates"
+    /// link to the new one on success); empty otherwise.
+    CreateJiraIssue,
     /// Filter the `*`-mode panes view to show
     /// only live multiplexer panes (hide
     /// `# sessions` and `# hosts`). Pressing
@@ -692,6 +699,7 @@ impl Action {
             Action::AddHost => "add-host",
             Action::ComposeNoteEntry => "compose-note-entry",
             Action::CreateNote => "create-note",
+            Action::CreateJiraIssue => "create-jira-issue",
             Action::FilterPanesWindows => "filter-panes-windows",
             Action::FilterPanesHosts => "filter-panes-hosts",
             Action::FilterPanesSessions => "filter-panes-sessions",
@@ -756,6 +764,7 @@ impl Action {
             Action::AddHost => "Add selected directory as a host",
             Action::ComposeNoteEntry => "Compose a new note/todo entry",
             Action::CreateNote => "Create a new note (Title + Content)",
+            Action::CreateJiraIssue => "Create JIRA issue",
             Action::FilterPanesWindows => "Filter panes: windows only",
             Action::FilterPanesHosts => "Filter panes: hosts only",
             Action::FilterPanesSessions => "Filter panes: directories only",
@@ -856,6 +865,7 @@ impl Action {
             Action::AddSession | Action::AddHost => "config",
             Action::ComposeNoteEntry => "tools",
             Action::CreateNote => "tools",
+            Action::CreateJiraIssue => "tools",
             Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
                 "panes"
             }
@@ -992,6 +1002,7 @@ impl Action {
             // don't reliably emit Alt-modified keys can
             // pick any other free spec).
             Action::CreateNote => "none",
+            Action::CreateJiraIssue => "none",
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
@@ -1417,6 +1428,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::AddHost,
     Action::ComposeNoteEntry,
     Action::CreateNote,
+    Action::CreateJiraIssue,
     Action::FilterPanesWindows,
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,

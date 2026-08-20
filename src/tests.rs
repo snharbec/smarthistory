@@ -3548,6 +3548,24 @@ tmuxpaneoutputdir=~/custom-tmux
         fn add_comment(&self, _key: &str, _body: &str) -> Result<(), crate::jira::JiraError> {
             Ok(())
         }
+        fn create_issue(
+            &self,
+            _project: &str,
+            _issuetype: &str,
+            _summary: &str,
+            _description: &str,
+            _labels: &[String],
+        ) -> Result<String, crate::jira::JiraError> {
+            Ok("PROJ-1".to_string())
+        }
+        fn link_issues(
+            &self,
+            _inward_key: &str,
+            _outward_key: &str,
+            _link_type: &str,
+        ) -> Result<(), crate::jira::JiraError> {
+            Ok(())
+        }
     }
 
     #[test]

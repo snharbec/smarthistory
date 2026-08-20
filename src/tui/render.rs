@@ -163,6 +163,13 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_add_entry_dialog(f, app, dialog);
     }
 
+    // The "create JIRA issue" dialog is a sibling of the add-entry
+    // dialog: also drawn last (topmost), also mutually exclusive
+    // with it in practice.
+    if let Some(dialog) = app.create_jira_issue_dialog.as_ref() {
+        draw_create_jira_issue_dialog(f, dialog);
+    }
+
     // The note/todo compose overlay is a sibling of the
     // add-entry dialog: also drawn last (topmost). The two are
     // mutually exclusive in practice (each opens via its own
@@ -1413,6 +1420,242 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
         Span::raw(" delete word"),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[footer_idx]);
+}
+
+/// Render a single-line `DialogField` as `<name>: <value>` with a
+/// cursor glyph, matching `draw_add_entry_dialog`'s per-field
+/// rendering exactly (same reversed-character/reversed-space cursor
+/// convention) — pulled out as its own function here since this
+/// dialog needs it for two fields (Subject, Labels) alongside
+/// non-`DialogField` selector rows, unlike `draw_add_entry_dialog`
+/// where every field is a `DialogField`.
+fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: bool) -> Line<'a> {
+    let style = if is_focused { Theme::highlight() } else { Style::default() };
+    // The field name is always bold — a dominant label the user can
+    // scan even when the field isn't focused — while its color still
+    // tracks focus like the value text does.
+    let label_style = style.add_modifier(Modifier::BOLD);
+    let chars: Vec<char> = field.value.chars().collect();
+    let mut spans: Vec<Span> = vec![Span::styled(format!("{}: ", field.name), label_style)];
+    if field.value.is_empty() && is_focused {
+        spans.push(Span::styled(field.placeholder.to_string(), Theme::dim()));
+        spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+    } else {
+        let pre: String = chars.iter().take(field.cursor).collect();
+        spans.push(Span::styled(pre, style));
+        if is_focused {
+            if field.cursor < chars.len() {
+                spans.push(Span::styled(
+                    chars[field.cursor].to_string(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
+            } else {
+                spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+            }
+        }
+        let post: String = chars
+            .iter()
+            .skip(if is_focused {
+                field.cursor + if field.cursor < chars.len() { 1 } else { 0 }
+            } else {
+                field.cursor
+            })
+            .collect();
+        if !post.is_empty() {
+            spans.push(Span::styled(post, style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Render a Project/Issue Type selector row: `<name>: ◂ value ▸`.
+fn selector_line<'a>(name: &'a str, value: &'a str, is_focused: bool) -> Line<'a> {
+    let style = if is_focused { Theme::highlight() } else { Style::default() };
+    // Bold name label, same dominance rule `dialog_field_line` uses.
+    let label_style = style.add_modifier(Modifier::BOLD);
+    Line::from(vec![
+        Span::styled(format!("{name}: "), label_style),
+        Span::styled(if is_focused { "◂ " } else { "  " }, Theme::dim()),
+        Span::styled(value.to_string(), style),
+        Span::styled(if is_focused { " ▸" } else { "  " }, Theme::dim()),
+    ])
+}
+
+fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::CreateJiraIssueDialog) {
+    use crate::tui::state::CreateJiraIssueFocus;
+
+    // Layout: Issue Type (1) + Project (1) + Subject (1) + Labels (1)
+    // + Description (fill) + error (1, only when present) + footer
+    // (1) + borders (2). Issue Type leads (the field most often
+    // changed away from its default) and Labels sits right after
+    // Subject so the two short fields are typed back-to-back before
+    // the long-form Description. Capped at 80% of the viewport height
+    // the same way `draw_add_entry_dialog`/`draw_note_create` are,
+    // for the same reason (leave the underlying TUI visible as a cue
+    // this is a transient overlay).
+    let has_error = dialog.error.is_some();
+    let area = centered_rect(70, 75, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Create JIRA issue ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent())
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut constraints = vec![
+        Constraint::Length(1), // Issue Type
+        Constraint::Length(1), // Project
+        Constraint::Length(1), // Subject
+        Constraint::Length(1), // Labels
+        Constraint::Fill(1),   // Description
+    ];
+    if has_error {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1)); // footer
+    let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
+
+    f.render_widget(
+        Paragraph::new(selector_line(
+            "Issue Type",
+            &dialog.issue_types[dialog.issue_type_index],
+            dialog.focused == CreateJiraIssueFocus::IssueType,
+        )),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(selector_line(
+            "Project",
+            &dialog.projects[dialog.project_index],
+            dialog.focused == CreateJiraIssueFocus::Project,
+        )),
+        chunks[1],
+    );
+    f.render_widget(
+        Paragraph::new(dialog_field_line(&dialog.fields[0], dialog.focused == CreateJiraIssueFocus::Subject)),
+        chunks[2],
+    );
+    f.render_widget(
+        Paragraph::new(dialog_field_line(&dialog.fields[2], dialog.focused == CreateJiraIssueFocus::Labels)),
+        chunks[3],
+    );
+
+    // Description: multi-line, word-wrapped, with the same
+    // bottom-anchored auto-scroll `draw_note_create`'s Content field
+    // uses (`wrap_chars_to_rows`/`content_display_position`) — so a
+    // long pre-filled body (a note's full content, or a JIRA issue's
+    // description) can actually be scrolled to and edited throughout,
+    // not just typed into invisibly off-screen at whatever the cursor
+    // happens to sit at. The cursor's own wrapped row gets a rendered
+    // glyph (same reversed-character/reversed-space convention
+    // `dialog_field_line` uses for the single-line fields above) —
+    // every other row renders as plain text.
+    let desc_focused = dialog.focused == CreateJiraIssueFocus::Description;
+    let desc_label_style = (if desc_focused { Theme::highlight() } else { Style::default() })
+        .add_modifier(Modifier::BOLD);
+    let desc_field = &dialog.fields[1];
+    let mut desc_lines: Vec<Line> = Vec::new();
+    let mut scroll_y_desc: u16 = 0;
+    if desc_field.value.is_empty() {
+        desc_lines.push(Line::from(vec![
+            Span::styled("Description: ", desc_label_style),
+            Span::styled(desc_field.placeholder, Theme::dim()),
+        ]));
+    } else {
+        desc_lines.push(Line::from(Span::styled("Description: ", desc_label_style)));
+        // Unlike `draw_note_create`'s Content field, this chunk has no
+        // border of its own (it's a plain slice of the outer dialog's
+        // already-bordered inner area) — no `-2` padding needed.
+        let inner_width_desc = chunks[4].width.max(1) as usize;
+        let line_chars: Vec<Vec<char>> =
+            desc_field.value.split('\n').map(|l| l.chars().collect()).collect();
+        let wrapped_lines: Vec<Vec<(String, usize)>> =
+            line_chars.iter().map(|chars| wrap_chars_to_rows(chars, inner_width_desc)).collect();
+
+        // Cursor's logical (line, col), plus its position within that
+        // line's wrapped rows — computed up front (before building
+        // `desc_lines`) so the row-building loop below knows which
+        // single row to render with a cursor glyph instead of plain
+        // text.
+        let cursor_byte = char_to_byte_index(&desc_field.value, desc_field.cursor);
+        let before_cursor = &desc_field.value[..cursor_byte];
+        let cursor_line = before_cursor.matches('\n').count();
+        let cursor_col = before_cursor.rsplit('\n').next().unwrap_or("").chars().count();
+        let (cursor_row_in_line, cursor_col_in_row) =
+            content_display_position(&wrapped_lines[cursor_line], cursor_col);
+
+        for (line_idx, rows) in wrapped_lines.iter().enumerate() {
+            for (row_idx, (text, _)) in rows.iter().enumerate() {
+                if desc_focused && line_idx == cursor_line && row_idx == cursor_row_in_line {
+                    let chars: Vec<char> = text.chars().collect();
+                    let pre: String = chars.iter().take(cursor_col_in_row).collect();
+                    let mut spans = vec![Span::raw(pre)];
+                    if cursor_col_in_row < chars.len() {
+                        spans.push(Span::styled(
+                            chars[cursor_col_in_row].to_string(),
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        ));
+                        let post: String = chars.iter().skip(cursor_col_in_row + 1).collect();
+                        if !post.is_empty() {
+                            spans.push(Span::raw(post));
+                        }
+                    } else {
+                        spans.push(Span::styled(
+                            " ",
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        ));
+                    }
+                    desc_lines.push(Line::from(spans));
+                } else {
+                    desc_lines.push(Line::from(text.clone()));
+                }
+            }
+        }
+
+        if desc_focused {
+            // +1 for the "Description: " label row always at the top.
+            let cursor_display_row: usize = 1
+                + wrapped_lines[..cursor_line].iter().map(|rows| rows.len()).sum::<usize>()
+                + cursor_row_in_line;
+            let inner_height_desc = chunks[4].height.max(1) as usize;
+            scroll_y_desc =
+                cursor_display_row.saturating_sub(inner_height_desc.saturating_sub(1)) as u16;
+        }
+    }
+    f.render_widget(
+        Paragraph::new(desc_lines).scroll((scroll_y_desc, 0)),
+        chunks[4],
+    );
+
+    let mut next_idx = 5;
+    if let Some(err) = &dialog.error {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(err.clone(), Theme::error()))),
+            chunks[next_idx],
+        );
+        next_idx += 1;
+    }
+
+    let footer = Line::from(vec![
+        Span::styled("Tab", Theme::highlight()),
+        Span::raw("/"),
+        Span::styled("S-Tab", Theme::highlight()),
+        Span::raw(" next/prev field, "),
+        Span::styled("←/→", Theme::highlight()),
+        Span::raw(" change Issue Type/Project, "),
+        Span::styled("↑/↓", Theme::highlight()),
+        Span::raw(" move line in Description, "),
+        Span::styled("Ctrl-S", Theme::highlight()),
+        Span::raw(" create, "),
+        Span::styled("Esc", Theme::highlight()),
+        Span::raw(" cancel"),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[next_idx]);
 }
 
 fn draw_output_view(f: &mut Frame, app: &App, view: &OutputView) {
