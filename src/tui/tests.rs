@@ -30147,3 +30147,40 @@ fn jira_prefill_fetch_error_clears_placeholder() {
     );
 }
 
+/// `strip_note_frontmatter` drops a well-formed YAML frontmatter
+/// block (delimiters + everything between them) plus the blank line
+/// separating it from the body, leaving only the body.
+#[test]
+fn strip_note_frontmatter_removes_well_formed_block() {
+    let content = "---\ntype: #project\ncreated: [[2026-08-14]]\n---\n\n# Body heading\n\nSome text.";
+    assert_eq!(
+        strip_note_frontmatter(content),
+        "# Body heading\n\nSome text."
+    );
+}
+
+/// Content with no frontmatter at all (doesn't start with a `---`
+/// line) passes through unchanged.
+#[test]
+fn strip_note_frontmatter_passes_through_content_without_frontmatter() {
+    let content = "# Just a note\n\nNo frontmatter here.";
+    assert_eq!(strip_note_frontmatter(content), content);
+}
+
+/// A malformed block — starts with `---` but never closes — is left
+/// untouched rather than silently discarding the whole note (better
+/// to show the raw content, `---` and all, than to lose it).
+#[test]
+fn strip_note_frontmatter_passes_through_unclosed_block() {
+    let content = "---\ntype: #project\n# never closes";
+    assert_eq!(strip_note_frontmatter(content), content);
+}
+
+/// An empty body after the closing `---` (frontmatter-only note)
+/// strips down to an empty string, not a stray blank line.
+#[test]
+fn strip_note_frontmatter_empty_body_yields_empty_string() {
+    let content = "---\ntype: #project\n---\n";
+    assert_eq!(strip_note_frontmatter(content), "");
+}
+

@@ -9135,10 +9135,17 @@ impl App {
                     let name = row.command.strip_suffix(".md").unwrap_or(&row.command);
                     fields[0].value = name.to_string();
                     fields[0].cursor = fields[0].value.chars().count();
+                    // Tags are extracted from the FULL content (including
+                    // frontmatter) — a note's `type:`/other frontmatter
+                    // fields are a common place for `#tags` to live (see
+                    // the live `project/fahrrad.md` case: `type: #project`).
+                    // Only the Description field strips the frontmatter
+                    // block below — JIRA has no use for a note's metadata
+                    // header, just its body.
                     let (_, tags) = crate::tui::state::extract_links_and_tags(&content);
                     fields[2].value = tags.join(", ");
                     fields[2].cursor = fields[2].value.chars().count();
-                    fields[1].value = content;
+                    fields[1].value = strip_note_frontmatter(&content);
                     fields[1].cursor = fields[1].value.chars().count();
                 }
                 "jira" => {
@@ -15710,6 +15717,47 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or_else(|| s.len())
+}
+
+/// Strip a leading YAML frontmatter block (a `---` line, a run of
+/// metadata lines, then a closing `---` line) from a note's raw
+/// content, along with the blank line typically separating it from
+/// the body. Used by `open_create_jira_issue_dialog`'s note-sourced
+/// prefill — JIRA has no use for a note's `type:`/`created:`/etc.
+/// metadata header in the Description, only the actual body (tags are
+/// still extracted from the FULL content beforehand, since frontmatter
+/// is a common place for `#tags` to live — see the caller).
+///
+/// Falls back to the original content unchanged when there's no
+/// well-formed frontmatter block (missing closing `---`, or the file
+/// doesn't start with one at all) — better to show the raw content
+/// than to silently discard it on a malformed/absent header.
+fn strip_note_frontmatter(content: &str) -> String {
+    let mut lines = content.lines();
+    let Some(first) = lines.next() else {
+        return content.to_string();
+    };
+    if first.trim_end() != "---" {
+        return content.to_string();
+    }
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if !closed {
+            if line.trim_end() == "---" {
+                closed = true;
+            }
+            continue;
+        }
+        body_lines.push(line);
+    }
+    if !closed {
+        return content.to_string();
+    }
+    while body_lines.first().is_some_and(|l| l.trim().is_empty()) {
+        body_lines.remove(0);
+    }
+    body_lines.join("\n")
 }
 
 /// Delete one word backward
