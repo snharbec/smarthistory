@@ -12210,6 +12210,53 @@ fn zoxide_save_prompt_renders_label_and_hint() {
     );
 }
 
+/// `draw_output_preview` used to hard-cap plain history rows (and any
+/// mode not on a specific allow-list) at 4 lines regardless of how
+/// tall the pane actually was. Now every mode renders as many lines
+/// as it already loaded, letting the pane's own render area (and
+/// scroll) determine what's visible — so a tall enough pane shows
+/// well past the old 4-line ceiling, with no mode-specific carve-out
+/// needed. Regression test for that fix: a plain `command`-mode row
+/// with 8 lines of captured output must show line 6 onscreen (which
+/// the old `take(4)` cap would have discarded before the Paragraph
+/// ever saw it).
+#[test]
+fn output_preview_shows_more_than_four_lines_when_pane_is_tall_enough() {
+    let mut app = directories_test_app(&[]);
+    let output: String = (1..=8).map(|n| format!("line {n} of captured output\n")).collect();
+    app.merged_rows.insert(
+        0,
+        crate::tui::state::HistoryRow {
+            id: 1,
+            command: "some-command".to_string(),
+            mode: "command".to_string(),
+            output,
+            ..Default::default()
+        },
+    );
+    app.list_state.select(Some(0));
+
+    // Tall enough that `PaneHeight::default()`'s detail row (at
+    // least `PaneHeight::MIN` = 8 lines) comfortably exceeds the old
+    // 4-line cap once its 2 border rows are subtracted.
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("line 6 of captured output"),
+        "expected line 6 onscreen (past the old 4-line cap), got: {text:?}"
+    );
+}
+
 // --- processes mode (`%` prefix) ----
 
 /// `%` mode parses the same as every other prefix mode: the query's
