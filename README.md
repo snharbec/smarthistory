@@ -1,5 +1,7 @@
 # Smart History
 
+![Smart History demo: live fuzzy search, match-algorithm toggle, and scope cycling in the TUI picker](assets/demo.gif)
+
 A fast, SQLite-backed shell history tool for zsh with a full-screen picker,
 match-algorithm toggle (substring / fuzzy / regex), optional LLM integration,
 multiplexer support (tmux + herdr), and context-aware navigation. For the full
