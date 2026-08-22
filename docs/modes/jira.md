@@ -89,6 +89,15 @@ frontmatter-defined fields alongside the usual ones. Full format reference
 is in
 [`docs/actions.md#createjiraissuefromtemplate`](../actions.md#createjiraissuefromtemplate).
 
+### Creating a template from an existing issue
+
+`Action::CreateJiraTemplateFromIssue` (unbound by default) is the reverse: on
+a selected JIRA row, asks for a template name, then writes a new template
+file capturing that issue's project/issue type/summary/labels/description
+and **every** populated custom field (not just the ones configured for
+[cloning into a new issue](../actions.md#createjiraissue)). Full reference in
+[`docs/actions.md#createjiratemplatefromissue`](../actions.md#createjiratemplatefromissue).
+
 ## Special tokens
 
 The body is parsed by [`src/jira.rs`](../src/jira.rs) using a shared token

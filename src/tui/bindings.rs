@@ -452,6 +452,13 @@ pub enum Action {
     /// precedence over the template's own defaults when a row is
     /// selected).
     CreateJiraIssueFromTemplate,
+    /// On a selected JIRA row (`-` mode), open a "Template name:" prompt,
+    /// then generate a NEW "create JIRA issue from template" template
+    /// file (under the same `~/.config/smarthistory/templates/jira/`
+    /// directory `CreateJiraIssueFromTemplate` reads from) capturing that
+    /// issue's project/issue type/summary/labels/description and every
+    /// populated custom field — the reverse of `CreateJiraIssueFromTemplate`.
+    CreateJiraTemplateFromIssue,
     /// Filter the `*`-mode panes view to show
     /// only live multiplexer panes (hide
     /// `# sessions` and `# hosts`). Pressing
@@ -709,6 +716,7 @@ impl Action {
             Action::CreateNote => "create-note",
             Action::CreateJiraIssue => "create-jira-issue",
             Action::CreateJiraIssueFromTemplate => "create-jira-issue-from-template",
+            Action::CreateJiraTemplateFromIssue => "create-jira-template-from-issue",
             Action::FilterPanesWindows => "filter-panes-windows",
             Action::FilterPanesHosts => "filter-panes-hosts",
             Action::FilterPanesSessions => "filter-panes-sessions",
@@ -775,6 +783,7 @@ impl Action {
             Action::CreateNote => "Create a new note (Title + Content)",
             Action::CreateJiraIssue => "Create JIRA issue",
             Action::CreateJiraIssueFromTemplate => "Create JIRA issue from template",
+            Action::CreateJiraTemplateFromIssue => "Create JIRA template from issue",
             Action::FilterPanesWindows => "Filter panes: windows only",
             Action::FilterPanesHosts => "Filter panes: hosts only",
             Action::FilterPanesSessions => "Filter panes: directories only",
@@ -877,6 +886,7 @@ impl Action {
             Action::CreateNote => "tools",
             Action::CreateJiraIssue => "tools",
             Action::CreateJiraIssueFromTemplate => "tools",
+            Action::CreateJiraTemplateFromIssue => "tools",
             Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
                 "panes"
             }
@@ -1015,6 +1025,7 @@ impl Action {
             Action::CreateNote => "none",
             Action::CreateJiraIssue => "none",
             Action::CreateJiraIssueFromTemplate => "none",
+            Action::CreateJiraTemplateFromIssue => "none",
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
@@ -1442,6 +1453,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CreateNote,
     Action::CreateJiraIssue,
     Action::CreateJiraIssueFromTemplate,
+    Action::CreateJiraTemplateFromIssue,
     Action::FilterPanesWindows,
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,

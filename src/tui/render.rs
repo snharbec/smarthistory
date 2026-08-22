@@ -108,6 +108,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_project_since_prompt(f, app, prompt);
     }
 
+    if let Some(ref prompt) = app.template_name_prompt {
+        draw_template_name_prompt(f, app, prompt);
+    }
+
     if let Some(view) = app.help_view.as_ref() {
         draw_help_view(f, app, view);
     }
@@ -563,6 +567,83 @@ fn draw_project_since_prompt(
             Span::raw(" cancels."),
         ]),
     ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+/// Renders `TemplateNamePrompt` — same shape as `draw_project_since_prompt`,
+/// with a free-text buffer (no "(just now)" placeholder — an empty buffer
+/// is invalid here, not a valid default) and an inline error line when
+/// `prompt.error.is_some()`.
+fn draw_template_name_prompt(
+    f: &mut Frame,
+    app: &App,
+    prompt: &crate::tui::state::TemplateNamePrompt,
+) {
+    let area = centered_rect(60, 22, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Create template from issue ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent());
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
+
+    let chars: Vec<char> = prompt.buffer.chars().collect();
+    let mut buffer_spans: Vec<Span> = Vec::new();
+    if chars.is_empty() {
+        buffer_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+    } else {
+        let pre: String = chars.iter().take(prompt.cursor).collect();
+        buffer_spans.push(Span::raw(pre));
+        if prompt.cursor < chars.len() {
+            buffer_spans.push(Span::styled(
+                chars[prompt.cursor].to_string(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+            let post: String = chars.iter().skip(prompt.cursor + 1).collect();
+            if !post.is_empty() {
+                buffer_spans.push(Span::raw(post));
+            }
+        } else {
+            buffer_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+        }
+    }
+
+    let mut text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Create a template from {}", prompt.source_key),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::raw("Template name:")),
+        Line::from(buffer_spans),
+    ];
+    if let Some(error) = &prompt.error {
+        text.push(Line::from(""));
+        text.push(Line::from(Span::styled(error.clone(), Theme::error())));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled("Enter", Theme::highlight()),
+        Span::raw(" confirms, "),
+        Span::styled(cancel_hint, Theme::highlight()),
+        Span::raw(" cancels."),
+    ]));
 
     let paragraph = Paragraph::new(text)
         .block(block)

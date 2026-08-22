@@ -182,6 +182,83 @@ pub(crate) fn classify_template_key(key: &str) -> TemplateFieldKind {
     }
 }
 
+/// Render a single frontmatter scalar value for "create JIRA template
+/// from issue" (`render_jira_template` below) — the write-side mirror of
+/// `unquote_scalar`. Embedded newlines are flattened to spaces (multi-line
+/// scalars aren't supported by `parse_jira_template`), and the result is
+/// wrapped in `"..."` unless the value itself contains a `"` — that case
+/// is left unquoted, best-effort, since `unquote_scalar` only strips a
+/// matching leading/trailing pair and has no backslash-escaping to lean
+/// on for an embedded quote.
+fn quote_scalar(value: &str) -> String {
+    let flattened = value.replace(['\n', '\r'], " ");
+    if flattened.contains('"') {
+        flattened
+    } else {
+        format!("\"{flattened}\"")
+    }
+}
+
+/// Build a "create JIRA issue from template" template file's content from
+/// an existing issue's fields — the write-side mirror of
+/// `parse_jira_template`/`classify_template_key`. Emits exactly the
+/// frontmatter keys those two recognize (`project`/`issuetype`/`summary`/
+/// `labels`/`cf[<digits>]`), so the generated file reads back correctly.
+/// `created`/`updated` are deliberately never emitted — `classify_template_key`
+/// treats them as `Reserved` (never shown as a field), so they'd be inert
+/// either way.
+pub(crate) fn render_jira_template(
+    issue: &crate::jira::JiraIssue,
+    custom_fields: &[(String, String)],
+) -> String {
+    // `JiraIssue` has no separate project field — every key matches
+    // `^[A-Z]+-[0-9]+$` (`extract_issue_key`'s own regex), so the project
+    // key is everything before the trailing `-<digits>`.
+    let project = issue.key.rsplit_once('-').map(|(p, _)| p).unwrap_or(&issue.key);
+
+    let mut frontmatter = String::from("---\n");
+    frontmatter.push_str(&format!("project: {}\n", quote_scalar(project)));
+    frontmatter.push_str(&format!("issuetype: {}\n", quote_scalar(&issue.issuetype)));
+    frontmatter.push_str(&format!("summary: {}\n", quote_scalar(&issue.summary)));
+    if !issue.labels.is_empty() {
+        frontmatter.push_str("labels:\n");
+        for label in &issue.labels {
+            frontmatter.push_str(&format!("- {}\n", quote_scalar(label)));
+        }
+    }
+    for (id, value) in custom_fields {
+        let Some(digits) = id.strip_prefix("customfield_") else {
+            continue;
+        };
+        frontmatter.push_str(&format!("cf[{digits}]: {}\n", quote_scalar(value)));
+    }
+    frontmatter.push_str("---\n");
+    frontmatter.push_str(&issue.description);
+    frontmatter
+}
+
+/// Write a generated template's content to `dir/<slugified name>.md`.
+/// Creates `dir` if it doesn't exist yet; refuses to overwrite an
+/// existing file (returns an error instead) so a mistyped or reused name
+/// can't silently clobber a template the user already has. `dir` is a
+/// parameter (rather than resolving `jira_templates_dir()` internally) so
+/// this is testable against a tempdir without touching the user's real
+/// templates directory.
+pub(crate) fn write_jira_template_file(
+    dir: &std::path::Path,
+    name: &str,
+    content: &str,
+) -> Result<std::path::PathBuf, String> {
+    let slug = crate::util::slugify(name, "template");
+    std::fs::create_dir_all(dir).map_err(|e| format!("couldn't create {}: {}", dir.display(), e))?;
+    let path = dir.join(format!("{slug}.md"));
+    if path.exists() {
+        return Err(format!("template {} already exists", path.display()));
+    }
+    std::fs::write(&path, content).map_err(|e| format!("couldn't write {}: {}", path.display(), e))?;
+    Ok(path)
+}
+
 /// Whether the query is a JIRA issue-search request:
 /// the query starts with the jira prefix (`-` by
 /// default). The body is parsed into a JQL query by
@@ -515,6 +592,27 @@ pub(crate) struct JiraPrefillFetchRequest {
 pub(crate) struct JiraPrefillResult {
     pub(crate) issue: crate::jira::JiraIssue,
     pub(crate) clone_fields: Vec<(String, String)>,
+}
+
+/// An in-flight fetch kicked off once `Action::CreateJiraTemplateFromIssue`'s
+/// "Template name:" prompt is answered — combines `search` (for
+/// summary/description/labels, same reason `JiraPrefillFetchRequest` needs
+/// its own `search` call) with `fetch_all_custom_fields` (every populated
+/// custom field on the source issue, not just `JiraConfig::clone_fields`).
+/// Unlike `JiraPrefillFetchRequest`'s clone-fields fetch, this one is NOT
+/// best-effort: either call failing fails the whole request, since there's
+/// no partial template worth writing to disk.
+pub(crate) struct JiraTemplateFetchRequest {
+    pub(crate) receiver: std::sync::mpsc::Receiver<Result<JiraTemplateFetchResult, crate::jira::JiraError>>,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What `App::start_jira_template_fetch` resolves with — the source
+/// issue's full details plus every populated custom field, everything
+/// `render_jira_template` needs to build the new template file's content.
+pub(crate) struct JiraTemplateFetchResult {
+    pub(crate) issue: crate::jira::JiraIssue,
+    pub(crate) custom_fields: Vec<(String, String)>,
 }
 
 /// Test-injection seam for [`App::open_jira_in_background`]'s real
@@ -1755,6 +1853,45 @@ impl App {
         }
     }
 
+    /// Resolve the fetch `App::start_jira_template_fetch` kicked off:
+    /// build the template's content and write it to the real
+    /// `~/.config/smarthistory/templates/jira/` directory. Unlike
+    /// `process_jira_prefill_fetch_result`'s clone-fields fetch, a
+    /// failure here means nothing gets written at all — there's no
+    /// partial template worth keeping.
+    pub(crate) fn process_jira_template_fetch_result(
+        &mut self,
+        request: crate::tui::mode::jira::JiraTemplateFetchRequest,
+        name: String,
+        result: Result<crate::tui::mode::jira::JiraTemplateFetchResult, crate::jira::JiraError>,
+    ) {
+        self.jira_template_fetch_in_flight = false;
+        self.jira_template_fetch_request = None;
+        if request.cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        let fetched = match result {
+            Ok(fetched) => fetched,
+            Err(e) => {
+                self.set_status_message(format!("Couldn't create template {}: {}", name, e));
+                return;
+            }
+        };
+        let Some(dir) = crate::tui::jira_templates_dir() else {
+            self.set_status_message("Couldn't create template: $HOME is not set".to_string());
+            return;
+        };
+        let content = crate::tui::mode::jira::render_jira_template(&fetched.issue, &fetched.custom_fields);
+        match crate::tui::mode::jira::write_jira_template_file(&dir, &name, &content) {
+            Ok(path) => {
+                self.set_status_message(format!("Created template {}", path.display()));
+            }
+            Err(e) => {
+                self.set_status_message(format!("Couldn't create template {}: {}", name, e));
+            }
+        }
+    }
+
     /// Fire a background thread to fetch the
     /// comments for a JIRA issue. Mirrors
     /// `spawn_jira_request` (the search-time
@@ -2007,6 +2144,40 @@ impl App {
         let staged = format!("note_search jira-issue {}", crate::util::shell_quote(&key));
         self.selection = Some(staged);
         self.pick_mode = Some(PickMode::Run);
+    }
+
+    /// Open the "Template name:" prompt (`Action::CreateJiraTemplateFromIssue`)
+    /// for the selected JIRA row — the first step of generating a NEW
+    /// "create JIRA issue from template" template file from that issue's
+    /// fields. Same gating/no-op-with-status-message shape as
+    /// `download_jira_issue`; unlike it, this never exits the TUI (opening
+    /// a dialog isn't staging a shell command) and the actual fetch/write
+    /// only happens once the prompt is answered — see
+    /// `handle_template_name_prompt_key`/`start_jira_template_fetch` in
+    /// `src/tui.rs`.
+    pub(crate) fn create_jira_template_from_issue(&mut self) {
+        if !self.is_jira_query() {
+            self.set_status_message(
+                "Create-JIRA-template-from-issue is only available in JIRA search (type `-`)"
+                    .to_string(),
+            );
+            return;
+        }
+        let Some(row) = self.selected_row().cloned() else {
+            self.set_status_message("No JIRA issue selected".to_string());
+            return;
+        };
+        let key = row.command.trim().to_string();
+        if key.is_empty() {
+            self.set_status_message("Selected JIRA row has no issue key".to_string());
+            return;
+        }
+        self.template_name_prompt = Some(crate::tui::state::TemplateNamePrompt {
+            source_key: key,
+            buffer: String::new(),
+            cursor: 0,
+            error: None,
+        });
     }
 
     /// Download EVERY JIRA issue matching the current query (not
