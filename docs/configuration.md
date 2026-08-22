@@ -853,6 +853,7 @@ are silently ignored.
 | `prefix.zoxide`      | zoxide directories          | `~`     | directories from the local `zoxide` database, highest frecency score first; selecting one creates a new tmux session / herdr workspace there (requires the `zoxide` binary on `$PATH`) |
 | `prefix.processes`   | running processes           | `%`     | list every OS process (macOS + Linux, all users); selecting one opens a confirm dialog to send it a signal (SIGTERM by default, Tab/Shift-Tab cycles SIGKILL/SIGHUP/SIGINT)            |
 | `prefix.project`     | project picker              | `.`     | lists `type: project` notes for time tracking; selecting one sets the current project                                                                                                  |
+| `prefix.worktree`    | git worktrees                | `;`     | lists `git worktree` checkouts for the current repo; selecting one creates a new tmux session / herdr workspace there (requires being inside a git repo)                              |
 | `prefix.meta`        | meta-prefix (mode picker)   | `'`     | not a search mode itself — type a partial mode name then Tab to expand/activate; see below                                                                                             |
 
 ```ini
@@ -1558,6 +1559,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `prefix.zoxide`                 | char                              | `~`                                                              | [Query prefixes](#query-prefixes)                                         |
 | `prefix.processes`              | char                              | `%`                                                              | [Query prefixes](#query-prefixes)                                         |
 | `prefix.project`                | char                              | `.`                                                              | [Query prefixes](#query-prefixes)                                         |
+| `prefix.worktree`               | char                              | `;`                                                              | [Query prefixes](#query-prefixes)                                         |
 | `prefix.meta`                   | char                              | `'`                                                              | [Query prefixes](#query-prefixes)                                         |
 | `multiplexer`                   | `tmux` \| `herdr`                 | `tmux`                                                           | [Multiplexer integration](#multiplexer-integration)                       |
 | `sessiondirs`                   | path list                         | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
