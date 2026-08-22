@@ -1528,6 +1528,11 @@ pub(crate) struct App {
     /// See `crate::tui::state::ZoxideSavePrompt`'s doc comment for
     /// the full flow.
     zoxide_save_prompt: Option<crate::tui::state::ZoxideSavePrompt>,
+    /// Pending "started how many minutes ago?" prompt shown after
+    /// picking a project note in `.`-mode. See
+    /// `crate::tui::state::ProjectSincePrompt`'s doc comment for the
+    /// full flow.
+    project_since_prompt: Option<crate::tui::state::ProjectSincePrompt>,
     /// The in-TUI multi-line note/todo compose overlay state
     /// (`Action::ComposeNoteEntry`, `F2` by default). `None`
     /// when closed. See the `NoteComposeDialog` doc comment in
@@ -5066,6 +5071,7 @@ impl App {
             host_defs: Vec::new(),
             add_entry_dialog: None,
             zoxide_save_prompt: None,
+            project_since_prompt: None,
             note_compose: None,
             note_create: None,
             panes_filter: PanesFilter::default(),
@@ -12831,6 +12837,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_zoxide_save_prompt_key(app, key);
     }
 
+    // Same modal-overlay precedence as the zoxide save prompt above:
+    // while asking "started how many minutes ago?", only digit
+    // entry/editing and Enter/Esc/Ctrl+C are meaningful.
+    if app.project_since_prompt.is_some() {
+        return handle_project_since_prompt_key(app, key);
+    }
+
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
     if let Some(ref mode) = app.confirm_delete {
         return handle_confirm_delete_key(app, key, mode.clone());
@@ -13675,6 +13688,70 @@ fn handle_zoxide_save_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             app.zoxide_save_prompt = None;
             app.cancelled = true;
             true
+        }
+        _ => false,
+    }
+}
+
+/// Key handler for the `project_since_prompt` overlay ("started how
+/// many minutes ago?"). `Char(c)` only inserts `c.is_ascii_digit()` —
+/// every other printable character is silently swallowed rather than
+/// typed, so `prompt.buffer` can never hold anything but digits (no
+/// parse-error state to handle in `answer_project_since_prompt`).
+/// `Backspace`/`Left`/`Right`/`Home`/`End` are the usual single-line
+/// editing primitives. `Enter` commits (blank buffer = "just now",
+/// same as before this prompt existed); `Esc`/`Ctrl-C` cancel —
+/// `Ctrl-C` additionally quits the whole TUI, the same panic-button
+/// convention every other overlay in the TUI uses.
+fn handle_project_since_prompt_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.project_since_prompt = None;
+        app.cancelled = true;
+        return true;
+    }
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+        app.project_since_prompt = None;
+        return false;
+    }
+    let Some(prompt) = app.project_since_prompt.as_mut() else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Enter => {
+            app.answer_project_since_prompt();
+            app.selection.is_some()
+        }
+        KeyCode::Backspace => {
+            if prompt.cursor > 0 {
+                let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor - 1);
+                if let Some(next) = prompt.buffer[byte_idx..].chars().next() {
+                    prompt.buffer.replace_range(byte_idx..byte_idx + next.len_utf8(), "");
+                }
+                prompt.cursor -= 1;
+            }
+            false
+        }
+        KeyCode::Left => {
+            prompt.cursor = prompt.cursor.saturating_sub(1);
+            false
+        }
+        KeyCode::Right => {
+            prompt.cursor = (prompt.cursor + 1).min(prompt.buffer.chars().count());
+            false
+        }
+        KeyCode::Home => {
+            prompt.cursor = 0;
+            false
+        }
+        KeyCode::End => {
+            prompt.cursor = prompt.buffer.chars().count();
+            false
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor);
+            prompt.buffer.insert(byte_idx, c);
+            prompt.cursor += 1;
+            false
         }
         _ => false,
     }

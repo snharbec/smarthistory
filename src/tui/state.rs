@@ -899,6 +899,29 @@ pub struct ZoxideSavePrompt {
     pub directory: String,
 }
 
+/// Pending "started how many minutes ago?" prompt, shown after picking
+/// a project note in `.`-mode (`Action::Run`/Enter) — see
+/// `App::stage_project_selection`, which opens this INSTEAD of
+/// immediately staging `smarthistory project select <slug>`, and
+/// `App::answer_project_since_prompt`, which stages the command (with
+/// `--since <N>m` appended only when `buffer` holds a positive
+/// number) and exits the TUI, same as the direct-staging path did
+/// before this prompt existed. `buffer` can only ever hold digits or
+/// be empty (`handle_project_since_prompt_key` filters every other
+/// character at insertion time), so there's no invalid state to
+/// report — blank or `"0"` both mean "just now" (today's exact
+/// pre-existing behavior, no `--since` at all).
+#[derive(Debug, Clone)]
+pub struct ProjectSincePrompt {
+    /// The slug to stage, resolved from the selected project note the
+    /// same way `stage_project_selection` always has.
+    pub slug: String,
+    /// Digits typed so far (minutes ago). Empty means "just now".
+    pub buffer: String,
+    /// Character-index cursor into `buffer` (0..=len).
+    pub cursor: usize,
+}
+
 /// Short flags — across `ssh`/`scp`/`sftp`/`rsync`/`mosh` — that take
 /// a separate following argument (`-p 2222`, `-i ~/.ssh/id_ed25519`,
 /// …), as opposed to a bare boolean flag (`-4`, `-C`, …) or a flag

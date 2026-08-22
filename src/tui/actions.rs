@@ -290,11 +290,14 @@ impl App {
     ///
     /// Slugs the selected note's filename stem the same way
     /// `project.<slug>.dir` config keys are matched (see
-    /// `crate::util::slugify`) and stages `smarthistory project
-    /// select <slug>` for the parent shell to run — a fresh process
-    /// that upserts `project_current` and closes/opens the active
-    /// `project_sessions` row via the same `switch_project` helper
-    /// the directory-detection path uses.
+    /// `crate::util::slugify`), then opens `project_since_prompt`
+    /// ("started how many minutes ago?") instead of staging directly
+    /// — the actual `smarthistory project select <slug>` (optionally
+    /// with `--since <N>m`) is staged once that prompt is answered,
+    /// by `answer_project_since_prompt`. This is the same "defer the
+    /// real staging behind a small prompt" shape
+    /// `stage_zoxide_selection`/`zoxide_save_prompt` already use,
+    /// just to collect a backdate offset instead of a yes/no.
     fn stage_project_selection(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
@@ -307,10 +310,36 @@ impl App {
             .and_then(|s| s.to_str())
             .unwrap_or(&row.command);
         let slug = crate::util::slugify(stem, "project");
-        self.selection = Some(format!(
+        self.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+            slug,
+            buffer: String::new(),
+            cursor: 0,
+        });
+    }
+
+    /// Answer the `project_since_prompt` opened by
+    /// `stage_project_selection`. `buffer` is either empty or a plain
+    /// digit string (enforced at insertion time by
+    /// `handle_project_since_prompt_key`, so no parse error is
+    /// possible here) — empty or `"0"` stages `smarthistory project
+    /// select <slug>` exactly as `stage_project_selection` did before
+    /// this prompt existed; a positive number `N` appends `--since
+    /// {N}m`. Either way sets the same `selection`/`pick_mode` fields
+    /// staging always has, so the TUI exits and the parent shell runs
+    /// the staged command.
+    pub(crate) fn answer_project_since_prompt(&mut self) {
+        let Some(prompt) = self.project_since_prompt.take() else {
+            return;
+        };
+        let minutes: u64 = prompt.buffer.parse().unwrap_or(0);
+        let mut command = format!(
             "smarthistory project select {}",
-            crate::util::shell_quote(&slug)
-        ));
+            crate::util::shell_quote(&prompt.slug)
+        );
+        if minutes > 0 {
+            command.push_str(&format!(" --since {minutes}m"));
+        }
+        self.selection = Some(command);
         self.pick_mode = Some(PickMode::Run);
     }
 

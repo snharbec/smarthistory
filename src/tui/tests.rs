@@ -29954,17 +29954,20 @@ fn project_pick_mode_kind_wiring() {
     assert_eq!(ModeKind::ProjectPick.prefix(&crate::QueryPrefixes::default()), '.');
 }
 
-/// Selecting a `type: project` note row stages `smarthistory
-/// project select <slug>`, where `<slug>` is
-/// `crate::util::slugify` of the note's filename stem — the same
-/// identity `project.<slug>.dir` config keys and the report's
-/// `--project` filter use. Rows are pushed directly into
-/// `app.rows`/`app.merged_rows` rather than via `refresh()`,
-/// since `project_pick::fetch` needs a real `notes.database`
-/// (same reasoning `pass` mode's tests would need a real password
-/// store — there are none in this suite for that mode either).
+/// Selecting a `type: project` note row opens `project_since_prompt`
+/// ("started how many minutes ago?") instead of staging immediately —
+/// nothing is staged yet. Answering with a blank buffer (Enter, no
+/// digits typed) stages `smarthistory project select <slug>` with no
+/// `--since`, where `<slug>` is `crate::util::slugify` of the note's
+/// filename stem — the same identity `project.<slug>.dir` config keys
+/// and the report's `--project` filter use, and the exact command the
+/// old immediate-staging behavior produced. Rows are pushed directly
+/// into `app.rows`/`app.merged_rows` rather than via `refresh()`,
+/// since `project_pick::fetch` needs a real `notes.database` (same
+/// reasoning `pass` mode's tests would need a real password store —
+/// there are none in this suite for that mode either).
 #[test]
-fn select_for_run_in_project_pick_mode_stages_project_select_slug() {
+fn select_for_run_in_project_pick_mode_opens_since_prompt_blank_enter_stages_plain_select() {
     let mut app = directories_test_app(&[]);
     app.rows = vec![crate::tui::state::HistoryRow {
         id: 0,
@@ -29983,11 +29986,75 @@ fn select_for_run_in_project_pick_mode_stages_project_select_slug() {
     app.query = ".".to_string();
     app.list_state.select(Some(0));
     app.select_for_run();
+
+    assert_eq!(app.selection, None, "nothing staged until the prompt is answered");
+    assert_eq!(
+        app.project_since_prompt.as_ref().map(|p| p.slug.as_str()),
+        Some("my-great-project")
+    );
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    handle_key(&mut app, enter);
+
     assert_eq!(
         app.selection.as_deref(),
-        Some("smarthistory project select my-great-project")
+        Some("smarthistory project select my-great-project"),
+        "blank buffer must match the old immediate-staging command exactly"
     );
     assert_eq!(app.pick_mode, Some(PickMode::Run));
+    assert!(app.project_since_prompt.is_none());
+}
+
+/// Typing digits into the prompt and confirming appends `--since
+/// <N>m` to the staged command.
+#[test]
+fn project_since_prompt_with_digits_appends_since_flag() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "my-great-project".to_string(),
+        buffer: String::new(),
+        cursor: 0,
+    });
+    for c in "30".chars() {
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("smarthistory project select my-great-project --since 30m")
+    );
+}
+
+/// Non-digit characters are silently swallowed, never inserted into
+/// the buffer — so the committed command can never contain anything
+/// but a plain integer.
+#[test]
+fn project_since_prompt_ignores_non_digit_characters() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "demo".to_string(),
+        buffer: String::new(),
+        cursor: 0,
+    });
+    for c in "3a0m".chars() {
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    assert_eq!(app.project_since_prompt.as_ref().unwrap().buffer, "30");
+}
+
+/// Esc cancels the prompt without staging anything.
+#[test]
+fn project_since_prompt_esc_cancels_without_staging() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "demo".to_string(),
+        buffer: "15".to_string(),
+        cursor: 2,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    assert!(app.project_since_prompt.is_none());
+    assert_eq!(app.selection, None);
 }
 
 /// A row from a different mode is never staged as a project

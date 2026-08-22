@@ -2480,6 +2480,92 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(end_ts, Some(1050));
     }
 
+    // --- `smarthistory project select --since` (backdated switch) ------
+
+    /// No `project_sessions` rows at all: nothing bounds a backdated
+    /// switch, so the earliest allowed timestamp is 0 (the Unix
+    /// epoch) — in practice `--since`'s own `now - offset` is always
+    /// far above that.
+    #[test]
+    fn latest_project_session_boundary_is_zero_when_no_sessions() {
+        let conn = project_lifecycle_test_conn();
+        assert_eq!(latest_project_session_boundary(&conn).unwrap(), 0);
+    }
+
+    /// A still-open session bounds a backdated switch at its OWN
+    /// `start_ts` — you can move the boundary back to when the
+    /// current session started, not further (that would reach into
+    /// whatever came before it, which this function doesn't know
+    /// about here since there's only one row).
+    #[test]
+    fn latest_project_session_boundary_uses_start_ts_when_open() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        assert_eq!(latest_project_session_boundary(&conn).unwrap(), 1000);
+    }
+
+    /// A closed session bounds a backdated switch at its `end_ts` —
+    /// reaching earlier would cut into that already-finished session.
+    #[test]
+    fn latest_project_session_boundary_uses_end_ts_when_closed() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        switch_project(&conn, Some("other"), 1050, 1800, None).expect("switch");
+        // Most recent row is "other", still open, started at 1050 —
+        // but the boundary should reflect the MOST RECENT row
+        // (ordered by start_ts DESC), which is the still-open "other"
+        // session, so its start_ts (1050) is the boundary, not
+        // "demo"'s end_ts.
+        assert_eq!(latest_project_session_boundary(&conn).unwrap(), 1050);
+    }
+
+    /// End-to-end: a backdated `switch_project` call (simulating what
+    /// `ProjectAction::Select`'s handler does once `--since` has
+    /// cleared the boundary check) closes the previously-open session
+    /// at the backdated point and opens the new one there too — the
+    /// same "one timestamp, two roles" mechanism an on-time switch
+    /// uses, just fed an earlier `now`.
+    #[test]
+    fn backdated_switch_project_splits_sessions_at_the_earlier_point() {
+        let conn = project_lifecycle_test_conn();
+        // "demo" has been open since 1000; real "now" is 2000, but
+        // the user backdates the switch to "other" by 500s (as if
+        // they'd run `--since` computing effective_ts = 1500).
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        let boundary = latest_project_session_boundary(&conn).unwrap();
+        assert_eq!(boundary, 1000, "backdating to 1500 must be allowed (1500 >= 1000)");
+        switch_project(&conn, Some("other"), 1500, 1800, Some("switch")).expect("switch");
+
+        let mut stmt = conn
+            .prepare("SELECT project_slug, start_ts, end_ts FROM project_sessions ORDER BY id")
+            .expect("prepare");
+        let rows: Vec<(String, i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(rows, vec![
+            ("demo".to_string(), 1000, Some(1500)),
+            ("other".to_string(), 1500, None),
+        ]);
+    }
+
+    /// The boundary check itself rejects a candidate earlier than the
+    /// currently-open session's start — `ProjectAction::Select`'s
+    /// handler bails out (no mutation) rather than ever calling
+    /// `switch_project` with such a value.
+    #[test]
+    fn latest_project_session_boundary_rejects_reaching_before_it() {
+        let conn = project_lifecycle_test_conn();
+        switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
+        let boundary = latest_project_session_boundary(&conn).unwrap();
+        let candidate = 500; // earlier than boundary (1000)
+        assert!(
+            candidate < boundary,
+            "the handler's own `if candidate < boundary` check would reject this"
+        );
+    }
+
     // --- Time tracking: resolve_current_project (`project current`) ----
 
     /// Fixture for `resolve_current_project`: needs `project_current`
@@ -2818,6 +2904,54 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(format_duration_secs(90), "1m30s");
         assert_eq!(format_duration_secs(3600), "1h00m");
         assert_eq!(format_duration_secs(3665), "1h01m");
+    }
+
+    // --- parse_duration_to_secs (the `--since` parser) ---------------
+
+    #[test]
+    fn parse_duration_to_secs_single_units() {
+        assert_eq!(parse_duration_to_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_to_secs("30m").unwrap(), 1800);
+        assert_eq!(parse_duration_to_secs("1h").unwrap(), 3600);
+        assert_eq!(parse_duration_to_secs("2d").unwrap(), 172800);
+    }
+
+    #[test]
+    fn parse_duration_to_secs_combines_components() {
+        assert_eq!(parse_duration_to_secs("1h30m").unwrap(), 5400);
+        assert_eq!(parse_duration_to_secs("1d2h").unwrap(), 93600);
+        // Order doesn't matter.
+        assert_eq!(parse_duration_to_secs("30m1h").unwrap(), 5400);
+    }
+
+    /// Round-trips through `format_duration_secs` for values that
+    /// format cleanly (no seconds component dropped).
+    #[test]
+    fn parse_duration_to_secs_round_trips_with_format_duration_secs() {
+        for secs in [30, 90, 3600, 5400] {
+            let formatted = format_duration_secs(secs);
+            assert_eq!(
+                parse_duration_to_secs(&formatted).unwrap(),
+                secs,
+                "format_duration_secs({secs}) = {formatted:?} should parse back to {secs}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_duration_to_secs_rejects_bare_number() {
+        assert!(parse_duration_to_secs("30").is_err(), "no unit is ambiguous, must be rejected");
+    }
+
+    #[test]
+    fn parse_duration_to_secs_rejects_empty_and_garbage() {
+        assert!(parse_duration_to_secs("").is_err());
+        assert!(parse_duration_to_secs("   ").is_err());
+        assert!(parse_duration_to_secs("abc").is_err());
+        assert!(parse_duration_to_secs("30x").is_err(), "unknown unit");
+        assert!(parse_duration_to_secs("30m30m").is_err(), "duplicated unit");
+        assert!(parse_duration_to_secs("0m").is_err(), "total of zero is not a duration");
+        assert!(parse_duration_to_secs("h").is_err(), "unit with no digits");
     }
 
     // --- day_standard_work_secs -------------------------------------

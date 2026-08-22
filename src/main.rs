@@ -899,6 +899,17 @@ enum ProjectAction {
         /// filename stem — the same identity `project.<slug>.dir`
         /// and the report's `--project` filter use).
         slug: String,
+        /// Backdate the switch: pretend it happened this long ago
+        /// instead of right now (e.g. `30m`, `1h`, `1h30m` — see
+        /// `parse_duration_to_secs`), for the common "I forgot to
+        /// switch" case. The time since then is retroactively
+        /// re-attributed to `slug`. Only the single most-recent
+        /// `project_sessions` boundary can be moved back this way
+        /// (whatever's currently open, or the end of the most
+        /// recently closed session) — not arbitrary history; see
+        /// the handler for the exact boundary check.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Print the project the current directory resolves to, using
     /// the exact same priority `smarthistory add` uses: an in-repo
@@ -6576,6 +6587,32 @@ fn switch_project(
     Ok(())
 }
 
+/// The earliest timestamp `smarthistory project select --since` is
+/// allowed to backdate a switch to: the end of the single most recent
+/// `project_sessions` row (its `end_ts` if closed, else its own
+/// `start_ts` if still open), or `0` (no limit) when the table is
+/// empty. This is what stops `--since` from reaching back into
+/// already-finished, already-reported history, or creating an
+/// overlapping interval with whatever's currently open — it only ever
+/// allows moving the single most-recent boundary, matching
+/// `switch_project`'s own "one open row at a time" invariant.
+fn latest_project_session_boundary(conn: &Connection) -> anyhow::Result<i64> {
+    use rusqlite::OptionalExtension;
+    let boundary: i64 = conn
+        .query_row(
+            "SELECT start_ts, end_ts FROM project_sessions ORDER BY start_ts DESC LIMIT 1",
+            [],
+            |row| {
+                let start_ts: i64 = row.get(0)?;
+                let end_ts: Option<i64> = row.get(1)?;
+                Ok(end_ts.unwrap_or(start_ts))
+            },
+        )
+        .optional()?
+        .unwrap_or(0);
+    Ok(boundary)
+}
+
 /// Resolve a `smarthistory project report --day` value (`YYYY-MM-DD`,
 /// `today`, `yesterday`, or omitted) to the `[start, end)` Unix
 /// timestamp range covering that local calendar day, plus the
@@ -6970,6 +7007,64 @@ fn format_duration_secs(secs: i64) -> String {
     } else {
         format!("{s}s")
     }
+}
+
+/// Parse a `--since` duration string into seconds — the inverse of
+/// `format_duration_secs`, so a value that command prints (`1h23m`,
+/// `45m12s`, `30s`) can be pasted straight back in. Each component is
+/// a non-negative integer followed by exactly one unit: `d`
+/// (days), `h` (hours), `m` (minutes), `s` (seconds), with
+/// components concatenated in any order (`1h30m`, `90m`, `1d2h`).
+/// A bare number with no unit is rejected rather than guessing
+/// seconds vs. minutes — the two most plausible readings disagree by
+/// 60x, not a mistake this should silently paper over. Returns an
+/// error (not a duration) for an empty string, an unparseable
+/// component, a duplicated unit (`30m30m`), or a total of zero.
+fn parse_duration_to_secs(s: &str) -> anyhow::Result<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("--since: empty duration; expected e.g. \"30m\", \"1h\", \"1h30m\"");
+    }
+    let mut total: i64 = 0;
+    let mut seen_units: Vec<char> = Vec::new();
+    let mut digits = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = c.to_ascii_lowercase();
+        if digits.is_empty() || !matches!(unit, 'd' | 'h' | 'm' | 's') {
+            anyhow::bail!(
+                "--since {s:?}: invalid duration; expected components like \"30m\", \"1h\", \"1h30m\" (units: d/h/m/s, each used at most once)"
+            );
+        }
+        if seen_units.contains(&unit) {
+            anyhow::bail!("--since {s:?}: unit {unit:?} appears more than once");
+        }
+        seen_units.push(unit);
+        let value: i64 = digits.parse().map_err(|_| {
+            anyhow::anyhow!("--since {s:?}: {digits:?} is too large to be a valid duration component")
+        })?;
+        digits.clear();
+        total += value
+            * match unit {
+                'd' => 86400,
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                _ => unreachable!(),
+            };
+    }
+    if !digits.is_empty() {
+        anyhow::bail!(
+            "--since {s:?}: trailing digits {digits:?} with no unit; expected e.g. \"30m\", \"1h\", \"1h30m\""
+        );
+    }
+    if total <= 0 {
+        anyhow::bail!("--since {s:?}: duration must be positive");
+    }
+    Ok(total)
 }
 
 /// Print one project's (or "untracked"'s) section of `project
@@ -9120,11 +9215,30 @@ fn main() -> anyhow::Result<()> {
                     println!();
                 }
             }
-            ProjectAction::Select { slug } => {
+            ProjectAction::Select { slug, since } => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
+                let effective_ts = match &since {
+                    None => now,
+                    Some(s) => {
+                        let offset = parse_duration_to_secs(s)?;
+                        let candidate = now - offset;
+                        let boundary = latest_project_session_boundary(&conn)?;
+                        if candidate < boundary {
+                            anyhow::bail!(
+                                "--since {s:?} would start before {}; the earliest allowed --since is {} (only the current/most recent session boundary can be moved back, not arbitrary history)",
+                                crate::util::format_time(boundary),
+                                format_duration_secs(now - boundary),
+                            );
+                        }
+                        candidate
+                    }
+                };
+                // `set_ts` records when this preference was touched,
+                // not part of the tracked interval itself — always the
+                // real "now", even for a backdated switch.
                 conn.execute(
                     "INSERT INTO project_current (id, project_slug, set_ts) VALUES (1, ?1, ?2)
                      ON CONFLICT (id) DO UPDATE SET project_slug = excluded.project_slug, set_ts = excluded.set_ts",
@@ -9134,11 +9248,18 @@ fn main() -> anyhow::Result<()> {
                 switch_project(
                     &conn,
                     Some(&slug),
-                    now,
+                    effective_ts,
                     cfg.project_idle_threshold_secs,
                     Some("switch"),
                 )?;
-                eprintln!("smarthistory: current project set to {slug:?}");
+                if since.is_some() {
+                    eprintln!(
+                        "smarthistory: current project set to {slug:?} (started {} ago)",
+                        format_duration_secs(now - effective_ts)
+                    );
+                } else {
+                    eprintln!("smarthistory: current project set to {slug:?}");
+                }
             }
             ProjectAction::Current { with_time } => {
                 let cfg = Config::load();
