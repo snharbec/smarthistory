@@ -18448,6 +18448,8 @@ fn fetch_directories_tmux_pane_path_is_a_real_path() {
 type CreatedIssueCall = (String, String, String, String, Vec<String>);
 /// One `create_issue` call's `custom_fields` argument, cloned.
 type CreatedIssueCustomFields = Vec<(String, String)>;
+/// One `fetch_custom_fields` call's `(key, field_ids)` arguments.
+type ClonedFieldsCall = (String, Vec<String>);
 
 #[derive(Default)]
 struct FakeJira {
@@ -18473,6 +18475,18 @@ struct FakeJira {
     /// succeeding — for testing the "issue created but link failed"
     /// partial-success path.
     fail_link: bool,
+    /// Canned response for `fetch_custom_fields` — a fixed
+    /// `(id, value)` list returned regardless of the requested
+    /// `field_ids` (tests set this up to match what they actually ask
+    /// for).
+    clone_fields_response: Vec<(String, String)>,
+    /// When `true`, `fetch_custom_fields` returns an error instead of
+    /// `clone_fields_response` — for testing the "prefill still
+    /// completes, clone fields just come back empty" degradation path.
+    fail_clone_fields: bool,
+    /// `(key, field_ids)` `fetch_custom_fields` was called with, in
+    /// call order.
+    clone_fields_calls: std::sync::Arc<std::sync::Mutex<Vec<ClonedFieldsCall>>>,
 }
 
 impl crate::jira::JiraClient for FakeJira {
@@ -18531,6 +18545,17 @@ impl crate::jira::JiraClient for FakeJira {
             return Err(crate::jira::JiraError::Http("boom".to_string()));
         }
         Ok(())
+    }
+    fn fetch_custom_fields(
+        &self,
+        key: &str,
+        field_ids: &[String],
+    ) -> Result<Vec<(String, String)>, crate::jira::JiraError> {
+        self.clone_fields_calls.lock().unwrap().push((key.to_string(), field_ids.to_vec()));
+        if self.fail_clone_fields {
+            return Err(crate::jira::JiraError::Http("boom".to_string()));
+        }
+        Ok(self.clone_fields_response.clone())
     }
 }
 
@@ -30329,7 +30354,11 @@ fn jira_prefill_fetch_fills_placeholder_fields() {
         labels: vec!["backend".to_string(), "urgent".to_string()],
         ..Default::default()
     };
-    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(issue));
+    app.process_jira_prefill_fetch_result(
+        request,
+        "PROJ-1".to_string(),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+    );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
     assert_eq!(dialog.fields[1].value, "Full description");
@@ -30360,7 +30389,11 @@ fn jira_prefill_fetch_does_not_overwrite_user_edited_description() {
         labels: vec!["backend".to_string()],
         ..Default::default()
     };
-    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(issue));
+    app.process_jira_prefill_fetch_result(
+        request,
+        "PROJ-1".to_string(),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+    );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
     assert_eq!(
@@ -30392,7 +30425,11 @@ fn jira_prefill_fetch_stale_source_key_is_ignored() {
         ..Default::default()
     };
     // Result is for "PROJ-1" but the dialog's source_key is now "PROJ-2".
-    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(issue));
+    app.process_jira_prefill_fetch_result(
+        request,
+        "PROJ-1".to_string(),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+    );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
     assert_eq!(
@@ -30586,6 +30623,53 @@ fn create_jira_issue_dialog_description_renders_cursor_glyph_at_correct_position
         reversed_cells,
         vec!["w"],
         "exactly one reversed cell, on the 'w' the cursor sits on: {reversed_cells:?}"
+    );
+}
+
+/// A `ClonedCustomField` extra field renders a dim "(cloned)" marker
+/// next to its value, so the UI explains why typing into it does
+/// nothing; a template's own editable `CustomField` extra field does
+/// NOT get this marker.
+#[test]
+fn create_jira_issue_dialog_renders_cloned_marker_only_on_cloned_fields() {
+    let mut app = directories_test_app(&[]);
+    let mut dialog = test_create_jira_issue_dialog("Subject", "", "", None);
+    dialog.extra_fields = vec![
+        crate::tui::state::DialogField::prefilled(
+            "customfield_11601",
+            "",
+            false,
+            "",
+            "Team ComS".to_string(),
+        ),
+        crate::tui::state::DialogField::prefilled("assigne", "", false, "", "HAR".to_string()),
+    ];
+    dialog.extra_field_kinds = vec![
+        crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string()),
+        crate::tui::state::ExtraFieldKind::Parameter,
+    ];
+    app.create_jira_issue_dialog = Some(dialog);
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let text = buffer.content.iter().map(|c| c.symbol()).collect::<String>();
+
+    assert!(
+        text.contains("Team ComS") && text.contains("(cloned)"),
+        "cloned field must render its value and a (cloned) marker: {text:?}"
+    );
+    assert!(
+        text.contains("HAR"),
+        "the Parameter field's own value must still render: {text:?}"
+    );
+    assert_eq!(
+        text.matches("(cloned)").count(),
+        1,
+        "only the ClonedCustomField gets the marker, not the Parameter field: {text:?}"
     );
 }
 
@@ -30787,6 +30871,143 @@ fn create_jira_issue_dialog_submit_with_template_extra_fields() {
     assert_eq!(
         custom_fields[0],
         vec![("customfield_11601".to_string(), "Team ComS".to_string())]
+    );
+}
+
+// ---- Cloning JIRA custom fields (`JIRA_CLONE_FIELDS`) ----
+
+/// `process_jira_prefill_fetch_result` populates `extra_fields`/
+/// `extra_field_kinds` as `ClonedCustomField` from the prefill result's
+/// `clone_fields`, alongside the existing Description/Labels fill-in.
+#[test]
+fn jira_prefill_fetch_populates_cloned_custom_fields() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-1 summary",
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "",
+        Some("PROJ-1"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        description: "Full description".to_string(),
+        ..Default::default()
+    };
+    let result = crate::tui::mode::jira::JiraPrefillResult {
+        issue,
+        clone_fields: vec![
+            ("customfield_11601".to_string(), "Team ComS".to_string()),
+            ("customfield_10050".to_string(), "High".to_string()),
+        ],
+    };
+    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(result));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(dialog.extra_fields.len(), 2);
+    assert_eq!(dialog.extra_fields[0].value, "Team ComS");
+    assert_eq!(dialog.extra_fields[1].value, "High");
+    assert_eq!(
+        dialog.extra_field_kinds,
+        vec![
+            crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string()),
+            crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_10050".to_string()),
+        ]
+    );
+}
+
+/// A `ClonedCustomField`'s value is sent to `create_issue` as a real
+/// custom field on submit — identical routing to a template's own
+/// `CustomField`.
+#[test]
+fn create_jira_issue_dialog_submit_sends_cloned_custom_field() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        created_issue_key: "PROJ-42".to_string(),
+        ..FakeJira::default()
+    };
+    let created_custom_fields = fake.created_issue_custom_fields.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    let mut dialog = test_create_jira_issue_dialog("New bug", "Original description", "", None);
+    dialog.extra_fields = vec![crate::tui::state::DialogField::prefilled(
+        "customfield_11601",
+        "",
+        false,
+        "",
+        "Team ComS".to_string(),
+    )];
+    dialog.extra_field_kinds =
+        vec![crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string())];
+    app.create_jira_issue_dialog = Some(dialog);
+    app.create_jira_issue_dialog_submit();
+
+    let custom_fields = created_custom_fields.lock().unwrap();
+    assert_eq!(custom_fields.len(), 1);
+    assert_eq!(
+        custom_fields[0],
+        vec![("customfield_11601".to_string(), "Team ComS".to_string())]
+    );
+}
+
+/// Typing, Backspace, Ctrl-U, and Ctrl-W all no-op on a focused
+/// `ClonedCustomField` — the whole point is an exact, unmodifiable
+/// clone. Cursor movement (Left/Right) is unaffected.
+#[test]
+fn create_jira_issue_dialog_cloned_field_rejects_edits() {
+    let mut app = directories_test_app(&[]);
+    let mut dialog = test_create_jira_issue_dialog("Subject", "", "", None);
+    dialog.extra_fields = vec![crate::tui::state::DialogField::prefilled(
+        "customfield_11601",
+        "",
+        false,
+        "",
+        "Team ComS".to_string(),
+    )];
+    dialog.extra_field_kinds =
+        vec![crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string())];
+    dialog.focused = crate::tui::state::CreateJiraIssueFocus::Extra(0);
+    app.create_jira_issue_dialog = Some(dialog);
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+    handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert_eq!(
+        dialog.extra_fields[0].value, "Team ComS",
+        "a cloned custom field must reject every editing keystroke"
+    );
+}
+
+/// Tab still reaches a `ClonedCustomField` — it's read-only, not
+/// unfocusable; the field stays visible in the normal tab order so the
+/// user can see what was cloned.
+#[test]
+fn create_jira_issue_dialog_cloned_field_is_still_tab_reachable() {
+    let mut app = directories_test_app(&[]);
+    let mut dialog = test_create_jira_issue_dialog("Subject", "", "", None);
+    dialog.extra_fields = vec![crate::tui::state::DialogField::prefilled(
+        "customfield_11601",
+        "",
+        false,
+        "",
+        "Team ComS".to_string(),
+    )];
+    dialog.extra_field_kinds =
+        vec![crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string())];
+    dialog.focused = crate::tui::state::CreateJiraIssueFocus::Labels;
+    app.create_jira_issue_dialog = Some(dialog);
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+
+    assert_eq!(
+        app.create_jira_issue_dialog.as_ref().unwrap().focused,
+        crate::tui::state::CreateJiraIssueFocus::Extra(0)
     );
 }
 

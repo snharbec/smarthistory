@@ -1293,6 +1293,16 @@ pub enum ExtraFieldKind {
     /// Folded into Description as a prepended `**name:** value` line on
     /// submit, rather than sent as its own JIRA API field.
     Parameter,
+    /// A JIRA custom field CLONED from a source issue
+    /// (`JiraConfig::clone_fields`/`JIRA_CLONE_FIELDS`) when the "create
+    /// JIRA issue" dialog is opened from a selected row. Sent as the
+    /// same real custom field as `CustomField` on submit, but — unlike
+    /// `CustomField` — READ-ONLY in the dialog: the whole point is an
+    /// exact clone, not a value the user might accidentally edit before
+    /// submitting. Enforced by `handle_create_jira_issue_dialog_key`
+    /// no-oping edit keystrokes when the focused extra field has this
+    /// kind; focus/Tab navigation is unaffected.
+    ClonedCustomField(String),
 }
 
 /// State for the "create JIRA issue" dialog (`Action::CreateJiraIssue`).
@@ -1382,6 +1392,19 @@ impl CreateJiraIssueDialog {
             return self.extra_fields.get_mut(i);
         }
         self.focused.field_index().and_then(|i| self.fields.get_mut(i))
+    }
+
+    /// Whether the focused field is a `ClonedCustomField` — read-only,
+    /// so `handle_create_jira_issue_dialog_key` no-ops every editing
+    /// keystroke while it's focused. `false` for every other focus
+    /// position (the selectors, Subject/Labels/Description, and a
+    /// template's own editable `CustomField`/`Parameter` extras).
+    pub fn focused_is_read_only(&self) -> bool {
+        if let CreateJiraIssueFocus::Extra(i) = self.focused {
+            matches!(self.extra_field_kinds.get(i), Some(ExtraFieldKind::ClonedCustomField(_)))
+        } else {
+            false
+        }
     }
 }
 
