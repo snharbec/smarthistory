@@ -1006,6 +1006,7 @@
             ca_certificate_path: None,
             available_projects: Vec::new(),
             available_issue_types: Vec::new(),
+            clone_fields: Vec::new(),
         };
         assert_eq!(
             cfg.browse_url("PROJ-123"),
@@ -1028,6 +1029,7 @@
             ca_certificate_path: None,
             available_projects: Vec::new(),
             available_issue_types: Vec::new(),
+            clone_fields: Vec::new(),
         };
         assert_eq!(cfg.browse_url("X-1"), "https://jira/browse/X-1");
     }
@@ -1124,6 +1126,95 @@
             resolve_available_issue_types(Some(" , ,")),
             resolve_available_issue_types(None)
         );
+    }
+
+    // ---- cf_bracket_field_id / resolve_clone_fields ----
+
+    #[test]
+    fn cf_bracket_field_id_parses_valid_bracket() {
+        assert_eq!(cf_bracket_field_id("cf[11601]"), Some("customfield_11601".to_string()));
+    }
+
+    #[test]
+    fn cf_bracket_field_id_rejects_non_digit_contents() {
+        assert_eq!(cf_bracket_field_id("cf[abc]"), None);
+    }
+
+    #[test]
+    fn cf_bracket_field_id_rejects_empty_brackets() {
+        assert_eq!(cf_bracket_field_id("cf[]"), None);
+    }
+
+    #[test]
+    fn cf_bracket_field_id_rejects_missing_prefix_or_suffix() {
+        assert_eq!(cf_bracket_field_id("11601]"), None);
+        assert_eq!(cf_bracket_field_id("cf[11601"), None);
+        assert_eq!(cf_bracket_field_id("summary"), None);
+    }
+
+    #[test]
+    fn resolve_clone_fields_parses_comma_separated_list() {
+        assert_eq!(
+            resolve_clone_fields(Some("cf[11601],cf[10050]")),
+            vec!["customfield_11601".to_string(), "customfield_10050".to_string()]
+        );
+    }
+
+    /// A malformed entry (not a valid `cf[<digits>]`) is dropped, not a
+    /// startup error — same "garbled config can't wedge the app" policy
+    /// every other env var in `JiraConfig` follows.
+    #[test]
+    fn resolve_clone_fields_drops_malformed_entries() {
+        assert_eq!(
+            resolve_clone_fields(Some("cf[11601], notacustomfield, cf[abc]")),
+            vec!["customfield_11601".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_clone_fields_unset_is_empty() {
+        assert_eq!(resolve_clone_fields(None), Vec::<String>::new());
+    }
+
+    // ---- extract_custom_field_value ----
+
+    #[test]
+    fn extract_custom_field_value_plain_string() {
+        assert_eq!(extract_custom_field_value(&serde_json::json!("Team ComS")), "Team ComS");
+    }
+
+    #[test]
+    fn extract_custom_field_value_null_is_empty() {
+        assert_eq!(extract_custom_field_value(&serde_json::Value::Null), "");
+    }
+
+    #[test]
+    fn extract_custom_field_value_object_with_value_key() {
+        assert_eq!(
+            extract_custom_field_value(&serde_json::json!({"value": "High", "id": "1"})),
+            "High"
+        );
+    }
+
+    #[test]
+    fn extract_custom_field_value_object_with_name_key() {
+        assert_eq!(
+            extract_custom_field_value(&serde_json::json!({"name": "Alice", "id": "2"})),
+            "Alice"
+        );
+    }
+
+    /// An object shape with neither `"value"` nor `"name"` falls back to
+    /// the raw JSON rather than silently losing the data.
+    #[test]
+    fn extract_custom_field_value_unrecognized_object_falls_back_to_raw_json() {
+        let v = serde_json::json!({"foo": "bar"});
+        assert_eq!(extract_custom_field_value(&v), v.to_string());
+    }
+
+    #[test]
+    fn extract_custom_field_value_number_falls_back_to_raw_json() {
+        assert_eq!(extract_custom_field_value(&serde_json::json!(42)), "42");
     }
 
     // ---- JSON parsing ----
@@ -2305,6 +2396,13 @@
         ) -> Result<(), JiraError> {
             Ok(())
         }
+        fn fetch_custom_fields(
+            &self,
+            _key: &str,
+            _field_ids: &[String],
+        ) -> Result<Vec<(String, String)>, JiraError> {
+            Ok(Vec::new())
+        }
     }
 
     #[test]
@@ -2366,6 +2464,13 @@
             _outward_key: &str,
             _link_type: &str,
         ) -> Result<(), JiraError> {
+            Err(JiraError::Http("boom".to_string()))
+        }
+        fn fetch_custom_fields(
+            &self,
+            _key: &str,
+            _field_ids: &[String],
+        ) -> Result<Vec<(String, String)>, JiraError> {
             Err(JiraError::Http("boom".to_string()))
         }
     }

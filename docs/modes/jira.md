@@ -72,7 +72,9 @@ version:
 - Opened from a **JIRA row**, Subject/Description/Labels are pre-filled from
   the selected issue (Description/Labels via an async `search("key = <KEY>")`
   re-fetch, since the cached row doesn't carry them), and on submit the new
-  issue gets a `Relates` link back to the selected one.
+  issue gets a `Relates` link back to the selected one. If `JIRA_CLONE_FIELDS`
+  is set, the listed custom fields are also cloned from the source issue,
+  shown read-only, and sent unchanged to the new issue.
 - `Ctrl-S` submits, `Esc` cancels.
 
 ### Creating from a template

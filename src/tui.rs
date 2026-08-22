@@ -9332,7 +9332,7 @@ impl App {
             error: None,
         });
         if let Some(key) = source_key {
-            self.start_jira_prefill_fetch(key);
+            self.start_jira_prefill_fetch(key, config.clone_fields.clone());
         }
     }
 
@@ -9341,7 +9341,7 @@ impl App {
     /// `start_jira_comments_fetch`'s shape (test-seam sync path when
     /// `self.jira_client` is set, else spawn a thread against a
     /// fresh `RestJiraClient`).
-    fn start_jira_prefill_fetch(&mut self, key: String) {
+    fn start_jira_prefill_fetch(&mut self, key: String, clone_field_ids: Vec<String>) {
         let jql = format!("key = {}", crate::jira::escape_jql_string(&key));
         if let Some(client) = self.jira_client.clone() {
             let result = client.search(&jql).map(|mut issues| {
@@ -9351,6 +9351,7 @@ impl App {
                     issues.remove(0)
                 }
             });
+            let result = fetch_jira_prefill_result(client.as_ref(), &key, &clone_field_ids, result);
             let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
                 receiver: mpsc::channel().1,
                 cancelled: Arc::new(AtomicBool::new(false)),
@@ -9374,6 +9375,7 @@ impl App {
                     issues.remove(0)
                 }
             });
+            let result = fetch_jira_prefill_result(&client, &key, &clone_field_ids, result);
             if !cancelled_clone.load(Ordering::Relaxed) {
                 let _ = tx.send(result);
             }
@@ -9583,7 +9585,8 @@ impl App {
                 continue;
             }
             match kind {
-                crate::tui::state::ExtraFieldKind::CustomField(id) => {
+                crate::tui::state::ExtraFieldKind::CustomField(id)
+                | crate::tui::state::ExtraFieldKind::ClonedCustomField(id) => {
                     custom_fields.push((id.clone(), value.to_string()));
                 }
                 crate::tui::state::ExtraFieldKind::Parameter => {
@@ -16026,7 +16029,9 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('u') => {
                 if let Some(d) = app.create_jira_issue_dialog.as_mut() {
-                    if let Some(field) = d.focused_field_mut() {
+                    if !d.focused_is_read_only()
+                        && let Some(field) = d.focused_field_mut()
+                    {
                         field.value.clear();
                         field.cursor = 0;
                     }
@@ -16036,7 +16041,9 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Char('w') => {
                 if let Some(d) = app.create_jira_issue_dialog.as_mut() {
-                    if let Some(field) = d.focused_field_mut() {
+                    if !d.focused_is_read_only()
+                        && let Some(field) = d.focused_field_mut()
+                    {
                         delete_field_word_backward(field);
                     }
                     d.error = None;
@@ -16150,6 +16157,7 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Backspace => {
             if let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && !d.focused_is_read_only()
                 && let Some(field) = d.focused_field_mut()
                 && field.cursor > 0
             {
@@ -16181,6 +16189,7 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
                 && let Some(d) = app.create_jira_issue_dialog.as_mut()
+                && !d.focused_is_read_only()
                 && let Some(field) = d.focused_field_mut()
             {
                 let byte_idx = char_to_byte_idx(&field.value, field.cursor);
@@ -16282,7 +16291,33 @@ fn jira_templates_dir() -> Option<std::path::PathBuf> {
 /// caller: at most a handful of extra fields, leaked once per dialog
 /// open, for a TUI a human opens interactively — not a hot loop, and not
 /// unbounded growth.
-fn leak_field_name(key: &str) -> &'static str {
+/// Combine `search`'s result with a best-effort
+/// `fetch_custom_fields` call into the `JiraPrefillResult`
+/// `App::process_jira_prefill_fetch_result` expects. `search`
+/// failing is still fatal (propagated via `?`) — Description/Labels
+/// can't prefill without it. `fetch_custom_fields` failing is NOT
+/// fatal: cloned fields just come back empty and the rest of the
+/// prefill proceeds normally, same "partial success over hard
+/// failure" policy `create_and_maybe_link`'s `link_issues` failure
+/// already uses. Skipped entirely (no HTTP call) when
+/// `clone_field_ids` is empty — the common case, no
+/// `JIRA_CLONE_FIELDS` configured.
+fn fetch_jira_prefill_result<C: crate::jira::JiraClient + ?Sized>(
+    client: &C,
+    key: &str,
+    clone_field_ids: &[String],
+    search_result: Result<crate::jira::JiraIssue, crate::jira::JiraError>,
+) -> Result<crate::tui::mode::jira::JiraPrefillResult, crate::jira::JiraError> {
+    let issue = search_result?;
+    let clone_fields = if clone_field_ids.is_empty() {
+        Vec::new()
+    } else {
+        client.fetch_custom_fields(key, clone_field_ids).unwrap_or_default()
+    };
+    Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields })
+}
+
+pub(crate) fn leak_field_name(key: &str) -> &'static str {
     Box::leak(key.to_string().into_boxed_str())
 }
 

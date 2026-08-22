@@ -176,16 +176,9 @@ pub(crate) fn classify_template_key(key: &str) -> TemplateFieldKind {
         "issuetype" => TemplateFieldKind::StandardIssueType,
         "summary" => TemplateFieldKind::StandardSummary,
         "labels" => TemplateFieldKind::StandardLabels,
-        _ => {
-            if let Some(id) = key.strip_prefix("cf[").and_then(|s| s.strip_suffix(']'))
-                && !id.is_empty()
-                && id.chars().all(|c| c.is_ascii_digit())
-            {
-                TemplateFieldKind::CustomField(format!("customfield_{id}"))
-            } else {
-                TemplateFieldKind::Parameter
-            }
-        }
+        _ => crate::jira::cf_bracket_field_id(key)
+            .map(TemplateFieldKind::CustomField)
+            .unwrap_or(TemplateFieldKind::Parameter),
     }
 }
 
@@ -507,8 +500,21 @@ pub(crate) fn create_and_maybe_link(
 /// `App::open_create_jira_issue_dialog`'s doc comment for why a
 /// fresh `search` call is needed here at all).
 pub(crate) struct JiraPrefillFetchRequest {
-    pub(crate) receiver: std::sync::mpsc::Receiver<Result<crate::jira::JiraIssue, crate::jira::JiraError>>,
+    pub(crate) receiver: std::sync::mpsc::Receiver<Result<JiraPrefillResult, crate::jira::JiraError>>,
     pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What `App::start_jira_prefill_fetch` resolves with: the source
+/// issue's full details (`search`'s result, for Description/Labels)
+/// plus whatever `JiraConfig::clone_fields` custom-field values were
+/// fetched alongside it (`(id, value)` pairs, same order as
+/// `clone_fields`; empty when `clone_fields` is empty or that
+/// secondary fetch failed — see `App::start_jira_prefill_fetch`'s
+/// doc comment for why a `fetch_custom_fields` failure doesn't fail
+/// the whole prefill).
+pub(crate) struct JiraPrefillResult {
+    pub(crate) issue: crate::jira::JiraIssue,
+    pub(crate) clone_fields: Vec<(String, String)>,
 }
 
 /// Test-injection seam for [`App::open_jira_in_background`]'s real
@@ -1684,7 +1690,7 @@ impl App {
         &mut self,
         request: crate::tui::mode::jira::JiraPrefillFetchRequest,
         source_key: String,
-        result: Result<crate::jira::JiraIssue, crate::jira::JiraError>,
+        result: Result<crate::tui::mode::jira::JiraPrefillResult, crate::jira::JiraError>,
     ) {
         self.jira_prefill_fetch_in_flight = false;
         self.jira_prefill_fetch_request = None;
@@ -1699,18 +1705,39 @@ impl App {
         }
         dialog.prefill_loading = false;
         match result {
-            Ok(issue) => {
+            Ok(result) => {
                 if let Some(description_field) = dialog.fields.get_mut(1)
                     && description_field.value == JIRA_PREFILL_LOADING_PLACEHOLDER
                 {
-                    description_field.value = issue.description;
+                    description_field.value = result.issue.description;
                     description_field.cursor = description_field.value.chars().count();
                 }
                 if let Some(labels_field) = dialog.fields.get_mut(2)
                     && labels_field.value.is_empty()
                 {
-                    labels_field.value = issue.labels.join(", ");
+                    labels_field.value = result.issue.labels.join(", ");
                     labels_field.cursor = labels_field.value.chars().count();
+                }
+                // Only the very first prefill result for this dialog
+                // populates the cloned fields — `extra_fields` is
+                // otherwise always empty for a non-template dialog
+                // (the only other populator, the template-open path,
+                // never calls this function), so this guard is
+                // defensive against a double-fire rather than an
+                // expected repeat call.
+                if dialog.extra_fields.is_empty() {
+                    for (id, value) in result.clone_fields {
+                        dialog.extra_fields.push(crate::tui::state::DialogField::prefilled(
+                            crate::tui::leak_field_name(&id),
+                            "",
+                            false,
+                            "",
+                            value,
+                        ));
+                        dialog
+                            .extra_field_kinds
+                            .push(crate::tui::state::ExtraFieldKind::ClonedCustomField(id));
+                    }
                 }
             }
             Err(e) => {

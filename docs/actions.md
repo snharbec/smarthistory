@@ -1113,6 +1113,19 @@ description/labels — so Description shows a `(loading…)` placeholder until
 that background fetch resolves. The fetch only overwrites a field still at
 its placeholder/empty state, never once the user has started typing into it.
 
+**Cloning extra custom fields** — when `JIRA_CLONE_FIELDS` is set (see
+[`docs/configuration.md`](configuration.md#jira--mode)) and the dialog was
+opened from a selected JIRA row, the listed custom fields (`cf[<id>]`,
+same bracket syntax `CreateJiraIssueFromTemplate`'s frontmatter uses) are
+fetched from the source issue alongside Description/Labels and shown
+between Labels and Description. Unlike a template's own custom fields,
+cloned fields are **read-only** — Tab still reaches them, but every editing
+keystroke is a no-op, and they render a dim `(cloned)` marker so it's clear
+why. Their value is still sent to the new issue on submit, unchanged — a
+real clone, not just a reference display. Fetching the cloned fields is
+best-effort: if it fails, Subject/Description/Labels prefill still
+completes normally and the cloned fields are simply absent.
+
 On submit, the issue is created first; if the dialog was opened from a JIRA
 row, a second call links the new issue to that source issue with a `Relates`
 link. A link failure doesn't undo or fail the create — the issue really was

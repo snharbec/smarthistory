@@ -263,6 +263,25 @@ pub trait JiraClient: Send + Sync {
         outward_key: &str,
         link_type: &str,
     ) -> Result<(), JiraError>;
+
+    /// Fetch the current value of arbitrary custom fields on a single
+    /// issue — used to clone `JiraConfig::clone_fields` into the
+    /// "create JIRA issue" dialog when opened from a selected row (see
+    /// `mode::jira::process_jira_prefill_fetch_result`). Unlike
+    /// `search`, which requests a fixed set of standard fields shared
+    /// by every row-list query, this targets exactly one issue and an
+    /// arbitrary caller-supplied field-id list, so it doesn't bloat
+    /// every search with payload most callers never asked for.
+    ///
+    /// Returns exactly `field_ids.len()` `(id, value)` pairs, in the
+    /// same order as `field_ids` — a missing or `null` field comes
+    /// back as `""` rather than being omitted, so callers never have
+    /// to handle a variable-length or reordered response.
+    fn fetch_custom_fields(
+        &self,
+        key: &str,
+        field_ids: &[String],
+    ) -> Result<Vec<(String, String)>, JiraError>;
 }
 
 /// Configuration read from the environment. `None` means
@@ -330,6 +349,15 @@ pub struct JiraConfig {
     /// `["Epic", "Initiative", "Story", "Task", "Bug"]` — JIRA's
     /// own standard issue-type set — when unset/empty.
     pub available_issue_types: Vec<String>,
+    /// Custom-field ids (`customfield_<digits>`) cloned from a source
+    /// JIRA issue into the "create JIRA issue" dialog when opened from
+    /// a selected row — see `mode::jira::process_jira_prefill_fetch_result`
+    /// and `ExtraFieldKind::ClonedCustomField`. Read from
+    /// `JIRA_CLONE_FIELDS` (comma-separated `cf[<digits>]` entries, same
+    /// bracket syntax a "create from template" `cf[<id>]` frontmatter key
+    /// uses — see `cf_bracket_field_id`). Unset/empty, or every entry
+    /// malformed, means no fields are cloned.
+    pub clone_fields: Vec<String>,
 }
 
 /// Parse a comma-separated env var value into a trimmed,
@@ -339,6 +367,36 @@ fn parse_comma_list(s: &str) -> Vec<String> {
     s.split(',')
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// Parse a `cf[<digits>]` bracket key into its `customfield_<digits>`
+/// id, or `None` if `s` isn't that exact shape (wrong prefix/suffix,
+/// empty brackets, non-digit contents). Shared by
+/// `mode::jira::classify_template_key` (a template's own `cf[<id>]`
+/// frontmatter keys) and `resolve_clone_fields` below (`JIRA_CLONE_FIELDS`
+/// entries) — the two places this bracket syntax is parsed, kept as one
+/// function so they can't drift.
+pub(crate) fn cf_bracket_field_id(s: &str) -> Option<String> {
+    let id = s.strip_prefix("cf[")?.strip_suffix(']')?;
+    if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+        Some(format!("customfield_{id}"))
+    } else {
+        None
+    }
+}
+
+/// `JiraConfig::clone_fields`'s resolution rule — same "pure function
+/// for testability" reasoning as `resolve_available_projects`. A
+/// malformed entry (not a valid `cf[<digits>]`) is silently dropped,
+/// not a startup error — same "garbled config can't wedge the app"
+/// policy the rest of `JiraConfig::from_env` follows.
+fn resolve_clone_fields(clone_fields_env: Option<&str>) -> Vec<String> {
+    clone_fields_env
+        .map(parse_comma_list)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| cf_bracket_field_id(s))
         .collect()
 }
 
@@ -420,6 +478,8 @@ impl JiraConfig {
         let available_issue_types = resolve_available_issue_types(
             std::env::var("JIRA_AVAILABLE_ISSUE_TYPES").ok().as_deref(),
         );
+        let clone_fields =
+            resolve_clone_fields(std::env::var("JIRA_CLONE_FIELDS").ok().as_deref());
         Some(JiraConfig {
             server: server.trim_end_matches('/').to_string(),
             token,
@@ -431,6 +491,7 @@ impl JiraConfig {
             ca_certificate_path,
             available_projects,
             available_issue_types,
+            clone_fields,
         })
     }
 
@@ -1015,6 +1076,81 @@ impl JiraClient for RestJiraClient {
         // `add_comment`, nothing in the response the caller needs.
         let _ = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
         Ok(())
+    }
+
+    /// `GET /rest/api/2/issue/{key}?fields=<comma-joined ids>` — the
+    /// simpler single-issue endpoint (no JQL, no pagination) since the
+    /// caller already knows the exact key and field ids it wants.
+    /// Parsed as a raw `serde_json::Value` rather than a fixed struct
+    /// like `ApiFields`: custom field JSON shapes vary by JIRA field
+    /// type (plain string, `{"value": ...}` for a single-select,
+    /// etc.), so there's no one shape to deserialize into up front —
+    /// see `extract_custom_field_value`.
+    fn fetch_custom_fields(
+        &self,
+        key: &str,
+        field_ids: &[String],
+    ) -> Result<Vec<(String, String)>, JiraError> {
+        if field_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = format!(
+            "{}/rest/api/2/issue/{}?fields={}",
+            self.config.server,
+            urlencoding::encode(key),
+            field_ids.iter().map(|id| urlencoding::encode(id).to_string()).collect::<Vec<_>>().join(","),
+        );
+        let client = self.build_blocking_client()?;
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|e| JiraError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            let excerpt: String = body.chars().take(200).collect();
+            return Err(JiraError::Api(format!("{}: {}", status, excerpt.trim())));
+        }
+        let body = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
+        let snippet: String = body.chars().take(300).collect();
+        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            JiraError::Parse(format!("{} — body starts with: {}", e, snippet.trim()))
+        })?;
+        let fields = parsed.get("fields");
+        Ok(field_ids
+            .iter()
+            .map(|id| {
+                let value = fields
+                    .and_then(|f| f.get(id))
+                    .map(extract_custom_field_value)
+                    .unwrap_or_default();
+                (id.clone(), value)
+            })
+            .collect())
+    }
+}
+
+/// Render a single JIRA custom-field JSON value as a display string —
+/// the shape varies by field type: a plain string is used as-is;
+/// `null`/missing becomes `""`; an object with a string `"value"` or
+/// `"name"` key (the two common shapes for a JIRA single-select
+/// custom field) uses that string; anything else (number, array,
+/// unrecognized object) falls back to the raw JSON so no data
+/// silently vanishes for a field shape this doesn't specifically
+/// handle.
+fn extract_custom_field_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => map
+            .get("value")
+            .or_else(|| map.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| v.to_string()),
+        other => other.to_string(),
     }
 }
 

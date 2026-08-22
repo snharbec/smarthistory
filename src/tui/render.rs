@@ -1497,6 +1497,18 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
 /// non-`DialogField` selector rows, unlike `draw_add_entry_dialog`
 /// where every field is a `DialogField`.
 fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: bool) -> Line<'a> {
+    dialog_field_line_inner(field, is_focused, false)
+}
+
+/// `dialog_field_line`, with an optional trailing dim `" (cloned)"`
+/// marker — used by `draw_create_jira_issue_dialog`'s extra-field loop
+/// for a `ClonedCustomField` so the UI explains WHY typing into it
+/// does nothing, rather than a silent, confusing no-op.
+fn dialog_field_line_inner<'a>(
+    field: &'a crate::tui::state::DialogField,
+    is_focused: bool,
+    read_only: bool,
+) -> Line<'a> {
     let style = if is_focused { Theme::highlight() } else { Style::default() };
     // The field name is always bold — a dominant label the user can
     // scan even when the field isn't focused — while its color still
@@ -1531,6 +1543,9 @@ fn dialog_field_line<'a>(field: &'a crate::tui::state::DialogField, is_focused: 
         if !post.is_empty() {
             spans.push(Span::styled(post, style));
         }
+    }
+    if read_only {
+        spans.push(Span::styled(" (cloned)", Theme::dim()));
     }
     Line::from(spans)
 }
@@ -1642,8 +1657,16 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
         chunks[3],
     );
     for (i, field) in dialog.extra_fields.iter().enumerate() {
+        let read_only = matches!(
+            dialog.extra_field_kinds.get(i),
+            Some(crate::tui::state::ExtraFieldKind::ClonedCustomField(_))
+        );
         f.render_widget(
-            Paragraph::new(dialog_field_line(field, dialog.focused == CreateJiraIssueFocus::Extra(i))),
+            Paragraph::new(dialog_field_line_inner(
+                field,
+                dialog.focused == CreateJiraIssueFocus::Extra(i),
+                read_only,
+            )),
             chunks[4 + i],
         );
     }

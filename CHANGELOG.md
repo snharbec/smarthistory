@@ -20,6 +20,13 @@ All notable changes to this project will be documented in this file.
   (blank = right now, unchanged from before) instead of switching
   immediately, so this is reachable from the TUI too, not just the CLI. See
   [docs/modes/project.md](docs/modes/project.md#selecting-a-row).
+- `Action::CreateJiraIssue`, opened from a selected JIRA row, can now clone
+  extra JIRA custom fields from the source issue via the new
+  `JIRA_CLONE_FIELDS` env var (comma-separated `cf[<id>]` entries, same
+  bracket syntax `CreateJiraIssueFromTemplate` uses). Cloned fields show up
+  read-only in the dialog (with a "(cloned)" marker) and are sent unchanged
+  to the new issue on submit. See
+  [docs/actions.md#createjiraissue](docs/actions.md#createjiraissue).
 
 ## 2.1.0 - 2026-08-20
 
