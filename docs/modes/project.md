@@ -4,6 +4,8 @@
 | -------------- | ----------------------- |
 | Configurable   | `prefix.project=<char>` |
 
+![Project mode demo](../../assets/demo-project.gif)
+
 Project mode is the picker half of **time tracking**: a feature that attributes
 time spent — directories, commands, notes created, and websites visited — to a
 project, where a project is a `type: project` frontmatter note in your

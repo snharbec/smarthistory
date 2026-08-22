@@ -4,6 +4,8 @@
 | -------------- | --------------------- |
 | Configurable   | `prefix.files=<char>` |
 
+![Files mode demo](../../assets/demo-files.gif)
+
 Files mode lists every file under the current working directory (recursively
 walked), filtered by the typed pattern. Selecting a row stages
 `cd <dir> && $EDITOR <file>` (well, actually `$EDITOR <file>` — the directory is

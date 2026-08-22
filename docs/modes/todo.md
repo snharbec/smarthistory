@@ -4,6 +4,8 @@
 | -------------- | -------------------- |
 | Configurable   | `prefix.todo=<char>` |
 
+![Todo mode demo](../../assets/demo-todo.gif)
+
 Todo mode scans every note in the `note_search` database for open todo entries
 (markdown task-list checkboxes `- [ ]` or `- [x]`) and lists each one as its own
 row. Selecting a row opens the note in `$EDITOR` at the exact line of the

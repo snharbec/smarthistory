@@ -4,6 +4,8 @@
 | -------------- | ------------------------- |
 | Configurable   | `prefix.paperless=<char>` |
 
+![Paperless mode demo](../../assets/demo-paperless.gif)
+
 Paperless mode searches documents on a self-hosted
 [Paperless-ngx](https://docs.paperless-ngx.com/) v3 instance via its REST API.
 Documents matching the query are listed with their title, correspondent, and

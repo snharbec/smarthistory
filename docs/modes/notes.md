@@ -4,6 +4,8 @@
 | -------------- | --------------------- |
 | Configurable   | `prefix.notes=<char>` |
 
+![Notes mode demo](../../assets/demo-notes.gif)
+
 Notes mode searches the `note_search` SQLite database (a separate project:
 <https://github.com/snharbec/note_search>) for entries that match the body of
 the query. The notes database is shared between the standalone `note_search` CLI

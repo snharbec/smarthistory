@@ -4,6 +4,8 @@
 | -------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Configurable   | `prefix.segments=<char>` (back-compat: `prefix.elements=` from before note_search's segment redesign still works) |
 
+![Segments mode demo](../../assets/demo-segments.gif)
+
 Segments mode searches `note_search`'s `segments` table — header-anchored
 sections — rather than whole files. It's the finer-grained sibling of
 [`@` (Notes) mode](notes.md): a search for a tag or link returns the specific

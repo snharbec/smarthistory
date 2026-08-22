@@ -4,6 +4,8 @@
 | -------------- | --------------------------- |
 | Configurable   | `prefix.directories=<char>` |
 
+![Directories mode demo](../../assets/demo-directories.gif)
+
 Directories mode lists every directory the shell has ever been in, sorted by the
 most-recent history row's timestamp. Each row carries a `T` marker when at least
 one tmux / herdr pane is currently rooted there. Selecting a row stages

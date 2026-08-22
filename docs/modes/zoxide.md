@@ -4,6 +4,8 @@
 | -------------- | ---------------------- |
 | Configurable   | `prefix.zoxide=<char>` |
 
+![Zoxide mode demo](../../assets/demo-zoxide.gif)
+
 Zoxide mode lists every directory in the local
 [`zoxide`](https://github.com/ajeetdsouza/zoxide) database, ordered by zoxide's
 own frecency score (highest first), filtered by the typed query. Selecting a row

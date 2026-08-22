@@ -6,6 +6,8 @@
 | Default key    | `Enter` (the [`Run`](../../TECHNICAL.md#run-enter) action)                                                            |
 | Configurable   | n/a — the no-prefix mode is always reachable by typing any character that isn't a configured prefix.                  |
 
+![History mode demo](../../assets/demo.gif)
+
 History mode is the default: a query without a leading prefix char searches the
 shell history. It's the mode you spend most of your time in.
 

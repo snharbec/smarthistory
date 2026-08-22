@@ -4,6 +4,8 @@
 | -------------- | ----------------------- |
 | Configurable   | `prefix.browser=<char>` |
 
+![Browser mode demo](../../assets/demo-browser.gif)
+
 Browser mode merges bookmarks and visited-URL history read straight from
 locally-installed browsers' own profile files — no browser extension, no
 running-browser IPC, no API token. Chrome, Firefox, and Safari are all

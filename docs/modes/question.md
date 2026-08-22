@@ -4,6 +4,8 @@
 | -------------- | ------------------------ |
 | Configurable   | `prefix.question=<char>` |
 
+![Question mode demo](../../assets/demo-question.gif)
+
 Question mode sends the body of the query — plus context about the last command
 you ran, if any — to the configured ollama instance and shows the model's
 4-sentence answer. Useful for short factual questions where you don't want a

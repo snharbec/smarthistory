@@ -4,6 +4,8 @@
 | -------------- | -------------------- |
 | Configurable   | `prefix.jira=<char>` |
 
+![JIRA mode demo](../../assets/demo-jira.gif)
+
 JIRA mode searches issues on a self-hosted JIRA instance via the REST API.
 Issues matching the query are listed with their key, summary, and status.
 Selecting an issue opens its browse URL in the system browser; `Ctrl-M-s`
