@@ -4,6 +4,8 @@
 | -------------- | ---------------------- |
 | Configurable   | `prefix.output=<char>` |
 
+![Output mode demo](../../assets/demo-output.gif)
+
 Output mode matches against the _captured stdout / stderr_ of each command, not
 the command text itself. Useful for finding the moment something went wrong
 ("which run printed `OutOfMemoryError`?") or for re-finding a command by what it

@@ -4,6 +4,8 @@
 | -------------- | ------------------ |
 | Configurable   | `prefix.ag=<char>` |
 
+![ag mode demo](../../assets/demo-ag.gif)
+
 ag mode searches file _contents_ with
 [`ag`](https://github.com/ggreer/the_silver_searcher) (The Silver Searcher).
 Every line containing the typed pattern is listed as a row; selecting a row

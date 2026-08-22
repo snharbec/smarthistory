@@ -4,6 +4,8 @@
 | -------------- | ------------------- |
 | Configurable   | `prefix.llm=<char>` |
 
+![LLM command mode demo](../../assets/demo-llm.gif)
+
 LLM command mode sends the body of the query (everything after `=`) to the
 configured ollama instance as a natural-language description, asks the model for
 a Bash one-liner, and stages the result for execution. Useful when you know

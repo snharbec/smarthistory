@@ -4,6 +4,8 @@
 | -------------- | ------------------------- |
 | Configurable   | `prefix.processes=<char>` |
 
+![Processes mode demo](../../assets/demo-processes.gif)
+
 Processes mode lists every running OS process on the machine — macOS and Linux,
 via the [`sysinfo`](https://docs.rs/sysinfo) crate — filtered by the typed
 query. Every process is shown regardless of who owns it; selecting a row opens a

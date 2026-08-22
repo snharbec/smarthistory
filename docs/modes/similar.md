@@ -4,6 +4,8 @@
 | -------------- | ----------------------- |
 | Configurable   | `prefix.similar=<char>` |
 
+![Similar mode demo](../../assets/demo-similar.gif)
+
 Similar mode ranks `note_search`'s `segments` table (the same table
 [`:` (Segments) mode](segments.md) searches) by MEANING rather than keyword: the
 entire typed body is embedded via a local Ollama call and matched against every

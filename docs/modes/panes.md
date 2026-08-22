@@ -4,6 +4,8 @@
 | -------------- | --------------------- |
 | Configurable   | `prefix.panes=<char>` |
 
+![Panes mode demo](../../assets/demo-panes.gif)
+
 Panes mode lists every pane across every tmux session and every herdr workspace,
 organised as a tree. Live sessions are wrapped under one common `# Sessions`
 heading, with each session / workspace as a `## workspace-label` sub-heading

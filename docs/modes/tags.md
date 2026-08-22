@@ -4,6 +4,8 @@
 | -------------- | -------------------- |
 | Configurable   | `prefix.tags=<char>` |
 
+![Tags mode demo](../../assets/demo-tags.gif)
+
 Tags mode lists every symbol defined in a universal-ctags `tags` file, walked
 from the cwd upward (just like vim). Selecting a row stages `$EDITOR +LINE file`
 and exits — your editor opens at the symbol's definition.

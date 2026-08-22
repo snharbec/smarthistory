@@ -4,6 +4,8 @@
 | -------------- | ------------------------- |
 | Configurable   | `prefix.codegraph=<char>` |
 
+![CodeGraph mode demo](../../assets/demo-codegraph.gif)
+
 CodeGraph mode searches symbols in the local `.codegraph/codegraph.db` SQLite
 index (a separate project: <https://github.com/snharbec/codegraph>), backed by
 an FTS5 virtual table over symbol names, qualified names, docstrings, and
