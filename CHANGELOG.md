@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `smarthistory project select <slug> --since <duration>` backdates a project
+  switch — for the common "I forgot to switch" case, where the project
+  actually started a few minutes before you got around to running the
+  command. `--since` accepts `s`/`m`/`h`/`d` unit suffixes, combinable
+  (`1h30m`); the time between the backdated point and now moves from
+  whatever was previously tracked over to the new project (closing the prior
+  session and opening the new one at that same timestamp). Can only reach
+  back to the start of whatever session is currently open (or the end of the
+  most recently closed one) — not further into already-reported history; an
+  out-of-range value is rejected with no changes made. The `.`-mode project
+  picker now asks "started how many minutes ago?" after picking a project
+  (blank = right now, unchanged from before) instead of switching
+  immediately, so this is reachable from the TUI too, not just the CLI. See
+  [docs/modes/project.md](docs/modes/project.md#selecting-a-row).
+
 ## 2.1.0 - 2026-08-20
 
 ### Added

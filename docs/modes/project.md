@@ -30,10 +30,17 @@ mode, since it searches the same vault, just pre-filtered. Run
 ## Selecting a row
 
 `Enter` slugifies the selected note's filename stem (`crate::util::slugify`,
-e.g. `Acme Corp.md` → `acme-corp`) and stages:
+e.g. `Acme Corp.md` → `acme-corp`) and opens a small prompt: **"Switch to
+`<slug>` — started how many minutes ago?"** — for the common "I forgot to
+switch" case, where the project you're picking actually started a few minutes
+before you got around to selecting it. Type a number (digits only) and press
+`Enter`, or just press `Enter` on the blank default for "right now" (today's
+exact prior behavior). `Esc`/`Ctrl-C` cancels the prompt without staging
+anything. Once answered, it stages:
 
 ```sh
-smarthistory project select <slug>
+smarthistory project select <slug>              # blank/"right now"
+smarthistory project select <slug> --since 45m   # "45 minutes ago"
 ```
 
 The TUI exits; the parent shell runs the staged command, which:
@@ -42,11 +49,22 @@ The TUI exits; the parent shell runs the staged command, which:
    to `<slug>`.
 2. Closes any currently-open project session with `end_reason = "switch"`, then
    opens a new one for `<slug>` — the same `switch_project` lifecycle helper the
-   directory-detection path (below) uses.
+   directory-detection path (below) uses. With `--since`, both the close and the
+   open use the backdated timestamp instead of right now, so the time between
+   then and now moves from whatever was previously tracked over to `<slug>`.
 
-You can also run `smarthistory project select <slug>` directly, outside the TUI
-— useful for scripting a project switch (e.g. from a shell alias or a tmux
-session-start hook).
+`--since <DURATION>` accepts `s`/`m`/`h`/`d` unit suffixes, combinable
+(`1h30m`) — a bare number with no unit is rejected rather than guessing
+seconds vs. minutes. It can only reach back as far as the start of whatever
+project session is currently open (or the end of the most recently closed
+one) — not further into already-finished, already-reported history; an
+out-of-range value is rejected with the earliest value that would be
+accepted, and nothing is changed.
+
+You can also run `smarthistory project select <slug> [--since <duration>]`
+directly, outside the TUI — useful for scripting a project switch (e.g. from
+a shell alias or a tmux session-start hook), or for backdating from the
+command line without going through the picker at all.
 
 ## How the active project is resolved (directories)
 

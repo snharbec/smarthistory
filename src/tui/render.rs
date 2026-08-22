@@ -104,6 +104,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_zoxide_save_prompt(f, app, prompt);
     }
 
+    if let Some(ref prompt) = app.project_since_prompt {
+        draw_project_since_prompt(f, app, prompt);
+    }
+
     if let Some(view) = app.help_view.as_ref() {
         draw_help_view(f, app, view);
     }
@@ -484,6 +488,79 @@ fn draw_zoxide_save_prompt(
             Span::raw(" or "),
             Span::styled(cancel_hint, Theme::highlight()),
             Span::raw(" to skip — either way, you'll still jump there."),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(paragraph, area);
+}
+
+fn draw_project_since_prompt(
+    f: &mut Frame,
+    app: &App,
+    prompt: &crate::tui::state::ProjectSincePrompt,
+) {
+    let area = centered_rect(60, 22, f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Switch project ")
+        .title_style(Theme::accent())
+        .border_style(Theme::accent());
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let cancel_hint = if cancel_keys.is_empty() {
+        "no key bound".to_string()
+    } else {
+        cancel_keys
+    };
+
+    // Same reversed-character/reversed-space cursor convention every
+    // other single-line input in the TUI uses.
+    let chars: Vec<char> = prompt.buffer.chars().collect();
+    let mut buffer_spans: Vec<Span> = Vec::new();
+    if chars.is_empty() {
+        buffer_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+        buffer_spans.push(Span::styled(" (just now)", Theme::dim()));
+    } else {
+        let pre: String = chars.iter().take(prompt.cursor).collect();
+        buffer_spans.push(Span::raw(pre));
+        if prompt.cursor < chars.len() {
+            buffer_spans.push(Span::styled(
+                chars[prompt.cursor].to_string(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+            let post: String = chars.iter().skip(prompt.cursor + 1).collect();
+            if !post.is_empty() {
+                buffer_spans.push(Span::raw(post));
+            }
+        } else {
+            buffer_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+        }
+        buffer_spans.push(Span::styled(" minutes ago", Theme::dim()));
+    }
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Switch to \"{}\" — started how many minutes ago?", prompt.slug),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(buffer_spans),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Digits only, "),
+            Span::styled("Enter", Theme::highlight()),
+            Span::raw(" confirms (blank = just now), "),
+            Span::styled(cancel_hint, Theme::highlight()),
+            Span::raw(" cancels."),
         ]),
     ];
 
