@@ -1941,6 +1941,22 @@ pub(crate) struct App {
     /// (above) via `open_create_jira_issue_dialog_from_template`.
     jira_template_picker: Option<crate::tui::state::JiraTemplatePicker>,
 
+    /// The "Template name:" prompt (`Action::CreateJiraTemplateFromIssue`),
+    /// when open. `None` otherwise — the reverse of `jira_template_picker`:
+    /// generating a NEW template file from a selected JIRA row's fields,
+    /// rather than reading an existing one.
+    template_name_prompt: Option<crate::tui::state::TemplateNamePrompt>,
+    /// `Some` while the fetch for a confirmed template name (search +
+    /// `fetch_all_custom_fields`, kicked off once the prompt above is
+    /// answered) is in flight.
+    jira_template_fetch_request: Option<crate::tui::mode::jira::JiraTemplateFetchRequest>,
+    /// Whether the template fetch above is currently in flight.
+    jira_template_fetch_in_flight: bool,
+    /// The template name the user confirmed, held onto until the fetch
+    /// above resolves — `template_name_prompt` is already closed by
+    /// then, so the name has nowhere else to live.
+    pending_jira_template_name: Option<String>,
+
     /// Per-pane `last_touched` map (Unix
     /// epoch seconds, keyed by `pane_id`).
     /// Populated from the session file at
@@ -5161,6 +5177,10 @@ impl App {
             jira_prefill_fetch_request: None,
             jira_prefill_fetch_in_flight: false,
             jira_template_picker: None,
+            template_name_prompt: None,
+            jira_template_fetch_request: None,
+            jira_template_fetch_in_flight: false,
+            pending_jira_template_name: None,
             smart_open_file_commands,
             tags_source_cache: std::collections::HashMap::new(),
             // Per-pane `last_touched` map.
@@ -9385,6 +9405,59 @@ impl App {
             Some(crate::tui::mode::jira::JiraPrefillFetchRequest { receiver: rx, cancelled });
     }
 
+    /// Fire the background fetch `handle_template_name_prompt_key` kicks
+    /// off once the "Template name:" prompt is answered. Same two-branch
+    /// shape as `start_jira_prefill_fetch`, but combining `search` with
+    /// `fetch_all_custom_fields` instead of the caller-supplied
+    /// clone-fields id list — and unlike that fetch, a failure here fails
+    /// the whole request (see `fetch_jira_template_result`).
+    fn start_jira_template_fetch(&mut self, key: String, name: String) {
+        let jql = format!("key = {}", crate::jira::escape_jql_string(&key));
+        if let Some(client) = self.jira_client.clone() {
+            let result = client.search(&jql).map(|mut issues| {
+                if issues.is_empty() {
+                    crate::jira::JiraIssue::default()
+                } else {
+                    issues.remove(0)
+                }
+            });
+            let result = fetch_jira_template_result(client.as_ref(), &key, result);
+            let request = crate::tui::mode::jira::JiraTemplateFetchRequest {
+                receiver: mpsc::channel().1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            self.jira_template_fetch_in_flight = true;
+            self.process_jira_template_fetch_result(request, name, result);
+            return;
+        }
+        let Some(config) = crate::jira::JiraConfig::from_env() else {
+            self.set_status_message(crate::jira::JiraError::NotConfigured.to_string());
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        std::thread::spawn(move || {
+            let client = crate::jira::RestJiraClient::new(config);
+            let result = client.search(&jql).map(|mut issues| {
+                if issues.is_empty() {
+                    crate::jira::JiraIssue::default()
+                } else {
+                    issues.remove(0)
+                }
+            });
+            let result = fetch_jira_template_result(&client, &key, result);
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+            }
+        });
+        self.jira_template_fetch_in_flight = true;
+        self.jira_template_fetch_request =
+            Some(crate::tui::mode::jira::JiraTemplateFetchRequest { receiver: rx, cancelled });
+        self.pending_jira_template_name = Some(name);
+        self.set_status_message("Creating template…".to_string());
+    }
+
     /// Close the dialog without submitting, cancelling any in-flight
     /// prefill fetch so a late result can never resurrect a
     /// closed/reopened dialog's fields.
@@ -12386,6 +12459,23 @@ fn run_loop(
             }
         }
 
+        // Check for "create JIRA template from issue"'s fetch result.
+        // The template name is on `App` (`pending_jira_template_name`,
+        // not the request struct or a still-open dialog — the prompt
+        // that carried it is already closed by the time this fetch
+        // resolves), same "read before taking the request" shape as
+        // the prefill-fetch block above.
+        if let Some(request) = app.jira_template_fetch_request.as_ref()
+            && let Ok(result) = request.receiver.try_recv()
+        {
+            let name = app.pending_jira_template_name.take();
+            if let Some(request) = app.jira_template_fetch_request.take()
+                && let Some(name) = name
+            {
+                app.process_jira_template_fetch_result(request, name, result);
+            }
+        }
+
         // Drain the background pane-cmdline lookup
         // (only in the herdr backend). Each ready
         // `(pane_id, cmdline)` pair patches the
@@ -12596,6 +12686,25 @@ fn run_loop(
                 request.cancelled.store(true, Ordering::Relaxed);
             }
             app.jira_prefill_fetch_in_flight = false;
+            continue;
+        }
+
+        // Same cancel handling for an in-flight "create JIRA template
+        // from issue" fetch. Unlike the prefill fetch, there's no
+        // still-open dialog to route Esc through once the name prompt
+        // has been answered and closed — this is the only cancel path
+        // for the window between submitting the prompt and the fetch
+        // resolving.
+        if app.jira_template_fetch_request.is_some()
+            && let Some(action) = action_for_key(&app.bindings, &key)
+            && matches!(action, Action::Cancel)
+        {
+            if let Some(request) = app.jira_template_fetch_request.take() {
+                request.cancelled.store(true, Ordering::Relaxed);
+            }
+            app.jira_template_fetch_in_flight = false;
+            app.pending_jira_template_name = None;
+            app.set_status_message("Create-template cancelled".to_string());
             continue;
         }
 
@@ -12845,6 +12954,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // entry/editing and Enter/Esc/Ctrl+C are meaningful.
     if app.project_since_prompt.is_some() {
         return handle_project_since_prompt_key(app, key);
+    }
+
+    // Same modal-overlay precedence: while asking "Template name?", only
+    // text entry/editing and Enter/Esc/Ctrl+C are meaningful.
+    if app.template_name_prompt.is_some() {
+        return handle_template_name_prompt_key(app, key);
     }
 
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
@@ -13203,6 +13318,21 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // command is staged so the
             // parent shell can run it.
             app.selection.is_some()
+        }
+        Action::CreateJiraTemplateFromIssue => {
+            // Same mode gate as `DownloadJiraIssue`, for the same
+            // reason. Opening the "Template name:" prompt is never
+            // itself a reason to exit the TUI — unlike the download
+            // actions, this one doesn't stage a shell command.
+            if !app.is_jira_query() {
+                app.set_status_message(
+                    "Create-JIRA-template-from-issue is only available in JIRA search (type `-`)"
+                        .to_string(),
+                );
+                return false;
+            }
+            app.create_jira_template_from_issue();
+            false
         }
         Action::DownloadJiraMatching => {
             // Same mode gate as `DownloadJiraIssue`, for the
@@ -13754,6 +13884,75 @@ fn handle_project_since_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor);
             prompt.buffer.insert(byte_idx, c);
             prompt.cursor += 1;
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Key handler for `TemplateNamePrompt` — same overlay shape as
+/// `handle_project_since_prompt_key`, with two differences: `Char(c)`
+/// accepts any non-control character (a template name, not a digit-only
+/// minute count), and `Enter` on a blank/whitespace-only buffer is a
+/// validation error (shown inline, dialog stays open) rather than a
+/// valid default.
+fn handle_template_name_prompt_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.template_name_prompt = None;
+        app.cancelled = true;
+        return true;
+    }
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+        app.template_name_prompt = None;
+        return false;
+    }
+    let Some(prompt) = app.template_name_prompt.as_mut() else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Enter => {
+            let name = prompt.buffer.trim().to_string();
+            if name.is_empty() {
+                prompt.error = Some("Template name is required".to_string());
+                return false;
+            }
+            let source_key = prompt.source_key.clone();
+            app.template_name_prompt = None;
+            app.start_jira_template_fetch(source_key, name);
+            false
+        }
+        KeyCode::Backspace => {
+            if prompt.cursor > 0 {
+                let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor - 1);
+                if let Some(next) = prompt.buffer[byte_idx..].chars().next() {
+                    prompt.buffer.replace_range(byte_idx..byte_idx + next.len_utf8(), "");
+                }
+                prompt.cursor -= 1;
+            }
+            prompt.error = None;
+            false
+        }
+        KeyCode::Left => {
+            prompt.cursor = prompt.cursor.saturating_sub(1);
+            false
+        }
+        KeyCode::Right => {
+            prompt.cursor = (prompt.cursor + 1).min(prompt.buffer.chars().count());
+            false
+        }
+        KeyCode::Home => {
+            prompt.cursor = 0;
+            false
+        }
+        KeyCode::End => {
+            prompt.cursor = prompt.buffer.chars().count();
+            false
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor);
+            prompt.buffer.insert(byte_idx, c);
+            prompt.cursor += 1;
+            prompt.error = None;
             false
         }
         _ => false,
@@ -16270,7 +16469,7 @@ fn strip_note_frontmatter(content: &str) -> String {
 /// `$HOME/.config/smarthistory/templates/jira/`. Same `HOME`-based
 /// resolution `main::config_path()` uses for
 /// `~/.config/smarthistory/config` — a fixed path, not an env var.
-fn jira_templates_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn jira_templates_dir() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(
         std::path::PathBuf::from(home)
@@ -16315,6 +16514,21 @@ fn fetch_jira_prefill_result<C: crate::jira::JiraClient + ?Sized>(
         client.fetch_custom_fields(key, clone_field_ids).unwrap_or_default()
     };
     Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields })
+}
+
+/// Combine `search`'s result with `fetch_all_custom_fields` into the
+/// `JiraTemplateFetchResult` `App::process_jira_template_fetch_result`
+/// expects. Unlike `fetch_jira_prefill_result`'s clone-fields fetch, this
+/// one is NOT best-effort: either call failing fails the whole request
+/// (via `?`) — there's no partial template worth writing to disk.
+fn fetch_jira_template_result<C: crate::jira::JiraClient + ?Sized>(
+    client: &C,
+    key: &str,
+    search_result: Result<crate::jira::JiraIssue, crate::jira::JiraError>,
+) -> Result<crate::tui::mode::jira::JiraTemplateFetchResult, crate::jira::JiraError> {
+    let issue = search_result?;
+    let custom_fields = client.fetch_all_custom_fields(key)?;
+    Ok(crate::tui::mode::jira::JiraTemplateFetchResult { issue, custom_fields })
 }
 
 pub(crate) fn leak_field_name(key: &str) -> &'static str {

@@ -3708,6 +3708,12 @@ tmuxpaneoutputdir=~/custom-tmux
         ) -> Result<Vec<(String, String)>, crate::jira::JiraError> {
             Ok(Vec::new())
         }
+        fn fetch_all_custom_fields(
+            &self,
+            _key: &str,
+        ) -> Result<Vec<(String, String)>, crate::jira::JiraError> {
+            Ok(Vec::new())
+        }
     }
 
     #[test]

@@ -18487,6 +18487,17 @@ struct FakeJira {
     /// `(key, field_ids)` `fetch_custom_fields` was called with, in
     /// call order.
     clone_fields_calls: std::sync::Arc<std::sync::Mutex<Vec<ClonedFieldsCall>>>,
+    /// Canned response for `fetch_all_custom_fields` — a fixed
+    /// `(id, value)` list returned regardless of the requested key
+    /// (tests set this up to match whatever `render_jira_template`
+    /// assertions expect).
+    all_custom_fields_response: Vec<(String, String)>,
+    /// When `true`, `fetch_all_custom_fields` returns an error instead
+    /// of `all_custom_fields_response` — for testing the "template
+    /// fetch failed, nothing written" path.
+    fail_all_custom_fields: bool,
+    /// Keys `fetch_all_custom_fields` was called with, in call order.
+    all_custom_fields_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl crate::jira::JiraClient for FakeJira {
@@ -18556,6 +18567,16 @@ impl crate::jira::JiraClient for FakeJira {
             return Err(crate::jira::JiraError::Http("boom".to_string()));
         }
         Ok(self.clone_fields_response.clone())
+    }
+    fn fetch_all_custom_fields(
+        &self,
+        key: &str,
+    ) -> Result<Vec<(String, String)>, crate::jira::JiraError> {
+        self.all_custom_fields_calls.lock().unwrap().push(key.to_string());
+        if self.fail_all_custom_fields {
+            return Err(crate::jira::JiraError::Http("boom".to_string()));
+        }
+        Ok(self.all_custom_fields_response.clone())
     }
 }
 
@@ -22201,6 +22222,188 @@ fn download_jira_issue_with_no_row_is_noop() {
         "status should mention the missing selection: {:?}",
         status
     );
+}
+
+/// `create_jira_template_from_issue` opens `template_name_prompt` with
+/// the selected row's issue key, same gating shape as `download_jira_issue`.
+#[test]
+fn create_jira_template_from_issue_opens_prompt() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        issues: vec![crate::jira::JiraIssue { key: "PROJ-42".to_string(), ..Default::default() }],
+        recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..FakeJira::default()
+    };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.query = String::from("-");
+    app.refresh();
+    let past = std::time::Instant::now()
+        - JIRA_IDLE_TIMEOUT
+        - JIRA_DEBOUNCE
+        - std::time::Duration::from_millis(50);
+    app.jira_debounce_started = Some(past);
+    app.jira_idle_started = Some(past);
+    app.jira_maybe_autocall();
+    app.list_state.select(Some(0));
+
+    app.create_jira_template_from_issue();
+
+    let prompt = app.template_name_prompt.as_ref().expect("prompt should be open");
+    assert_eq!(prompt.source_key, "PROJ-42");
+    assert_eq!(prompt.buffer, "");
+    assert!(prompt.error.is_none());
+}
+
+/// Outside of JIRA mode, the action is a no-op with a status message —
+/// same policy as `download_jira_issue`.
+#[test]
+fn create_jira_template_from_issue_outside_jira_mode_is_noop() {
+    let mut app = directories_test_app(&[("ls", "/tmp", 0)]);
+    app.query = String::from("*");
+    app.refresh();
+    app.create_jira_template_from_issue();
+    assert!(app.template_name_prompt.is_none());
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(status.contains("JIRA search"), "status should mention JIRA search: {:?}", status);
+}
+
+/// With no row selected, the action is a no-op with a status message.
+#[test]
+fn create_jira_template_from_issue_with_no_row_is_noop() {
+    use std::sync::Arc;
+    let fake = FakeJira { issues: vec![], recorded: Arc::new(std::sync::Mutex::new(Vec::new())), ..FakeJira::default() };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.query = String::from("-");
+    app.refresh();
+    app.create_jira_template_from_issue();
+    assert!(app.template_name_prompt.is_none());
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(status.contains("No JIRA issue selected"), "status: {:?}", status);
+}
+
+/// Pressing Enter on a blank/whitespace-only template name is a
+/// validation error: the prompt stays open and shows the error inline,
+/// rather than committing an empty name.
+#[test]
+fn template_name_prompt_enter_with_empty_buffer_shows_error() {
+    let mut app = directories_test_app(&[]);
+    app.template_name_prompt = Some(crate::tui::state::TemplateNamePrompt {
+        source_key: "PROJ-42".to_string(),
+        buffer: "   ".to_string(),
+        cursor: 3,
+        error: None,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let prompt = app.template_name_prompt.as_ref().expect("prompt should stay open");
+    assert_eq!(prompt.error.as_deref(), Some("Template name is required"));
+    assert!(!app.jira_template_fetch_in_flight, "no fetch should start on an invalid submit");
+}
+
+/// `Esc` cancels the prompt without starting a fetch.
+#[test]
+fn template_name_prompt_cancel_closes_without_fetch() {
+    let mut app = directories_test_app(&[]);
+    app.template_name_prompt = Some(crate::tui::state::TemplateNamePrompt {
+        source_key: "PROJ-42".to_string(),
+        buffer: "bug template".to_string(),
+        cursor: 12,
+        error: None,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.template_name_prompt.is_none());
+    assert!(!app.jira_template_fetch_in_flight);
+}
+
+/// Full pipeline, end to end: typing a name and pressing Enter closes
+/// the prompt, fetches the issue (search + `fetch_all_custom_fields`)
+/// via the `FakeJira` test seam (synchronous), and writes a template
+/// file that reads back correctly through `parse_jira_template`. `HOME`
+/// is redirected to a scratch tempdir for the duration of the test (see
+/// `ENV_LOCK`) so this never touches the user's real
+/// `~/.config/smarthistory/templates/jira/` directory.
+#[test]
+fn template_name_prompt_full_pipeline_writes_readable_template() {
+    use std::sync::Arc;
+    let _env_guard = lock_or_recover(&ENV_LOCK);
+    let tmp_home = std::env::temp_dir().join(format!(
+        "smarthistory_template_prompt_pipeline_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_home);
+    std::fs::create_dir_all(&tmp_home).expect("create tmp home");
+    let prev_home = std::env::var("HOME").ok();
+    unsafe {
+        std::env::set_var("HOME", &tmp_home);
+    }
+
+    let fake = FakeJira {
+        issues: vec![crate::jira::JiraIssue {
+            key: "PROJ-42".to_string(),
+            summary: "Checkout page throws 500".to_string(),
+            issuetype: "Bug".to_string(),
+            labels: vec!["checkout".to_string()],
+            description: "Repro steps.".to_string(),
+            ..Default::default()
+        }],
+        recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+        all_custom_fields_response: vec![("customfield_11601".to_string(), "Team ComS".to_string())],
+        all_custom_fields_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..FakeJira::default()
+    };
+    let all_custom_fields_calls = fake.all_custom_fields_calls.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.template_name_prompt = Some(crate::tui::state::TemplateNamePrompt {
+        source_key: "PROJ-42".to_string(),
+        buffer: String::new(),
+        cursor: 0,
+        error: None,
+    });
+
+    for c in "Bug Template".chars() {
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(app.template_name_prompt.is_none(), "prompt should close on a valid submit");
+    assert_eq!(all_custom_fields_calls.lock().unwrap().as_slice(), ["PROJ-42"]);
+
+    let path = tmp_home.join(".config/smarthistory/templates/jira/bug-template.md");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("expected template written at {path:?}: {e}"));
+
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp_home);
+
+    let (pairs, body) = crate::tui::mode::jira::parse_jira_template(&content);
+    assert_eq!(body, "Repro steps.");
+    use crate::tui::mode::jira::{TemplateFieldKind, classify_template_key};
+    let mut saw_project = false;
+    let mut saw_cf = false;
+    for (key, value) in &pairs {
+        match classify_template_key(key) {
+            TemplateFieldKind::StandardProject => {
+                assert_eq!(value.as_display_string(), "PROJ");
+                saw_project = true;
+            }
+            TemplateFieldKind::CustomField(id) if id == "customfield_11601" => {
+                assert_eq!(value.as_display_string(), "Team ComS");
+                saw_cf = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_project, "expected a project: line in {content:?}");
+    assert!(saw_cf, "expected a cf[11601]: line in {content:?}");
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(status.contains("Created template"), "status: {:?}", status);
 }
 
 /// `Action::DownloadJiraMatching` ships unbound by
@@ -30767,6 +30970,128 @@ fn classify_template_key_buckets() {
         crate::tui::mode::jira::classify_template_key("cf[abc]"),
         TemplateFieldKind::Parameter
     );
+}
+
+// ---- "Create JIRA template from issue" (`Action::CreateJiraTemplateFromIssue`) ----
+
+/// `render_jira_template`'s output round-trips through
+/// `parse_jira_template`/`classify_template_key` — the write side and the
+/// read side agree on the frontmatter format.
+#[test]
+fn render_jira_template_round_trips_through_parse_jira_template() {
+    use crate::tui::mode::jira::{TemplateFieldKind, classify_template_key, parse_jira_template, render_jira_template};
+
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-42".to_string(),
+        summary: "Checkout page throws 500".to_string(),
+        issuetype: "Bug".to_string(),
+        labels: vec!["checkout".to_string(), "urgent".to_string()],
+        description: "Full repro steps here.".to_string(),
+        ..Default::default()
+    };
+    let custom_fields = vec![
+        ("customfield_11601".to_string(), "Team ComS".to_string()),
+        ("customfield_10050".to_string(), "High".to_string()),
+    ];
+    let content = render_jira_template(&issue, &custom_fields);
+
+    let (pairs, body) = parse_jira_template(&content);
+    assert_eq!(body, "Full repro steps here.");
+
+    let mut project = None;
+    let mut issuetype = None;
+    let mut summary = None;
+    let mut labels = None;
+    let mut cf_11601 = None;
+    let mut cf_10050 = None;
+    for (key, value) in &pairs {
+        match classify_template_key(key) {
+            TemplateFieldKind::StandardProject => project = Some(value.as_display_string()),
+            TemplateFieldKind::StandardIssueType => issuetype = Some(value.as_display_string()),
+            TemplateFieldKind::StandardSummary => summary = Some(value.as_display_string()),
+            TemplateFieldKind::StandardLabels => labels = Some(value.as_display_string()),
+            TemplateFieldKind::CustomField(id) if id == "customfield_11601" => {
+                cf_11601 = Some(value.as_display_string());
+            }
+            TemplateFieldKind::CustomField(id) if id == "customfield_10050" => {
+                cf_10050 = Some(value.as_display_string());
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(project.as_deref(), Some("PROJ"));
+    assert_eq!(issuetype.as_deref(), Some("Bug"));
+    assert_eq!(summary.as_deref(), Some("Checkout page throws 500"));
+    assert_eq!(labels.as_deref(), Some("checkout, urgent"));
+    assert_eq!(cf_11601.as_deref(), Some("Team ComS"));
+    assert_eq!(cf_10050.as_deref(), Some("High"));
+}
+
+/// An issue with no labels omits the `labels:` key entirely, rather than
+/// emitting an empty list that would round-trip strangely.
+#[test]
+fn render_jira_template_omits_labels_key_when_empty() {
+    use crate::tui::mode::jira::render_jira_template;
+
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        summary: "No labels here".to_string(),
+        issuetype: "Task".to_string(),
+        ..Default::default()
+    };
+    let content = render_jira_template(&issue, &[]);
+    assert!(!content.contains("labels:"), "content should have no labels key: {content:?}");
+}
+
+/// A value containing a colon or embedded newline still round-trips: the
+/// colon survives (only the FIRST colon on the line is the frontmatter
+/// separator) and the newline is flattened to a space so it can't be
+/// mistaken for a new frontmatter line.
+#[test]
+fn render_jira_template_handles_colon_and_newline_in_values() {
+    use crate::tui::mode::jira::{TemplateFieldKind, classify_template_key, parse_jira_template, render_jira_template};
+
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-7".to_string(),
+        summary: "Ratio is 3:1\nacross two lines".to_string(),
+        issuetype: "Task".to_string(),
+        ..Default::default()
+    };
+    let content = render_jira_template(&issue, &[]);
+    let (pairs, _) = parse_jira_template(&content);
+    let summary = pairs
+        .iter()
+        .find(|(k, _)| classify_template_key(k) == TemplateFieldKind::StandardSummary)
+        .map(|(_, v)| v.as_display_string());
+    assert_eq!(summary.as_deref(), Some("Ratio is 3:1 across two lines"));
+}
+
+/// `write_jira_template_file` writes into the given directory (a tempdir
+/// in tests, never the real templates directory) and refuses to
+/// overwrite an existing file.
+#[test]
+fn write_jira_template_file_writes_and_refuses_overwrite() {
+    use crate::tui::mode::jira::write_jira_template_file;
+
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-template-write-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let path = write_jira_template_file(&dir, "My New Template", "---\nsummary: \"x\"\n---\nbody")
+        .expect("first write should succeed");
+    assert_eq!(path, dir.join("my-new-template.md"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "---\nsummary: \"x\"\n---\nbody");
+
+    let err = write_jira_template_file(&dir, "My New Template", "different content")
+        .expect_err("second write with the same name must refuse to overwrite");
+    assert!(err.contains("already exists"), "unexpected error: {err}");
+    // The original content must be untouched.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "---\nsummary: \"x\"\n---\nbody");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// `jira_dialog_row_prefill` returns the template-provided defaults

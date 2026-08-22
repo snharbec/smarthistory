@@ -282,6 +282,18 @@ pub trait JiraClient: Send + Sync {
         key: &str,
         field_ids: &[String],
     ) -> Result<Vec<(String, String)>, JiraError>;
+
+    /// Fetch every populated custom field on a single issue — used by
+    /// "create JIRA template from issue" (`mode::jira::start_jira_template_fetch`)
+    /// to capture a real issue's full custom-field set into a reusable
+    /// template file, unlike `fetch_custom_fields` which only returns
+    /// values for a caller-supplied id list (`JiraConfig::clone_fields`).
+    ///
+    /// Returns `(id, value)` pairs for every `customfield_<digits>` key
+    /// the issue actually has a non-empty value for — fields that are
+    /// null, missing, or empty are omitted entirely (there's no fixed
+    /// list to preserve order/length against, unlike `fetch_custom_fields`).
+    fn fetch_all_custom_fields(&self, key: &str) -> Result<Vec<(String, String)>, JiraError>;
 }
 
 /// Configuration read from the environment. `None` means
@@ -1130,6 +1142,58 @@ impl JiraClient for RestJiraClient {
             })
             .collect())
     }
+
+    /// `GET /rest/api/2/issue/{key}?fields=*all` — same single-issue
+    /// endpoint as `fetch_custom_fields`, but requesting every field
+    /// (including non-navigable ones) instead of a caller-supplied id
+    /// list, since there's no known-in-advance set of custom field ids
+    /// to ask for here.
+    fn fetch_all_custom_fields(&self, key: &str) -> Result<Vec<(String, String)>, JiraError> {
+        let url = format!(
+            "{}/rest/api/2/issue/{}?fields=*all",
+            self.config.server,
+            urlencoding::encode(key),
+        );
+        let client = self.build_blocking_client()?;
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json")
+            .send()
+            .map_err(|e| JiraError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            let excerpt: String = body.chars().take(200).collect();
+            return Err(JiraError::Api(format!("{}: {}", status, excerpt.trim())));
+        }
+        let body = resp.text().map_err(|e| JiraError::Http(e.to_string()))?;
+        let snippet: String = body.chars().take(300).collect();
+        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            JiraError::Parse(format!("{} — body starts with: {}", e, snippet.trim()))
+        })?;
+        Ok(extract_all_custom_fields(parsed.get("fields")))
+    }
+}
+
+/// Pull every populated `customfield_<digits>` entry out of a `GET
+/// /rest/api/2/issue/{key}` response's `fields` object — the parsing
+/// half of `fetch_all_custom_fields`, split out so it's testable without
+/// a real HTTP round-trip. `fields` is `None` (missing `fields` key, or a
+/// non-object value) → empty result, same as an issue with nothing
+/// populated.
+fn extract_all_custom_fields(fields: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    let Some(fields) = fields.and_then(|f| f.as_object()) else {
+        return Vec::new();
+    };
+    fields
+        .iter()
+        .filter(|(id, _)| id.starts_with("customfield_"))
+        .filter_map(|(id, v)| {
+            let value = extract_custom_field_value(v);
+            if value.is_empty() { None } else { Some((id.clone(), value)) }
+        })
+        .collect()
 }
 
 /// Render a single JIRA custom-field JSON value as a display string —

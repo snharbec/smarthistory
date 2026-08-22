@@ -1217,6 +1217,40 @@
         assert_eq!(extract_custom_field_value(&serde_json::json!(42)), "42");
     }
 
+    // ---- extract_all_custom_fields ----
+
+    #[test]
+    fn extract_all_custom_fields_keeps_only_populated_customfield_keys() {
+        let fields = serde_json::json!({
+            "summary": "not a custom field",
+            "customfield_11601": "Team ComS",
+            "customfield_10050": {"value": "High"},
+            "customfield_99999": null,
+            "customfield_10001": "",
+        });
+        let mut result = extract_all_custom_fields(Some(&fields));
+        result.sort();
+        assert_eq!(
+            result,
+            vec![
+                ("customfield_10050".to_string(), "High".to_string()),
+                ("customfield_11601".to_string(), "Team ComS".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_all_custom_fields_missing_fields_is_empty() {
+        assert_eq!(extract_all_custom_fields(None), Vec::new());
+        assert_eq!(extract_all_custom_fields(Some(&serde_json::json!("not an object"))), Vec::new());
+    }
+
+    #[test]
+    fn extract_all_custom_fields_no_customfield_keys_is_empty() {
+        let fields = serde_json::json!({"summary": "s", "status": {"name": "Open"}});
+        assert_eq!(extract_all_custom_fields(Some(&fields)), Vec::new());
+    }
+
     // ---- JSON parsing ----
 
     #[test]
@@ -2403,6 +2437,9 @@
         ) -> Result<Vec<(String, String)>, JiraError> {
             Ok(Vec::new())
         }
+        fn fetch_all_custom_fields(&self, _key: &str) -> Result<Vec<(String, String)>, JiraError> {
+            Ok(Vec::new())
+        }
     }
 
     #[test]
@@ -2471,6 +2508,9 @@
             _key: &str,
             _field_ids: &[String],
         ) -> Result<Vec<(String, String)>, JiraError> {
+            Err(JiraError::Http("boom".to_string()))
+        }
+        fn fetch_all_custom_fields(&self, _key: &str) -> Result<Vec<(String, String)>, JiraError> {
             Err(JiraError::Http("boom".to_string()))
         }
     }

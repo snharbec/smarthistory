@@ -1191,6 +1191,35 @@ template's values for those three only apply as the fallback (the same case
 `CreateJiraIssue` would otherwise leave blank). `project:`/`issuetype:` and
 every `cf[...]`/parameter field always apply regardless of row selection.
 
+### `CreateJiraTemplateFromIssue`
+
+| Field        | Value                                                                                                    |
+| ------------ | --------------------------------------------------------------------------------------------------------- |
+| Config key   | `create-jira-template-from-issue`                                                                          |
+| Display name | Create JIRA template from issue                                                                            |
+| Default key  | none (open it via the command palette, `Ctrl-Q`, or bind `key.create-jira-template-from-issue=<spec>`)    |
+| Category     | tools                                                                                                      |
+
+The reverse of `CreateJiraIssueFromTemplate`: generates a NEW template file
+from an existing issue, instead of creating an issue from an existing
+template. Only available on a selected row in `-` (JIRA) mode; a no-op with a
+status message everywhere else, or when nothing is selected.
+
+Opens a "Template name:" prompt (`Enter` confirms, `Esc`/`Ctrl-C` cancels). An
+empty/whitespace-only name is rejected inline — the prompt stays open. On a
+valid name, fetches the source issue's full details (`search`, for
+summary/description/labels — the cached row doesn't carry them) plus every
+populated custom field on the issue (not just whatever
+[`JIRA_CLONE_FIELDS`](configuration.md#jira--mode) happens to be configured
+to clone into a NEW issue — see [`CreateJiraIssue`](#createjiraissue)), then
+writes `~/.config/smarthistory/templates/jira/<slugified-name>.md` in exactly
+the frontmatter format `CreateJiraIssueFromTemplate` reads (`project:`,
+`issuetype:`, `summary:`, `labels:`, one `cf[<digits>]:` line per populated
+custom field, `description` as the body). Refuses to overwrite an existing
+template with the same name — the status message says so rather than
+silently clobbering it. Either fetch call failing fails the whole request
+(no partial template is written); the status message shows the JIRA error.
+
 ---
 
 ## panes

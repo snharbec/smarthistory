@@ -27,6 +27,13 @@ All notable changes to this project will be documented in this file.
   read-only in the dialog (with a "(cloned)" marker) and are sent unchanged
   to the new issue on submit. See
   [docs/actions.md#createjiraissue](docs/actions.md#createjiraissue).
+- New `Action::CreateJiraTemplateFromIssue` (unbound by default) — the
+  reverse of `CreateJiraIssueFromTemplate`: on a selected JIRA row, asks for
+  a template name, then generates a new template file capturing that
+  issue's fields, including every populated custom field (not just whatever
+  `JIRA_CLONE_FIELDS` is configured to clone). Refuses to overwrite an
+  existing template with the same name. See
+  [docs/actions.md#createjiratemplatefromissue](docs/actions.md#createjiratemplatefromissue).
 
 ## 2.1.0 - 2026-08-20
 

@@ -922,6 +922,33 @@ pub struct ProjectSincePrompt {
     pub cursor: usize,
 }
 
+/// Pending "Template name:" prompt, shown by
+/// `Action::CreateJiraTemplateFromIssue` (`-` mode, selected row) before
+/// generating a "create JIRA issue from template" template file from that
+/// issue's fields. See `App::start_jira_template_fetch`/
+/// `App::process_jira_template_fetch_result` in `src/tui.rs` for what
+/// happens once a name is confirmed. Modeled directly on
+/// `ProjectSincePrompt`, the closest existing single-line-input dialog —
+/// the one real difference is `buffer` accepts any printable character
+/// (a template name, not a digit-only minute count), so an empty submit
+/// is a genuine invalid state `error` reports, rather than a valid
+/// "just now" default.
+#[derive(Debug, Clone)]
+pub struct TemplateNamePrompt {
+    /// The JIRA issue key this template will be generated from (e.g.
+    /// `PROJ-123`), captured when the action opened the prompt.
+    pub source_key: String,
+    /// The template name typed so far.
+    pub buffer: String,
+    /// Character-index cursor into `buffer` (0..=len).
+    pub cursor: usize,
+    /// Set on an empty-submit (`Enter` with a blank/whitespace-only
+    /// `buffer`) — a template needs a name, unlike `ProjectSincePrompt`
+    /// where blank is a valid "just now" default. Cleared on the next
+    /// keystroke or a non-empty submit.
+    pub error: Option<String>,
+}
+
 /// Short flags — across `ssh`/`scp`/`sftp`/`rsync`/`mosh` — that take
 /// a separate following argument (`-p 2222`, `-i ~/.ssh/id_ed25519`,
 /// …), as opposed to a bare boolean flag (`-4`, `-C`, …) or a flag
