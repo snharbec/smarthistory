@@ -12,9 +12,10 @@ use ratatui::{
     widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap},
 };
 
-use super::bindings::{ALL_ACTIONS, Action, format_key_specs};
+use super::bindings::{ALL_ACTIONS, Action, format_key_spec, format_key_specs};
 use super::state::{
-    ExitFilter, HistoryRow, Mode, NoteComposeDialog, NoteCreateDialog, NoteCreateField, SortOrder,
+    ExitFilter, HistoryRow, KeyBindingsEditor, Mode, NoteComposeDialog, NoteCreateDialog,
+    NoteCreateField, SortOrder,
 };
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
@@ -164,6 +165,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(picker) = app.theme_picker.as_ref() {
         draw_theme_picker(f, app, picker);
+    }
+
+    if let Some(editor) = app.key_bindings_editor.as_ref() {
+        draw_key_bindings_editor(f, app, editor);
     }
 
     // The add-session /
@@ -3970,6 +3975,181 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
         )
         .wrap(Wrap { trim: false });
     f.render_widget(preview, inner_horizontal[1]);
+}
+
+/// Render the `Action::KeyBindingsEditor` overlay. Same overall shape
+/// as `draw_command_menu` (a 3-column description/key/name table, its
+/// column widths computed once over the full `ALL_ACTIONS` list so
+/// they don't jitter while filtering) — the difference is the top line
+/// switches between the filter box (browsing), a "press a key" banner
+/// (capturing), and a conflict-confirmation banner (`pending_conflict`),
+/// per `KeyBindingsEditor`'s own doc comment.
+fn draw_key_bindings_editor(f: &mut Frame, app: &App, editor: &KeyBindingsEditor) {
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let title = if cancel_keys.is_empty() {
+        String::from(" Key bindings editor ")
+    } else {
+        format!(" Key bindings editor — {} to close ", cancel_keys)
+    };
+    let inner = overlay(f, &title, 75, 75);
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+    let dim_style = Style::default().fg(Theme::dim_color());
+    let warning_style = Style::default().fg(Theme::warning_color());
+    let accent_style = Theme::accent();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)].as_ref())
+        .split(inner);
+
+    // ---- Top line: filter box, or a capture/conflict banner ----
+    if let Some((action, spec, other)) = editor.pending_conflict {
+        let line = Line::from(vec![
+            Span::styled(
+                format!(
+                    " {} is also bound to {}. ",
+                    other.display_name(),
+                    format_key_spec(spec)
+                ),
+                warning_style,
+            ),
+            Span::styled("y", accent_style),
+            Span::raw("/"),
+            Span::styled("Enter", accent_style),
+            Span::raw(" bind anyway to "),
+            Span::styled(action.display_name(), Style::default().fg(fg)),
+            Span::raw(", "),
+            Span::styled("n", accent_style),
+            Span::raw(format!("/{} try another key", cancel_keys)),
+        ]);
+        f.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), chunks[0]);
+    } else if let Some(action) = editor.capturing {
+        let line = Line::from(vec![
+            Span::styled(" Press a key to bind to ", dim_style),
+            Span::styled(action.display_name(), accent_style),
+            Span::styled(format!("… ({} cancels)", cancel_keys), dim_style),
+        ]);
+        f.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), chunks[0]);
+    } else {
+        let placeholder = if editor.query.is_empty() {
+            Span::styled(
+                "Type an action name (e.g. \"cycle\", \"delete\") or a key",
+                Style::default().fg(Theme::dim_color()).add_modifier(Modifier::ITALIC),
+            )
+        } else {
+            Span::styled(editor.query.clone(), Style::default().fg(fg))
+        };
+        let query_line = Line::from(vec![Span::styled("> ", accent_style), placeholder]);
+        f.render_widget(
+            Paragraph::new(query_line).style(Style::default().bg(bg)).wrap(Wrap { trim: false }),
+            chunks[0],
+        );
+        let prompt_width = "> ".chars().count() as u16;
+        let cursor_x = chunks[0].x + prompt_width + editor.query.chars().count() as u16;
+        f.set_cursor_position((
+            cursor_x.min(chunks[0].x.saturating_add(chunks[0].width).saturating_sub(2)),
+            chunks[0].y,
+        ));
+    }
+
+    // ---- Action list ----
+    fn key_text(app: &App, action: Action) -> String {
+        if app.bindings.is_unbound(action) {
+            "unbound".to_string()
+        } else {
+            let specs = app.bindings.specs(action);
+            if specs.is_empty() {
+                "?".to_string()
+            } else {
+                format_key_specs(specs)
+            }
+        }
+    }
+
+    let filtered = editor.filtered_indices();
+    let highlight_style =
+        Style::default().bg(Theme::selection_color()).fg(fg).add_modifier(Modifier::BOLD);
+
+    let key_width = ALL_ACTIONS
+        .iter()
+        .map(|a| key_text(app, *a).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("key".len());
+    let name_width = ALL_ACTIONS
+        .iter()
+        .map(|a| a.config_key().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("action".len());
+    let desc_width = (chunks[1].width as usize).saturating_sub(key_width + name_width + 2).max(1);
+
+    let mut rows: Vec<Row> = Vec::new();
+    for &idx in &filtered {
+        let action = ALL_ACTIONS[idx];
+        let key = key_text(app, action);
+        let key_style = if app.bindings.is_unbound(action) { warning_style } else { accent_style };
+
+        let desc_chars: Vec<char> = action.display_name().chars().collect();
+        let wrapped = wrap_chars_to_rows(&desc_chars, desc_width);
+        let row_height = wrapped.len().max(1);
+
+        let mut key_lines: Vec<Line> = vec![Line::styled(key, key_style)];
+        let mut name_lines: Vec<Line> = vec![Line::styled(action.config_key(), dim_style)];
+        let mut desc_lines: Vec<Line> = Vec::new();
+        for (text, _) in &wrapped {
+            desc_lines.push(Line::raw(text.clone()));
+        }
+        while key_lines.len() < row_height {
+            key_lines.push(Line::raw(""));
+        }
+        while name_lines.len() < row_height {
+            name_lines.push(Line::raw(""));
+        }
+
+        rows.push(
+            Row::new(vec![
+                Cell::from(Text::from(desc_lines)),
+                Cell::from(Text::from(key_lines)),
+                Cell::from(Text::from(name_lines)),
+            ])
+            .height(row_height as u16),
+        );
+    }
+    if rows.is_empty() {
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled("(no action matches your query)", dim_style)),
+            Cell::from(""),
+            Cell::from(""),
+        ]));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(desc_width as u16),
+            Constraint::Length(key_width as u16),
+            Constraint::Length(name_width as u16),
+        ],
+    )
+    .style(Style::default().bg(bg))
+    .row_highlight_style(highlight_style);
+
+    let mut table_state = TableState::default();
+    if !filtered.is_empty() {
+        table_state.select(Some(editor.selected));
+    }
+    f.render_stateful_widget(table, chunks[1], &mut table_state);
+
+    // ---- Footer ----
+    let close_hint = if cancel_keys.is_empty() { "no key bound".to_string() } else { format!("{} close", cancel_keys) };
+    let footer = Line::from(vec![
+        Span::styled(format!(" {}/{} actions", filtered.len(), ALL_ACTIONS.len()), dim_style),
+        Span::raw(format!("  up/down move  Enter rebind  Delete unbind  {} ", close_hint)),
+    ]);
+    f.render_widget(Paragraph::new(footer).style(Style::default().bg(bg)), chunks[2]);
 }
 
 /// Render the tab-completion

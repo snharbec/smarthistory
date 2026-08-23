@@ -332,6 +332,13 @@ pub enum Action {
     /// (manual + built-in) where navigating the list applies the
     /// theme live, Enter commits, Esc reverts to the original.
     ThemePicker,
+    /// Open the key-bindings editor: a list of every action, filterable,
+    /// with its current binding shown (mirrors the command palette's
+    /// listing). Enter on a highlighted action starts key-capture mode —
+    /// the next keypress becomes that action's new (sole) binding,
+    /// applied immediately and persisted to the config file. `Delete`
+    /// unbinds the highlighted action. See `handle_key_bindings_editor_key`.
+    KeyBindingsEditor,
     /// Toggle between substring, fuzzy, and regex match
     /// algorithms. Applied to ALL prefix modes (history,
     /// directories, panes, notes, etc.) except JIRA.
@@ -757,6 +764,7 @@ impl Action {
             Action::DeleteWordBackward => "delete-word-backward",
             Action::CommandAction => "command-action",
             Action::ThemePicker => "theme-picker",
+            Action::KeyBindingsEditor => "key-bindings-editor",
             Action::ToggleSearchMode => "toggle-search-mode",
             Action::MarkTodoDone => "mark-todo-done",
             Action::TogglePaneVisibility => "toggle-pane-visibility",
@@ -826,6 +834,7 @@ impl Action {
             Action::DeleteWordBackward => "Delete word backward",
             Action::CommandAction => "Command palette",
             Action::ThemePicker => "Theme picker",
+            Action::KeyBindingsEditor => "Key bindings editor",
             Action::ToggleSearchMode => "Toggle search mode",
             Action::MarkTodoDone => "Mark todo done",
             Action::TogglePaneVisibility => "Toggle pane visibility",
@@ -877,6 +886,7 @@ impl Action {
             | Action::OpenHelp
             | Action::CommandAction
             | Action::ThemePicker
+            | Action::KeyBindingsEditor
             | Action::YankSelection
             | Action::EditFileReference => "tools",
             // LLM-backed actions. The `run_llm_query` and
@@ -1016,6 +1026,7 @@ impl Action {
             Action::DeleteWordBackward => "C-w",
             Action::CommandAction => "C-q",
             Action::ThemePicker => "T",
+            Action::KeyBindingsEditor => "none",
             Action::ToggleSearchMode => "C-f",
             // `mark-todo-done` ships unbound by default. The
             // mark-todo-done functionality (toggling the
@@ -1558,6 +1569,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::DeleteWordBackward,
     Action::CommandAction,
     Action::ThemePicker,
+    Action::KeyBindingsEditor,
     Action::ToggleSearchMode,
     Action::MarkTodoDone,
     Action::AddSession,
@@ -1789,4 +1801,168 @@ pub fn format_key_specs(specs: &[KeySpec]) -> String {
         out.push_str(&format_key_spec(*spec));
     }
     out
+}
+
+/// Append a `key.<config_key> = <value>` line to the main config file,
+/// persisting a rebind (or, when `spec` is `None`, an unbind) made via
+/// the in-TUI key-bindings editor. Mirrors
+/// `crate::tui::mode::worktree::write_project_dir_binding`'s exact
+/// atomic-write shape (read-or-empty, append, tmp-write, rename), but
+/// the value here is UNQUOTED plain text — `key.<action>=` lines are
+/// parsed as bare `value.trim()` (`Config::parse_multi`), not the
+/// `{:?}`-quoted strings `project.*.dir` lines use; a quoted value
+/// would fail to parse back into a `KeySpec`.
+///
+/// A later `key.<config_key>=` line always wins over an earlier one
+/// (`Config::parse_multi`'s documented "later line wins" rule), so
+/// appending is correct — no need to find and replace an existing line.
+pub(crate) fn write_key_binding_to_config(action: Action, specs: &[KeySpec]) -> Result<(), String> {
+    let value = if specs.is_empty() {
+        "none".to_string()
+    } else {
+        // `Config::parse_multi` treats `#` as a comment-start
+        // anywhere in the line (`raw_line.split('#').next()`), so a
+        // formatted spec containing it would silently truncate the
+        // line and corrupt the binding. No named key or modifier
+        // prefix ever formats to a bare `#`, so this only fires for
+        // `KeySpec { code: KeyCode::Char('#'), .. }` — rare, but a
+        // real corruption path worth refusing outright. Checked per
+        // spec (not the joined string) so one bad spec in a longer
+        // list is reported precisely.
+        for spec in specs {
+            let formatted = format_key_spec(*spec);
+            if formatted.contains('#') {
+                return Err(format!(
+                    "cannot persist a binding that formats to {:?} — the config file's \
+                     comment syntax would truncate the line",
+                    formatted
+                ));
+            }
+        }
+        format_key_specs(specs)
+    };
+    let target_path =
+        crate::config_path().ok_or_else(|| "no config directory path (HOME is not set)".to_string())?;
+    let contents = match std::fs::read_to_string(&target_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("failed to read {}: {}", target_path.display(), e)),
+    };
+    let mut new_contents = contents.clone();
+    if !new_contents.is_empty() && !new_contents.ends_with('\n') {
+        new_contents.push('\n');
+    }
+    new_contents.push_str(&format!("key.{} = {}\n", action.config_key(), value));
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    let tmp_path = target_path.with_extension("tmp");
+    std::fs::write(&tmp_path, new_contents.as_bytes())
+        .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
+    std::fs::rename(&tmp_path, &target_path).map_err(|e| {
+        format!(
+            "failed to rename {} to {}: {}",
+            tmp_path.display(),
+            target_path.display(),
+            e,
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod write_key_binding_to_config_tests {
+    use super::{Action, KeySpec, write_key_binding_to_config};
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::sync::Mutex;
+
+    /// Same "serialise every test that mutates process-level `$HOME`"
+    /// rationale as `write_theme_to_config_tests::HOME_LOCK`
+    /// (`src/tui.rs`) — a sibling test suite that mutates the same
+    /// global env var and would otherwise race this one under the
+    /// parallel test runner.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: seed a config file, run the write, return the
+    /// resulting file text. Uses a temp `$HOME` so the test never
+    /// touches the user's real config — same pattern as
+    /// `write_theme_to_config_tests::run_with_existing`.
+    fn run_with_existing(existing: &str, action: Action, spec: Option<KeySpec>) -> Result<String, String> {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp_home = std::env::temp_dir().join(format!(
+            "smarthistory_key_binding_write_test_{}_{:?}",
+            std::process::id(),
+            action
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_home);
+        std::fs::create_dir_all(&tmp_home).expect("create tmp home");
+        let cfg_dir = tmp_home.join(".config/smarthistory");
+        std::fs::create_dir_all(&cfg_dir).expect("create cfg dir");
+        let cfg_path = cfg_dir.join("config");
+        std::fs::write(&cfg_path, existing).expect("write seed config");
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: single-threaded test, serialised by HOME_LOCK,
+        // restored on the way out — same convention as
+        // `write_theme_to_config_tests::run_with_existing`.
+        unsafe {
+            std::env::set_var("HOME", &tmp_home);
+        }
+        let specs: Vec<KeySpec> = spec.into_iter().collect();
+        let result = write_key_binding_to_config(action, &specs);
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let contents = std::fs::read_to_string(&cfg_path);
+        let _ = std::fs::remove_dir_all(&tmp_home);
+        result?;
+        Ok(contents.expect("read back the written config"))
+    }
+
+    /// A rebind writes a bare, UNQUOTED `key.<config_key> = <spec>`
+    /// line — `key.<action>=` values are parsed as plain trimmed text
+    /// (`Config::parse_multi`), so a quoted value (like
+    /// `project.*.dir`'s `{:?}`-formatted lines) would fail to parse
+    /// back into a `KeySpec`.
+    #[test]
+    fn writes_unquoted_spec_line() {
+        let spec = KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+        let result = run_with_existing("", Action::ThemePicker, Some(spec)).expect("write should succeed");
+        assert!(
+            result.contains("key.theme-picker = F19\n"),
+            "expected an unquoted `key.theme-picker = F19` line; got:\n{}",
+            result
+        );
+    }
+
+    /// An unbind (`spec = None`) writes the canonical `none` sentinel.
+    #[test]
+    fn unbind_writes_none_sentinel() {
+        let result = run_with_existing("", Action::ThemePicker, None).expect("write should succeed");
+        assert!(
+            result.contains("key.theme-picker = none\n"),
+            "expected `key.theme-picker = none`; got:\n{}",
+            result
+        );
+    }
+
+    /// A later `key.<config_key>=` line wins over an earlier one
+    /// (`Config::parse_multi`'s documented rule), so appending after
+    /// an existing line for the same action is correct — no find-and-
+    /// replace needed. This test just confirms the append actually
+    /// happens (both lines present, new one last), not the parse-time
+    /// resolution itself (covered by `Config::parse_multi`'s own
+    /// tests).
+    #[test]
+    fn appends_rather_than_replacing_existing_line() {
+        let spec = KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+        let result = run_with_existing("key.theme-picker = T\n", Action::ThemePicker, Some(spec))
+            .expect("write should succeed");
+        let t_pos = result.find("key.theme-picker = T").expect("original line preserved");
+        let f19_pos = result.find("key.theme-picker = F19").expect("new line appended");
+        assert!(f19_pos > t_pos, "the new line must come after the old one so it wins");
+    }
 }
