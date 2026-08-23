@@ -31993,6 +31993,57 @@ fn project_since_prompt_esc_cancels_without_staging() {
     assert_eq!(app.selection, None);
 }
 
+/// Regression: digit entry had no length cap, so a long-enough digit
+/// string could overflow `u64::parse` in `answer_project_since_prompt`
+/// and silently stage an un-backdated switch. The buffer must stop
+/// growing at 15 digits — comfortably more than any realistic backdate
+/// needs, and short enough that `u64::parse` can never overflow.
+#[test]
+fn project_since_prompt_caps_digit_entry_at_fifteen() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "demo".to_string(),
+        buffer: String::new(),
+        cursor: 0,
+    });
+    for c in "123456789012345678901234567890".chars() {
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    let buffer = app.project_since_prompt.as_ref().unwrap().buffer.clone();
+    assert_eq!(buffer.chars().count(), 15, "buffer must stop growing at 15 digits: {buffer:?}");
+    assert!(buffer.parse::<u64>().is_ok(), "15 digits must always fit in u64: {buffer:?}");
+}
+
+/// Defense in depth: even if `answer_project_since_prompt` is ever
+/// reached with a buffer the digit cap didn't prevent (e.g. a future
+/// caller that builds `ProjectSincePrompt` directly, bypassing the key
+/// handler), a parse failure must surface a status message rather than
+/// silently staging an un-backdated switch with no indication anything
+/// was wrong.
+#[test]
+fn project_since_prompt_overflow_buffer_surfaces_status_message_not_silent_zero() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "demo".to_string(),
+        // 20 nines: overflows u64::MAX (~1.8e19), unreachable via the
+        // key handler's 15-digit cap, constructed directly to exercise
+        // the defensive path.
+        buffer: "9".repeat(20),
+        cursor: 20,
+    });
+    app.answer_project_since_prompt();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("smarthistory project select demo"),
+        "must still stage the plain project switch, just without --since"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("too large"),
+        "status should explain the number was rejected: {status:?}"
+    );
+}
+
 /// A row from a different mode is never staged as a project
 /// selection, even if `.` mode happens to be active (defensive
 /// guard against a stale `merged_rows` from a prior mode).

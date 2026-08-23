@@ -14122,7 +14122,16 @@ fn handle_project_since_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             prompt.cursor = prompt.buffer.chars().count();
             false
         }
-        KeyCode::Char(c) if c.is_ascii_digit() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        // Capped at 15 digits — comfortably covers any realistic
+        // backdate in minutes (15 nines is ~1.9 billion years) while
+        // staying well under u64::MAX's 20 digits, so `.parse::<u64>()`
+        // in `answer_project_since_prompt` can never overflow from
+        // anything the user actually typed here.
+        KeyCode::Char(c)
+            if c.is_ascii_digit()
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && prompt.buffer.chars().count() < 15 =>
+        {
             let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor);
             prompt.buffer.insert(byte_idx, c);
             prompt.cursor += 1;

@@ -340,7 +340,24 @@ impl App {
         let Some(prompt) = self.project_since_prompt.take() else {
             return;
         };
-        let minutes: u64 = prompt.buffer.parse().unwrap_or(0);
+        // `handle_project_since_prompt_key`'s digit-insertion arm caps
+        // `buffer` at 15 digits, so this can't actually overflow
+        // `u64::MAX` (20 digits) — but silently treating a parse
+        // failure as "0 minutes" would stage an un-backdated project
+        // switch with no indication anything was wrong, so surface it
+        // rather than defaulting quietly if this invariant is ever
+        // violated some other way.
+        let minutes: u64 = match prompt.buffer.parse() {
+            Ok(m) => m,
+            Err(_) if prompt.buffer.is_empty() => 0,
+            Err(_) => {
+                self.set_status_message(format!(
+                    "{:?} is too large a backdate; switched project without one",
+                    prompt.buffer
+                ));
+                0
+            }
+        };
         let mut command = format!(
             "smarthistory project select {}",
             crate::util::shell_quote(&prompt.slug)
