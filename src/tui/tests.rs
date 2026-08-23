@@ -283,19 +283,119 @@ fn action_for_key_roundtrip() {
     // user-configured `key.open-help=C-a` in
     // the project config).
     let evt = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-    assert_eq!(action_for_key(&bindings, &evt), Some(Action::OpenHelp));
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), Some(Action::OpenHelp));
     // Unbound plain char → None.
     let evt = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
-    assert_eq!(action_for_key(&bindings, &evt), None);
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), None);
     // Uppercase letters (Shift held) are unbound at the action
     // level — they fall through to the input path, which must
     // accept them rather than swallow them.
     let evt = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
-    assert_eq!(action_for_key(&bindings, &evt), None);
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), None);
     // Shift+symbol also falls through (e.g. "?" typed via
     // Shift+/).
     let evt = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
-    assert_eq!(action_for_key(&bindings, &evt), None);
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), None);
+}
+
+/// `Action::scope()` spot checks — one `Global` action, one
+/// single-mode-scoped action, one multi-mode-scoped action. See the
+/// full classification table in the mode-scoped-key-bindings plan.
+#[test]
+fn action_scope_classifies_global_and_mode_scoped_actions() {
+    use crate::tui::bindings::ActionScope;
+    use crate::tui::mode::ModeKind;
+
+    assert!(matches!(Action::Up.scope(), ActionScope::Global));
+    assert!(matches!(
+        Action::CreateWorktree.scope(),
+        ActionScope::Modes(modes) if modes.len() == 1 && modes.contains(&ModeKind::Worktree)
+    ), "CreateWorktree must be scoped to exactly Worktree mode");
+    assert!(matches!(
+        Action::ComposeNoteEntry.scope(),
+        ActionScope::Modes(modes) if modes.len() == 2
+            && modes.contains(&ModeKind::Notes)
+            && modes.contains(&ModeKind::Todo)
+    ), "ComposeNoteEntry must be scoped to exactly Notes and Todo");
+}
+
+/// Two actions scoped to disjoint, mutually-exclusive prefix modes
+/// can legitimately share a key: `action_for_key` must resolve to
+/// whichever one applies to the currently active mode.
+#[test]
+fn action_for_key_resolves_mode_scoped_conflict_by_current_mode() {
+    let mut bindings = KeyBindings::defaults();
+    let key = bindings::KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+    bindings.set(Action::CreateWorktree, vec![key]);
+    bindings.set(Action::DownloadJiraIssue, vec![key]);
+    let evt = KeyEvent::new(KeyCode::F(19), KeyModifiers::empty());
+
+    assert_eq!(
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::Worktree),
+        Some(Action::CreateWorktree)
+    );
+    assert_eq!(
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::Jira),
+        Some(Action::DownloadJiraIssue)
+    );
+    // Neither mode active: falls back to whichever comes first in
+    // `ALL_ACTIONS` order — still captures the key (no fall-through
+    // to typing the character), matching today's single-action
+    // no-op-elsewhere behavior.
+    assert!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History).is_some());
+}
+
+/// A key shared between a `Global` action and a mode-scoped action:
+/// the scoped action wins in its own mode (a deliberate, specific
+/// override); the global action wins everywhere else.
+#[test]
+fn action_for_key_prefers_mode_scoped_action_over_global_in_its_own_mode() {
+    let mut bindings = KeyBindings::defaults();
+    let key = bindings::KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+    bindings.set(Action::Up, vec![key]);
+    bindings.set(Action::CreateWorktree, vec![key]);
+    let evt = KeyEvent::new(KeyCode::F(19), KeyModifiers::empty());
+
+    assert_eq!(
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::Worktree),
+        Some(Action::CreateWorktree),
+        "the scoped action must win in its own mode"
+    );
+    assert_eq!(
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History),
+        Some(Action::Up),
+        "the global action must win outside the scoped action's mode"
+    );
+    assert_eq!(
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::Jira),
+        Some(Action::Up),
+        "the global action must win in any OTHER mode too"
+    );
+}
+
+/// `scopes_conflict` is the shared predicate both duplicate-key-
+/// warning blocks (`key_bindings_from_config`, `validate_config`) use
+/// to decide whether to actually warn. Two actions scoped to disjoint
+/// modes must never conflict; two globals, or two actions sharing at
+/// least one mode, always do.
+#[test]
+fn scopes_conflict_exempts_disjoint_modes_but_not_globals_or_overlap() {
+    use crate::tui::bindings::{scopes_conflict, ActionScope};
+    use crate::tui::mode::ModeKind;
+
+    assert!(scopes_conflict(ActionScope::Global, ActionScope::Global));
+    assert!(!scopes_conflict(
+        ActionScope::Global,
+        ActionScope::Modes(&[ModeKind::Worktree])
+    ));
+    assert!(!scopes_conflict(
+        ActionScope::Modes(&[ModeKind::Worktree]),
+        ActionScope::Modes(&[ModeKind::Jira])
+    ));
+    assert!(scopes_conflict(
+        ActionScope::Modes(&[ModeKind::Notes, ModeKind::Todo]),
+        ActionScope::Modes(&[ModeKind::Todo])
+    ));
 }
 
 #[test]
@@ -397,7 +497,7 @@ fn key_bindings_from_config_unbind_action() {
     assert!(!bindings.specs(Action::Cancel).is_empty());
     // `action_for_key` must not fire for unbound actions.
     let evt = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
-    assert_eq!(action_for_key(&bindings, &evt), None);
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), None);
 }
 
 #[test]
@@ -413,8 +513,8 @@ fn key_bindings_from_config_multi_key() {
     // Both keys must fire the action.
     let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
     let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
-    assert_eq!(action_for_key(&bindings, &ctrl_h), Some(Action::OpenHelp));
-    assert_eq!(action_for_key(&bindings, &f1), Some(Action::OpenHelp));
+    assert_eq!(action_for_key(&bindings, &ctrl_h, crate::tui::mode::ModeKind::History), Some(Action::OpenHelp));
+    assert_eq!(action_for_key(&bindings, &f1, crate::tui::mode::ModeKind::History), Some(Action::OpenHelp));
     // The display string is comma-joined.
     assert_eq!(format_key_specs(specs), "C-h, F1");
 }
@@ -687,7 +787,7 @@ fn command_action_has_default_binding_and_routes() {
     );
     // Pressing `Ctrl-Q` fires the CommandAction.
     let evt = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
-    assert_eq!(action_for_key(&bindings, &evt), Some(Action::CommandAction));
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), Some(Action::CommandAction));
 }
 
 /// The command palette closes only
@@ -943,12 +1043,12 @@ fn pane_height_default_keys_are_f11_and_shift_f11() {
     );
     let f11 = KeyEvent::new(KeyCode::F(11), KeyModifiers::empty());
     assert_eq!(
-        action_for_key(&bindings, &f11),
+        action_for_key(&bindings, &f11, crate::tui::mode::ModeKind::History),
         Some(Action::IncreasePaneHeight)
     );
     let shift_f11 = KeyEvent::new(KeyCode::F(11), KeyModifiers::SHIFT);
     assert_eq!(
-        action_for_key(&bindings, &shift_f11),
+        action_for_key(&bindings, &shift_f11, crate::tui::mode::ModeKind::History),
         Some(Action::DecreasePaneHeight)
     );
 }
@@ -1051,7 +1151,7 @@ fn theme_picker_default_binding_and_list_layout() {
     );
     // Pressing T fires the ThemePicker.
     let evt = KeyEvent::new(KeyCode::Char('T'), KeyModifiers::empty());
-    assert_eq!(action_for_key(&bindings, &evt), Some(Action::ThemePicker));
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), Some(Action::ThemePicker));
     // Picker contains every theme: `None` plus the
     // canonical `ratatui-themes::ThemeName::all()` list.
     let p = ThemePicker::new(SelectedTheme::None);
@@ -1796,7 +1896,7 @@ fn cycle_exit_filter_default_key_routes() {
     );
     let evt = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
     assert_eq!(
-        action_for_key(&bindings, &evt),
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History),
         Some(Action::CycleExitFilter)
     );
 }
@@ -1812,7 +1912,7 @@ fn yank_selection_default_key_routes() {
         "C-y"
     );
     let evt = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
-    assert_eq!(action_for_key(&bindings, &evt), Some(Action::YankSelection));
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), Some(Action::YankSelection));
 }
 
 /// `pick_text_to_yank` falls back to the selected row's
@@ -2301,7 +2401,7 @@ fn edit_file_reference_default_key_routes() {
     );
     let evt = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
     assert_eq!(
-        action_for_key(&bindings, &evt),
+        action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History),
         Some(Action::EditFileReference)
     );
 }
@@ -5618,7 +5718,7 @@ fn cycle_sort_order_default_key_routes() {
     let mut app = stats_test_app(&[("a", 1)]);
     let bindings = KeyBindings::defaults();
     let key = KeyEvent::new(KeyCode::F(4), KeyModifiers::empty());
-    let action = action_for_key(&bindings, &key).expect("F4 is bound by default");
+    let action = action_for_key(&bindings, &key, crate::tui::mode::ModeKind::History).expect("F4 is bound by default");
     assert_eq!(action, Action::CycleSortOrder);
     // Apply the action and check the
     // field flipped. We use the public
@@ -5733,7 +5833,7 @@ fn session_round_trips_sort_order() {
 fn describe_default_key_routes() {
     let bindings = KeyBindings::defaults();
     let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
-    let action = action_for_key(&bindings, &key).expect("Ctrl-K is bound by default");
+    let action = action_for_key(&bindings, &key, crate::tui::mode::ModeKind::History).expect("Ctrl-K is bound by default");
     assert_eq!(action, Action::Describe);
 }
 
@@ -5945,7 +6045,7 @@ fn is_describe_viewing_tracks_field() {
 fn correct_default_key_routes() {
     let bindings = KeyBindings::defaults();
     let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
-    let action = action_for_key(&bindings, &key).expect("Ctrl-T is bound by default");
+    let action = action_for_key(&bindings, &key, crate::tui::mode::ModeKind::History).expect("Ctrl-T is bound by default");
     assert_eq!(action, Action::Correct);
 }
 
@@ -6166,7 +6266,7 @@ fn accept_corrected_command_no_op_when_overlay_closed() {
 fn delete_word_backward_default_key_routes() {
     let bindings = KeyBindings::defaults();
     let key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
-    let action = action_for_key(&bindings, &key).expect("Ctrl-W is bound by default");
+    let action = action_for_key(&bindings, &key, crate::tui::mode::ModeKind::History).expect("Ctrl-W is bound by default");
     assert_eq!(action, Action::DeleteWordBackward);
 }
 
@@ -6181,7 +6281,7 @@ fn delete_word_backward_alt_backspace_routes() {
     let bindings = KeyBindings::defaults();
     let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
     let action =
-        action_for_key(&bindings, &key).expect("M-Backspace is bound by default alongside C-w");
+        action_for_key(&bindings, &key, crate::tui::mode::ModeKind::History).expect("M-Backspace is bound by default alongside C-w");
     assert_eq!(action, Action::DeleteWordBackward);
 }
 
@@ -6253,9 +6353,9 @@ fn cancel_defaults_have_both_specs() {
     // Both keys route to
     // `Action::Cancel`.
     let evt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert_eq!(action_for_key(&bindings, &evt), Some(Action::Cancel));
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), Some(Action::Cancel));
     let evt = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
-    assert_eq!(action_for_key(&bindings, &evt), Some(Action::Cancel));
+    assert_eq!(action_for_key(&bindings, &evt, crate::tui::mode::ModeKind::History), Some(Action::Cancel));
 }
 
 /// The project config
@@ -22934,7 +23034,8 @@ fn download_jira_issue_default_key_routes() {
         KeyCode::Char('s'),
         KeyModifiers::CONTROL | KeyModifiers::ALT,
     );
-    let action = action_for_key(&bindings, &key).expect("Ctrl-M-s is bound by default");
+    let action = action_for_key(&bindings, &key, crate::tui::mode::ModeKind::Jira)
+        .expect("Ctrl-M-s is bound by default");
     assert_eq!(action, Action::DownloadJiraIssue);
 }
 
@@ -30420,6 +30521,7 @@ fn file_picker_enter_confirms_selection_not_editor_command() {
     let action = crate::tui::bindings::action_for_key(
         &app.bindings,
         &crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+        crate::tui::mode::ModeKind::History,
     );
     assert_eq!(action, Some(Action::Run), "sanity: Enter must resolve to Action::Run for this test to be meaningful");
     handle_key(
@@ -30924,6 +31026,7 @@ fn process_picker_enter_returns_single_pid_not_signal_dialog() {
     let action = crate::tui::bindings::action_for_key(
         &app.bindings,
         &crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+        crate::tui::mode::ModeKind::History,
     );
     assert_eq!(action, Some(Action::Run), "sanity: Enter must resolve to Action::Run for this test to be meaningful");
     handle_key(

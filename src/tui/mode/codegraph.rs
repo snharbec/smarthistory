@@ -507,7 +507,7 @@ impl App {
 /// dismisses the picker without opening anything.
 pub(crate) fn handle_codegraph_relations_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel` binding.
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.close_codegraph_relations_picker();
         return false;
     }

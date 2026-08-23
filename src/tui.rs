@@ -12658,7 +12658,7 @@ fn run_loop(
         // cancel key. If so, cancel the request without leaving
         // the TUI.
         if app.llm_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.llm_request.take() {
@@ -12671,7 +12671,7 @@ fn run_loop(
 
         // Same cancel handling for an in-flight JIRA search.
         if app.jira_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.jira_request.take() {
@@ -12692,7 +12692,7 @@ fn run_loop(
         // the flag check is dropped, not
         // delivered).
         if app.jira_comments_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.jira_comments_request.take() {
@@ -12718,7 +12718,7 @@ fn run_loop(
         // (another `Esc`, which triggers
         // `cancel_comment_edit` next).
         if app.jira_add_comment_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.jira_add_comment_request.take() {
@@ -12732,7 +12732,7 @@ fn run_loop(
         // Same cancel handling for an in-flight "create JIRA issue"
         // submit.
         if app.create_jira_issue_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.create_jira_issue_request.take() {
@@ -12755,7 +12755,7 @@ fn run_loop(
         // live (defensive, matches the belt-and-suspenders style of
         // the other cancel blocks here).
         if app.jira_prefill_fetch_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.jira_prefill_fetch_request.take() {
@@ -12772,7 +12772,7 @@ fn run_loop(
         // for the window between submitting the prompt and the fetch
         // resolving.
         if app.jira_template_fetch_request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.jira_template_fetch_request.take() {
@@ -12788,7 +12788,7 @@ fn run_loop(
         // ag search. Pressing Esc sets the
         // cancelled flag on the worker thread.
         if app.ag_state.request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.ag_state.request.take() {
@@ -12802,7 +12802,7 @@ fn run_loop(
         // Same cancel handling for an in-flight
         // segments search.
         if app.segments_state.request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.segments_state.request.take() {
@@ -12817,7 +12817,7 @@ fn run_loop(
         // search (the embed call is the slow part, and unlike a
         // plain SQL query it can genuinely take a few seconds).
         if app.similar_state.request.is_some()
-            && let Some(action) = action_for_key(&app.bindings, &key)
+            && let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))
             && matches!(action, Action::Cancel)
         {
             if let Some(request) = app.similar_state.request.take() {
@@ -12915,7 +12915,7 @@ fn handle_picker_lock_key(
         }
         return Some(false);
     }
-    let action = action_for_key(&app.bindings, &key)?;
+    let action = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app))?;
     match action {
         Action::Run | Action::EditStart | Action::EditEnd => {
             confirm_selection(app);
@@ -13215,7 +13215,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // Action-based dispatch: look up the user-configured binding
     // for this key. Anything not explicitly bound falls through to
     // the default "type a character into the query" behavior.
-    if let Some(action) = action_for_key(&app.bindings, &key) {
+    if let Some(action) = action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app)) {
         return dispatch_action(app, action);
     }
 
@@ -13913,7 +13913,7 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
 /// - Any other key is ignored, so a stray keypress can't silently
 ///   answer the prompt.
 fn handle_zoxide_save_prompt_key(app: &mut App, key: KeyEvent) -> bool {
-    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
     match key.code {
         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
             app.answer_zoxide_save_prompt(true);
@@ -13952,7 +13952,7 @@ fn handle_project_since_prompt_key(app: &mut App, key: KeyEvent) -> bool {
         app.cancelled = true;
         return true;
     }
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.project_since_prompt = None;
         return false;
     }
@@ -14012,7 +14012,7 @@ fn handle_template_name_prompt_key(app: &mut App, key: KeyEvent) -> bool {
         app.cancelled = true;
         return true;
     }
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.template_name_prompt = None;
         return false;
     }
@@ -14083,7 +14083,7 @@ fn handle_worktree_create_flow_key(app: &mut App, key: KeyEvent) -> bool {
         app.cancelled = true;
         return true;
     }
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.worktree_create_flow = None;
         return false;
     }
@@ -14191,7 +14191,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
     // doesn't share a key with
     // anything else the user
     // might rebind Cancel to).
-    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             match &mode {
@@ -14252,7 +14252,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
 /// dialog uses its own parallel `confirm_signal` field instead of a
 /// `ConfirmMode` variant (see `App::confirm_signal`'s doc comment).
 fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
-    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(s) = app.confirm_signal.take() {
@@ -14400,7 +14400,7 @@ fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // - Multi-key bindings
     //   (`key.cancel=Esc,F1`)
     //   all close the palette.
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.close_command_menu();
         return false;
     }
@@ -14528,7 +14528,7 @@ impl CommandMenu {
 fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel`
     // binding.
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.close_completion_menu();
         return false;
     }
@@ -14668,7 +14668,7 @@ fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
 /// picker without changing the query.
 fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel` binding.
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
         app.close_prefix_picker();
         return false;
     }
@@ -14883,8 +14883,8 @@ fn handle_output_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> Out
     // the TUI session, mirroring
     // the convention used
     // elsewhere.
-    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
-    let is_toggle_key = action_for_key(&app.bindings, &key) == Some(Action::ShowOutput);
+    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
+    let is_toggle_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::ShowOutput);
     let is_close = is_cancel_key || is_toggle_key;
     match key.code {
         _ if is_close => {
@@ -15647,7 +15647,7 @@ fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
 /// - Any other key is ignored, so a stray keypress can't discard
 ///   data by accident.
 fn handle_note_create_confirm_key(app: &mut App, key: KeyEvent) -> bool {
-    let is_cancel_key = action_for_key(&app.bindings, &key) == Some(Action::Cancel);
+    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
     match key.code {
         KeyCode::Enter => app.note_create_submit(),
         KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -16034,7 +16034,7 @@ pub(crate) fn handle_note_create_completion_key(
     // `Cancel` binding OR
     // `Ctrl-C` — same as the
     // main `CompletionMenu`.
-    if action_for_key(&app.bindings, &key) == Some(Action::Cancel)
+    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel)
         || (key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL))
     {

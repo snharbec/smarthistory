@@ -54,6 +54,18 @@ All notable changes to this project will be documented in this file.
   branch's upstream, when either applies. See
   [docs/actions.md#disposeworktree](docs/actions.md#disposeworktree).
 
+### Changed
+
+- The same key can now be bound to two or more actions that are only ever
+  reachable in different, mutually-exclusive prefix modes (e.g.
+  `key.create-worktree=d` and `key.download-jira-issue=d`) without triggering
+  a "bound to the same key" warning — `smarthistory config check` and the
+  key-binding loader now only flag a real conflict when the actions could
+  actually compete for the same keypress. A key shared between such an
+  action and an unscoped (global) action still resolves correctly too: the
+  mode-specific action wins while its mode is active, the global one wins
+  everywhere else.
+
 ## 2.1.0 - 2026-08-20
 
 ### Added
