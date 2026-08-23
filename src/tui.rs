@@ -17092,12 +17092,15 @@ fn fetch_jira_prefill_result<C: crate::jira::JiraClient + ?Sized>(
     search_result: Result<crate::jira::JiraIssue, crate::jira::JiraError>,
 ) -> Result<crate::tui::mode::jira::JiraPrefillResult, crate::jira::JiraError> {
     let issue = search_result?;
-    let clone_fields = if clone_field_ids.is_empty() {
-        Vec::new()
+    let (clone_fields, clone_fields_error) = if clone_field_ids.is_empty() {
+        (Vec::new(), None)
     } else {
-        client.fetch_custom_fields(key, clone_field_ids).unwrap_or_default()
+        match client.fetch_custom_fields(key, clone_field_ids) {
+            Ok(fields) => (fields, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        }
     };
-    Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields })
+    Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields, clone_fields_error })
 }
 
 /// Combine `search`'s result with `fetch_all_custom_fields` into the

@@ -32319,7 +32319,7 @@ fn jira_prefill_fetch_fills_placeholder_fields() {
     app.process_jira_prefill_fetch_result(
         request,
         "PROJ-1".to_string(),
-        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new(), clone_fields_error: None }),
     );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
@@ -32354,7 +32354,7 @@ fn jira_prefill_fetch_does_not_overwrite_user_edited_description() {
     app.process_jira_prefill_fetch_result(
         request,
         "PROJ-1".to_string(),
-        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new(), clone_fields_error: None }),
     );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
@@ -32390,7 +32390,7 @@ fn jira_prefill_fetch_stale_source_key_is_ignored() {
     app.process_jira_prefill_fetch_result(
         request,
         "PROJ-1".to_string(),
-        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new(), clone_fields_error: None }),
     );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
@@ -32987,6 +32987,7 @@ fn jira_prefill_fetch_populates_cloned_custom_fields() {
             ("customfield_11601".to_string(), "Team ComS".to_string()),
             ("customfield_10050".to_string(), "High".to_string()),
         ],
+        clone_fields_error: None,
     };
     app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(result));
 
@@ -33000,6 +33001,50 @@ fn jira_prefill_fetch_populates_cloned_custom_fields() {
             crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string()),
             crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_10050".to_string()),
         ]
+    );
+}
+
+/// Regression: a failed `fetch_custom_fields` call used to be silently
+/// swallowed via `.unwrap_or_default()` — the dialog opened with no
+/// cloned fields and no indication anything had gone wrong,
+/// indistinguishable from "nothing was configured to clone". A failure
+/// must now surface a status message, mirroring the codebase's own
+/// `link_warning` precedent for the analogous "partial success" case.
+#[test]
+fn jira_prefill_fetch_surfaces_status_message_when_clone_fields_fetch_fails() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-1 summary",
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "",
+        Some("PROJ-1"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        description: "Full description".to_string(),
+        ..Default::default()
+    };
+    let result = crate::tui::mode::jira::JiraPrefillResult {
+        issue,
+        clone_fields: Vec::new(),
+        clone_fields_error: Some("permission denied".to_string()),
+    };
+    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(result));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert!(
+        dialog.extra_fields.is_empty(),
+        "no cloned fields on a failed fetch"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("cloning custom fields failed") && status.contains("permission denied"),
+        "status should explain the clone-fields fetch failed and why: {:?}",
+        status
     );
 }
 

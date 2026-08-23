@@ -592,6 +592,13 @@ pub(crate) struct JiraPrefillFetchRequest {
 pub(crate) struct JiraPrefillResult {
     pub(crate) issue: crate::jira::JiraIssue,
     pub(crate) clone_fields: Vec<(String, String)>,
+    /// `Some(message)` when `JIRA_CLONE_FIELDS` was configured but the
+    /// secondary `fetch_custom_fields` call failed — `clone_fields` is
+    /// empty in that case too, but for a DIFFERENT reason than "nothing
+    /// configured", and the dialog should tell the user so rather than
+    /// silently opening as if cloning had never been requested. `None`
+    /// both when nothing was configured and when the fetch succeeded.
+    pub(crate) clone_fields_error: Option<String>,
 }
 
 /// An in-flight fetch kicked off once `Action::CreateJiraTemplateFromIssue`'s
@@ -1836,6 +1843,19 @@ impl App {
                             .extra_field_kinds
                             .push(crate::tui::state::ExtraFieldKind::ClonedCustomField(id));
                     }
+                }
+                // Same "surface a partial failure, don't just silently
+                // proceed as if nothing was requested" policy
+                // `create_and_maybe_link`'s `link_warning` uses for a
+                // failed link — here it's a failed clone-fields fetch
+                // rather than a failed link, but the dialog is already
+                // open by the time this fires, so a status message
+                // (not a dialog field) is the only way to surface it.
+                if let Some(warning) = result.clone_fields_error {
+                    self.set_status_message(format!(
+                        "JIRA issue prefilled, but cloning custom fields failed: {}",
+                        warning
+                    ));
                 }
             }
             Err(e) => {
