@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 2.2.0 - 2026-08-23
+
 ### Added
 
 - New `Action::KeyBindingsEditor` — configure key bindings from inside the
@@ -15,8 +17,10 @@ All notable changes to this project will be documented in this file.
   two could genuinely compete for it (same mode-scope check
   `smarthistory config check` already uses) — binding the same key to two
   actions scoped to different, mutually-exclusive prefix modes is allowed
-  without a warning. Ships unbound by default; open it via the command
-  palette or `key.key-bindings-editor=<spec>`. See
+  without a warning; confirming a genuine conflict removes the key from
+  whichever action had it before (only that one key, any of its other
+  bindings are left alone). Ships unbound by default; open it via the
+  command palette or `key.key-bindings-editor=<spec>`. See
   [docs/actions.md](docs/actions.md#keybindingseditor).
 - `smarthistory project select <slug> --since <duration>` backdates a project
   switch — for the common "I forgot to switch" case, where the project
@@ -27,7 +31,8 @@ All notable changes to this project will be documented in this file.
   session and opening the new one at that same timestamp). Can only reach
   back to the start of whatever session is currently open (or the end of the
   most recently closed one) — not further into already-reported history; an
-  out-of-range value is rejected with no changes made. The `.`-mode project
+  out-of-range or unparseably large value is rejected with no changes made.
+  The `.`-mode project
   picker now asks "started how many minutes ago?" after picking a project
   (blank = right now, unchanged from before) instead of switching
   immediately, so this is reachable from the TUI too, not just the CLI. See
@@ -37,14 +42,17 @@ All notable changes to this project will be documented in this file.
   `JIRA_CLONE_FIELDS` env var (comma-separated `cf[<id>]` entries, same
   bracket syntax `CreateJiraIssueFromTemplate` uses). Cloned fields show up
   read-only in the dialog (with a "(cloned)" marker) and are sent unchanged
-  to the new issue on submit. See
+  to the new issue on submit; a failed fetch surfaces a warning instead of
+  silently opening the dialog with the fields missing. See
   [docs/actions.md#createjiraissue](docs/actions.md#createjiraissue).
 - New `Action::CreateJiraTemplateFromIssue` (unbound by default) — the
   reverse of `CreateJiraIssueFromTemplate`: on a selected JIRA row, asks for
   a template name, then generates a new template file capturing that
   issue's fields, including every populated custom field (not just whatever
   `JIRA_CLONE_FIELDS` is configured to clone). Refuses to overwrite an
-  existing template with the same name. See
+  existing template with the same name; triggering it again on a different
+  row while a fetch is already in flight is refused with a status message
+  rather than silently dropping the first row's result. See
   [docs/actions.md#createjiratemplatefromissue](docs/actions.md#createjiratemplatefromissue).
 - New `;` (Worktree) prefix mode — lists `git worktree` checkouts for the
   repo containing the current directory (`git worktree list --porcelain`),
@@ -54,8 +62,10 @@ All notable changes to this project will be documented in this file.
 - New `Action::CreateWorktree` (unbound by default, `;` mode only) — a
   step-through dialog that creates a new `git worktree` checkout: pick or
   create a branch, optionally pick a base branch for a new branch,
-  optionally carry over the current checkout's uncommitted changes (`git
-  stash`), and optionally bind the new worktree to a time-tracking project
+  optionally carry over the current checkout's uncommitted changes
+  (`git stash`, including untracked files; skipped entirely — never applying
+  an unrelated older stash — when there was nothing to carry over), and
+  optionally bind the new worktree to a time-tracking project
   (`project.<slug>.dir=`). New `worktree.basedir`/`worktree.defaultbranch`
   config keys control where new worktrees are created and which branch is
   preselected as the base. See
@@ -63,8 +73,17 @@ All notable changes to this project will be documented in this file.
 - New `Action::DisposeWorktree` (unbound by default, `;` mode only) — removes
   the worktree under the cursor via `git worktree remove`. Warns before
   removing about uncommitted changes and/or commits not yet pushed to the
-  branch's upstream, when either applies. See
+  branch's upstream, when either applies, re-checked immediately before the
+  removal actually runs (not just when the confirmation dialog first opened)
+  so a change made in another terminal while the dialog is open can't be
+  force-removed on a stale "clean" warning. See
   [docs/actions.md#disposeworktree](docs/actions.md#disposeworktree).
+- Up/Down history recall in the zsh integration now shows a live preview
+  box of the surrounding history entries as you walk through them — oldest
+  on top, the command that's actually been recalled into the line on the
+  bottom, sliding by one entry per press (Down mirrors it). Purely a visual
+  aid: the recalled command is still placed directly on the line exactly as
+  before, immediately editable or runnable with Enter.
 
 ### Changed
 
@@ -77,6 +96,22 @@ All notable changes to this project will be documented in this file.
   action and an unscoped (global) action still resolves correctly too: the
   mode-specific action wins while its mode is active, the global one wins
   everywhere else.
+
+### Fixed
+
+- Every modal dialog in the TUI now closes on your configured `Cancel`
+  binding, not just a hardcoded `Esc` — describe/correct/question/help
+  views, the theme picker, comment editing, the add-session/add-host and
+  JIRA dialogs, and note compose/create all previously only checked for
+  `Esc` directly, so remapping `key.cancel=...` away from `Esc` left them
+  impossible to close except by force-quitting the whole session with
+  Ctrl-C.
+- Key specs now accept function keys beyond F12 (`F13`-`F24`+, e.g. media
+  keys or keys remapped via a tool like Karabiner-Elements) — previously
+  only `F1`-`F12` were recognized by name, so binding one of these keys
+  (including via the new key-bindings editor, which captures the raw
+  keypress) would write out fine but silently fail to parse back on the
+  next config load, reverting the binding with a warning.
 
 ## 2.1.0 - 2026-08-20
 
