@@ -1465,6 +1465,45 @@ fn key_bindings_editor_capture_sets_pending_conflict_for_global_vs_global() {
     assert_ne!(app.bindings.specs(Action::Down)[0], up_spec, "not committed yet");
 }
 
+/// Regression: the capture-mode conflict scan used to stop at the FIRST
+/// action found holding the captured key, regardless of whether it
+/// actually conflicted — so if that first holder happened to be scoped
+/// to a disjoint mode, a genuine conflict with a LATER holder of the
+/// same key went completely undetected and the rebind committed with no
+/// warning at all.
+///
+/// Pre-bind one key to two actions: `DownloadJiraIssue` (Jira scope,
+/// earlier in `ALL_ACTIONS` order, disjoint from Worktree) and
+/// `CreateWorktree` (Worktree scope, later in `ALL_ACTIONS` order).
+/// Capture that same key for `DisposeWorktree` (also Worktree-scoped —
+/// genuinely conflicts with `CreateWorktree`, not with
+/// `DownloadJiraIssue`). The old scan found `DownloadJiraIssue` first,
+/// saw no conflict, and committed immediately. The fix must keep
+/// scanning past it and find the real conflict with `CreateWorktree`.
+#[test]
+fn key_bindings_editor_capture_finds_conflict_past_a_disjoint_first_holder() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let spec = bindings::parse_key_spec("F19").expect("F19");
+    app.bindings.set(Action::DownloadJiraIssue, vec![spec]);
+    app.bindings.set(Action::CreateWorktree, vec![spec]);
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::DisposeWorktree);
+    let key = KeyEvent::new(spec.code, spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert_eq!(
+        editor.pending_conflict,
+        Some((Action::DisposeWorktree, spec, Action::CreateWorktree)),
+        "must detect the real Worktree/Worktree conflict with CreateWorktree, \
+         not stop at the disjoint DownloadJiraIssue holder"
+    );
+    assert_ne!(
+        app.bindings.specs(Action::DisposeWorktree).first(),
+        Some(&spec),
+        "must not have committed without asking"
+    );
+}
+
 /// `y`/`Enter` on a conflict prompt commits the pending rebind anyway,
 /// AND removes the colliding spec from the other action's binding list —
 /// otherwise both actions would still be racing for the same key

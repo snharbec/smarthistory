@@ -15069,26 +15069,33 @@ fn handle_key_bindings_editor_key(app: &mut App, key: KeyEvent) -> bool {
             return false;
         }
         let spec = KeySpec { code: key.code, modifiers: key.modifiers };
-        let conflict = ALL_ACTIONS.iter().copied().find(|&other| {
+        // Scan every OTHER action currently holding this exact key —
+        // not just the first one found — and flag the first one that
+        // actually conflicts (`scopes_conflict`). A key can legitimately
+        // be held by several disjoint-mode-scoped actions at once; if
+        // the FIRST holder found happens to be one of those, but a
+        // LATER holder genuinely conflicts (same scope / overlapping
+        // modes), that real conflict must still surface.
+        let conflict = ALL_ACTIONS.iter().copied().filter(|&other| {
             other != action
                 && app
                     .bindings
                     .specs(other)
                     .iter()
                     .any(|s| s.code == spec.code && s.modifiers == spec.modifiers)
-        });
+        }).find(|&other| scopes_conflict(action.scope(), other.scope()));
         match conflict {
-            Some(other) if scopes_conflict(action.scope(), other.scope()) => {
+            Some(other) => {
                 if let Some(editor) = app.key_bindings_editor.as_mut() {
                     editor.pending_conflict = Some((action, spec, other));
                 }
             }
-            // No other action holds this key, or the one that does is
-            // scoped to a disjoint prefix mode (`scopes_conflict` is
-            // false) — the tiered `action_for_key` resolution already
-            // makes that case unambiguous, so there's nothing to warn
-            // about; commit straight away.
-            _ => {
+            // No other action holds this key, or every action that does
+            // is scoped to a disjoint prefix mode (`scopes_conflict` is
+            // false for all of them) — the tiered `action_for_key`
+            // resolution already makes that case unambiguous, so
+            // there's nothing to warn about; commit straight away.
+            None => {
                 app.commit_key_binding(action, spec);
                 if let Some(editor) = app.key_bindings_editor.as_mut() {
                     editor.capturing = None;

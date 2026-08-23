@@ -4072,6 +4072,42 @@ tmuxpaneoutputdir=~/custom-tmux
         );
     }
 
+    /// Regression: the duplicate-key-binding scan used to compare a new
+    /// binding only against the FIRST action ever seen holding that key,
+    /// never against subsequent holders — so a real conflict between the
+    /// second and third action sharing a key went completely undetected.
+    ///
+    /// Three actions bound to the same key: `create-worktree` (Worktree
+    /// scope), `download-jira-issue` (Jira scope, disjoint from Worktree
+    /// — correctly exempt, no warning), `download-jira-matching` (also
+    /// Jira scope — genuinely conflicts with `download-jira-issue`, same
+    /// mode). The old first-seen-only scan only ever compared new
+    /// bindings against `create-worktree` (disjoint from both), so the
+    /// real Jira/Jira collision was silently missed.
+    #[test]
+    fn validate_config_detects_conflict_past_the_first_seen_holder() {
+        let report = validate_project_config(
+            "key.create-worktree = F19\n\
+             key.download-jira-issue = F19\n\
+             key.download-jira-matching = F19\n",
+        );
+        assert!(
+            report.issues().iter().any(|i| i.category == "key"
+                && i.message.contains("DownloadJiraMatching")
+                && i.message.contains("DownloadJiraIssue")),
+            "the Jira/Jira collision between the second and third holder of \
+             F19 must be flagged, not just silently missed: {:?}",
+            report.issues()
+        );
+        assert!(
+            !report.issues().iter().any(|i| i.category == "key"
+                && (i.message.contains("CreateWorktree") && i.message.contains("DownloadJira"))),
+            "Worktree-scoped and Jira-scoped actions sharing a key must \
+             NOT be flagged (disjoint prefix modes never really compete): {:?}",
+            report.issues()
+        );
+    }
+
     #[test]
     fn validate_config_warns_on_jiralabel_without_jira_credentials() {
         // Hold `ENV_LOCK` for the JIRA env mutation too, not just

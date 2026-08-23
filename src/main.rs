@@ -1376,12 +1376,20 @@ pub fn validate_config() -> ConfigReport {
     // never really compete for the same keypress — see `scopes_conflict`.
     use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
-    let mut seen_specs: std::collections::HashMap<String, tui::bindings::Action> =
+    // Every action seen so far for a given key, not just the first — a
+    // key can legitimately be held by several disjoint-mode-scoped
+    // actions at once (see `scopes_conflict`), so a later action must be
+    // checked against ALL of them, not only whichever happened to claim
+    // the key first. Comparing only against the first-ever-seen holder
+    // let a genuine same-scope collision between the SECOND and THIRD
+    // holder of a key go completely undetected.
+    let mut seen_specs: std::collections::HashMap<String, Vec<tui::bindings::Action>> =
         std::collections::HashMap::new();
     for (action, specs) in bindings.iter() {
         for spec in specs {
             let spec_str = tui::format_key_spec(*spec);
-            if let Some(prev) = seen_specs.get(&spec_str) {
+            let holders = seen_specs.entry(spec_str.clone()).or_default();
+            for prev in holders.iter() {
                 if tui::bindings::scopes_conflict(action.scope(), prev.scope()) {
                     issues.push(ConfigIssue {
                         level: ConfigIssueLevel::Warning,
@@ -1392,9 +1400,8 @@ pub fn validate_config() -> ConfigReport {
                         ),
                     });
                 }
-            } else {
-                seen_specs.insert(spec_str.clone(), action);
             }
+            holders.push(action);
         }
     }
 
