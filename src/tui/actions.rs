@@ -250,6 +250,15 @@ impl App {
                 // fallback. See `stage_project_selection`.
                 self.stage_project_selection();
             }
+            crate::tui::mode::ModeKind::Worktree => {
+                // `;...` queries are git-worktree rows (tagged
+                // `mode == "directory"`, same as Directories/Zoxide).
+                // Selecting one stages `cd <abs-path>` directly — no
+                // extra "save this directory?" detour, unlike
+                // `stage_zoxide_selection`; that's zoxide-specific UX
+                // this mode doesn't need.
+                self.stage_directory_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for

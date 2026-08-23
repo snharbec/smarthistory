@@ -34,6 +34,13 @@ All notable changes to this project will be documented in this file.
   `JIRA_CLONE_FIELDS` is configured to clone). Refuses to overwrite an
   existing template with the same name. See
   [docs/actions.md#createjiratemplatefromissue](docs/actions.md#createjiratemplatefromissue).
+- New `;` (Worktree) prefix mode — lists `git worktree` checkouts for the
+  repo containing the current directory (`git worktree list --porcelain`),
+  filtered by the typed query. Selecting a row creates a new tmux session /
+  herdr workspace rooted there, the same staging `#` Directories / `~`
+  Zoxide use. Read-only for now (list + select); creating and disposing
+  worktrees from the TUI are planned as follow-ups. See
+  [docs/modes/worktree.md](docs/modes/worktree.md).
 
 ## 2.1.0 - 2026-08-20
 

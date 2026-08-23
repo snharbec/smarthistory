@@ -4675,6 +4675,12 @@ impl PrefixPicker {
                 label: "Project",
                 description: "pick the current project (`type: project` notes); Enter stages `smarthistory project select <slug>`",
             },
+            PrefixOption {
+                prefix: Some(prefixes.worktree),
+                name: "worktree",
+                label: "Worktree",
+                description: "list git worktrees for the current repo; Enter stages `cd <path>`",
+            },
         ]
     }
 
@@ -5421,6 +5427,12 @@ impl App {
         if self.is_zoxide_query() {
             crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         }
+        // Worktree mode (`;`) rows are the same story as Zoxide's,
+        // just above: plain directory rows that get the `T`-marked
+        // treatment too.
+        if self.is_worktree_query() {
+            crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
+        }
         // Same one-shot cache priming for the
         // `*`-prefix panes view: populate the
         // session-panes snapshot before `fetch()`
@@ -6041,6 +6053,7 @@ impl App {
             crate::tui::mode::ModeKind::ProjectPick => {
                 return crate::tui::mode::project_pick::fetch(self);
             }
+            crate::tui::mode::ModeKind::Worktree => return crate::tui::mode::worktree::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -6546,6 +6559,10 @@ impl App {
             return;
         }
         if self.is_project_pick_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_worktree_query() {
             self.select_for_run_impl();
             return;
         }
@@ -11529,6 +11546,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.browser => Some(ModeKind::Browser),
             _ if c == query_prefixes.zoxide => Some(ModeKind::Zoxide),
             _ if c == query_prefixes.processes => Some(ModeKind::Processes),
+            _ if c == query_prefixes.worktree => Some(ModeKind::Worktree),
             _ => None,
         }
     });

@@ -3026,6 +3026,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         qp.processes.to_string(),
         "list running OS processes (macOS + Linux, all users); the preview shows cwd/exe/environment; Enter opens a confirm dialog to send a signal (defaults to SIGTERM, Tab/Shift-Tab cycles SIGKILL/SIGHUP/SIGINT)",
     );
+    mode_row(
+        &mut lines,
+        "worktree",
+        qp.worktree.to_string(),
+        "list git worktrees for the repo containing the current directory; Enter stages `cd <path>` (same staging as directories mode)",
+    );
 
     lines.push(Line::from(""));
 
@@ -5024,7 +5030,9 @@ pub(crate) fn render_row<'a>(
     // marker would never have anything useful to say there either).
     let is_directory_flavored_mode = matches!(
         active_mode,
-        crate::tui::mode::ModeKind::Directories | crate::tui::mode::ModeKind::Zoxide
+        crate::tui::mode::ModeKind::Directories
+            | crate::tui::mode::ModeKind::Zoxide
+            | crate::tui::mode::ModeKind::Worktree
     );
     let tmux_span = if !is_directory_flavored_mode {
         Span::raw("")

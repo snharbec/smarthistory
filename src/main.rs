@@ -1913,6 +1913,13 @@ pub struct QueryPrefixes {
     /// fallback used by time tracking's directory-based resolution
     /// (see `resolve_current_project`).
     pub project_pick: char,
+    /// Prefix for the worktree mode (default `;`). Lists every `git
+    /// worktree` checkout for the repo containing the current
+    /// directory (`git worktree list --porcelain`). Selecting a row
+    /// stages a `cd <path>` command the same way `#` Directories/`~`
+    /// Zoxide do (rows are tagged `mode == "directory"`, `source ==
+    /// "worktree"`).
+    pub worktree: char,
     /// Prefix for the meta-prefix mode (default `'`). Not a search
     /// mode itself — typing `'` then a partial mode name (e.g.
     /// `'jir`) and pressing Tab expands to that mode's real prefix
@@ -1947,6 +1954,7 @@ impl Default for QueryPrefixes {
             processes: '%',
             pass: ')',
             project_pick: '.',
+            worktree: ';',
             meta: '\'',
         }
     }
@@ -1963,7 +1971,7 @@ impl QueryPrefixes {
     /// (missing `paperless` in two of the three) as fields were
     /// added over time. Add a new prefix field here too when one is
     /// added to the struct.
-    pub(crate) fn all_chars(&self) -> [char; 21] {
+    pub(crate) fn all_chars(&self) -> [char; 22] {
         [
             self.output,
             self.llm,
@@ -1985,6 +1993,7 @@ impl QueryPrefixes {
             self.processes,
             self.pass,
             self.project_pick,
+            self.worktree,
             self.meta,
         ]
     }
@@ -4563,7 +4572,7 @@ impl Config {
     const KNOWN_PREFIX_NAMES: &[&str] = &[
         "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
         "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
-        "processes", "pass", "project", "meta",
+        "zoxide", "processes", "pass", "project", "worktree", "meta",
     ];
 
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
@@ -4598,6 +4607,7 @@ impl Config {
             "processes" => prefixes.processes = c,
             "pass" => prefixes.pass = c,
             "project" => prefixes.project_pick = c,
+            "worktree" => prefixes.worktree = c,
             "meta" => prefixes.meta = c,
             _ => {}
         }

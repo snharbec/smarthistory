@@ -122,6 +122,14 @@ pub enum ModeKind {
     /// explicit "current project" fallback and switching the active
     /// `project_sessions` row.
     ProjectPick,
+    /// `;` (default). Lists every `git worktree` checkout for the
+    /// repo containing the current directory (`git worktree list
+    /// --porcelain`). Selecting a row stages a `cd <path>` command —
+    /// the same staging `#` Directories / `~` Zoxide use — since rows
+    /// are tagged `mode == "directory"` (`source == "worktree"`).
+    /// Not `dedup_eligible` (each worktree is a distinct path, same
+    /// reasoning as `Processes`'s unique-PID exclusion).
+    Worktree,
 }
 
 impl ModeKind {
@@ -151,6 +159,7 @@ impl ModeKind {
             ModeKind::Processes => '%',
             ModeKind::Pass => ')',
             ModeKind::ProjectPick => '.',
+            ModeKind::Worktree => ';',
         }
     }
 
@@ -180,6 +189,7 @@ impl ModeKind {
             ModeKind::Processes => "processes",
             ModeKind::Pass => "pass",
             ModeKind::ProjectPick => "project",
+            ModeKind::Worktree => "worktree",
         }
     }
 
@@ -218,6 +228,7 @@ impl ModeKind {
             ModeKind::Processes => "Processes",
             ModeKind::Pass => "Pass",
             ModeKind::ProjectPick => "Projects",
+            ModeKind::Worktree => "Worktree",
         }
     }
 
@@ -249,6 +260,7 @@ impl ModeKind {
             ModeKind::Processes => prefixes.processes,
             ModeKind::Pass => prefixes.pass,
             ModeKind::ProjectPick => prefixes.project_pick,
+            ModeKind::Worktree => prefixes.worktree,
         }
     }
 
@@ -326,6 +338,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::Pass
     } else if c == p.project_pick {
         ModeKind::ProjectPick
+    } else if c == p.worktree {
+        ModeKind::Worktree
     } else {
         ModeKind::History
     }
@@ -351,6 +365,7 @@ pub mod question;
 pub mod similar;
 pub mod tags;
 pub mod todo;
+pub mod worktree;
 pub mod zoxide;
 
 /// Lazy-load the selected row's preview context for every mode that
@@ -404,6 +419,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Processes => Some(Theme::warning()),
         ModeKind::Pass => Some(Theme::success()),
         ModeKind::ProjectPick => Some(Theme::accent()),
+        ModeKind::Worktree => Some(Theme::success()),
         ModeKind::History => None,
     }
 }
@@ -444,6 +460,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Processes => ("%".to_string(), format!(" processes{} ", algo)),
         ModeKind::Pass => (")".to_string(), format!(" pass{} ", algo)),
         ModeKind::ProjectPick => (".".to_string(), format!(" project{} ", algo)),
+        ModeKind::Worktree => (";".to_string(), format!(" worktree{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -661,6 +678,7 @@ pub fn run_all_checks(
             ModeKind::Processes => crate::tui::mode::processes::check(app),
             ModeKind::Pass => crate::tui::mode::pass::check(app),
             ModeKind::ProjectPick => crate::tui::mode::project_pick::check(app),
+            ModeKind::Worktree => crate::tui::mode::worktree::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -694,6 +712,7 @@ impl ModeKind {
             ModeKind::Processes,
             ModeKind::Pass,
             ModeKind::ProjectPick,
+            ModeKind::Worktree,
         ]
     }
 }

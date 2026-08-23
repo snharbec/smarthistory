@@ -11895,6 +11895,159 @@ fn zoxide_mode_is_dedup_eligible() {
     assert!(crate::tui::mode::ModeKind::Zoxide.dedup_eligible());
 }
 
+// ---- Worktree mode (`;`) ----
+
+#[test]
+fn worktree_matches_and_pattern() {
+    let mut app = directories_test_app(&[]);
+    assert!(!app.is_worktree_query());
+    assert_eq!(app.worktree_pattern(), "");
+    app.query = ";feat".to_string();
+    assert!(app.is_worktree_query());
+    assert_eq!(app.worktree_pattern(), "feat");
+}
+
+/// `ModeKind::Worktree` is NOT dedup-eligible — each worktree is a
+/// distinct path, same reasoning as `Processes`'s unique-PID exclusion.
+#[test]
+fn worktree_mode_is_not_dedup_eligible() {
+    assert!(!crate::tui::mode::ModeKind::Worktree.dedup_eligible());
+}
+
+/// `parse_worktree_list` handles the three block shapes `git worktree
+/// list --porcelain` produces: a normal branch worktree, a
+/// detached-HEAD worktree, and a bare repo — plus the blank-line
+/// separators between blocks.
+#[test]
+fn parse_worktree_list_handles_all_block_shapes() {
+    let output = "worktree /repo/main\n\
+HEAD abc123\n\
+branch refs/heads/main\n\
+\n\
+worktree /repo/feature\n\
+HEAD def456\n\
+branch refs/heads/feature/thing\n\
+\n\
+worktree /repo/detached-checkout\n\
+HEAD 789abc\n\
+detached\n\
+\n\
+worktree /repo/bare.git\n\
+bare\n";
+    let entries = crate::tui::mode::worktree::parse_worktree_list(output);
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0].path, "/repo/main");
+    assert_eq!(entries[0].branch.as_deref(), Some("main"));
+    assert!(!entries[0].is_bare);
+    assert_eq!(entries[1].path, "/repo/feature");
+    assert_eq!(entries[1].branch.as_deref(), Some("feature/thing"));
+    assert_eq!(entries[2].path, "/repo/detached-checkout");
+    assert_eq!(entries[2].branch, None, "a detached HEAD has no branch name");
+    assert!(!entries[2].is_bare);
+    assert_eq!(entries[3].path, "/repo/bare.git");
+    assert_eq!(entries[3].branch, None);
+    assert!(entries[3].is_bare);
+}
+
+#[test]
+fn parse_worktree_list_empty_output_is_empty() {
+    assert_eq!(crate::tui::mode::worktree::parse_worktree_list(""), Vec::new());
+}
+
+/// `build_rows` preserves `git worktree list`'s own order (main
+/// worktree first) via a descending synthetic `timestamp`, same
+/// convention `zoxide::build_rows` uses for its own ranked order.
+#[test]
+fn worktree_build_rows_preserves_list_order() {
+    use crate::tui::mode::worktree::WorktreeEntry;
+    let entries = vec![
+        WorktreeEntry { path: "/repo/main".to_string(), branch: Some("main".to_string()), is_bare: false },
+        WorktreeEntry { path: "/repo/feature".to_string(), branch: Some("feature".to_string()), is_bare: false },
+    ];
+    let rows = crate::tui::mode::worktree::build_rows(entries, &[], &[]);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].directory, "/repo/main");
+    assert_eq!(rows[1].directory, "/repo/feature");
+    assert!(
+        rows[0].timestamp > rows[1].timestamp,
+        "synthetic timestamps must descend in git's own listing order"
+    );
+}
+
+/// The branch name becomes the row's primary text (`command`); a
+/// detached or bare worktree gets a parenthesized placeholder instead.
+#[test]
+fn worktree_build_rows_label_shows_branch_or_placeholder() {
+    use crate::tui::mode::worktree::WorktreeEntry;
+    let entries = vec![
+        WorktreeEntry { path: "/repo/main".to_string(), branch: Some("main".to_string()), is_bare: false },
+        WorktreeEntry { path: "/repo/detached".to_string(), branch: None, is_bare: false },
+        WorktreeEntry { path: "/repo/bare.git".to_string(), branch: None, is_bare: true },
+    ];
+    let rows = crate::tui::mode::worktree::build_rows(entries, &[], &[]);
+    assert_eq!(rows[0].command, "main");
+    assert_eq!(rows[1].command, "(detached)");
+    assert_eq!(rows[2].command, "(bare)");
+}
+
+/// The typed query filters by case-insensitive substring, AND-matched
+/// across whitespace-separated tokens, over both the branch label and
+/// the path — same contract as every other prefix mode's filter.
+#[test]
+fn worktree_build_rows_filters_by_tokens_case_insensitively() {
+    use crate::tui::mode::worktree::WorktreeEntry;
+    let entries = vec![
+        WorktreeEntry {
+            path: "/repo/worktrees/feature-login".to_string(),
+            branch: Some("feature/login".to_string()),
+            is_bare: false,
+        },
+        WorktreeEntry { path: "/repo/main".to_string(), branch: Some("main".to_string()), is_bare: false },
+    ];
+    let rows = crate::tui::mode::worktree::build_rows(entries, &["login"], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].directory, "/repo/worktrees/feature-login");
+}
+
+/// Rows are tagged `mode == "directory"`, `source == "worktree"` — the
+/// same `mode` tag `#` Directories / `~` Zoxide rows carry, which is
+/// what makes `App::stage_directory_selection` and the `T`-marker
+/// render logic work unmodified for a worktree row.
+#[test]
+fn worktree_build_rows_tags_mode_directory() {
+    use crate::tui::mode::worktree::WorktreeEntry;
+    let entries =
+        vec![WorktreeEntry { path: "/repo/main".to_string(), branch: Some("main".to_string()), is_bare: false }];
+    let rows = crate::tui::mode::worktree::build_rows(entries, &[], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].mode, "directory");
+    assert_eq!(rows[0].source, "worktree");
+}
+
+/// Selecting a worktree row must go through the same staging as a
+/// Directories-mode row (`stage_directory_selection`), not fall
+/// through to the generic "history mode" default.
+#[test]
+fn worktree_select_for_run_stages_cd_not_plain_command() {
+    let mut app = directories_test_app(&[]);
+    app.merged_rows = vec![crate::tui::state::HistoryRow {
+        id: -1,
+        command: "feature".to_string(),
+        directory: "/repo/feature".to_string(),
+        mode: "directory".to_string(),
+        source: "worktree".to_string(),
+        ..Default::default()
+    }];
+    app.list_state.select(Some(0));
+    app.query = ";".to_string();
+    app.select_for_run();
+    let staged = app.selection.as_deref().unwrap_or("");
+    assert!(
+        staged.contains("/repo/feature"),
+        "expected a cd/session-create command referencing the worktree path, got: {staged:?}"
+    );
+}
+
 /// Selecting a zoxide row must go through the same staging as a
 /// Directories-mode row (`stage_directory_selection`'s
 /// create-a-new-session path), not fall through to the generic
@@ -23613,9 +23766,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_twentyone_entries() {
+fn prefix_picker_has_twentytwo_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 21);
+    assert_eq!(picker.options.len(), 22);
 }
 
 #[test]
@@ -23700,7 +23853,7 @@ fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
         .prefix_picker
         .as_ref()
         .expect("bare ' + Tab should open a picker");
-    assert_eq!(picker.options.len(), 21, "bare ' + Tab should show every mode");
+    assert_eq!(picker.options.len(), 22, "bare ' + Tab should show every mode");
 }
 
 /// A partial name matching nothing sets a status message and does
@@ -23825,7 +23978,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 20);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 21);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);
