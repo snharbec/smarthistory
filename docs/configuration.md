@@ -1396,6 +1396,24 @@ weburlgroup.jira.label=JIRA tickets
 Full reference (session lifecycle, the 3-tier website resolution, report
 output): **[docs/modes/project.md](modes/project.md)**.
 
+### Worktree (`;` mode)
+
+Both keys are optional and only affect `Action::CreateWorktree` (the `;`-mode
+"create a new worktree" dialog); listing/selecting existing worktrees needs no
+config.
+
+| Key                       | Meaning                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `worktree.basedir`         | Base directory new worktrees are created under (`<basedir>/<branch>`). Default: sibling to the repo (`<repo-parent>/<repo-name>-worktrees/<branch>`). |
+| `worktree.defaultbranch`   | Branch to preselect as the base for a brand-new worktree branch, overriding the dialog's own auto-detection (remote `HEAD`, then local `main`/`master`, then the current branch). |
+
+```ini
+worktree.basedir=~/worktrees
+worktree.defaultbranch=main
+```
+
+Full reference: **[docs/modes/worktree.md](modes/worktree.md)**.
+
 ---
 
 ## Environment variables
@@ -1597,6 +1615,8 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `weburl.<slug>.match`           | URL substring                     | —                                                                | [Project (`.` mode)](#project--mode)                                      |
 | `weburlgroup.<name>.match`      | URL substring                     | —                                                                | [Project (`.` mode)](#project--mode)                                      |
 | `weburlgroup.<name>.label`      | string                            | —                                                                | [Project (`.` mode)](#project--mode)                                      |
+| `worktree.basedir`              | path                               | — (sibling to the repo)                                          | [Worktree (`;` mode)](#worktree--mode)                                    |
+| `worktree.defaultbranch`        | branch name                       | — (auto-detected)                                                 | [Worktree (`;` mode)](#worktree--mode)                                    |
 
 ---
 

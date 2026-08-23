@@ -16,9 +16,9 @@ rev-parse --show-toplevel`) and the `git` binary on `$PATH`. Outside a repo,
 the mode is empty rather than an error — same "degrade to no rows" policy
 `~` (Zoxide) uses for a missing `zoxide` binary.
 
-This first phase is read-only: list + select to jump into a worktree.
-Creating and disposing worktrees from inside the TUI are planned as later
-additions.
+Listing + selecting a worktree is read-only; creating one is available via
+the `CreateWorktree` action (see below). Disposing a worktree from inside the
+TUI is still planned as a later addition.
 
 ## What it does
 
@@ -41,6 +41,19 @@ additions.
   uses (`App::stage_directory_selection`) — a worktree row is tagged
   `mode == "directory"` internally, so the rest of the TUI treats it
   identically to a Directories-mode row.
+
+## Creating a worktree
+
+The `CreateWorktree` action (unbound by default — open it via the command
+palette, or bind `key.create-worktree=<spec>`) opens a step-through dialog:
+pick or create a branch, optionally pick a base branch for a new branch,
+optionally carry over the current checkout's uncommitted changes (`git
+stash`), and optionally assign the new worktree to a time-tracking project
+(`project.<slug>.dir=`). On confirm it runs `git worktree add`, then stages a
+`cd` into the new worktree the same way selecting a row above does. See
+[docs/actions.md#createworktree](../actions.md#createworktree) for the full
+step-by-step and [docs/configuration.md](../configuration.md) for
+`worktree.basedir`/`worktree.defaultbranch`.
 
 ## Relationship to Directories and Zoxide mode
 

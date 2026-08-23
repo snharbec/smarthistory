@@ -2250,6 +2250,18 @@ pub struct Config {
     /// note content for the preview pane.
     /// Can also be set via the NOTE_SEARCH_DIR env var.
     notes_dir: Option<std::path::PathBuf>,
+    /// Base directory under which `Action::CreateWorktree` creates new
+    /// worktree checkouts (`<basedir>/<branch>`). Set via
+    /// `worktree.basedir=<path>`. `None` means "sibling to the repo"
+    /// (`<repo-parent>/<repo-name>-worktrees/<branch>`), resolved at
+    /// creation time rather than here since it depends on which repo
+    /// the user is in.
+    worktree_basedir: Option<std::path::PathBuf>,
+    /// Branch to preselect as the base for a brand-new worktree branch,
+    /// overriding the `Action::CreateWorktree` flow's own
+    /// remote-`HEAD`/`main`/`master` auto-detection. Set via
+    /// `worktree.defaultbranch=<name>`.
+    worktree_default_branch: Option<String>,
     /// Template for the line-number option that
     /// the todo-search mode (`!`) appends to the
     /// editor command when the user selects a
@@ -2665,6 +2677,8 @@ impl Config {
             zsh_default_mode: "sess".to_string(),
             notes_database: None,
             notes_dir: None,
+            worktree_basedir: None,
+            worktree_default_branch: None,
             todo_line_option: String::from("+$LINE"),
             jira_fragments: std::collections::HashMap::new(),
             files_ignores: Vec::new(),
@@ -3006,6 +3020,12 @@ impl Config {
                             path.display()
                         );
                     }
+                }
+                "worktree.basedir" => {
+                    self.worktree_basedir = Some(expand_tilde(value));
+                }
+                "worktree.defaultbranch" => {
+                    self.worktree_default_branch = Some(value.to_string());
                 }
                 "todo.line_option" => {
                     // The template uses the literal
@@ -4189,6 +4209,16 @@ impl Config {
     /// Path to the notes directory, if configured.
     pub fn notes_dir(&self) -> Option<&std::path::Path> {
         self.notes_dir.as_deref()
+    }
+
+    /// Configured base directory for new worktree checkouts, if set.
+    pub fn worktree_basedir(&self) -> Option<&std::path::Path> {
+        self.worktree_basedir.as_deref()
+    }
+
+    /// Configured default base branch for new worktree branches, if set.
+    pub fn worktree_default_branch(&self) -> Option<&str> {
+        self.worktree_default_branch.as_deref()
     }
 
     /// Template for the line-number option that

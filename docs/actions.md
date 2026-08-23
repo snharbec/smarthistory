@@ -1220,6 +1220,44 @@ template with the same name — the status message says so rather than
 silently clobbering it. Either fetch call failing fails the whole request
 (no partial template is written); the status message shows the JIRA error.
 
+### `CreateWorktree`
+
+| Field        | Value                                                                                  |
+| ------------ | --------------------------------------------------------------------------------------- |
+| Config key   | `create-worktree`                                                                        |
+| Display name | Create worktree                                                                          |
+| Default key  | none (open it via the command palette, or bind `key.create-worktree=<spec>`)             |
+| Category     | tools                                                                                    |
+
+Only available in `;` (worktree) mode; a no-op with a status message
+everywhere else. Opens a step-through dialog that creates a new `git
+worktree` checkout for the repo containing the current directory:
+
+1. **Branch** — pick an existing local branch from a filtered list, or type a
+   name that matches none of them to create a new branch.
+2. **Base branch** (new branch only) — pick the existing branch the new one
+   is created from. Preselected from `worktree.defaultbranch` if configured,
+   otherwise auto-detected (the remote's `HEAD`, then a local `main`/`master`,
+   then the repo's current branch).
+3. **Carry over uncommitted changes?** (`y`/`n`, only asked when the current
+   checkout is dirty) — `y` runs `git stash push` in the source checkout and
+   `git stash apply` in the new worktree.
+4. **Assign to a project** (optional) — pick an existing `project.<slug>`
+   from a filtered list, type a new one, or submit blank to skip. On
+   confirm, this final step creates the worktree (`git worktree add`), under
+   `worktree.basedir` if configured or sibling to the repo otherwise
+   (`<repo-parent>/<repo-name>-worktrees/<branch>`), applies the carried-over
+   stash if requested, writes `project.<slug>.dir=<path>` to the config file
+   if a project was assigned, then stages a `cd` into the new worktree the
+   same way selecting a Phase-1 worktree row does.
+
+`Esc`/`Ctrl-C` cancel the dialog from any step without creating anything. A
+`git` failure at any point (an existing branch collision, a bad base branch,
+etc.) is shown inline in the dialog rather than closing it. See
+[docs/modes/worktree.md](modes/worktree.md) and
+[`worktree.basedir`/`worktree.defaultbranch`](configuration.md) for the
+related config keys.
+
 ---
 
 ## panes

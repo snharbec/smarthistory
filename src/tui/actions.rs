@@ -352,6 +352,264 @@ impl App {
         self.pick_mode = Some(PickMode::Run);
     }
 
+    /// Open the `Action::CreateWorktree` dialog (`;` mode): resolve
+    /// the repo root for the current directory, populate the
+    /// `PickBranch` step's candidate list, and open at that step. A
+    /// status message (no dialog) when the cwd isn't inside a git
+    /// repo — same degrade-to-message convention `DownloadJiraIssue`'s
+    /// mode gate uses.
+    pub(crate) fn open_worktree_create_flow(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let Some(repo_root) = crate::tui::mode::worktree::find_repo_root(&cwd) else {
+            self.set_status_message("not inside a git repository".to_string());
+            return;
+        };
+        let options = crate::tui::mode::worktree::list_branches(&repo_root);
+        self.worktree_create_flow = Some(crate::tui::state::WorktreeCreateFlow {
+            repo_root,
+            step: crate::tui::state::WorktreeCreateStep::PickBranch,
+            branch: String::new(),
+            is_new_branch: false,
+            base_branch: String::new(),
+            carry_over: false,
+            project_slug: None,
+            options,
+            filter: String::new(),
+            cursor: 0,
+            selected: 0,
+            error: None,
+        });
+    }
+
+    /// `Enter` pressed inside the `Action::CreateWorktree` dialog.
+    /// Advances through `WorktreeCreateStep`s per the flow described on
+    /// `WorktreeCreateFlow`'s doc comment, executing everything on the
+    /// final `PickProject` step. Returns `true` when a `cd` command
+    /// was staged (i.e. the TUI should exit), the same convention
+    /// `handle_project_since_prompt_key` uses around
+    /// `answer_project_since_prompt`.
+    pub(crate) fn advance_worktree_create_flow(&mut self) -> bool {
+        use crate::tui::state::WorktreeCreateStep;
+        let Some(flow) = self.worktree_create_flow.as_ref() else {
+            return false;
+        };
+        let step = flow.step;
+        let repo_root = flow.repo_root.clone();
+        let typed = flow.filter.trim().to_string();
+        let filtered = crate::tui::state::worktree_create_filtered_options(flow);
+        let chosen = filtered.get(flow.selected).cloned();
+        match step {
+            WorktreeCreateStep::PickBranch => {
+                if let Some(existing) = chosen {
+                    if let Some(f) = self.worktree_create_flow.as_mut() {
+                        f.branch = existing;
+                        f.is_new_branch = false;
+                        f.error = None;
+                    }
+                    self.worktree_create_after_branch_chosen(&repo_root);
+                } else if !typed.is_empty() {
+                    // No existing branch matches what's typed — create
+                    // a new one. Preselect the base branch: an
+                    // explicit `worktree.defaultbranch` config value
+                    // wins, otherwise auto-detect (remote HEAD /
+                    // main / master / current branch).
+                    let default_base = self.worktree_default_branch.clone().unwrap_or_else(|| {
+                        crate::tui::mode::worktree::default_base_branch(&repo_root)
+                    });
+                    let base_options = crate::tui::mode::worktree::list_branches(&repo_root);
+                    let selected_idx =
+                        base_options.iter().position(|b| *b == default_base).unwrap_or(0);
+                    if let Some(f) = self.worktree_create_flow.as_mut() {
+                        f.branch = typed;
+                        f.is_new_branch = true;
+                        f.step = WorktreeCreateStep::PickBaseBranch;
+                        f.base_branch = default_base;
+                        f.options = base_options;
+                        f.filter.clear();
+                        f.cursor = 0;
+                        f.selected = selected_idx;
+                        f.error = None;
+                    }
+                } else if let Some(f) = self.worktree_create_flow.as_mut() {
+                    f.error = Some("pick a branch or type a new name".to_string());
+                }
+                false
+            }
+            WorktreeCreateStep::PickBaseBranch => {
+                if let Some(existing) = chosen {
+                    if let Some(f) = self.worktree_create_flow.as_mut() {
+                        f.base_branch = existing;
+                        f.error = None;
+                    }
+                    self.worktree_create_after_branch_chosen(&repo_root);
+                } else if let Some(f) = self.worktree_create_flow.as_mut() {
+                    // Unlike `PickBranch`, there's no "create new"
+                    // concept for a base branch — it must already exist.
+                    f.error = Some("pick an existing branch as the base".to_string());
+                }
+                false
+            }
+            // `y`/`n` (not `Enter`) drive this step — see
+            // `worktree_create_confirm_carry_over`, called directly
+            // from `handle_worktree_create_flow_key`.
+            WorktreeCreateStep::ConfirmCarryOver => false,
+            WorktreeCreateStep::PickProject => {
+                // A blank filter always means "skip assignment",
+                // regardless of whether the (untouched) candidate list
+                // happens to be non-empty — the one step where an
+                // empty `Enter` is a deliberate choice, not "browse
+                // the full list and pick index 0".
+                let slug = if typed.is_empty() {
+                    None
+                } else if let Some(existing) = chosen {
+                    Some(existing)
+                } else {
+                    Some(crate::util::slugify(&typed, "project"))
+                };
+                if let Some(f) = self.worktree_create_flow.as_mut() {
+                    f.project_slug = slug;
+                }
+                self.worktree_create_execute()
+            }
+        }
+    }
+
+    /// The dirty-check that runs right after `branch`/`base_branch`
+    /// are settled (from either `PickBranch` choosing an existing
+    /// branch, or `PickBaseBranch` completing a new one): clean →
+    /// skip straight to `PickProject`; dirty → open `ConfirmCarryOver`
+    /// first so the user can choose whether to bring their
+    /// uncommitted changes along.
+    fn worktree_create_after_branch_chosen(&mut self, repo_root: &std::path::Path) {
+        use crate::tui::state::WorktreeCreateStep;
+        let dirty = crate::tui::mode::worktree::repo_is_dirty(repo_root);
+        if dirty {
+            if let Some(f) = self.worktree_create_flow.as_mut() {
+                f.step = WorktreeCreateStep::ConfirmCarryOver;
+                f.options.clear();
+                f.filter.clear();
+                f.cursor = 0;
+                f.selected = 0;
+                f.error = None;
+            }
+        } else {
+            let projects = crate::tui::mode::worktree::list_project_slugs(self);
+            if let Some(f) = self.worktree_create_flow.as_mut() {
+                f.step = WorktreeCreateStep::PickProject;
+                f.options = projects;
+                f.filter.clear();
+                f.cursor = 0;
+                f.selected = 0;
+                f.error = None;
+            }
+        }
+    }
+
+    /// `y`/`n` pressed on the `ConfirmCarryOver` step: records the
+    /// choice and advances to `PickProject`, the same as the dirty-check
+    /// branch in `worktree_create_after_branch_chosen` above (a clean
+    /// repo skips straight past this step, so both paths converge on
+    /// the same `PickProject` setup).
+    pub(crate) fn worktree_create_confirm_carry_over(&mut self, carry_over: bool) {
+        use crate::tui::state::WorktreeCreateStep;
+        if self.worktree_create_flow.is_none() {
+            return;
+        }
+        let projects = crate::tui::mode::worktree::list_project_slugs(self);
+        if let Some(f) = self.worktree_create_flow.as_mut() {
+            f.carry_over = carry_over;
+            f.step = WorktreeCreateStep::PickProject;
+            f.options = projects;
+            f.filter.clear();
+            f.cursor = 0;
+            f.selected = 0;
+            f.error = None;
+        }
+    }
+
+    /// The final step: create the worktree, optionally carry over
+    /// uncommitted changes and bind a project, then stage the `cd`
+    /// into it via `stage_cd_to_directory` — the same staging a
+    /// Phase-1 row selection uses. A git failure sets `flow.error`
+    /// and leaves the dialog open rather than staging anything, so
+    /// the user sees what went wrong.
+    fn worktree_create_execute(&mut self) -> bool {
+        let Some(flow) = self.worktree_create_flow.clone() else {
+            return false;
+        };
+        let path = self.worktree_create_target_path(&flow.repo_root, &flow.branch);
+        match crate::tui::mode::worktree::create_worktree(
+            &flow.repo_root,
+            &path,
+            &flow.branch,
+            flow.is_new_branch,
+            &flow.base_branch,
+        ) {
+            Ok(()) => {
+                if flow.carry_over {
+                    // Best-effort past this point: a stash-apply
+                    // conflict surfaces as a status message but
+                    // doesn't undo the already-created worktree, and
+                    // the stash entry itself is never dropped either
+                    // way, so nothing is lost even on failure.
+                    let _ = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&flow.repo_root)
+                        .args(["stash", "push"])
+                        .output();
+                    let apply = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&path)
+                        .args(["stash", "apply"])
+                        .output();
+                    if let Ok(o) = apply
+                        && !o.status.success()
+                    {
+                        self.set_status_message(format!(
+                            "worktree created, but stash apply failed: {}",
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        ));
+                    }
+                }
+                if let Some(slug) = flow.project_slug.as_ref()
+                    && let Err(e) = crate::tui::mode::worktree::write_project_dir_binding(slug, &path)
+                {
+                    self.set_status_message(format!(
+                        "worktree created, but failed to bind project {:?}: {}",
+                        slug, e
+                    ));
+                }
+                self.worktree_create_flow = None;
+                let dir_str = path.display().to_string();
+                self.stage_cd_to_directory(&dir_str);
+                self.selection.is_some()
+            }
+            Err(e) => {
+                if let Some(f) = self.worktree_create_flow.as_mut() {
+                    f.error = Some(e);
+                }
+                false
+            }
+        }
+    }
+
+    /// Where a new worktree for `branch` is created: under the
+    /// configured `worktree.basedir` when set, otherwise sibling to
+    /// the repo (`<repo-parent>/<repo-name>-worktrees/<branch>`).
+    fn worktree_create_target_path(
+        &self,
+        repo_root: &std::path::Path,
+        branch: &str,
+    ) -> std::path::PathBuf {
+        if let Some(base) = self.worktree_basedir.as_ref() {
+            base.join(branch)
+        } else {
+            let parent = repo_root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| repo_root.to_path_buf());
+            let repo_name = repo_root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+            parent.join(format!("{}-worktrees", repo_name)).join(branch)
+        }
+    }
+
     /// Stage the todo (`!`) mode selection.
     ///
     /// Extracted from the legacy monolithic
@@ -495,28 +753,23 @@ impl App {
     /// the full rationale on basename collisions and
     /// the `;` shell-safe sequencing.
     fn stage_directory_selection(&mut self) {
-        // Clone the row's
-        // `directory` (and
-        // the resolved tmux
-        // pane id) up front
-        // so the rest of the
-        // block can mutate
-        // `self.selection`
-        // without fighting
-        // the borrow
-        // checker. We can't
-        // hold the
-        // `selected_row()`
-        // borrow across
-        // `self.selection =`
-        // assignments.
-        let (directory, pane_id): (String, Option<String>) = match self.selected_row() {
-            Some(r) => (
-                r.directory.clone(),
-                self.directory_tmux_pane_id(&r.directory),
-            ),
-            None => return,
+        let Some(directory) = self.selected_row().map(|r| r.directory.clone()) else {
+            return;
         };
+        self.stage_cd_to_directory(&directory);
+    }
+
+    /// The tmux/herdr `cd`-staging core `stage_directory_selection`
+    /// uses for a selected `#`/`~`/`;` row, extracted so
+    /// `Action::CreateWorktree`'s completion step can reuse it for a
+    /// freshly-created worktree directory that never had a row to
+    /// select in the first place. Builds either a "focus the existing
+    /// pane" command (when `directory` already has an active
+    /// tmux/herdr context — see `directory_tmux_pane_id`) or a "create
+    /// a new session/workspace rooted here" command, then chains in
+    /// the directory's `.command` bootstrap script, if any.
+    fn stage_cd_to_directory(&mut self, directory: &str) {
+        let pane_id = self.directory_tmux_pane_id(directory);
         // Two action paths for
         // directory rows, branched
         // on whether the row has
@@ -658,7 +911,7 @@ impl App {
             // the backend to
             // produce a
             // shell-safe string.
-            let path = crate::util::expand_home(&directory).into_owned();
+            let path = crate::util::expand_home(directory).into_owned();
             let label = std::path::Path::new(&path)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -753,8 +1006,8 @@ impl App {
         // between the
         // command and the
         // switch-client.
-        if let Some(cmd_path) = crate::util::find_command_file(std::path::Path::new(&directory)) {
-            let path_for_arg = crate::util::expand_home(&directory).into_owned();
+        if let Some(cmd_path) = crate::util::find_command_file(std::path::Path::new(directory)) {
+            let path_for_arg = crate::util::expand_home(directory).into_owned();
             let quoted_arg = crate::util::shell_quote(&path_for_arg);
             let quoted_cmd = crate::util::shell_quote(&cmd_path.display().to_string());
             // The script body:
@@ -901,7 +1154,7 @@ impl App {
                 // the id
                 // of.
                 if self.multiplexer.name() == "tmux" {
-                    let path = crate::util::expand_home(&directory).into_owned();
+                    let path = crate::util::expand_home(directory).into_owned();
                     let name = std::path::Path::new(&path)
                         .file_name()
                         .and_then(|n| n.to_str())

@@ -1394,6 +1394,16 @@ pub(crate) struct App {
     notes_database: Option<std::path::PathBuf>,
     /// Path to the notes directory, if configured.
     notes_dir: Option<std::path::PathBuf>,
+    /// Configured base directory for new worktree checkouts
+    /// (`Config::worktree_basedir`). `None` means the
+    /// `Action::CreateWorktree` flow falls back to "sibling to the
+    /// repo" at creation time.
+    worktree_basedir: Option<std::path::PathBuf>,
+    /// Configured default base branch for new worktree branches
+    /// (`Config::worktree_default_branch`), overriding the
+    /// `Action::CreateWorktree` flow's own auto-detection. `None`
+    /// means auto-detect.
+    worktree_default_branch: Option<String>,
     /// Template for the line-number option that
     /// the todo-search mode (`!`) appends to the
     /// editor command when the user selects a
@@ -1956,6 +1966,12 @@ pub(crate) struct App {
     /// above resolves — `template_name_prompt` is already closed by
     /// then, so the name has nowhere else to live.
     pending_jira_template_name: Option<String>,
+
+    /// The `Action::CreateWorktree` dialog's state, when open — `None`
+    /// otherwise. Steps through picking/creating a branch, an optional
+    /// base branch, an optional uncommitted-changes carry-over, and an
+    /// optional project assignment, then creates the worktree.
+    worktree_create_flow: Option<crate::tui::state::WorktreeCreateFlow>,
 
     /// Per-pane `last_touched` map (Unix
     /// epoch seconds, keyed by `pane_id`).
@@ -4975,6 +4991,8 @@ impl App {
         query_prefixes: crate::QueryPrefixes,
         notes_database: Option<std::path::PathBuf>,
         notes_dir: Option<std::path::PathBuf>,
+        worktree_basedir: Option<std::path::PathBuf>,
+        worktree_default_branch: Option<String>,
         _todo_line_option: String,
         jira_fragments: std::collections::HashMap<String, String>,
         files_ignores: Vec<String>,
@@ -5071,6 +5089,9 @@ impl App {
             query_prefixes,
             notes_database,
             notes_dir,
+            worktree_basedir,
+            worktree_default_branch,
+            worktree_create_flow: None,
             todo_line_option: String::from("+$LINE"),
             notes_query_error: false,
             notes_date_filter: NotesDateFilter::All,
@@ -11581,6 +11602,8 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
         query_prefixes,
         notes_database,
         notes_dir,
+        app_cfg.worktree_basedir().map(|p| p.to_path_buf()),
+        app_cfg.worktree_default_branch().map(|s| s.to_string()),
         app_cfg.todo_line_option().to_string(),
         app_cfg.jira_fragments().clone(),
         app_cfg.files_ignores().to_vec(),
@@ -11864,6 +11887,8 @@ pub fn run_tui_to_stdout(
         query_prefixes,
         notes_database,
         notes_dir,
+        app_cfg.worktree_basedir().map(|p| p.to_path_buf()),
+        app_cfg.worktree_default_branch().map(|s| s.to_string()),
         app_cfg.todo_line_option().to_string(),
         app_cfg.jira_fragments().clone(),
         app_cfg.files_ignores().to_vec(),
@@ -12980,6 +13005,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_template_name_prompt_key(app, key);
     }
 
+    // Same modal-overlay precedence: the "create a new worktree"
+    // dialog also takes over the keymap while open — list
+    // navigation, filter text entry, and Enter/Esc/Ctrl+C.
+    if app.worktree_create_flow.is_some() {
+        return handle_worktree_create_flow_key(app, key);
+    }
+
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
     if let Some(ref mode) = app.confirm_delete {
         return handle_confirm_delete_key(app, key, mode.clone());
@@ -13350,6 +13382,20 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 return false;
             }
             app.create_jira_template_from_issue();
+            false
+        }
+        Action::CreateWorktree => {
+            // Same mode gate shape as `DownloadJiraIssue`, adapted to
+            // worktree mode. Unlike a JIRA-row action, this doesn't
+            // need a selected row — it creates a *new* worktree, so
+            // it's meaningful anywhere inside `;` mode.
+            if !app.is_worktree_query() {
+                app.set_status_message(
+                    "Create-worktree is only available in worktree search (type `;`)".to_string(),
+                );
+                return false;
+            }
+            app.open_worktree_create_flow();
             false
         }
         Action::DownloadJiraMatching => {
@@ -13971,6 +14017,113 @@ fn handle_template_name_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             prompt.buffer.insert(byte_idx, c);
             prompt.cursor += 1;
             prompt.error = None;
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Key handler for the `Action::CreateWorktree` dialog
+/// (`WorktreeCreateFlow`). Three of its four steps
+/// (`PickBranch`/`PickBaseBranch`/`PickProject`) are "pick from a
+/// filtered list or type something new" pickers — `Up`/`Down` move the
+/// highlight, printable characters edit the filter, `Enter` advances
+/// via `App::advance_worktree_create_flow`. The fourth
+/// (`ConfirmCarryOver`) is a plain `y`/`n` prompt, handled directly
+/// here rather than through the list machinery.
+fn handle_worktree_create_flow_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.worktree_create_flow = None;
+        app.cancelled = true;
+        return true;
+    }
+    if action_for_key(&app.bindings, &key) == Some(Action::Cancel) {
+        app.worktree_create_flow = None;
+        return false;
+    }
+    let Some(flow) = app.worktree_create_flow.as_ref() else {
+        return false;
+    };
+    if flow.step == crate::tui::state::WorktreeCreateStep::ConfirmCarryOver {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.worktree_create_confirm_carry_over(true);
+                false
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.worktree_create_confirm_carry_over(false);
+                false
+            }
+            _ => false,
+        };
+    }
+    match key.code {
+        KeyCode::Enter => app.advance_worktree_create_flow(),
+        KeyCode::Up => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                f.selected = f.selected.saturating_sub(1);
+            }
+            false
+        }
+        KeyCode::Down => {
+            let filtered_len = app
+                .worktree_create_flow
+                .as_ref()
+                .map(|f| crate::tui::state::worktree_create_filtered_options(f).len())
+                .unwrap_or(0);
+            if let Some(f) = app.worktree_create_flow.as_mut()
+                && filtered_len > 0
+            {
+                f.selected = (f.selected + 1).min(filtered_len - 1);
+            }
+            false
+        }
+        KeyCode::Backspace => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                if f.cursor > 0 {
+                    let byte_idx = char_to_byte_idx(&f.filter, f.cursor - 1);
+                    if let Some(next) = f.filter[byte_idx..].chars().next() {
+                        f.filter.replace_range(byte_idx..byte_idx + next.len_utf8(), "");
+                    }
+                    f.cursor -= 1;
+                }
+                f.selected = 0;
+                f.error = None;
+            }
+            false
+        }
+        KeyCode::Left => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                f.cursor = f.cursor.saturating_sub(1);
+            }
+            false
+        }
+        KeyCode::Right => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                f.cursor = (f.cursor + 1).min(f.filter.chars().count());
+            }
+            false
+        }
+        KeyCode::Home => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                f.cursor = 0;
+            }
+            false
+        }
+        KeyCode::End => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                f.cursor = f.filter.chars().count();
+            }
+            false
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(f) = app.worktree_create_flow.as_mut() {
+                let byte_idx = char_to_byte_idx(&f.filter, f.cursor);
+                f.filter.insert(byte_idx, c);
+                f.cursor += 1;
+                f.selected = 0;
+                f.error = None;
+            }
             false
         }
         _ => false,

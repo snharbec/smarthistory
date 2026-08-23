@@ -459,6 +459,15 @@ pub enum Action {
     /// issue's project/issue type/summary/labels/description and every
     /// populated custom field — the reverse of `CreateJiraIssueFromTemplate`.
     CreateJiraTemplateFromIssue,
+    /// In `;` (worktree) mode, open the "create a new worktree" dialog:
+    /// pick or create a branch, optionally pick a base branch for a
+    /// new branch, optionally carry over uncommitted changes, and
+    /// optionally assign the new worktree to a time-tracking project.
+    /// No-op outside of worktree mode (with a status message), same
+    /// gate `DownloadJiraIssue` uses for `-` mode.
+    ///
+    /// Default key: unbound.
+    CreateWorktree,
     /// Filter the `*`-mode panes view to show
     /// only live multiplexer panes (hide
     /// `# sessions` and `# hosts`). Pressing
@@ -717,6 +726,7 @@ impl Action {
             Action::CreateJiraIssue => "create-jira-issue",
             Action::CreateJiraIssueFromTemplate => "create-jira-issue-from-template",
             Action::CreateJiraTemplateFromIssue => "create-jira-template-from-issue",
+            Action::CreateWorktree => "create-worktree",
             Action::FilterPanesWindows => "filter-panes-windows",
             Action::FilterPanesHosts => "filter-panes-hosts",
             Action::FilterPanesSessions => "filter-panes-sessions",
@@ -784,6 +794,7 @@ impl Action {
             Action::CreateJiraIssue => "Create JIRA issue",
             Action::CreateJiraIssueFromTemplate => "Create JIRA issue from template",
             Action::CreateJiraTemplateFromIssue => "Create JIRA template from issue",
+            Action::CreateWorktree => "Create worktree",
             Action::FilterPanesWindows => "Filter panes: windows only",
             Action::FilterPanesHosts => "Filter panes: hosts only",
             Action::FilterPanesSessions => "Filter panes: directories only",
@@ -887,6 +898,7 @@ impl Action {
             Action::CreateJiraIssue => "tools",
             Action::CreateJiraIssueFromTemplate => "tools",
             Action::CreateJiraTemplateFromIssue => "tools",
+            Action::CreateWorktree => "tools",
             Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
                 "panes"
             }
@@ -1026,6 +1038,7 @@ impl Action {
             Action::CreateJiraIssue => "none",
             Action::CreateJiraIssueFromTemplate => "none",
             Action::CreateJiraTemplateFromIssue => "none",
+            Action::CreateWorktree => "none",
             Action::FilterPanesWindows => "F7",
             Action::FilterPanesHosts => "F8",
             Action::FilterPanesSessions => "F9",
@@ -1454,6 +1467,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::CreateJiraIssue,
     Action::CreateJiraIssueFromTemplate,
     Action::CreateJiraTemplateFromIssue,
+    Action::CreateWorktree,
     Action::FilterPanesWindows,
     Action::FilterPanesHosts,
     Action::FilterPanesSessions,

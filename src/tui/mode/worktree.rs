@@ -77,7 +77,10 @@ pub(crate) fn check(_app: &App) -> CheckReport {
 /// rev-parse --show-toplevel` — the same pattern `GitTimestamps::load`
 /// (`src/files.rs`) already uses. Returns `None` when `dir` isn't
 /// inside a git repo, `git` isn't on `$PATH`, or the command fails.
-fn find_repo_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+///
+/// `pub(crate)` (not private) so the `Action::CreateWorktree` flow can
+/// resolve the repo root before the dialog even opens.
+pub(crate) fn find_repo_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -217,6 +220,186 @@ pub(crate) fn build_rows(
         });
     }
     rows
+}
+
+/// List every local branch of the repo at `repo_root`, in `git
+/// for-each-ref`'s own order. Used to populate the `PickBranch` /
+/// `PickBaseBranch` steps of the `Action::CreateWorktree` flow.
+/// `--format='%(refname:short)'` gives bare branch names with none of
+/// `git branch --list`'s `*`/indentation markers to strip.
+pub(crate) fn list_branches(repo_root: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The branch to preselect as the base for a new worktree branch:
+/// the remote `HEAD` symbolic ref when one is set (`origin/main` /
+/// `origin/master`, whichever the remote actually points at), falling
+/// back to a local `main` or `master` branch, and finally to the
+/// repo's own current branch — always something valid to preselect,
+/// even in a from-scratch repo with a single branch.
+pub(crate) fn default_base_branch(repo_root: &std::path::Path) -> String {
+    let symbolic = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .output();
+    if let Ok(o) = symbolic
+        && o.status.success()
+    {
+        let raw = String::from_utf8_lossy(&o.stdout);
+        let trimmed = raw.trim().strip_prefix("refs/remotes/origin/").unwrap_or(raw.trim());
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let branches = list_branches(repo_root);
+    for candidate in ["main", "master"] {
+        if branches.iter().any(|b| b == candidate) {
+            return candidate.to_string();
+        }
+    }
+    let current = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output();
+    match current {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Create a new `git worktree` checkout at `path`. When `is_new_branch`
+/// is true, `-b <branch>` creates the branch off `base_branch`;
+/// otherwise `branch` must already exist and is simply checked out
+/// into the new worktree. `path`'s parent directory is created first
+/// so a branch name containing `/` (e.g. `feature/login`) can become a
+/// nested worktree directory. Propagates git's stderr on failure —
+/// unlike this module's listing functions (which best-effort degrade
+/// to empty), a create action must surface real errors to the user.
+pub(crate) fn create_worktree(
+    repo_root: &std::path::Path,
+    path: &std::path::Path,
+    branch: &str,
+    is_new_branch: bool,
+    base_branch: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(repo_root).arg("worktree").arg("add");
+    if is_new_branch {
+        cmd.arg("-b").arg(branch).arg(path).arg(base_branch);
+    } else {
+        cmd.arg(path).arg(branch);
+    }
+    let output = cmd.output().map_err(|e| format!("failed to run git: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// True when `git status --porcelain` on `repo_root` reports any
+/// uncommitted changes. Used by the `Action::CreateWorktree` flow to
+/// decide whether to ask about carrying changes over into the new
+/// worktree. A failed/unparseable `git status` degrades to `false`
+/// (skip the prompt) rather than blocking the flow.
+pub(crate) fn repo_is_dirty(repo_root: &std::path::Path) -> bool {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["status", "--porcelain"])
+        .output();
+    matches!(output, Ok(o) if o.status.success() && !o.stdout.is_empty())
+}
+
+/// Every project slug already in use, derived the same way
+/// `App::stage_project_selection` derives a slug from a selected
+/// `type: project` note's filename (`file_stem` +
+/// `crate::util::slugify`) — so the `PickProject` step offers exactly
+/// the slugs already in use, not a separately invented list. Returns
+/// an empty list (not an error) when `notes.database` isn't configured
+/// or the query fails, same degrade-to-empty convention `check`/`fetch`
+/// use elsewhere in this module.
+pub(crate) fn list_project_slugs(app: &App) -> Vec<String> {
+    let Some(ref db_path) = app.notes_database else {
+        return Vec::new();
+    };
+    let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
+    let criteria = note_search::SearchCriteria {
+        list_only: true,
+        query_expr: Some(note_search::QueryExpr::Attribute {
+            key: "type".to_string(),
+            value: Some("project".to_string()),
+        }),
+        ..Default::default()
+    };
+    let Ok(rows) = service.search_notes(&criteria) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .map(|note| {
+            let stem = std::path::Path::new(&note.filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&note.filename);
+            crate::util::slugify(stem, "project")
+        })
+        .collect()
+}
+
+/// Append a `project.<slug>.dir = "<path>"` line to the main config
+/// file, binding future `smarthistory add`/time-tracking directory
+/// detection under `path` to `slug`. Modeled on
+/// `App::write_new_entry_to_config`'s atomic tmp-file-then-`rename`
+/// write, but targets `crate::config_path()` (where `project.*` keys
+/// live) instead of the dedicated sessions/hosts files, and just
+/// appends one line rather than building a multi-field block.
+pub(crate) fn write_project_dir_binding(slug: &str, path: &std::path::Path) -> Result<(), String> {
+    let target_path =
+        crate::config_path().ok_or_else(|| "no config directory path (HOME is not set)".to_string())?;
+    let contents = match std::fs::read_to_string(&target_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("failed to read {}: {}", target_path.display(), e)),
+    };
+    let mut new_contents = contents.clone();
+    if !new_contents.is_empty() && !new_contents.ends_with('\n') {
+        new_contents.push('\n');
+    }
+    new_contents.push_str(&format!("project.{}.dir = {:?}\n", slug, path.display()));
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    let tmp_path = target_path.with_extension("tmp");
+    std::fs::write(&tmp_path, new_contents.as_bytes())
+        .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
+    std::fs::rename(&tmp_path, &target_path).map_err(|e| {
+        format!(
+            "failed to rename {} to {}: {}",
+            tmp_path.display(),
+            target_path.display(),
+            e,
+        )
+    })?;
+    Ok(())
 }
 
 impl App {
