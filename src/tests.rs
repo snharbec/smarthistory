@@ -2954,6 +2954,30 @@ tmuxpaneoutputdir=~/custom-tmux
         assert!(parse_duration_to_secs("h").is_err(), "unit with no digits");
     }
 
+    /// Regression: `value * multiplier` and the running `total +=`
+    /// used plain `i64` arithmetic with no overflow check. A large
+    /// enough digit component (still comfortably fitting in `i64` on
+    /// its own, so the earlier `.parse::<i64>()` guard didn't catch
+    /// it) would overflow once multiplied by a unit's seconds factor —
+    /// silently wrapping to garbage in a release build, or panicking
+    /// in a debug build. Must now return a clear error instead.
+    #[test]
+    fn parse_duration_to_secs_rejects_overflow() {
+        // 999999999999999 (15 nines) fits in i64 on its own, but
+        // * 86400 (seconds per day) overflows i64::MAX.
+        assert!(
+            parse_duration_to_secs("999999999999999d").is_err(),
+            "a single component overflowing after unit multiplication must be rejected"
+        );
+        // Each component individually fits (the first IS i64::MAX
+        // seconds, the second is a trivial 1 minute), but the running
+        // sum overflows once they're added together.
+        assert!(
+            parse_duration_to_secs("9223372036854775807s1m").is_err(),
+            "the running total overflowing across multiple components must be rejected"
+        );
+    }
+
     // --- day_standard_work_secs -------------------------------------
 
     #[test]

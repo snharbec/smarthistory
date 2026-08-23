@@ -7099,14 +7099,25 @@ fn parse_duration_to_secs(s: &str) -> anyhow::Result<i64> {
             anyhow::anyhow!("--since {s:?}: {digits:?} is too large to be a valid duration component")
         })?;
         digits.clear();
-        total += value
-            * match unit {
-                'd' => 86400,
-                'h' => 3600,
-                'm' => 60,
-                's' => 1,
-                _ => unreachable!(),
-            };
+        let multiplier: i64 = match unit {
+            'd' => 86400,
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => unreachable!(),
+        };
+        // `value` alone fitting in `i64` (checked by `.parse()` above)
+        // doesn't mean `value * multiplier` does — e.g. a 15-digit
+        // number of days overflows once multiplied by 86400. Checked
+        // arithmetic here turns that into a clear CLI error instead of
+        // a silent wraparound (release build, possibly writing a bogus
+        // negative timestamp into the DB) or a panic (debug build).
+        let component = value.checked_mul(multiplier).ok_or_else(|| {
+            anyhow::anyhow!("--since {s:?}: duration is too large (overflows)")
+        })?;
+        total = total
+            .checked_add(component)
+            .ok_or_else(|| anyhow::anyhow!("--since {s:?}: duration is too large (overflows)"))?;
     }
     if !digits.is_empty() {
         anyhow::bail!(
