@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- New `smarthistory completions <shell>` — prints a shell tab-completion
+  script for `smarthistory`'s own subcommands and flags to stdout
+  (`eval "$(smarthistory completions zsh)"`; bash/fish/powershell/elvish
+  also supported). Unrelated to `smarthistory init`, which sets up the
+  interactive history-widget integration (Up/Down recall, the live
+  dropdown, etc.) — this only teaches your shell to complete
+  `smarthistory <TAB>` and its flags. Generated directly from the CLI's own
+  `clap` command definition, so it never drifts out of sync as subcommands
+  are added.
+
 ## 2.2.0 - 2026-08-23
 
 ### Added

@@ -488,6 +488,19 @@ enum Commands {
         /// `zsh` or `bash`.
         shell: String,
     },
+    /// Print a shell tab-completion script for `smarthistory`'s own
+    /// subcommands and flags to stdout — `eval "$(smarthistory completions
+    /// zsh)"` (bash/fish/PowerShell/elvish also supported). This is
+    /// unrelated to `init`, which sets up the interactive history-widget
+    /// integration (Up/Down recall, the live dropdown, etc.) — that's a
+    /// separate, much larger shell script; this one only teaches your
+    /// shell to complete `smarthistory <TAB>` and its flags. Generated
+    /// directly from the same `clap` command definition this binary
+    /// parses its own arguments with, so it never drifts out of sync as
+    /// subcommands are added.
+    Completions {
+        shell: clap_complete::Shell,
+    },
     /// Read or validate the resolved configuration.
     ///
     /// Used by the zsh precmd hook to discover the tmux pane output
@@ -8838,6 +8851,11 @@ fn main() -> anyhow::Result<()> {
             };
             let session_id = generate_uuid_v4();
             println!("{}", snippet.replace("{session_id}", &session_id));
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = <Args as clap::CommandFactory>::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
         }
         Commands::ImportAtuin => {
             let atuin_db =

@@ -132,6 +132,12 @@ eval "$(smarthistory init zsh)"
 
 # ...or in ~/.bashrc, for bash instead of zsh:
 eval "$(smarthistory init bash)"
+
+# Optional: tab-completion for the `smarthistory` CLI itself (subcommands
+# and flags) — unrelated to `init` above, which sets up the interactive
+# history widgets, not command-line completion. Needs `compinit` to have
+# already run (zsh's completion system bootstrap).
+eval "$(smarthistory completions zsh)"
 ```
 
 The init snippet embeds a freshly-generated session UUID and binds the keyboard
@@ -179,6 +185,7 @@ smarthistory prune <DAYS> [-f]          # delete entries older than N days
 smarthistory prune-directories [-f]     # remove session.<key> entries whose directory no longer exists
 smarthistory tui   [options]            # launch the TUI
 smarthistory init  zsh                  # emit the zsh init snippet
+smarthistory completions zsh            # emit a zsh tab-completion script for this CLI (bash/fish/powershell/elvish too)
 smarthistory pane-exec                  # reconnect the current tmux/herdr session (see below)
 smarthistory create-note [--title T] [--content C]  # open the create-note dialog directly (see below)
 smarthistory config get <key>          # print a resolved config value
