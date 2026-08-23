@@ -510,6 +510,24 @@ typeset -g _smarthistory_dropdown_suppressed=0
 # default 0 but nothing is highlighted and Tab falls through to plain
 # completion. See `_smarthistory_dropdown_accept`.
 typeset -g _smarthistory_dropdown_chosen=0
+# Distinguishes "the box currently showing is the real-history preview
+# (`_smarthistory_history_walk_paint`)" from "it's a genuine typed-search
+# or prediction dropdown (`_smarthistory_dropdown_render`)". Both share
+# the `_smarthistory_dropdown_visible`/`_smarthistory_dropdown_chosen`
+# flags above so every generic consumer (Enter's commit fast-path, Esc,
+# the accept/break/abort-line resets) keeps working unchanged regardless
+# of which one is showing — but `_smarthistory_up_history`/
+# `_smarthistory_down_history`'s own top-of-function guard specifically
+# needs to tell them apart: it exists to detect "a typed-search/
+# prediction dropdown is up, so Up/Down should navigate ITS candidates
+# instead of walking real history" — without this flag, that guard could
+# not distinguish its own real-history preview box (also visible, also
+# chosen, by design) from the thing it was written to detect, and would
+# wrongly route every Up/Down press after the first into
+# `_smarthistory_dropdown_navigate_prev`/`next`'s modulo-3 wraparound —
+# "stuck cycling the same three items" — instead of continuing to walk
+# further back through history.
+typeset -g _smarthistory_dropdown_is_walk_preview=0
 typeset -ga _smarthistory_dropdown_candidates
 # `_smarthistory_dropdown_meta[i]` holds the trimmed `diff` (age,
 # e.g. "5m", "2h", "3d") string for `_smarthistory_dropdown_candidates[i]`
@@ -555,6 +573,7 @@ _smarthistory_dropdown_clear() {
     _smarthistory_dropdown_hl_prune
     _smarthistory_dropdown_visible=0
     _smarthistory_dropdown_chosen=0
+    _smarthistory_dropdown_is_walk_preview=0
 }
 
 # Remove every `region_highlight` entry whose start offset falls
@@ -1720,6 +1739,11 @@ _smarthistory_dropdown_render() {
         unset _sm_hl_raw _sm_hl_line _sm_hl_i _sm_hl_lines _sm_hl_row_spans
     fi
     _smarthistory_dropdown_visible=1
+    # A genuine typed-search/prediction render, as opposed to the
+    # real-history preview `_smarthistory_history_walk_paint` builds —
+    # see `_smarthistory_dropdown_is_walk_preview`'s doc comment for why
+    # Up/Down's own top-of-function guard needs this distinction.
+    _smarthistory_dropdown_is_walk_preview=0
     # A fresh candidate set from a new keystroke always starts
     # unchosen — the user must re-navigate (Up / Down) to pick a
     # row again, even if they had one highlighted before this render.
@@ -2385,6 +2409,14 @@ _smarthistory_history_walk_paint() {
     _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
     _smarthistory_dropdown_chosen=1
     _smarthistory_dropdown_visible=1
+    # Marks this as OUR OWN box, not a typed-search/prediction dropdown —
+    # see `_smarthistory_dropdown_is_walk_preview`'s doc comment. Without
+    # this, `_smarthistory_up_history`/`_smarthistory_down_history`'s own
+    # top-of-function guard (checked on every subsequent press) would
+    # mistake this box for the thing it exists to detect and hand
+    # further Up/Down presses to `_smarthistory_dropdown_navigate_prev`/
+    # `next` instead of letting the real-history walk below continue.
+    _smarthistory_dropdown_is_walk_preview=1
     _smarthistory_dropdown_paint
 }
 _smarthistory_up_history() {
@@ -2417,7 +2449,16 @@ _smarthistory_up_history() {
     # image of Down's own "exhaust real history, fall into
     # predictions" transition — instead of wrapping around to the
     # bottom of the prediction list forever.
+    #
+    # `_smarthistory_dropdown_is_walk_preview -eq 0` excludes OUR OWN
+    # real-history preview box (`_smarthistory_history_walk_paint`,
+    # called at the end of this same function) from this branch — it
+    # also leaves `visible`/`chosen` set, but isn't the typed-search/
+    # prediction dropdown this guard exists to detect, and must let
+    # Up keep walking real history below instead of being redirected
+    # into `_smarthistory_dropdown_navigate_prev`'s candidate-cycling.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
+        && $_smarthistory_dropdown_is_walk_preview -eq 0 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         if [[ -z "$LBUFFER" && $_smarthistory_dropdown_chosen -eq 1 \
             && $_smarthistory_dropdown_selected -eq 0 ]]; then
@@ -2513,8 +2554,11 @@ _smarthistory_down_history() {
     # `LBUFFER` with nothing explicitly chosen yet (a passively-shown
     # `dropdown.predict` hint, never a normal search dropdown) falls
     # through to the real history walk below instead of being
-    # intercepted here.
+    # intercepted here. `_smarthistory_dropdown_is_walk_preview -eq 0`
+    # excludes our own real-history preview box the same way it does in
+    # `_smarthistory_up_history` above — see that guard's comment.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
+        && $_smarthistory_dropdown_is_walk_preview -eq 0 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         _smarthistory_dropdown_navigate_next
         return
