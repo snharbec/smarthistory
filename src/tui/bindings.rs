@@ -1140,6 +1140,95 @@ impl Action {
             _ => &[],
         }
     }
+
+    /// Which prefix mode(s), if any, this action is actually
+    /// reachable in. Most actions are [`ActionScope::Global`] — they
+    /// either do something meaningful in every mode, or branch
+    /// internally on the mode with a meaningful `else` (e.g.
+    /// `DeleteSelected`, `SmartOpen`). A handful of actions are
+    /// gated: their `dispatch_action` arm (or a helper it calls)
+    /// checks `is_X_query()`/an equivalent and bails out with a
+    /// status message in every other mode — those are
+    /// [`ActionScope::Modes`], scoped to exactly the mode(s) where
+    /// they're not a no-op. This powers `action_for_key`'s
+    /// mode-aware resolution and `scopes_conflict`'s relaxed
+    /// duplicate-key detection: two actions scoped to disjoint modes
+    /// can never actually compete for the same keypress, since only
+    /// one prefix mode is ever active at a time.
+    pub(crate) fn scope(self) -> ActionScope {
+        use crate::tui::mode::ModeKind;
+        match self {
+            Action::DownloadJiraIssue
+            | Action::CreateJiraTemplateFromIssue
+            | Action::DownloadJiraMatching => ActionScope::Modes(&[ModeKind::Jira]),
+            Action::CreateWorktree | Action::DisposeWorktree => {
+                ActionScope::Modes(&[ModeKind::Worktree])
+            }
+            Action::MarkTodoDone => ActionScope::Modes(&[ModeKind::Todo]),
+            Action::FilterPanesWindows | Action::FilterPanesHosts | Action::FilterPanesSessions => {
+                ActionScope::Modes(&[ModeKind::Panes])
+            }
+            Action::ComposeNoteEntry => ActionScope::Modes(&[ModeKind::Notes, ModeKind::Todo]),
+            // The gate (`open_codegraph_relations`) checks the
+            // *selected row's* `mode` field rather than the query
+            // prefix directly, but the two coincide in practice —
+            // `&`/`$` are the only modes that ever produce
+            // "codegraph"/"tags" rows.
+            Action::CodegraphRelations => ActionScope::Modes(&[ModeKind::Codegraph, ModeKind::Tags]),
+            // Also fires for the `'` meta-prefix pseudo-state
+            // (`is_meta_query()`), which has no `ModeKind` variant of
+            // its own — it resolves to `ModeKind::History` under
+            // `active_mode()`, so it isn't represented here. Tab
+            // colliding with something else during meta-entry is a
+            // corner case not worth a dedicated `ModeKind::Meta`.
+            Action::JiraFieldComplete => ActionScope::Modes(&[
+                ModeKind::Jira,
+                ModeKind::Notes,
+                ModeKind::Todo,
+                ModeKind::Segments,
+                ModeKind::Similar,
+                ModeKind::Paperless,
+                ModeKind::Question,
+            ]),
+            _ => ActionScope::Global,
+        }
+    }
+}
+
+/// Where an [`Action`] is reachable — see [`Action::scope`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ActionScope {
+    /// Meaningfully dispatched regardless of the active prefix mode.
+    Global,
+    /// Only reachable in one of these prefix modes; a no-op (status
+    /// message) everywhere else.
+    Modes(&'static [crate::tui::mode::ModeKind]),
+}
+
+impl ActionScope {
+    /// True if an action with this scope would actually do something
+    /// in `mode` (as opposed to hitting its own no-op gate).
+    fn applies_to(self, mode: crate::tui::mode::ModeKind) -> bool {
+        match self {
+            ActionScope::Global => true,
+            ActionScope::Modes(modes) => modes.contains(&mode),
+        }
+    }
+}
+
+/// Whether two actions' scopes can genuinely compete for the same
+/// keypress. `Global`+`Global` always can (both are always active).
+/// `Global`+`Modes(_)` cannot: `action_for_key`'s tiered resolution
+/// always prefers the scoped action in its own mode and falls back
+/// to the global one everywhere else, so there's no real ambiguity
+/// to warn about. `Modes(x)`+`Modes(y)` can only compete where the
+/// two mode sets actually overlap.
+pub(crate) fn scopes_conflict(a: ActionScope, b: ActionScope) -> bool {
+    match (a, b) {
+        (ActionScope::Global, ActionScope::Global) => true,
+        (ActionScope::Global, ActionScope::Modes(_)) | (ActionScope::Modes(_), ActionScope::Global) => false,
+        (ActionScope::Modes(x), ActionScope::Modes(y)) => x.iter().any(|m| y.contains(m)),
+    }
 }
 
 /// A parsed key binding. `None` means "any key with these
@@ -1602,27 +1691,32 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
         bindings.set(*a, specs);
     }
 
-    // Detect duplicate key bindings (same key bound to multiple actions).
-    // The first action in ALL_ACTIONS order wins; the others are silently
-    // shadowed. We warn about all shadowed bindings so the user can fix
-    // the conflict.
+    // Detect duplicate key bindings (same key bound to multiple actions
+    // whose scopes can actually compete — see `scopes_conflict`). Actions
+    // scoped to disjoint prefix modes are exempt: only one prefix mode is
+    // ever active at a time, so they can never really collide. Among
+    // actions that DO conflict, the first in ALL_ACTIONS order wins (see
+    // `action_for_key`); the others are silently shadowed. We warn about
+    // all shadowed bindings so the user can fix the conflict.
     {
-        let mut seen: std::collections::HashMap<(KeyCode, KeyModifiers), &'static str> =
+        let mut seen: std::collections::HashMap<(KeyCode, KeyModifiers), (&'static str, Action)> =
             std::collections::HashMap::new();
         for a in ALL_ACTIONS {
             for spec in bindings.specs(*a) {
                 let key = (spec.code, spec.modifiers);
-                if let Some(prev) = seen.get(&key) {
-                    eprintln!(
-                        "warning: key.{}={} is bound to the same key ({}) as {}; \
-                         only the first binding wins",
-                        a.config_key(),
-                        format_key_spec(*spec),
-                        format_key_spec(*spec),
-                        prev,
-                    );
+                if let Some((prev_name, prev_action)) = seen.get(&key) {
+                    if scopes_conflict(a.scope(), prev_action.scope()) {
+                        eprintln!(
+                            "warning: key.{}={} is bound to the same key ({}) as {}; \
+                             only the first binding wins",
+                            a.config_key(),
+                            format_key_spec(*spec),
+                            format_key_spec(*spec),
+                            prev_name,
+                        );
+                    }
                 } else {
-                    seen.insert(key, a.config_key());
+                    seen.insert(key, (a.config_key(), *a));
                 }
             }
         }
@@ -1632,23 +1726,44 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
 }
 
 /// Try to match a `KeyEvent` against the binding table, returning
-/// the first action whose spec matches. Iteration order is the
-/// `ALL_ACTIONS` order, so earlier entries win on collisions. (We
-/// don't currently try to detect collisions; the help overlay lists
-/// every binding so the user can spot duplicates themselves.)
+/// the action that should fire given `current_mode` (the active
+/// prefix mode — see `crate::tui::mode::active_mode`). When several
+/// actions are bound to the same key, resolution is tiered: (1) a
+/// mode-scoped action (`ActionScope::Modes`) whose set contains
+/// `current_mode` wins — a deliberate same-key override for the
+/// active mode; else (2) a `ActionScope::Global` action wins,
+/// unchanged from the historical "first in `ALL_ACTIONS` order"
+/// behavior; else (3) whatever mode-scoped action comes first anyway
+/// — it doesn't apply here, but the key should still be captured
+/// (and show that action's own "wrong mode" status message) rather
+/// than falling through to typing the character, matching today's
+/// behavior for a key bound to a single mode-scoped action pressed
+/// outside its mode. Within each tier, `ALL_ACTIONS` order is the
+/// tiebreaker.
 ///
 /// An action with several bound specs is matched if the event
 /// matches *any* of them — pressing F1 or C-h both fire
 /// `Action::OpenHelp` if the user wrote `key.open-help=C-h,F1`.
-pub fn action_for_key(bindings: &KeyBindings, key: &KeyEvent) -> Option<Action> {
-    for a in ALL_ACTIONS {
-        for spec in bindings.specs(*a) {
-            if spec.code == key.code && spec.modifiers == key.modifiers {
-                return Some(*a);
-            }
-        }
+pub fn action_for_key(
+    bindings: &KeyBindings,
+    key: &KeyEvent,
+    current_mode: crate::tui::mode::ModeKind,
+) -> Option<Action> {
+    let matches = || {
+        ALL_ACTIONS.iter().copied().filter(|a| {
+            bindings
+                .specs(*a)
+                .iter()
+                .any(|spec| spec.code == key.code && spec.modifiers == key.modifiers)
+        })
+    };
+    if let Some(a) = matches().find(|a| matches!(a.scope(), ActionScope::Modes(_)) && a.scope().applies_to(current_mode)) {
+        return Some(a);
     }
-    None
+    if let Some(a) = matches().find(|a| matches!(a.scope(), ActionScope::Global)) {
+        return Some(a);
+    }
+    matches().next()
 }
 
 /// Join a slice of `KeySpec` into the canonical display form

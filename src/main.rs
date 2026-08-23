@@ -1371,6 +1371,9 @@ pub fn validate_config() -> ConfigReport {
     }
 
     // --- Key-binding collision detection ---
+    // Actions scoped to disjoint prefix modes (see `Action::scope`) are
+    // exempt: only one prefix mode is ever active at a time, so they can
+    // never really compete for the same keypress — see `scopes_conflict`.
     use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
     let mut seen_specs: std::collections::HashMap<String, tui::bindings::Action> =
@@ -1379,14 +1382,16 @@ pub fn validate_config() -> ConfigReport {
         for spec in specs {
             let spec_str = tui::format_key_spec(*spec);
             if let Some(prev) = seen_specs.get(&spec_str) {
-                issues.push(ConfigIssue {
-                    level: ConfigIssueLevel::Warning,
-                    category: "key".into(),
-                    message: format!(
-                        "{:?} is bound to the same key ({}) as {:?}; only the first action wins",
-                        action, spec_str, prev
-                    ),
-                });
+                if tui::bindings::scopes_conflict(action.scope(), prev.scope()) {
+                    issues.push(ConfigIssue {
+                        level: ConfigIssueLevel::Warning,
+                        category: "key".into(),
+                        message: format!(
+                            "{:?} is bound to the same key ({}) as {:?}; only the first action wins",
+                            action, spec_str, prev
+                        ),
+                    });
+                }
             } else {
                 seen_specs.insert(spec_str.clone(), action);
             }
