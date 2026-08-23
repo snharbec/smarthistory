@@ -1884,22 +1884,29 @@ pub(crate) fn write_key_binding_to_config(action: Action, specs: &[KeySpec]) -> 
 #[cfg(test)]
 mod write_key_binding_to_config_tests {
     use super::{Action, KeySpec, write_key_binding_to_config};
+    use crate::tui::tests::ENV_LOCK;
     use crossterm::event::{KeyCode, KeyModifiers};
-    use std::sync::Mutex;
 
-    /// Same "serialise every test that mutates process-level `$HOME`"
-    /// rationale as `write_theme_to_config_tests::HOME_LOCK`
-    /// (`src/tui.rs`) — a sibling test suite that mutates the same
-    /// global env var and would otherwise race this one under the
-    /// parallel test runner.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    /// Reuses the crate-wide `ENV_LOCK` (`src/tui/tests.rs`) rather than
+    /// a lock private to this module — a local `Mutex` here would only
+    /// serialise tests WITHIN this module, not against every other
+    /// `$HOME`-mutating test in the crate (`write_theme_to_config_tests`
+    /// in `src/tui.rs`, `expand_home_*`/`config_parses_user_file` in
+    /// `src/util.rs`/`src/main.rs`, …) — `cargo test` runs the whole
+    /// crate's tests in one process, so two independently-locked test
+    /// suites can still mutate the same process-level `$HOME` at the
+    /// same time. This was exactly that bug: a separate local
+    /// `HOME_LOCK` here raced `write_theme_to_config_tests::HOME_LOCK`
+    /// under CI's parallel test runner (no `--test-threads=1`),
+    /// intermittently corrupting unrelated tests' `$HOME`-dependent
+    /// state.
 
     /// Helper: seed a config file, run the write, return the
     /// resulting file text. Uses a temp `$HOME` so the test never
     /// touches the user's real config — same pattern as
     /// `write_theme_to_config_tests::run_with_existing`.
     fn run_with_existing(existing: &str, action: Action, spec: Option<KeySpec>) -> Result<String, String> {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp_home = std::env::temp_dir().join(format!(
             "smarthistory_key_binding_write_test_{}_{:?}",
             std::process::id(),
@@ -1912,7 +1919,7 @@ mod write_key_binding_to_config_tests {
         let cfg_path = cfg_dir.join("config");
         std::fs::write(&cfg_path, existing).expect("write seed config");
         let prev_home = std::env::var("HOME").ok();
-        // SAFETY: single-threaded test, serialised by HOME_LOCK,
+        // SAFETY: single-threaded test, serialised by ENV_LOCK,
         // restored on the way out — same convention as
         // `write_theme_to_config_tests::run_with_existing`.
         unsafe {

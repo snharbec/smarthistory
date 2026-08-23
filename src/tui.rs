@@ -17577,22 +17577,22 @@ mod tui_session_tests {
 mod write_theme_to_config_tests {
     use super::write_theme_to_config;
     use crate::tui::theme::ColorScheme;
-    use std::sync::Mutex;
 
-    /// Process-wide mutex that serialises every
-    /// `write_theme_to_config` test. The function
-    /// mutates the process-level `$HOME` env var to
-    /// redirect `config_path()` to a temp file, and
-    /// the parallel test runner would otherwise let
-    /// two tests stomp on each other's env (one
-    /// setting $HOME to /tmp/A while another sets it
-    /// to /tmp/B). The `unsafe` `set_var` calls are
-    /// the load-bearing concern here; serialising
-    /// the test through a single mutex is the
-    /// standard workaround. We use a `std::sync::Mutex`
-    /// (NOT `parking_lot` or similar) to keep the test
-    /// dependency footprint at zero.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    /// Reuses the crate-wide `ENV_LOCK` (`src/tui/tests.rs`) rather than
+    /// a lock private to this module. `write_theme_to_config` mutates the
+    /// process-level `$HOME` env var to redirect `config_path()` to a
+    /// temp file; a lock scoped to just this module would only serialise
+    /// tests against EACH OTHER, not against every other `$HOME`-mutating
+    /// test in the crate (`write_key_binding_to_config_tests` in
+    /// `src/tui/bindings.rs`, `expand_home_*`/`config_parses_user_file`
+    /// in `src/util.rs`/`src/main.rs`, …) — `cargo test` runs the whole
+    /// crate's tests in one process, so two independently-locked test
+    /// suites can still mutate the same process-level `$HOME` at the same
+    /// time. This was exactly that bug: a separate local `HOME_LOCK` here
+    /// raced `write_key_binding_to_config_tests`'s own lock under CI's
+    /// parallel test runner (no `--test-threads=1`), intermittently
+    /// corrupting unrelated tests' `$HOME`-dependent state.
+    use crate::tui::tests::ENV_LOCK;
 
     /// Helper: build a config file with the given
     /// existing contents, run the write, and return
@@ -17611,7 +17611,7 @@ mod write_theme_to_config_tests {
         // through this global lock. The lock is
         // released on drop (the guard is held for
         // the lifetime of this function).
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp_home = std::env::temp_dir().join(format!(
             "smarthistory_theme_write_test_{}_{:?}",
@@ -17631,7 +17631,7 @@ mod write_theme_to_config_tests {
         let prev_home = std::env::var("HOME").ok();
         // SAFETY: this is a single-threaded test
         // setting an env var for the duration of the
-        // test (serialised by HOME_LOCK above). We
+        // test (serialised by ENV_LOCK above). We
         // restore the previous value on the way out.
         // Mutating process-level env is the only
         // way to influence `config_path()` from here
