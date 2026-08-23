@@ -592,6 +592,13 @@ pub(crate) struct JiraPrefillFetchRequest {
 pub(crate) struct JiraPrefillResult {
     pub(crate) issue: crate::jira::JiraIssue,
     pub(crate) clone_fields: Vec<(String, String)>,
+    /// `Some(message)` when `JIRA_CLONE_FIELDS` was configured but the
+    /// secondary `fetch_custom_fields` call failed — `clone_fields` is
+    /// empty in that case too, but for a DIFFERENT reason than "nothing
+    /// configured", and the dialog should tell the user so rather than
+    /// silently opening as if cloning had never been requested. `None`
+    /// both when nothing was configured and when the fetch succeeded.
+    pub(crate) clone_fields_error: Option<String>,
 }
 
 /// An in-flight fetch kicked off once `Action::CreateJiraTemplateFromIssue`'s
@@ -1837,6 +1844,19 @@ impl App {
                             .push(crate::tui::state::ExtraFieldKind::ClonedCustomField(id));
                     }
                 }
+                // Same "surface a partial failure, don't just silently
+                // proceed as if nothing was requested" policy
+                // `create_and_maybe_link`'s `link_warning` uses for a
+                // failed link — here it's a failed clone-fields fetch
+                // rather than a failed link, but the dialog is already
+                // open by the time this fires, so a status message
+                // (not a dialog field) is the only way to surface it.
+                if let Some(warning) = result.clone_fields_error {
+                    self.set_status_message(format!(
+                        "JIRA issue prefilled, but cloning custom fields failed: {}",
+                        warning
+                    ));
+                }
             }
             Err(e) => {
                 if let Some(description_field) = dialog.fields.get_mut(1)
@@ -2160,6 +2180,21 @@ impl App {
             self.set_status_message(
                 "Create-JIRA-template-from-issue is only available in JIRA search (type `-`)"
                     .to_string(),
+            );
+            return;
+        }
+        // A previous invocation's background fetch is still running.
+        // `template_name_prompt` is a modal overlay, so this can only be
+        // reached again after that prompt closed (i.e. the user already
+        // submitted a name and `start_jira_template_fetch` is mid-flight
+        // for a DIFFERENT row) — without this guard, opening a second
+        // prompt and submitting it would silently overwrite
+        // `jira_template_fetch_request`, and the first fetch's result
+        // would be dropped with no error when its thread finished (the
+        // channel receiver it was sending to no longer exists).
+        if self.jira_template_fetch_in_flight {
+            self.set_status_message(
+                "a JIRA template fetch is already in progress; wait for it to finish".to_string(),
             );
             return;
         }

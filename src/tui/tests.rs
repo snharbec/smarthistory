@@ -1183,6 +1183,103 @@ fn confirm_delete_closes_on_user_cancel_binding() {
     assert!(app.confirm_delete.is_none());
 }
 
+/// Regression: `_ if is_cancel_key` was matched before the explicit
+/// Ctrl-C arm, so with the default Cancel binding (which includes
+/// `C-c`) pressing Ctrl-C only closed the dialog instead of aborting
+/// the whole TUI. Ctrl-C must close the dialog AND set `cancelled`.
+#[test]
+fn confirm_delete_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = handle_confirm_delete_key(&mut app, ctrl_c, ConfirmMode::DeleteSelected);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression as `confirm_delete_ctrl_c_aborts_tui`, for the
+/// sibling `%` (processes) signal-confirmation dialog.
+#[test]
+fn confirm_signal_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999,
+        name: "sleep".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_confirm_signal_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the zoxide "save as session?" prompt.
+#[test]
+fn zoxide_save_prompt_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.zoxide_save_prompt = Some(crate::tui::state::ZoxideSavePrompt {
+        label: "my-project".to_string(),
+        directory: "/tmp/my-project".to_string(),
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_zoxide_save_prompt_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.zoxide_save_prompt.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the command palette.
+#[test]
+fn command_menu_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_command_menu();
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_command_menu_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(!app.is_command_menu_open());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the captured-output overlay.
+#[test]
+fn output_view_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.output_view = Some(OutputView { text: "captured\noutput".to_string(), scroll: 0 });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let result = crate::tui::handle_output_view_key(&mut app, ctrl_c, 10);
+    assert!(matches!(result, crate::tui::OutputViewResult::Close));
+    assert!(app.output_view.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the `?` question overlay.
+#[test]
+fn question_view_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.question_view = Some(QuestionView {
+        question: "what does that do".to_string(),
+        text: "an answer".to_string(),
+        scroll: 0,
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::mode::question::handle_question_view_key(&mut app, ctrl_c, 10);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.question_view.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the CodeGraph callers/callees picker.
+#[test]
+fn codegraph_relations_picker_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.codegraph_relations_picker = Some(make_relations_picker(5));
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::mode::codegraph::handle_codegraph_relations_picker_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.codegraph_relations_picker.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
 #[test]
 fn theme_picker_default_binding_and_list_layout() {
     let bindings = KeyBindings::defaults();
@@ -1366,6 +1463,45 @@ fn key_bindings_editor_capture_sets_pending_conflict_for_global_vs_global() {
     assert_eq!(editor.capturing, Some(Action::Down));
     assert_eq!(editor.pending_conflict, Some((Action::Down, up_spec, Action::Up)));
     assert_ne!(app.bindings.specs(Action::Down)[0], up_spec, "not committed yet");
+}
+
+/// Regression: the capture-mode conflict scan used to stop at the FIRST
+/// action found holding the captured key, regardless of whether it
+/// actually conflicted — so if that first holder happened to be scoped
+/// to a disjoint mode, a genuine conflict with a LATER holder of the
+/// same key went completely undetected and the rebind committed with no
+/// warning at all.
+///
+/// Pre-bind one key to two actions: `DownloadJiraIssue` (Jira scope,
+/// earlier in `ALL_ACTIONS` order, disjoint from Worktree) and
+/// `CreateWorktree` (Worktree scope, later in `ALL_ACTIONS` order).
+/// Capture that same key for `DisposeWorktree` (also Worktree-scoped —
+/// genuinely conflicts with `CreateWorktree`, not with
+/// `DownloadJiraIssue`). The old scan found `DownloadJiraIssue` first,
+/// saw no conflict, and committed immediately. The fix must keep
+/// scanning past it and find the real conflict with `CreateWorktree`.
+#[test]
+fn key_bindings_editor_capture_finds_conflict_past_a_disjoint_first_holder() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let spec = bindings::parse_key_spec("F19").expect("F19");
+    app.bindings.set(Action::DownloadJiraIssue, vec![spec]);
+    app.bindings.set(Action::CreateWorktree, vec![spec]);
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::DisposeWorktree);
+    let key = KeyEvent::new(spec.code, spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert_eq!(
+        editor.pending_conflict,
+        Some((Action::DisposeWorktree, spec, Action::CreateWorktree)),
+        "must detect the real Worktree/Worktree conflict with CreateWorktree, \
+         not stop at the disjoint DownloadJiraIssue holder"
+    );
+    assert_ne!(
+        app.bindings.specs(Action::DisposeWorktree).first(),
+        Some(&spec),
+        "must not have committed without asking"
+    );
 }
 
 /// `y`/`Enter` on a conflict prompt commits the pending rebind anyway,
@@ -12535,6 +12671,34 @@ fn parse_worktree_list_empty_output_is_empty() {
     assert_eq!(crate::tui::mode::worktree::parse_worktree_list(""), Vec::new());
 }
 
+/// Valid UTF-8 bytes decode and parse exactly like the `&str` form —
+/// `parse_worktree_list_bytes` is just a byte-level wrapper.
+#[test]
+fn parse_worktree_list_bytes_valid_utf8_matches_str_form() {
+    let output = "worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n\n";
+    let from_bytes = crate::tui::mode::worktree::parse_worktree_list_bytes(output.as_bytes());
+    let from_str = crate::tui::mode::worktree::parse_worktree_list(output);
+    assert_eq!(from_bytes, Ok(from_str));
+}
+
+/// Regression: `fetch` used to decode `git worktree list --porcelain`'s
+/// stdout with `String::from_utf8_lossy`, silently replacing invalid
+/// bytes with U+FFFD — a worktree path containing non-UTF8 bytes would
+/// end up stored under a corrupted path that no longer matches the real
+/// on-disk directory, yet still gets reused verbatim as a literal
+/// `git -C <path>` argument for dirty-checking and disposal.
+/// `parse_worktree_list_bytes` must reject invalid UTF-8 outright
+/// (`Err(())`) rather than silently mangling it, so `fetch` can degrade
+/// to "no worktrees" for that refresh instead of returning a corrupted
+/// row.
+#[test]
+fn parse_worktree_list_bytes_rejects_invalid_utf8() {
+    let mut bytes = b"worktree /repo/".to_vec();
+    bytes.extend_from_slice(&[0xFF, 0xFE]); // not valid UTF-8
+    bytes.extend_from_slice(b"bad\nHEAD abc123\nbranch refs/heads/main\n\n");
+    assert_eq!(crate::tui::mode::worktree::parse_worktree_list_bytes(&bytes), Err(()));
+}
+
 /// `build_rows` preserves `git worktree list`'s own order (main
 /// worktree first) via a descending synthetic `timestamp`, same
 /// convention `zoxide::build_rows` uses for its own ranked order.
@@ -12861,6 +13025,74 @@ fn worktree_create_flow_dirty_repo_opens_confirm_carry_over() {
     });
     std::env::set_current_dir(&prev_cwd).expect("restore cwd");
     let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Regression: `git stash push` without `--include-untracked` saves
+/// nothing for an untracked-only dirty checkout, yet `git stash apply`
+/// used to run unconditionally afterward in the new worktree — for a
+/// repo whose only "dirty" state is an untracked file, that could
+/// silently apply some unrelated pre-existing stash entry instead of
+/// doing nothing. Confirm the untracked file actually carries over
+/// into the new worktree (proving `--include-untracked` is now passed)
+/// and is gone from the source checkout (proving something really was
+/// stashed, not skipped).
+#[test]
+fn worktree_create_flow_carry_over_captures_untracked_file() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_carry_over_untracked", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    // Untracked-only dirty state: a brand-new file, never `git add`-ed.
+    std::fs::write(repo.join("untracked.txt"), "new work\n").expect("write untracked file");
+    let base_dir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_carry_over_target_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.worktree_basedir = Some(base_dir.clone());
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> ConfirmCarryOver (dirty repo)
+        assert_eq!(
+            app.worktree_create_flow.as_ref().map(|f| f.step),
+            Some(WorktreeCreateStep::ConfirmCarryOver)
+        );
+        app.worktree_create_confirm_carry_over(true);
+        let ret = app.advance_worktree_create_flow(); // -> PickProject (blank filter) -> execute
+        assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
+        assert!(ret || app.selection.is_some(), "a cd command must be staged on success");
+
+        let new_untracked = base_dir.join("feature").join("untracked.txt");
+        assert!(
+            new_untracked.exists(),
+            "the untracked file must have carried over into the new worktree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&new_untracked).unwrap(),
+            "new work\n"
+        );
+        assert!(
+            !repo.join("untracked.txt").exists(),
+            "the untracked file must be gone from the source checkout (it was stashed, not copied)"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(base_dir.join("feature"))
+        .output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&base_dir);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
@@ -13251,6 +13483,65 @@ fn confirm_delete_dispose_worktree_key_y_removes_worktree_and_closes_dialog() {
     let _ = std::fs::remove_dir_all(&repo);
 }
 
+/// Regression: the dirty/unpushed warning shown by
+/// `open_worktree_dispose_confirm` is computed once, when the dialog
+/// opens — if the worktree becomes dirty *after* that (edited from
+/// another terminal while the dialog sits open) but the stored
+/// `ConfirmMode` still says `dirty: false`, pressing `y` must NOT
+/// silently force-remove the new work. `dispose_worktree` re-checks
+/// dirtiness fresh right before running `git worktree remove --force`
+/// and refuses if it disagrees with what was shown.
+#[test]
+fn confirm_delete_dispose_worktree_refuses_when_dirtied_after_dialog_opened() {
+    let Some(repo) = worktree_scratch_repo("dispose_stale_dirty", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-dispose-stale",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+
+    // The dialog was opened while the worktree was still clean.
+    let mut app = directories_test_app(&[]);
+    app.confirm_delete = Some(ConfirmMode::DisposeWorktree {
+        repo_root: repo.clone(),
+        path: target.to_string_lossy().to_string(),
+        label: "feature".to_string(),
+        dirty: false,
+        unpushed: crate::tui::mode::worktree::WorktreeUnpushedStatus::NoUpstream,
+    });
+
+    // Simulate editing the worktree from another terminal while the
+    // dialog is still open.
+    std::fs::write(target.join("new_file.txt"), "uncommitted work\n").expect("dirty the worktree");
+
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty());
+    let mode = app.confirm_delete.clone().unwrap();
+    handle_confirm_delete_key(&mut app, y, mode);
+
+    assert!(app.confirm_delete.is_none(), "the dialog must still close");
+    assert!(
+        target.is_dir(),
+        "the worktree must NOT be removed — it's dirtier now than the dialog warned about"
+    );
+    assert!(
+        target.join("new_file.txt").exists(),
+        "the new uncommitted work must survive"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("changed since this dialog opened"),
+        "status should explain why disposal was refused: {status:?}"
+    );
+
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", "--force"]).arg(&target).output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
 /// `n` leaves the worktree completely untouched, same as every other
 /// `ConfirmMode` variant's "no" answer.
 #[test]
@@ -13536,23 +13827,23 @@ fn zoxide_save_prompt_key_dispatch() {
     assert!(app.zoxide_save_prompt.is_none());
     assert!(app.selection.is_some());
 
-    // With the DEFAULT bindings, `Action::Cancel` is bound to both
-    // `Esc` and `C-c` (see `KeyBindings::defaults`), so Ctrl-C hits
-    // the `_ if is_cancel_key` arm before the dedicated
-    // `KeyCode::Char('c') + CONTROL` arm ever runs — same
-    // shadowed-fallback shape as `handle_confirm_delete_key`. That
-    // dedicated arm only becomes reachable if the user remaps
-    // `key.cancel` away from `C-c`; under defaults, Ctrl-C behaves
-    // exactly like `n`/Cancel here — decline the save, still stage.
+    // Ctrl-C is the panic button everywhere in this TUI and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — the dedicated `KeyCode::Char('c') + CONTROL` arm is
+    // checked before the general `is_cancel_key` fallback, so under
+    // defaults Ctrl-C aborts the whole TUI (no directory jump staged)
+    // rather than merely declining the save like `n` does.
     let dir = zoxide_test_dir("key-ctrlc");
     let mut app = zoxide_test_app_selecting(&dir);
     app.select_for_run();
     assert!(app.zoxide_save_prompt.is_some());
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let quit = handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(quit, "ctrl+c must exit the TUI");
     assert!(app.zoxide_save_prompt.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
     assert!(
-        app.selection.is_some(),
-        "Ctrl-C under default bindings must still stage the directory jump"
+        app.selection.is_none(),
+        "ctrl+c aborts, it must not stage the directory jump"
     );
 
     // A stray, unbound key does nothing — the prompt stays open.
@@ -23653,6 +23944,51 @@ fn create_jira_template_from_issue_opens_prompt() {
     assert!(prompt.error.is_none());
 }
 
+/// Regression: triggering the action again while a previous fetch is
+/// still in flight used to silently overwrite
+/// `jira_template_fetch_request` — the first fetch's result would then
+/// be dropped with no error when its background thread finished (the
+/// channel receiver it was sending to no longer existed). It must now
+/// refuse with a status message instead of opening a second prompt.
+#[test]
+fn create_jira_template_from_issue_refuses_while_fetch_in_flight() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        issues: vec![crate::jira::JiraIssue { key: "PROJ-42".to_string(), ..Default::default() }],
+        recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..FakeJira::default()
+    };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.query = String::from("-");
+    app.refresh();
+    let past = std::time::Instant::now()
+        - JIRA_IDLE_TIMEOUT
+        - JIRA_DEBOUNCE
+        - std::time::Duration::from_millis(50);
+    app.jira_debounce_started = Some(past);
+    app.jira_idle_started = Some(past);
+    app.jira_maybe_autocall();
+    app.list_state.select(Some(0));
+
+    // Simulate a fetch already in flight (e.g. from a previous row,
+    // still running on a background thread).
+    app.jira_template_fetch_in_flight = true;
+
+    app.create_jira_template_from_issue();
+
+    assert!(
+        app.template_name_prompt.is_none(),
+        "must not open a second prompt while a fetch is already running"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("already in progress"),
+        "status should explain why: {:?}",
+        status
+    );
+}
+
 /// Outside of JIRA mode, the action is a no-op with a status message —
 /// same policy as `download_jira_issue`.
 #[test]
@@ -25236,18 +25572,18 @@ fn handle_prefix_picker_key_ctrl_c_closes_picker() {
     app.open_prefix_picker();
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     let quit = handle_prefix_picker_key(&mut app, ctrl_c);
-    // Ctrl+C is bound to Cancel by
-    // default, so the Cancel action
-    // fires: close the picker, do not
-    // exit the TUI. This mirrors the
-    // command palette behaviour where
-    // the user's Cancel binding
-    // dismisses the overlay.
-    assert!(!quit, "picker cancel (ctrl+c) should not exit TUI");
+    // Ctrl-C is the panic button everywhere in this TUI and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — it closes the picker AND aborts the whole TUI, matching
+    // every other overlay (help view, theme picker, confirm dialogs,
+    // …). Previously this checked Cancel's binding before Ctrl-C, so
+    // Ctrl-C was silently swallowed as an ordinary dismiss; fixed to
+    // check Ctrl-C first.
+    assert!(quit, "ctrl+c must exit the TUI, not just close the picker");
     assert!(app.prefix_picker.is_none(), "picker should close on ctrl+c");
     assert!(
-        !app.cancelled,
-        "cancelled flag should not be set by picker close"
+        app.cancelled,
+        "cancelled flag must be set so the run loop actually exits"
     );
 }
 
@@ -31685,6 +32021,57 @@ fn project_since_prompt_esc_cancels_without_staging() {
     assert_eq!(app.selection, None);
 }
 
+/// Regression: digit entry had no length cap, so a long-enough digit
+/// string could overflow `u64::parse` in `answer_project_since_prompt`
+/// and silently stage an un-backdated switch. The buffer must stop
+/// growing at 15 digits — comfortably more than any realistic backdate
+/// needs, and short enough that `u64::parse` can never overflow.
+#[test]
+fn project_since_prompt_caps_digit_entry_at_fifteen() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "demo".to_string(),
+        buffer: String::new(),
+        cursor: 0,
+    });
+    for c in "123456789012345678901234567890".chars() {
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    let buffer = app.project_since_prompt.as_ref().unwrap().buffer.clone();
+    assert_eq!(buffer.chars().count(), 15, "buffer must stop growing at 15 digits: {buffer:?}");
+    assert!(buffer.parse::<u64>().is_ok(), "15 digits must always fit in u64: {buffer:?}");
+}
+
+/// Defense in depth: even if `answer_project_since_prompt` is ever
+/// reached with a buffer the digit cap didn't prevent (e.g. a future
+/// caller that builds `ProjectSincePrompt` directly, bypassing the key
+/// handler), a parse failure must surface a status message rather than
+/// silently staging an un-backdated switch with no indication anything
+/// was wrong.
+#[test]
+fn project_since_prompt_overflow_buffer_surfaces_status_message_not_silent_zero() {
+    let mut app = directories_test_app(&[]);
+    app.project_since_prompt = Some(crate::tui::state::ProjectSincePrompt {
+        slug: "demo".to_string(),
+        // 20 nines: overflows u64::MAX (~1.8e19), unreachable via the
+        // key handler's 15-digit cap, constructed directly to exercise
+        // the defensive path.
+        buffer: "9".repeat(20),
+        cursor: 20,
+    });
+    app.answer_project_since_prompt();
+    assert_eq!(
+        app.selection.as_deref(),
+        Some("smarthistory project select demo"),
+        "must still stage the plain project switch, just without --since"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("too large"),
+        "status should explain the number was rejected: {status:?}"
+    );
+}
+
 /// A row from a different mode is never staged as a project
 /// selection, even if `.` mode happens to be active (defensive
 /// guard against a stale `merged_rows` from a prior mode).
@@ -31960,7 +32347,7 @@ fn jira_prefill_fetch_fills_placeholder_fields() {
     app.process_jira_prefill_fetch_result(
         request,
         "PROJ-1".to_string(),
-        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new(), clone_fields_error: None }),
     );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
@@ -31995,7 +32382,7 @@ fn jira_prefill_fetch_does_not_overwrite_user_edited_description() {
     app.process_jira_prefill_fetch_result(
         request,
         "PROJ-1".to_string(),
-        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new(), clone_fields_error: None }),
     );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
@@ -32031,7 +32418,7 @@ fn jira_prefill_fetch_stale_source_key_is_ignored() {
     app.process_jira_prefill_fetch_result(
         request,
         "PROJ-1".to_string(),
-        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new() }),
+        Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields: Vec::new(), clone_fields_error: None }),
     );
 
     let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
@@ -32628,6 +33015,7 @@ fn jira_prefill_fetch_populates_cloned_custom_fields() {
             ("customfield_11601".to_string(), "Team ComS".to_string()),
             ("customfield_10050".to_string(), "High".to_string()),
         ],
+        clone_fields_error: None,
     };
     app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(result));
 
@@ -32641,6 +33029,50 @@ fn jira_prefill_fetch_populates_cloned_custom_fields() {
             crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_11601".to_string()),
             crate::tui::state::ExtraFieldKind::ClonedCustomField("customfield_10050".to_string()),
         ]
+    );
+}
+
+/// Regression: a failed `fetch_custom_fields` call used to be silently
+/// swallowed via `.unwrap_or_default()` — the dialog opened with no
+/// cloned fields and no indication anything had gone wrong,
+/// indistinguishable from "nothing was configured to clone". A failure
+/// must now surface a status message, mirroring the codebase's own
+/// `link_warning` precedent for the analogous "partial success" case.
+#[test]
+fn jira_prefill_fetch_surfaces_status_message_when_clone_fields_fetch_fails() {
+    let mut app = directories_test_app(&[]);
+    app.create_jira_issue_dialog = Some(test_create_jira_issue_dialog(
+        "PROJ-1 summary",
+        crate::tui::mode::jira::JIRA_PREFILL_LOADING_PLACEHOLDER,
+        "",
+        Some("PROJ-1"),
+    ));
+    let request = crate::tui::mode::jira::JiraPrefillFetchRequest {
+        receiver: std::sync::mpsc::channel().1,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let issue = crate::jira::JiraIssue {
+        key: "PROJ-1".to_string(),
+        description: "Full description".to_string(),
+        ..Default::default()
+    };
+    let result = crate::tui::mode::jira::JiraPrefillResult {
+        issue,
+        clone_fields: Vec::new(),
+        clone_fields_error: Some("permission denied".to_string()),
+    };
+    app.process_jira_prefill_fetch_result(request, "PROJ-1".to_string(), Ok(result));
+
+    let dialog = app.create_jira_issue_dialog.as_ref().unwrap();
+    assert!(
+        dialog.extra_fields.is_empty(),
+        "no cloned fields on a failed fetch"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("cloning custom fields failed") && status.contains("permission denied"),
+        "status should explain the clone-fields fetch failed and why: {:?}",
+        status
     );
 }
 

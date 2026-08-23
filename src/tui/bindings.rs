@@ -1715,12 +1715,19 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
     // `action_for_key`); the others are silently shadowed. We warn about
     // all shadowed bindings so the user can fix the conflict.
     {
-        let mut seen: std::collections::HashMap<(KeyCode, KeyModifiers), (&'static str, Action)> =
+        // Every action seen so far for a given key, not just the first —
+        // see the identical fix (and its rationale) in `main.rs`'s
+        // `validate_config`, the sibling copy of this same check. A key
+        // can legitimately be held by several disjoint-mode-scoped
+        // actions at once, so a later action must be checked against ALL
+        // of them, not only whichever happened to claim the key first.
+        let mut seen: std::collections::HashMap<(KeyCode, KeyModifiers), Vec<(&'static str, Action)>> =
             std::collections::HashMap::new();
         for a in ALL_ACTIONS {
             for spec in bindings.specs(*a) {
                 let key = (spec.code, spec.modifiers);
-                if let Some((prev_name, prev_action)) = seen.get(&key) {
+                let holders = seen.entry(key).or_default();
+                for (prev_name, prev_action) in holders.iter() {
                     if scopes_conflict(a.scope(), prev_action.scope()) {
                         eprintln!(
                             "warning: key.{}={} is bound to the same key ({}) as {}; \
@@ -1731,9 +1738,8 @@ pub fn key_bindings_from_config(entries: &HashMap<String, String>) -> KeyBinding
                             prev_name,
                         );
                     }
-                } else {
-                    seen.insert(key, (a.config_key(), *a));
                 }
+                holders.push((a.config_key(), *a));
             }
         }
     }

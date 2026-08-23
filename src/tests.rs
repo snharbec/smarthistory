@@ -2954,6 +2954,30 @@ tmuxpaneoutputdir=~/custom-tmux
         assert!(parse_duration_to_secs("h").is_err(), "unit with no digits");
     }
 
+    /// Regression: `value * multiplier` and the running `total +=`
+    /// used plain `i64` arithmetic with no overflow check. A large
+    /// enough digit component (still comfortably fitting in `i64` on
+    /// its own, so the earlier `.parse::<i64>()` guard didn't catch
+    /// it) would overflow once multiplied by a unit's seconds factor —
+    /// silently wrapping to garbage in a release build, or panicking
+    /// in a debug build. Must now return a clear error instead.
+    #[test]
+    fn parse_duration_to_secs_rejects_overflow() {
+        // 999999999999999 (15 nines) fits in i64 on its own, but
+        // * 86400 (seconds per day) overflows i64::MAX.
+        assert!(
+            parse_duration_to_secs("999999999999999d").is_err(),
+            "a single component overflowing after unit multiplication must be rejected"
+        );
+        // Each component individually fits (the first IS i64::MAX
+        // seconds, the second is a trivial 1 minute), but the running
+        // sum overflows once they're added together.
+        assert!(
+            parse_duration_to_secs("9223372036854775807s1m").is_err(),
+            "the running total overflowing across multiple components must be rejected"
+        );
+    }
+
     // --- day_standard_work_secs -------------------------------------
 
     #[test]
@@ -4068,6 +4092,42 @@ tmuxpaneoutputdir=~/custom-tmux
                 .iter()
                 .any(|i| i.category == "project" && i.message.contains("idlethreshold")),
             "issues: {:?}",
+            report.issues()
+        );
+    }
+
+    /// Regression: the duplicate-key-binding scan used to compare a new
+    /// binding only against the FIRST action ever seen holding that key,
+    /// never against subsequent holders — so a real conflict between the
+    /// second and third action sharing a key went completely undetected.
+    ///
+    /// Three actions bound to the same key: `create-worktree` (Worktree
+    /// scope), `download-jira-issue` (Jira scope, disjoint from Worktree
+    /// — correctly exempt, no warning), `download-jira-matching` (also
+    /// Jira scope — genuinely conflicts with `download-jira-issue`, same
+    /// mode). The old first-seen-only scan only ever compared new
+    /// bindings against `create-worktree` (disjoint from both), so the
+    /// real Jira/Jira collision was silently missed.
+    #[test]
+    fn validate_config_detects_conflict_past_the_first_seen_holder() {
+        let report = validate_project_config(
+            "key.create-worktree = F19\n\
+             key.download-jira-issue = F19\n\
+             key.download-jira-matching = F19\n",
+        );
+        assert!(
+            report.issues().iter().any(|i| i.category == "key"
+                && i.message.contains("DownloadJiraMatching")
+                && i.message.contains("DownloadJiraIssue")),
+            "the Jira/Jira collision between the second and third holder of \
+             F19 must be flagged, not just silently missed: {:?}",
+            report.issues()
+        );
+        assert!(
+            !report.issues().iter().any(|i| i.category == "key"
+                && (i.message.contains("CreateWorktree") && i.message.contains("DownloadJira"))),
+            "Worktree-scoped and Jira-scoped actions sharing a key must \
+             NOT be flagged (disjoint prefix modes never really compete): {:?}",
             report.issues()
         );
     }

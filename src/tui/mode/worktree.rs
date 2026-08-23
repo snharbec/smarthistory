@@ -105,7 +105,11 @@ pub(crate) fn find_repo_root(dir: &std::path::Path) -> Option<std::path::PathBuf
 /// degrades to "no rows" with a normal empty-list message, same
 /// convention `zoxide::fetch` uses for a missing `zoxide` binary.
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
-    let filter = app.worktree_pattern().trim();
+    // Owned (not borrowed from `app`) so the immutable borrow of `app`
+    // is released immediately — the non-UTF8 guard below needs `&mut
+    // app` (via `set_status_message`), and `filter_tokens` is still
+    // needed at the very end to build the rows.
+    let filter = app.worktree_pattern().trim().to_string();
     let filter_tokens: Vec<&str> = filter.split_whitespace().filter(|t| !t.is_empty()).collect();
     let cwd = std::env::current_dir().unwrap_or_default();
     let Some(repo_root) = find_repo_root(&cwd) else {
@@ -117,7 +121,27 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         .args(["worktree", "list", "--porcelain"])
         .output();
     let entries = match output {
-        Ok(o) if o.status.success() => parse_worktree_list(&String::from_utf8_lossy(&o.stdout)),
+        Ok(o) if o.status.success() => match parse_worktree_list_bytes(&o.stdout) {
+            Ok(entries) => entries,
+            Err(()) => {
+                // A worktree path containing non-UTF8 bytes would
+                // otherwise get silently mangled by a lossy decode
+                // (invalid bytes replaced with U+FFFD) — the stored
+                // row's `directory` would then no longer match the
+                // real on-disk path, yet still gets reused verbatim as
+                // a literal `git -C <path>` argument for dirty-checking
+                // and disposal. Degrading to "no worktrees" for this
+                // refresh (rather than silently returning rows with
+                // corrupted paths) is safer than guessing which ones
+                // are still trustworthy.
+                app.set_status_message(
+                    "a worktree path contains invalid UTF-8; run `git worktree list \
+                     --porcelain` directly to inspect it"
+                        .to_string(),
+                );
+                Vec::new()
+            }
+        },
         _ => Vec::new(),
     };
     Ok(build_rows(entries, &filter_tokens, &app.home_list))
@@ -150,6 +174,20 @@ pub(crate) struct WorktreeEntry {
 /// bare
 /// ```
 ///
+/// `parse_worktree_list`, but from `git worktree list --porcelain`'s
+/// raw stdout bytes rather than an already-decoded `&str`. Returns
+/// `Err(())` if the bytes aren't valid UTF-8 — see `fetch`'s doc
+/// comment for why silently lossy-decoding (replacing invalid bytes
+/// with U+FFFD) isn't safe here: a mangled path would no longer match
+/// the real on-disk worktree, yet still gets reused verbatim as a
+/// literal `git -C <path>` argument elsewhere. Split out from `fetch`
+/// as its own `pub(crate)` function so a corrupted-input test doesn't
+/// need an actual non-UTF8 path on disk (most filesystems — APFS
+/// included — don't allow creating one to begin with).
+pub(crate) fn parse_worktree_list_bytes(stdout: &[u8]) -> Result<Vec<WorktreeEntry>, ()> {
+    std::str::from_utf8(stdout).map(parse_worktree_list).map_err(|_| ())
+}
+
 /// `pub(crate)` (not private) so tests can exercise it directly
 /// against canned output without spawning a real `git` process.
 pub(crate) fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {

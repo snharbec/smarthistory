@@ -11250,7 +11250,26 @@ impl App {
     /// worktree list` (the same way every other keystroke does) so the
     /// row disappears immediately; on failure, the row list is left
     /// untouched so the user can see what's still there.
-    fn dispose_worktree(&mut self, repo_root: &std::path::Path, path: &str) {
+    ///
+    /// `shown_dirty` is the dirty flag the confirmation dialog displayed
+    /// when it opened (`ConfirmMode::DisposeWorktree`'s `dirty` field).
+    /// The dialog can sit open for a while — the user might switch to
+    /// another terminal and edit files in the worktree before coming
+    /// back and pressing `y`. Re-checking dirtiness fresh here, right
+    /// before `--force` actually runs, closes that window: if the
+    /// worktree is dirty NOW but wasn't when the warning was shown, we
+    /// refuse rather than silently force-discarding work the user was
+    /// never warned about.
+    fn dispose_worktree(&mut self, repo_root: &std::path::Path, path: &str, shown_dirty: bool) {
+        let now_dirty = crate::tui::mode::worktree::repo_is_dirty(std::path::Path::new(path));
+        if now_dirty && !shown_dirty {
+            self.confirm_delete = None;
+            self.set_status_message(format!(
+                "worktree {path} changed since this dialog opened (now has uncommitted changes); \
+                 dispose it again to see the up-to-date warning"
+            ));
+            return;
+        }
         match crate::tui::mode::worktree::remove_worktree(repo_root, path) {
             Ok(()) => {
                 self.refresh();
@@ -14032,14 +14051,18 @@ fn handle_zoxide_save_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             app.answer_zoxide_save_prompt(false);
             app.selection.is_some()
         }
-        _ if is_cancel_key => {
-            app.answer_zoxide_save_prompt(false);
-            app.selection.is_some()
-        }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.zoxide_save_prompt = None;
             app.cancelled = true;
             true
+        }
+        _ if is_cancel_key => {
+            app.answer_zoxide_save_prompt(false);
+            app.selection.is_some()
         }
         _ => false,
     }
@@ -14099,7 +14122,16 @@ fn handle_project_since_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             prompt.cursor = prompt.buffer.chars().count();
             false
         }
-        KeyCode::Char(c) if c.is_ascii_digit() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        // Capped at 15 digits — comfortably covers any realistic
+        // backdate in minutes (15 nines is ~1.9 billion years) while
+        // staying well under u64::MAX's 20 digits, so `.parse::<u64>()`
+        // in `answer_project_since_prompt` can never overflow from
+        // anything the user actually typed here.
+        KeyCode::Char(c)
+            if c.is_ascii_digit()
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && prompt.buffer.chars().count() < 15 =>
+        {
             let byte_idx = char_to_byte_idx(&prompt.buffer, prompt.cursor);
             prompt.buffer.insert(byte_idx, c);
             prompt.cursor += 1;
@@ -14317,10 +14349,11 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
                 ConfirmMode::DeleteMarked { .. } => {
                     let _ = app.delete_marked();
                 }
-                ConfirmMode::DisposeWorktree { repo_root, path, .. } => {
+                ConfirmMode::DisposeWorktree { repo_root, path, dirty, .. } => {
                     let repo_root = repo_root.clone();
                     let path = path.clone();
-                    app.dispose_worktree(&repo_root, &path);
+                    let shown_dirty = *dirty;
+                    app.dispose_worktree(&repo_root, &path, shown_dirty);
                 }
             }
             false
@@ -14328,6 +14361,14 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
         KeyCode::Char('n') | KeyCode::Char('N') => {
             app.confirm_delete = None;
             false
+        }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
         }
         _ if is_cancel_key => {
             // User-configured Cancel
@@ -14339,10 +14380,6 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
             // action.
             app.confirm_delete = None;
             false
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cancelled = true;
-            true
         }
         _ => false,
     }
@@ -14387,6 +14424,14 @@ fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
             app.confirm_signal = None;
             false
         }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
+        }
         _ if is_cancel_key => {
             app.confirm_signal = None;
             false
@@ -14402,10 +14447,6 @@ fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
                 s.signal = s.signal.prev();
             }
             false
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cancelled = true;
-            true
         }
         _ => false,
     }
@@ -14515,14 +14556,18 @@ fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // - Multi-key bindings
     //   (`key.cancel=Esc,F1`)
     //   all close the palette.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_command_menu();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_command_menu();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_command_menu();
+        return false;
     }
 
     // Capture a mutable borrow of the menu once so the closures
@@ -14643,14 +14688,18 @@ impl CommandMenu {
 fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel`
     // binding.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_completion_menu();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_completion_menu();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_completion_menu();
+        return false;
     }
 
     match key.code {
@@ -14783,14 +14832,18 @@ fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
 /// picker without changing the query.
 fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel` binding.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_prefix_picker();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_prefix_picker();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_prefix_picker();
+        return false;
     }
 
     // Capture a mutable borrow of the picker once.
@@ -15025,26 +15078,33 @@ fn handle_key_bindings_editor_key(app: &mut App, key: KeyEvent) -> bool {
             return false;
         }
         let spec = KeySpec { code: key.code, modifiers: key.modifiers };
-        let conflict = ALL_ACTIONS.iter().copied().find(|&other| {
+        // Scan every OTHER action currently holding this exact key —
+        // not just the first one found — and flag the first one that
+        // actually conflicts (`scopes_conflict`). A key can legitimately
+        // be held by several disjoint-mode-scoped actions at once; if
+        // the FIRST holder found happens to be one of those, but a
+        // LATER holder genuinely conflicts (same scope / overlapping
+        // modes), that real conflict must still surface.
+        let conflict = ALL_ACTIONS.iter().copied().filter(|&other| {
             other != action
                 && app
                     .bindings
                     .specs(other)
                     .iter()
                     .any(|s| s.code == spec.code && s.modifiers == spec.modifiers)
-        });
+        }).find(|&other| scopes_conflict(action.scope(), other.scope()));
         match conflict {
-            Some(other) if scopes_conflict(action.scope(), other.scope()) => {
+            Some(other) => {
                 if let Some(editor) = app.key_bindings_editor.as_mut() {
                     editor.pending_conflict = Some((action, spec, other));
                 }
             }
-            // No other action holds this key, or the one that does is
-            // scoped to a disjoint prefix mode (`scopes_conflict` is
-            // false) — the tiered `action_for_key` resolution already
-            // makes that case unambiguous, so there's nothing to warn
-            // about; commit straight away.
-            _ => {
+            // No other action holds this key, or every action that does
+            // is scoped to a disjoint prefix mode (`scopes_conflict` is
+            // false for all of them) — the tiered `action_for_key`
+            // resolution already makes that case unambiguous, so
+            // there's nothing to warn about; commit straight away.
+            None => {
                 app.commit_key_binding(action, spec);
                 if let Some(editor) = app.key_bindings_editor.as_mut() {
                     editor.capturing = None;
@@ -15179,6 +15239,15 @@ fn handle_output_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> Out
     let is_toggle_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::ShowOutput);
     let is_close = is_cancel_key || is_toggle_key;
     match key.code {
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general close-key arm
+        // below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            app.close_output_view();
+            OutputViewResult::Close
+        }
         _ if is_close => {
             // The runner loop at the
             // top level ignores the
@@ -15197,11 +15266,6 @@ fn handle_output_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> Out
             // because they returned
             // `Close` without
             // mutating `app.output_view`.
-            app.close_output_view();
-            OutputViewResult::Close
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cancelled = true;
             app.close_output_view();
             OutputViewResult::Close
         }
@@ -17028,12 +17092,15 @@ fn fetch_jira_prefill_result<C: crate::jira::JiraClient + ?Sized>(
     search_result: Result<crate::jira::JiraIssue, crate::jira::JiraError>,
 ) -> Result<crate::tui::mode::jira::JiraPrefillResult, crate::jira::JiraError> {
     let issue = search_result?;
-    let clone_fields = if clone_field_ids.is_empty() {
-        Vec::new()
+    let (clone_fields, clone_fields_error) = if clone_field_ids.is_empty() {
+        (Vec::new(), None)
     } else {
-        client.fetch_custom_fields(key, clone_field_ids).unwrap_or_default()
+        match client.fetch_custom_fields(key, clone_field_ids) {
+            Ok(fields) => (fields, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        }
     };
-    Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields })
+    Ok(crate::tui::mode::jira::JiraPrefillResult { issue, clone_fields, clone_fields_error })
 }
 
 /// Combine `search`'s result with `fetch_all_custom_fields` into the

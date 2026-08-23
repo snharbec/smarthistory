@@ -159,16 +159,20 @@ pub(crate) fn handle_question_view_key(app: &mut App, key: KeyEvent, page_size: 
         let total = text.lines().count();
         total.saturating_sub(page_size.max(1))
     };
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_question();
+        return true;
+    }
     let is_close =
         is_cancel_key(&app.bindings, &key) || matches!(key.code, KeyCode::Enter | KeyCode::Char('q'));
     if is_close {
         app.close_question();
         return false;
-    }
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.cancelled = true;
-        app.close_question();
-        return true;
     }
     match key.code {
         KeyCode::Up => {

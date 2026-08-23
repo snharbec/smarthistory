@@ -1376,12 +1376,20 @@ pub fn validate_config() -> ConfigReport {
     // never really compete for the same keypress — see `scopes_conflict`.
     use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
-    let mut seen_specs: std::collections::HashMap<String, tui::bindings::Action> =
+    // Every action seen so far for a given key, not just the first — a
+    // key can legitimately be held by several disjoint-mode-scoped
+    // actions at once (see `scopes_conflict`), so a later action must be
+    // checked against ALL of them, not only whichever happened to claim
+    // the key first. Comparing only against the first-ever-seen holder
+    // let a genuine same-scope collision between the SECOND and THIRD
+    // holder of a key go completely undetected.
+    let mut seen_specs: std::collections::HashMap<String, Vec<tui::bindings::Action>> =
         std::collections::HashMap::new();
     for (action, specs) in bindings.iter() {
         for spec in specs {
             let spec_str = tui::format_key_spec(*spec);
-            if let Some(prev) = seen_specs.get(&spec_str) {
+            let holders = seen_specs.entry(spec_str.clone()).or_default();
+            for prev in holders.iter() {
                 if tui::bindings::scopes_conflict(action.scope(), prev.scope()) {
                     issues.push(ConfigIssue {
                         level: ConfigIssueLevel::Warning,
@@ -1392,9 +1400,8 @@ pub fn validate_config() -> ConfigReport {
                         ),
                     });
                 }
-            } else {
-                seen_specs.insert(spec_str.clone(), action);
             }
+            holders.push(action);
         }
     }
 
@@ -7092,14 +7099,25 @@ fn parse_duration_to_secs(s: &str) -> anyhow::Result<i64> {
             anyhow::anyhow!("--since {s:?}: {digits:?} is too large to be a valid duration component")
         })?;
         digits.clear();
-        total += value
-            * match unit {
-                'd' => 86400,
-                'h' => 3600,
-                'm' => 60,
-                's' => 1,
-                _ => unreachable!(),
-            };
+        let multiplier: i64 = match unit {
+            'd' => 86400,
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => unreachable!(),
+        };
+        // `value` alone fitting in `i64` (checked by `.parse()` above)
+        // doesn't mean `value * multiplier` does — e.g. a 15-digit
+        // number of days overflows once multiplied by 86400. Checked
+        // arithmetic here turns that into a clear CLI error instead of
+        // a silent wraparound (release build, possibly writing a bogus
+        // negative timestamp into the DB) or a panic (debug build).
+        let component = value.checked_mul(multiplier).ok_or_else(|| {
+            anyhow::anyhow!("--since {s:?}: duration is too large (overflows)")
+        })?;
+        total = total
+            .checked_add(component)
+            .ok_or_else(|| anyhow::anyhow!("--since {s:?}: duration is too large (overflows)"))?;
     }
     if !digits.is_empty() {
         anyhow::bail!(
