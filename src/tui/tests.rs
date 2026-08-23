@@ -270,6 +270,32 @@ fn parse_key_spec_named_keys() {
     assert_eq!(bindings::parse_key_spec("F5").unwrap().code, KeyCode::F(5));
 }
 
+/// Regression: the key-bindings editor captures a live `KeyEvent`
+/// directly (`KeySpec { code: key.code, .. }`, bypassing this parser
+/// entirely) and writes it via `format_key_spec`, which formats ANY
+/// `KeyCode::F(n)` generically. Before this fix, `parse_key_spec_opt`
+/// only recognised `F1`-`F12` by name, so an extended function key
+/// (F13-F24 — common for media keys, remapped keys, or keyboards with
+/// more than 12 F-keys) would write out fine but fail to parse back on
+/// the next config load, silently reverting the binding and printing a
+/// "bad spec" warning the editor gave no way to locate (nothing in the
+/// editor would show as bound to F19, since the parse never succeeded).
+#[test]
+fn parse_key_spec_extended_function_keys() {
+    assert_eq!(bindings::parse_key_spec("F13").unwrap().code, KeyCode::F(13));
+    assert_eq!(bindings::parse_key_spec("F19").unwrap().code, KeyCode::F(19));
+    assert_eq!(bindings::parse_key_spec("F24").unwrap().code, KeyCode::F(24));
+    // Case-insensitive, same as every other named key.
+    assert_eq!(bindings::parse_key_spec("f19").unwrap().code, KeyCode::F(19));
+    // Full round-trip: format an extended F-key, parse it back, get
+    // the same spec — this is exactly the path a rebind in the
+    // key-bindings editor takes across a restart.
+    let spec = bindings::KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+    let formatted = bindings::format_key_spec(spec);
+    assert_eq!(formatted, "F19");
+    assert_eq!(bindings::parse_key_spec(&formatted).unwrap(), spec);
+}
+
 #[test]
 fn parse_key_spec_invalid() {
     assert!(bindings::parse_key_spec("").is_err());
@@ -419,6 +445,23 @@ fn key_bindings_from_config_overrides() {
     assert_eq!(
         format_key_specs(bindings.specs(Action::DeleteSelected)),
         "C-d".to_string()
+    );
+}
+
+/// Regression: a `key.<action>=F19` config line — exactly what the
+/// key-bindings editor writes after capturing an extended function key
+/// — must resolve to `Action` being bound to `F19`, not silently
+/// revert to the action's default with a "bad spec" warning (the bug
+/// fixed alongside this test: `parse_key_spec_opt` used to only
+/// recognise F1-F12 by name).
+#[test]
+fn key_bindings_from_config_accepts_extended_function_key() {
+    let mut entries = std::collections::HashMap::new();
+    entries.insert("theme-picker".to_string(), "F19".to_string());
+    let bindings = bindings::key_bindings_from_config(&entries);
+    assert_eq!(
+        bindings.specs(Action::ThemePicker),
+        &[bindings::KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() }]
     );
 }
 

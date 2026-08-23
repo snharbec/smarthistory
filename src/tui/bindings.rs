@@ -1332,31 +1332,35 @@ pub(crate) fn parse_key_spec_opt(s: &str) -> Result<Option<KeySpec>, String> {
         "pagedown" | "pgdn" | "page-down" => KeyCode::PageDown,
         "insert" | "ins" => KeyCode::Insert,
         "delete" | "del" => KeyCode::Delete,
-        "f1" => KeyCode::F(1),
-        "f2" => KeyCode::F(2),
-        "f3" => KeyCode::F(3),
-        "f4" => KeyCode::F(4),
-        "f5" => KeyCode::F(5),
-        "f6" => KeyCode::F(6),
-        "f7" => KeyCode::F(7),
-        "f8" => KeyCode::F(8),
-        "f9" => KeyCode::F(9),
-        "f10" => KeyCode::F(10),
-        "f11" => KeyCode::F(11),
-        "f12" => KeyCode::F(12),
         _ => {
-            // Plain character. For multi-character strings, only
-            // accept the single-character form; otherwise emit a
-            // clear error so the user notices the typo.
-            let mut chars = rest.chars();
-            let first = chars.next().unwrap();
-            if chars.next().is_some() {
-                return Err(format!(
-                    "unknown key spec {:?}: expected a single character or a named key (Up, Esc, …)",
-                    s
-                ));
+            // Function keys: `f` followed by a number — any value
+            // crossterm's `KeyCode::F(u8)` can hold, not just F1-F12.
+            // Many terminals/keyboards report extended function keys,
+            // media keys, or remapped keys (e.g. via Karabiner-Elements)
+            // as F13-F24 and beyond. `format_key_code` (below) already
+            // formats any `F(n)` generically, and the key-bindings
+            // editor's live key capture (`KeySpec { code: key.code, .. }`,
+            // src/tui.rs) never went through this parser to begin with —
+            // so a captured F13+ binding wrote out fine but then failed
+            // to parse back on the next config load, silently reverting
+            // and warning. Matching `format_key_code`'s generic handling
+            // here closes that gap.
+            if let Some(n) = lower.strip_prefix('f').and_then(|d| d.parse::<u8>().ok()) {
+                KeyCode::F(n)
+            } else {
+                // Plain character. For multi-character strings, only
+                // accept the single-character form; otherwise emit a
+                // clear error so the user notices the typo.
+                let mut chars = rest.chars();
+                let first = chars.next().unwrap();
+                if chars.next().is_some() {
+                    return Err(format!(
+                        "unknown key spec {:?}: expected a single character or a named key (Up, Esc, …)",
+                        s
+                    ));
+                }
+                KeyCode::Char(first)
             }
-            KeyCode::Char(first)
         }
     };
     Ok(Some(KeySpec { code, modifiers }))
