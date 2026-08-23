@@ -12671,6 +12671,34 @@ fn parse_worktree_list_empty_output_is_empty() {
     assert_eq!(crate::tui::mode::worktree::parse_worktree_list(""), Vec::new());
 }
 
+/// Valid UTF-8 bytes decode and parse exactly like the `&str` form —
+/// `parse_worktree_list_bytes` is just a byte-level wrapper.
+#[test]
+fn parse_worktree_list_bytes_valid_utf8_matches_str_form() {
+    let output = "worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n\n";
+    let from_bytes = crate::tui::mode::worktree::parse_worktree_list_bytes(output.as_bytes());
+    let from_str = crate::tui::mode::worktree::parse_worktree_list(output);
+    assert_eq!(from_bytes, Ok(from_str));
+}
+
+/// Regression: `fetch` used to decode `git worktree list --porcelain`'s
+/// stdout with `String::from_utf8_lossy`, silently replacing invalid
+/// bytes with U+FFFD — a worktree path containing non-UTF8 bytes would
+/// end up stored under a corrupted path that no longer matches the real
+/// on-disk directory, yet still gets reused verbatim as a literal
+/// `git -C <path>` argument for dirty-checking and disposal.
+/// `parse_worktree_list_bytes` must reject invalid UTF-8 outright
+/// (`Err(())`) rather than silently mangling it, so `fetch` can degrade
+/// to "no worktrees" for that refresh instead of returning a corrupted
+/// row.
+#[test]
+fn parse_worktree_list_bytes_rejects_invalid_utf8() {
+    let mut bytes = b"worktree /repo/".to_vec();
+    bytes.extend_from_slice(&[0xFF, 0xFE]); // not valid UTF-8
+    bytes.extend_from_slice(b"bad\nHEAD abc123\nbranch refs/heads/main\n\n");
+    assert_eq!(crate::tui::mode::worktree::parse_worktree_list_bytes(&bytes), Err(()));
+}
+
 /// `build_rows` preserves `git worktree list`'s own order (main
 /// worktree first) via a descending synthetic `timestamp`, same
 /// convention `zoxide::build_rows` uses for its own ranked order.
