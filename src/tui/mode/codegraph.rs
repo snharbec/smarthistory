@@ -505,15 +505,19 @@ impl App {
 /// selection); the user's `Cancel` binding (Esc / Ctrl-C)
 /// dismisses the picker without opening anything.
 pub(crate) fn handle_codegraph_relations_picker_key(app: &mut App, key: KeyEvent) -> bool {
-    // Dismiss on the user's `Cancel` binding.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_codegraph_relations_picker();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_codegraph_relations_picker();
         return true;
+    }
+    // Dismiss on the user's `Cancel` binding.
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_codegraph_relations_picker();
+        return false;
     }
 
     // Movement keys only need the index; do them with a short

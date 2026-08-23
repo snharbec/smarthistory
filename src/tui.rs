@@ -14032,14 +14032,18 @@ fn handle_zoxide_save_prompt_key(app: &mut App, key: KeyEvent) -> bool {
             app.answer_zoxide_save_prompt(false);
             app.selection.is_some()
         }
-        _ if is_cancel_key => {
-            app.answer_zoxide_save_prompt(false);
-            app.selection.is_some()
-        }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.zoxide_save_prompt = None;
             app.cancelled = true;
             true
+        }
+        _ if is_cancel_key => {
+            app.answer_zoxide_save_prompt(false);
+            app.selection.is_some()
         }
         _ => false,
     }
@@ -14329,6 +14333,14 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
             app.confirm_delete = None;
             false
         }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
+        }
         _ if is_cancel_key => {
             // User-configured Cancel
             // binding (default `Esc`,
@@ -14339,10 +14351,6 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
             // action.
             app.confirm_delete = None;
             false
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cancelled = true;
-            true
         }
         _ => false,
     }
@@ -14387,6 +14395,14 @@ fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
             app.confirm_signal = None;
             false
         }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            true
+        }
         _ if is_cancel_key => {
             app.confirm_signal = None;
             false
@@ -14402,10 +14418,6 @@ fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
                 s.signal = s.signal.prev();
             }
             false
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cancelled = true;
-            true
         }
         _ => false,
     }
@@ -14515,14 +14527,18 @@ fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // - Multi-key bindings
     //   (`key.cancel=Esc,F1`)
     //   all close the palette.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_command_menu();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_command_menu();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_command_menu();
+        return false;
     }
 
     // Capture a mutable borrow of the menu once so the closures
@@ -14643,14 +14659,18 @@ impl CommandMenu {
 fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel`
     // binding.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_completion_menu();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_completion_menu();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_completion_menu();
+        return false;
     }
 
     match key.code {
@@ -14783,14 +14803,18 @@ fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
 /// picker without changing the query.
 fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel` binding.
-    if is_cancel_key(&app.bindings, &key) {
-        app.close_prefix_picker();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — checked before the general Cancel-binding check below
+    // so a rebound Cancel can't swallow it.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_prefix_picker();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_prefix_picker();
+        return false;
     }
 
     // Capture a mutable borrow of the picker once.
@@ -15179,6 +15203,15 @@ fn handle_output_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> Out
     let is_toggle_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::ShowOutput);
     let is_close = is_cancel_key || is_toggle_key;
     match key.code {
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general close-key arm
+        // below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            app.close_output_view();
+            OutputViewResult::Close
+        }
         _ if is_close => {
             // The runner loop at the
             // top level ignores the
@@ -15197,11 +15230,6 @@ fn handle_output_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> Out
             // because they returned
             // `Close` without
             // mutating `app.output_view`.
-            app.close_output_view();
-            OutputViewResult::Close
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cancelled = true;
             app.close_output_view();
             OutputViewResult::Close
         }

@@ -1183,6 +1183,103 @@ fn confirm_delete_closes_on_user_cancel_binding() {
     assert!(app.confirm_delete.is_none());
 }
 
+/// Regression: `_ if is_cancel_key` was matched before the explicit
+/// Ctrl-C arm, so with the default Cancel binding (which includes
+/// `C-c`) pressing Ctrl-C only closed the dialog instead of aborting
+/// the whole TUI. Ctrl-C must close the dialog AND set `cancelled`.
+#[test]
+fn confirm_delete_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.confirm_delete = Some(ConfirmMode::DeleteSelected);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = handle_confirm_delete_key(&mut app, ctrl_c, ConfirmMode::DeleteSelected);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression as `confirm_delete_ctrl_c_aborts_tui`, for the
+/// sibling `%` (processes) signal-confirmation dialog.
+#[test]
+fn confirm_signal_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999,
+        name: "sleep".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_confirm_signal_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the zoxide "save as session?" prompt.
+#[test]
+fn zoxide_save_prompt_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.zoxide_save_prompt = Some(crate::tui::state::ZoxideSavePrompt {
+        label: "my-project".to_string(),
+        directory: "/tmp/my-project".to_string(),
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_zoxide_save_prompt_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.zoxide_save_prompt.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the command palette.
+#[test]
+fn command_menu_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_command_menu();
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_command_menu_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(!app.is_command_menu_open());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the captured-output overlay.
+#[test]
+fn output_view_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.output_view = Some(OutputView { text: "captured\noutput".to_string(), scroll: 0 });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let result = crate::tui::handle_output_view_key(&mut app, ctrl_c, 10);
+    assert!(matches!(result, crate::tui::OutputViewResult::Close));
+    assert!(app.output_view.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the `?` question overlay.
+#[test]
+fn question_view_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.question_view = Some(QuestionView {
+        question: "what does that do".to_string(),
+        text: "an answer".to_string(),
+        scroll: 0,
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::mode::question::handle_question_view_key(&mut app, ctrl_c, 10);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.question_view.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
+/// Same regression, for the CodeGraph callers/callees picker.
+#[test]
+fn codegraph_relations_picker_ctrl_c_aborts_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.codegraph_relations_picker = Some(make_relations_picker(5));
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::mode::codegraph::handle_codegraph_relations_picker_key(&mut app, ctrl_c);
+    assert!(quit, "ctrl+c must exit the TUI");
+    assert!(app.codegraph_relations_picker.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
+}
+
 #[test]
 fn theme_picker_default_binding_and_list_layout() {
     let bindings = KeyBindings::defaults();
@@ -13536,23 +13633,23 @@ fn zoxide_save_prompt_key_dispatch() {
     assert!(app.zoxide_save_prompt.is_none());
     assert!(app.selection.is_some());
 
-    // With the DEFAULT bindings, `Action::Cancel` is bound to both
-    // `Esc` and `C-c` (see `KeyBindings::defaults`), so Ctrl-C hits
-    // the `_ if is_cancel_key` arm before the dedicated
-    // `KeyCode::Char('c') + CONTROL` arm ever runs — same
-    // shadowed-fallback shape as `handle_confirm_delete_key`. That
-    // dedicated arm only becomes reachable if the user remaps
-    // `key.cancel` away from `C-c`; under defaults, Ctrl-C behaves
-    // exactly like `n`/Cancel here — decline the save, still stage.
+    // Ctrl-C is the panic button everywhere in this TUI and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — the dedicated `KeyCode::Char('c') + CONTROL` arm is
+    // checked before the general `is_cancel_key` fallback, so under
+    // defaults Ctrl-C aborts the whole TUI (no directory jump staged)
+    // rather than merely declining the save like `n` does.
     let dir = zoxide_test_dir("key-ctrlc");
     let mut app = zoxide_test_app_selecting(&dir);
     app.select_for_run();
     assert!(app.zoxide_save_prompt.is_some());
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let quit = handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(quit, "ctrl+c must exit the TUI");
     assert!(app.zoxide_save_prompt.is_none());
+    assert!(app.cancelled, "cancelled flag must be set");
     assert!(
-        app.selection.is_some(),
-        "Ctrl-C under default bindings must still stage the directory jump"
+        app.selection.is_none(),
+        "ctrl+c aborts, it must not stage the directory jump"
     );
 
     // A stray, unbound key does nothing — the prompt stays open.
@@ -25236,18 +25333,18 @@ fn handle_prefix_picker_key_ctrl_c_closes_picker() {
     app.open_prefix_picker();
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     let quit = handle_prefix_picker_key(&mut app, ctrl_c);
-    // Ctrl+C is bound to Cancel by
-    // default, so the Cancel action
-    // fires: close the picker, do not
-    // exit the TUI. This mirrors the
-    // command palette behaviour where
-    // the user's Cancel binding
-    // dismisses the overlay.
-    assert!(!quit, "picker cancel (ctrl+c) should not exit TUI");
+    // Ctrl-C is the panic button everywhere in this TUI and must stay
+    // reachable even though Cancel's default binding also includes
+    // `C-c` — it closes the picker AND aborts the whole TUI, matching
+    // every other overlay (help view, theme picker, confirm dialogs,
+    // …). Previously this checked Cancel's binding before Ctrl-C, so
+    // Ctrl-C was silently swallowed as an ordinary dismiss; fixed to
+    // check Ctrl-C first.
+    assert!(quit, "ctrl+c must exit the TUI, not just close the picker");
     assert!(app.prefix_picker.is_none(), "picker should close on ctrl+c");
     assert!(
-        !app.cancelled,
-        "cancelled flag should not be set by picker close"
+        app.cancelled,
+        "cancelled flag must be set so the run loop actually exits"
     );
 }
 
