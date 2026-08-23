@@ -12963,6 +12963,74 @@ fn worktree_create_flow_dirty_repo_opens_confirm_carry_over() {
     }
 }
 
+/// Regression: `git stash push` without `--include-untracked` saves
+/// nothing for an untracked-only dirty checkout, yet `git stash apply`
+/// used to run unconditionally afterward in the new worktree — for a
+/// repo whose only "dirty" state is an untracked file, that could
+/// silently apply some unrelated pre-existing stash entry instead of
+/// doing nothing. Confirm the untracked file actually carries over
+/// into the new worktree (proving `--include-untracked` is now passed)
+/// and is gone from the source checkout (proving something really was
+/// stashed, not skipped).
+#[test]
+fn worktree_create_flow_carry_over_captures_untracked_file() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_carry_over_untracked", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    // Untracked-only dirty state: a brand-new file, never `git add`-ed.
+    std::fs::write(repo.join("untracked.txt"), "new work\n").expect("write untracked file");
+    let base_dir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_carry_over_target_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.worktree_basedir = Some(base_dir.clone());
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> ConfirmCarryOver (dirty repo)
+        assert_eq!(
+            app.worktree_create_flow.as_ref().map(|f| f.step),
+            Some(WorktreeCreateStep::ConfirmCarryOver)
+        );
+        app.worktree_create_confirm_carry_over(true);
+        let ret = app.advance_worktree_create_flow(); // -> PickProject (blank filter) -> execute
+        assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
+        assert!(ret || app.selection.is_some(), "a cd command must be staged on success");
+
+        let new_untracked = base_dir.join("feature").join("untracked.txt");
+        assert!(
+            new_untracked.exists(),
+            "the untracked file must have carried over into the new worktree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&new_untracked).unwrap(),
+            "new work\n"
+        );
+        assert!(
+            !repo.join("untracked.txt").exists(),
+            "the untracked file must be gone from the source checkout (it was stashed, not copied)"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(base_dir.join("feature"))
+        .output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&base_dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 /// A blank `Enter` on `PickProject` skips assignment (no
 /// `project.<slug>.dir=` write) but still creates the worktree and
 /// stages a `cd` into it.

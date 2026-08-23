@@ -576,28 +576,55 @@ impl App {
         ) {
             Ok(()) => {
                 if flow.carry_over {
+                    // `--include-untracked` so untracked-only dirty
+                    // state (new files that were never `git add`-ed)
+                    // actually gets captured — without it, `stash push`
+                    // has nothing to save for an untracked-only
+                    // checkout and reports "No local changes to save"
+                    // while leaving the working tree untouched.
+                    //
+                    // Only run `stash apply` in the new worktree when
+                    // `stash push` actually created an entry. Without
+                    // this check, an untracked-only checkout with
+                    // nothing to stash would still unconditionally run
+                    // `stash apply` in the new worktree — silently
+                    // applying whatever OTHER stash entry happens to be
+                    // on top of this repo's shared stash ref (e.g. an
+                    // old, unrelated one from a previous session),
+                    // rather than doing nothing.
+                    //
                     // Best-effort past this point: a stash-apply
                     // conflict surfaces as a status message but
                     // doesn't undo the already-created worktree, and
                     // the stash entry itself is never dropped either
                     // way, so nothing is lost even on failure.
-                    let _ = std::process::Command::new("git")
+                    let push = std::process::Command::new("git")
                         .arg("-C")
                         .arg(&flow.repo_root)
-                        .args(["stash", "push"])
+                        .args(["stash", "push", "--include-untracked"])
                         .output();
-                    let apply = std::process::Command::new("git")
-                        .arg("-C")
-                        .arg(&path)
-                        .args(["stash", "apply"])
-                        .output();
-                    if let Ok(o) = apply
-                        && !o.status.success()
-                    {
-                        self.set_status_message(format!(
-                            "worktree created, but stash apply failed: {}",
-                            String::from_utf8_lossy(&o.stderr).trim()
-                        ));
+                    let nothing_to_stash = push.as_ref().is_ok_and(|o| {
+                        let text = format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                        text.contains("No local changes to save")
+                    });
+                    if !nothing_to_stash {
+                        let apply = std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(&path)
+                            .args(["stash", "apply"])
+                            .output();
+                        if let Ok(o) = apply
+                            && !o.status.success()
+                        {
+                            self.set_status_message(format!(
+                                "worktree created, but stash apply failed: {}",
+                                String::from_utf8_lossy(&o.stderr).trim()
+                            ));
+                        }
                     }
                 }
                 if let Some(slug) = flow.project_slug.as_ref()
