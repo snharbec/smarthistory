@@ -1170,6 +1170,100 @@ fn theme_picker_default_binding_and_list_layout() {
     assert_eq!(p.selected, p.themes.len() - 1);
 }
 
+/// Same regression coverage as
+/// `describe_view_respects_user_cancel_binding`, for one of the
+/// "plain `if key.code == KeyCode::Esc`" handlers this feature fixed.
+#[test]
+fn theme_picker_respects_user_cancel_binding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.bindings.set(
+        Action::Cancel,
+        vec![bindings::parse_key_spec("F1").expect("F1")],
+    );
+    app.open_theme_picker();
+    assert!(app.theme_picker.is_some());
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_theme_picker_key(&mut app, esc);
+    assert!(
+        app.theme_picker.is_some(),
+        "Esc must NOT close the theme picker when Cancel is bound only to F1"
+    );
+    let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+    crate::tui::handle_theme_picker_key(&mut app, f1);
+    assert!(
+        app.theme_picker.is_none(),
+        "F1 must close the theme picker when bound to Cancel"
+    );
+}
+
+/// Regression check: plain `Esc` still closes the theme picker
+/// under default bindings.
+#[test]
+fn theme_picker_closes_on_default_esc_binding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_theme_picker();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_theme_picker_key(&mut app, esc);
+    assert!(app.theme_picker.is_none(), "Esc must still close the theme picker by default");
+}
+
+/// `Ctrl-C` must still abort the whole TUI even though it's also
+/// `Action::Cancel`'s default binding — same guarantee as
+/// `describe_view_ctrl_c_aborts_even_though_it_is_also_the_default_cancel_key`.
+#[test]
+fn theme_picker_ctrl_c_aborts_even_though_it_is_also_the_default_cancel_key() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_theme_picker();
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_theme_picker_key(&mut app, ctrl_c);
+    assert!(quit, "Ctrl-C must abort the whole TUI, not just close the picker");
+    assert!(app.cancelled);
+    assert!(app.theme_picker.is_none());
+}
+
+/// Same regression coverage, for the third handler shape this
+/// feature fixed: an unconditional `if key.modifiers.contains(CONTROL)`
+/// block runs first (comment editing's own Ctrl-C-aborts arm lives
+/// there, untouched by this fix), then a plain `match key.code` whose
+/// former hardcoded `KeyCode::Esc` arm is now a dynamic Cancel-binding
+/// check.
+#[test]
+fn comment_edit_respects_user_cancel_binding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.bindings.set(
+        Action::Cancel,
+        vec![bindings::parse_key_spec("F1").expect("F1")],
+    );
+    app.list_state.select(Some(0));
+    app.start_comment_edit();
+    assert!(app.is_comment_editing());
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_comment_edit_key(&mut app, esc);
+    assert!(
+        app.is_comment_editing(),
+        "Esc must NOT cancel comment editing when Cancel is bound only to F1"
+    );
+    let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+    crate::tui::handle_comment_edit_key(&mut app, f1);
+    assert!(
+        !app.is_comment_editing(),
+        "F1 must cancel comment editing when bound to Cancel"
+    );
+}
+
+/// Regression check: plain `Esc` still cancels comment editing
+/// under default bindings.
+#[test]
+fn comment_edit_cancels_on_default_esc_binding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.list_state.select(Some(0));
+    app.start_comment_edit();
+    assert!(app.is_comment_editing());
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_comment_edit_key(&mut app, esc);
+    assert!(!app.is_comment_editing(), "Esc must still cancel comment editing by default");
+}
+
 /// The captured-output view
 /// closes only on the
 /// user-configured `Cancel`
@@ -6031,6 +6125,73 @@ fn is_describe_viewing_tracks_field() {
     });
     assert!(app.is_describe_viewing());
     app.close_describe();
+    assert!(!app.is_describe_viewing());
+}
+
+/// Regression test for the bug this feature fixes: the describe
+/// overlay used to only close on a hardcoded `Esc`/`Enter`/`q`/
+/// `Ctrl-K` (and, due to an unrelated match-guard scoping bug, not
+/// even reliably on those — see `handle_describe_view_key`), never
+/// on the user's actual configured `Cancel` binding. Same pattern as
+/// `command_palette_respects_user_cancel_binding`.
+#[test]
+fn describe_view_respects_user_cancel_binding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.bindings.set(
+        Action::Cancel,
+        vec![bindings::parse_key_spec("F1").expect("F1")],
+    );
+    app.describe_view = Some(DescribeView {
+        command: "a".to_string(),
+        text: "a description".to_string(),
+        scroll: 0,
+    });
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_describe_view_key(&mut app, esc, 20);
+    assert!(
+        app.is_describe_viewing(),
+        "Esc must NOT close describe view when Cancel is bound only to F1"
+    );
+    let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::empty());
+    crate::tui::handle_describe_view_key(&mut app, f1, 20);
+    assert!(
+        !app.is_describe_viewing(),
+        "F1 must close describe view when bound to Cancel"
+    );
+}
+
+/// Regression check: plain `Esc` (the default `Cancel` binding)
+/// must still close the describe overlay — the fix above must not
+/// have broken the out-of-the-box behavior.
+#[test]
+fn describe_view_closes_on_default_esc_binding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.describe_view = Some(DescribeView {
+        command: "a".to_string(),
+        text: "a description".to_string(),
+        scroll: 0,
+    });
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_describe_view_key(&mut app, esc, 20);
+    assert!(!app.is_describe_viewing(), "Esc must still close describe view by default");
+}
+
+/// `Ctrl-C` must still abort the whole TUI (the panic-button
+/// convention every overlay shares) even though `Action::Cancel`'s
+/// default binding also includes `C-c` — the dedicated Ctrl-C check
+/// must not be shadowed by the general Cancel-binding check.
+#[test]
+fn describe_view_ctrl_c_aborts_even_though_it_is_also_the_default_cancel_key() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.describe_view = Some(DescribeView {
+        command: "a".to_string(),
+        text: "a description".to_string(),
+        scroll: 0,
+    });
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = crate::tui::handle_describe_view_key(&mut app, ctrl_c, 20);
+    assert!(quit, "Ctrl-C must abort the whole TUI, not just close the overlay");
+    assert!(app.cancelled);
     assert!(!app.is_describe_viewing());
 }
 

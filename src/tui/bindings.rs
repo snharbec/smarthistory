@@ -1766,6 +1766,15 @@ pub fn action_for_key(
     matches().next()
 }
 
+/// True if `key` resolves to the user's configured `Action::Cancel`
+/// binding. Modal overlays aren't "in" any prefix mode, so this always
+/// resolves against `ModeKind::History` — the neutral default every
+/// modal handler already uses for `action_for_key`'s mode parameter
+/// (see the mode-scoped-key-bindings feature).
+pub(crate) fn is_cancel_key(bindings: &KeyBindings, key: &KeyEvent) -> bool {
+    action_for_key(bindings, key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel)
+}
+
 /// Join a slice of `KeySpec` into the canonical display form
 /// (`"C-h, F1, M-x"`) for the help overlay and the command
 /// palette. Empty slice returns the empty string; use

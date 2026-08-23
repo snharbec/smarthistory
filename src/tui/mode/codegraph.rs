@@ -14,10 +14,9 @@
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::{
-    Action, App, CodeGraphRelationsPicker, CodegraphRelationEntry, CodegraphRelationSection,
-    PickMode,
+    App, CodeGraphRelationsPicker, CodegraphRelationEntry, CodegraphRelationSection, PickMode,
 };
-use crate::tui::bindings::action_for_key;
+use crate::tui::bindings::is_cancel_key;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Whether the query is a CodeGraph symbol-search
@@ -507,7 +506,7 @@ impl App {
 /// dismisses the picker without opening anything.
 pub(crate) fn handle_codegraph_relations_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel` binding.
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.close_codegraph_relations_picker();
         return false;
     }

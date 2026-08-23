@@ -2,6 +2,7 @@
 //!
 //! Like the LLM mode, requires non-whitespace text after the
 //! prefix.
+use crate::tui::bindings::is_cancel_key;
 use crate::tui::{App, LlmRequestType};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rusqlite::params;
@@ -158,7 +159,8 @@ pub(crate) fn handle_question_view_key(app: &mut App, key: KeyEvent, page_size: 
         let total = text.lines().count();
         total.saturating_sub(page_size.max(1))
     };
-    let is_close = matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'));
+    let is_close =
+        is_cancel_key(&app.bindings, &key) || matches!(key.code, KeyCode::Enter | KeyCode::Char('q'));
     if is_close {
         app.close_question();
         return false;
