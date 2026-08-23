@@ -12399,6 +12399,342 @@ fn worktree_create_flow_esc_cancels_without_creating_anything() {
     }
 }
 
+// ---- Worktree dispose (`Action::DisposeWorktree`) ----
+
+/// `dispose_warnings` is pure: no git, no filesystem. It should report
+/// exactly the conditions that are true, dirty first, joined-order
+/// stable, and nothing at all for a clean/up-to-date/no-upstream-unknown
+/// combination that has nothing worth warning about.
+#[test]
+fn dispose_warnings_reports_only_true_conditions() {
+    use crate::tui::mode::worktree::{WorktreeUnpushedStatus, dispose_warnings};
+
+    assert!(dispose_warnings(false, WorktreeUnpushedStatus::UpToDate).is_empty());
+    assert!(dispose_warnings(false, WorktreeUnpushedStatus::Unknown).is_empty());
+
+    assert_eq!(
+        dispose_warnings(true, WorktreeUnpushedStatus::UpToDate),
+        vec!["uncommitted changes".to_string()]
+    );
+    assert_eq!(
+        dispose_warnings(false, WorktreeUnpushedStatus::Ahead(1)),
+        vec!["1 unpushed commit".to_string()]
+    );
+    assert_eq!(
+        dispose_warnings(false, WorktreeUnpushedStatus::Ahead(3)),
+        vec!["3 unpushed commits".to_string()]
+    );
+    assert_eq!(
+        dispose_warnings(false, WorktreeUnpushedStatus::NoUpstream),
+        vec!["no upstream (never pushed)".to_string()]
+    );
+    assert_eq!(
+        dispose_warnings(true, WorktreeUnpushedStatus::Ahead(2)),
+        vec!["uncommitted changes".to_string(), "2 unpushed commits".to_string()]
+    );
+}
+
+/// A branch with no remote configured at all has no upstream to compare
+/// against — reported as `NoUpstream`, not `Unknown` (there IS a branch,
+/// it's just never been pushed).
+#[test]
+fn worktree_unpushed_status_no_upstream_when_branch_has_no_remote() {
+    let Some(repo) = worktree_scratch_repo("unpushed_no_remote", "trunk") else {
+        return;
+    };
+    assert_eq!(
+        crate::tui::mode::worktree::worktree_unpushed_status(&repo),
+        crate::tui::mode::worktree::WorktreeUnpushedStatus::NoUpstream
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// A detached HEAD has no branch at all, so there's no upstream concept
+/// to report on — `Unknown`, not `NoUpstream`.
+#[test]
+fn worktree_unpushed_status_detached_head_is_unknown() {
+    let Some(repo) = worktree_scratch_repo("unpushed_detached", "trunk") else {
+        return;
+    };
+    let head_sha = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse");
+    let sha = String::from_utf8_lossy(&head_sha.stdout).trim().to_string();
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["checkout", "--detach", &sha]).output();
+    assert_eq!(
+        crate::tui::mode::worktree::worktree_unpushed_status(&repo),
+        crate::tui::mode::worktree::WorktreeUnpushedStatus::Unknown
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// With an upstream configured and nothing ahead of it, `UpToDate`; one
+/// more local commit past the last push flips it to `Ahead(1)`.
+#[test]
+fn worktree_unpushed_status_up_to_date_then_ahead_after_local_commit() {
+    use crate::tui::mode::worktree::{WorktreeUnpushedStatus, worktree_unpushed_status};
+    let Some(repo) = worktree_scratch_repo("unpushed_ahead", "trunk") else {
+        return;
+    };
+    let remote = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_unpushed_remote_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&remote);
+    if !std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&remote)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_dir_all(&repo);
+        return;
+    }
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["remote", "add", "origin"]).arg(&remote).output();
+    let push = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["push", "-u", "origin", "trunk"])
+        .output();
+    assert!(push.map(|o| o.status.success()).unwrap_or(false), "push to local bare remote should succeed");
+    assert_eq!(worktree_unpushed_status(&repo), WorktreeUnpushedStatus::UpToDate);
+
+    std::fs::write(repo.join("more.txt"), "x").expect("write");
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["add", "more.txt"]).output();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["commit", "-m", "more"])
+        .env("GIT_COMMITTER_DATE", "1577836800 +0000")
+        .env("GIT_AUTHOR_DATE", "1577836800 +0000")
+        .output();
+    assert_eq!(worktree_unpushed_status(&repo), WorktreeUnpushedStatus::Ahead(1));
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&remote);
+}
+
+#[test]
+fn worktree_remove_worktree_removes_directory_and_list_entry() {
+    let Some(repo) = worktree_scratch_repo("remove_clean", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-remove",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+    assert!(target.is_dir());
+
+    let result = crate::tui::mode::worktree::remove_worktree(&repo, &target.to_string_lossy());
+    assert!(result.is_ok(), "expected success, got {result:?}");
+    assert!(!target.exists(), "the worktree directory itself must be gone");
+    let list = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("git worktree list");
+    assert!(
+        !String::from_utf8_lossy(&list.stdout).contains(&target.to_string_lossy().to_string()),
+        "removed worktree must no longer appear in `git worktree list`"
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// `remove_worktree` always passes `--force`, so a worktree with
+/// uncommitted changes is removed anyway (the caller only reaches this
+/// point after the user has already confirmed past the dirty warning).
+#[test]
+fn worktree_remove_worktree_force_removes_dirty_worktree() {
+    let Some(repo) = worktree_scratch_repo("remove_dirty", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-remove-dirty",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+    std::fs::write(target.join("dirty.txt"), "uncommitted").expect("write");
+    assert!(crate::tui::mode::worktree::repo_is_dirty(&target));
+
+    let result = crate::tui::mode::worktree::remove_worktree(&repo, &target.to_string_lossy());
+    assert!(result.is_ok(), "--force should remove a dirty worktree, got {result:?}");
+    assert!(!target.exists());
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// Git refuses to remove the main worktree (it isn't a linked worktree);
+/// that refusal must propagate as an `Err`, not be silently swallowed.
+#[test]
+fn worktree_remove_worktree_main_worktree_fails() {
+    let Some(repo) = worktree_scratch_repo("remove_main", "trunk") else {
+        return;
+    };
+    let result = crate::tui::mode::worktree::remove_worktree(&repo, &repo.to_string_lossy());
+    assert!(result.is_err(), "removing the main worktree must fail");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// `Action::DisposeWorktree` outside worktree mode is a no-op with a
+/// status message, same gate shape `Action::CreateWorktree` uses.
+#[test]
+fn dispatch_action_dispose_worktree_outside_worktree_mode_is_noop() {
+    let mut app = global_test_app(&[("a", 0)]);
+    app.query = String::new();
+
+    dispatch_action(&mut app, Action::DisposeWorktree);
+
+    assert!(app.confirm_delete.is_none());
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(status.contains("worktree search"), "got: {status:?}");
+}
+
+/// Inside worktree mode with no row selected, disposal is a no-op with a
+/// status message rather than opening an empty confirmation.
+#[test]
+fn open_worktree_dispose_confirm_no_row_selected_sets_status_message() {
+    let mut app = directories_test_app(&[]);
+    app.query = ";".to_string();
+    app.merged_rows.clear();
+    app.list_state.select(None);
+
+    app.open_worktree_dispose_confirm();
+
+    assert!(app.confirm_delete.is_none());
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(status.contains("no worktree selected"), "got: {status:?}");
+}
+
+/// With a row selected, `open_worktree_dispose_confirm` runs the real
+/// dirty/unpushed checks against the worktree's own path (not the repo
+/// root) and opens the dialog with the results.
+#[test]
+fn open_worktree_dispose_confirm_populates_confirm_mode_with_checks() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("dispose_confirm_populate", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-dispose",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    let created = crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "").is_ok();
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    let result = std::panic::catch_unwind(|| {
+        assert!(created, "create_worktree should succeed");
+        std::env::set_current_dir(&repo).expect("chdir");
+        std::fs::write(target.join("dirty.txt"), "x").expect("write");
+
+        let mut app = directories_test_app(&[]);
+        app.query = ";".to_string();
+        app.merged_rows = vec![crate::tui::state::HistoryRow {
+            id: -1,
+            command: "feature".to_string(),
+            directory: target.to_string_lossy().to_string(),
+            mode: "directory".to_string(),
+            source: "worktree".to_string(),
+            ..Default::default()
+        }];
+        app.list_state.select(Some(0));
+
+        app.open_worktree_dispose_confirm();
+
+        match app.confirm_delete {
+            Some(ConfirmMode::DisposeWorktree { ref path, ref label, dirty, unpushed, .. }) => {
+                assert_eq!(path, &target.to_string_lossy().to_string());
+                assert_eq!(label, "feature");
+                assert!(dirty, "the untracked file should have been detected");
+                assert_eq!(unpushed, crate::tui::mode::worktree::WorktreeUnpushedStatus::NoUpstream);
+            }
+            other => panic!("expected ConfirmMode::DisposeWorktree, got {other:?}"),
+        }
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", "--force"]).arg(&target).output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&target);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// `y` in the `ConfirmMode::DisposeWorktree` dialog runs `git worktree
+/// remove` and closes the dialog, same `handle_confirm_delete_key`
+/// dispatch every other delete confirmation uses.
+#[test]
+fn confirm_delete_dispose_worktree_key_y_removes_worktree_and_closes_dialog() {
+    let Some(repo) = worktree_scratch_repo("dispose_key_y", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-dispose-y",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+
+    let mut app = directories_test_app(&[]);
+    app.confirm_delete = Some(ConfirmMode::DisposeWorktree {
+        repo_root: repo.clone(),
+        path: target.to_string_lossy().to_string(),
+        label: "feature".to_string(),
+        dirty: false,
+        unpushed: crate::tui::mode::worktree::WorktreeUnpushedStatus::NoUpstream,
+    });
+
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty());
+    let mode = app.confirm_delete.clone().unwrap();
+    handle_confirm_delete_key(&mut app, y, mode);
+
+    assert!(app.confirm_delete.is_none());
+    assert!(!target.exists(), "the worktree directory should have been removed");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// `n` leaves the worktree completely untouched, same as every other
+/// `ConfirmMode` variant's "no" answer.
+#[test]
+fn confirm_delete_dispose_worktree_key_n_leaves_worktree_untouched() {
+    let Some(repo) = worktree_scratch_repo("dispose_key_n", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-dispose-n",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+
+    let mut app = directories_test_app(&[]);
+    let mode = ConfirmMode::DisposeWorktree {
+        repo_root: repo.clone(),
+        path: target.to_string_lossy().to_string(),
+        label: "feature".to_string(),
+        dirty: false,
+        unpushed: crate::tui::mode::worktree::WorktreeUnpushedStatus::NoUpstream,
+    };
+    app.confirm_delete = Some(mode.clone());
+
+    let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty());
+    handle_confirm_delete_key(&mut app, n, mode);
+
+    assert!(app.confirm_delete.is_none());
+    assert!(target.is_dir(), "the worktree must still exist after declining");
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", "--force"]).arg(&target).output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
 /// Selecting a zoxide row must go through the same staging as a
 /// Directories-mode row (`stage_directory_selection`'s
 /// create-a-new-session path), not fall through to the generic

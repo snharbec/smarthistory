@@ -381,6 +381,35 @@ impl App {
         });
     }
 
+    /// `Action::DisposeWorktree`: open the `ConfirmMode::DisposeWorktree`
+    /// dialog for the selected `;` row. Same mode gate as
+    /// `open_worktree_create_flow`, plus a "no row selected" degrade —
+    /// disposal always needs a concrete worktree, unlike creation.
+    /// Pre-computes the dirty/unpushed checks here (not at render time)
+    /// so `draw_confirm_delete` doesn't re-run `git` on every frame.
+    pub(crate) fn open_worktree_dispose_confirm(&mut self) {
+        let Some(row) = self.selected_row() else {
+            self.set_status_message("no worktree selected".to_string());
+            return;
+        };
+        let path = row.directory.clone();
+        let label = row.command.clone();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let Some(repo_root) = crate::tui::mode::worktree::find_repo_root(&cwd) else {
+            self.set_status_message("not inside a git repository".to_string());
+            return;
+        };
+        let dirty = crate::tui::mode::worktree::repo_is_dirty(std::path::Path::new(&path));
+        let unpushed = crate::tui::mode::worktree::worktree_unpushed_status(std::path::Path::new(&path));
+        self.confirm_delete = Some(ConfirmMode::DisposeWorktree {
+            repo_root,
+            path,
+            label,
+            dirty,
+            unpushed,
+        });
+    }
+
     /// `Enter` pressed inside the `Action::CreateWorktree` dialog.
     /// Advances through `WorktreeCreateStep`s per the flow described on
     /// `WorktreeCreateFlow`'s doc comment, executing everything on the

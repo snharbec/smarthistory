@@ -1258,6 +1258,33 @@ etc.) is shown inline in the dialog rather than closing it. See
 [`worktree.basedir`/`worktree.defaultbranch`](configuration.md) for the
 related config keys.
 
+### `DisposeWorktree`
+
+| Field        | Value                                                                                  |
+| ------------ | --------------------------------------------------------------------------------------- |
+| Config key   | `dispose-worktree`                                                                       |
+| Display name | Dispose worktree                                                                         |
+| Default key  | none (open it via the command palette, or bind `key.dispose-worktree=<spec>`)            |
+| Category     | tools                                                                                    |
+
+Only available on a selected row in `;` (worktree) mode; a no-op with a
+status message everywhere else, or when no row is selected. Removes the
+worktree under the cursor via `git worktree remove`.
+
+Before opening the confirmation dialog, checks the worktree for uncommitted
+changes (`git status --porcelain`) and for commits not yet pushed to its
+upstream (`git rev-list --count @{upstream}..HEAD`, or "no upstream
+configured" when the branch has never been pushed at all). The dialog warns
+about whichever of those actually apply — nothing is shown for a worktree
+that's clean and fully pushed. `y` runs `git worktree remove --force`, which
+deletes the worktree's directory as part of removing it (`--force` is always
+passed, since by this point the user has already seen and accepted any
+dirty/unpushed warning); `n`/Cancel/`Ctrl-C` leaves it untouched. The branch
+itself is never deleted, only the worktree checkout. A `git` failure (e.g.
+attempting to remove the repo's main worktree, which git always refuses) is
+shown as a status message rather than a panic. See
+[docs/modes/worktree.md](modes/worktree.md).
+
 ---
 
 ## panes
