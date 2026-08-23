@@ -11250,7 +11250,26 @@ impl App {
     /// worktree list` (the same way every other keystroke does) so the
     /// row disappears immediately; on failure, the row list is left
     /// untouched so the user can see what's still there.
-    fn dispose_worktree(&mut self, repo_root: &std::path::Path, path: &str) {
+    ///
+    /// `shown_dirty` is the dirty flag the confirmation dialog displayed
+    /// when it opened (`ConfirmMode::DisposeWorktree`'s `dirty` field).
+    /// The dialog can sit open for a while — the user might switch to
+    /// another terminal and edit files in the worktree before coming
+    /// back and pressing `y`. Re-checking dirtiness fresh here, right
+    /// before `--force` actually runs, closes that window: if the
+    /// worktree is dirty NOW but wasn't when the warning was shown, we
+    /// refuse rather than silently force-discarding work the user was
+    /// never warned about.
+    fn dispose_worktree(&mut self, repo_root: &std::path::Path, path: &str, shown_dirty: bool) {
+        let now_dirty = crate::tui::mode::worktree::repo_is_dirty(std::path::Path::new(path));
+        if now_dirty && !shown_dirty {
+            self.confirm_delete = None;
+            self.set_status_message(format!(
+                "worktree {path} changed since this dialog opened (now has uncommitted changes); \
+                 dispose it again to see the up-to-date warning"
+            ));
+            return;
+        }
         match crate::tui::mode::worktree::remove_worktree(repo_root, path) {
             Ok(()) => {
                 self.refresh();
@@ -14321,10 +14340,11 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
                 ConfirmMode::DeleteMarked { .. } => {
                     let _ = app.delete_marked();
                 }
-                ConfirmMode::DisposeWorktree { repo_root, path, .. } => {
+                ConfirmMode::DisposeWorktree { repo_root, path, dirty, .. } => {
                     let repo_root = repo_root.clone();
                     let path = path.clone();
-                    app.dispose_worktree(&repo_root, &path);
+                    let shown_dirty = *dirty;
+                    app.dispose_worktree(&repo_root, &path, shown_dirty);
                 }
             }
             false

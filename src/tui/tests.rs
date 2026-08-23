@@ -13348,6 +13348,65 @@ fn confirm_delete_dispose_worktree_key_y_removes_worktree_and_closes_dialog() {
     let _ = std::fs::remove_dir_all(&repo);
 }
 
+/// Regression: the dirty/unpushed warning shown by
+/// `open_worktree_dispose_confirm` is computed once, when the dialog
+/// opens — if the worktree becomes dirty *after* that (edited from
+/// another terminal while the dialog sits open) but the stored
+/// `ConfirmMode` still says `dirty: false`, pressing `y` must NOT
+/// silently force-remove the new work. `dispose_worktree` re-checks
+/// dirtiness fresh right before running `git worktree remove --force`
+/// and refuses if it disagrees with what was shown.
+#[test]
+fn confirm_delete_dispose_worktree_refuses_when_dirtied_after_dialog_opened() {
+    let Some(repo) = worktree_scratch_repo("dispose_stale_dirty", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-dispose-stale",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+
+    // The dialog was opened while the worktree was still clean.
+    let mut app = directories_test_app(&[]);
+    app.confirm_delete = Some(ConfirmMode::DisposeWorktree {
+        repo_root: repo.clone(),
+        path: target.to_string_lossy().to_string(),
+        label: "feature".to_string(),
+        dirty: false,
+        unpushed: crate::tui::mode::worktree::WorktreeUnpushedStatus::NoUpstream,
+    });
+
+    // Simulate editing the worktree from another terminal while the
+    // dialog is still open.
+    std::fs::write(target.join("new_file.txt"), "uncommitted work\n").expect("dirty the worktree");
+
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty());
+    let mode = app.confirm_delete.clone().unwrap();
+    handle_confirm_delete_key(&mut app, y, mode);
+
+    assert!(app.confirm_delete.is_none(), "the dialog must still close");
+    assert!(
+        target.is_dir(),
+        "the worktree must NOT be removed — it's dirtier now than the dialog warned about"
+    );
+    assert!(
+        target.join("new_file.txt").exists(),
+        "the new uncommitted work must survive"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("changed since this dialog opened"),
+        "status should explain why disposal was refused: {status:?}"
+    );
+
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", "--force"]).arg(&target).output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
 /// `n` leaves the worktree completely untouched, same as every other
 /// `ConfirmMode` variant's "no" answer.
 #[test]
