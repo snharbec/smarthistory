@@ -34,6 +34,7 @@ use std::sync::mpsc;
 pub use bindings::{
     ALL_ACTIONS, Action, KeyBindings, action_for_key, format_key_spec, format_key_specs,
 };
+use bindings::is_cancel_key;
 pub use state::{
     AddEntryDialog, AddEntryKind, ExitFilter, HistoryRow, HostDef, MatchAlgorithm, Mode,
     PanesFilter, PickMode, SortOrder, TmuxWindowInfo, exit_code,
@@ -13913,7 +13914,7 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
 /// - Any other key is ignored, so a stray keypress can't silently
 ///   answer the prompt.
 fn handle_zoxide_save_prompt_key(app: &mut App, key: KeyEvent) -> bool {
-    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
+    let is_cancel_key = is_cancel_key(&app.bindings, &key);
     match key.code {
         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
             app.answer_zoxide_save_prompt(true);
@@ -13952,7 +13953,7 @@ fn handle_project_since_prompt_key(app: &mut App, key: KeyEvent) -> bool {
         app.cancelled = true;
         return true;
     }
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.project_since_prompt = None;
         return false;
     }
@@ -14012,7 +14013,7 @@ fn handle_template_name_prompt_key(app: &mut App, key: KeyEvent) -> bool {
         app.cancelled = true;
         return true;
     }
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.template_name_prompt = None;
         return false;
     }
@@ -14083,7 +14084,7 @@ fn handle_worktree_create_flow_key(app: &mut App, key: KeyEvent) -> bool {
         app.cancelled = true;
         return true;
     }
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.worktree_create_flow = None;
         return false;
     }
@@ -14191,7 +14192,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
     // doesn't share a key with
     // anything else the user
     // might rebind Cancel to).
-    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
+    let is_cancel_key = is_cancel_key(&app.bindings, &key);
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             match &mode {
@@ -14252,7 +14253,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
 /// dialog uses its own parallel `confirm_signal` field instead of a
 /// `ConfirmMode` variant (see `App::confirm_signal`'s doc comment).
 fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
-    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
+    let is_cancel_key = is_cancel_key(&app.bindings, &key);
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(s) = app.confirm_signal.take() {
@@ -14306,14 +14307,20 @@ fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
 /// only when the user aborts the whole TUI with Ctrl+C.
 fn handle_help_view_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-            app.close_help();
-            false
-        }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cancelled = true;
             app.close_help();
             true
+        }
+        _ if is_cancel_key(&app.bindings, &key)
+            || matches!(key.code, KeyCode::Enter | KeyCode::Char('q')) =>
+        {
+            app.close_help();
+            false
         }
         KeyCode::Up => {
             if let Some(ref mut view) = app.help_view {
@@ -14400,7 +14407,7 @@ fn handle_command_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // - Multi-key bindings
     //   (`key.cancel=Esc,F1`)
     //   all close the palette.
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.close_command_menu();
         return false;
     }
@@ -14528,7 +14535,7 @@ impl CommandMenu {
 fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel`
     // binding.
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.close_completion_menu();
         return false;
     }
@@ -14668,7 +14675,7 @@ fn handle_completion_menu_key(app: &mut App, key: KeyEvent) -> bool {
 /// picker without changing the query.
 fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
     // Dismiss on the user's `Cancel` binding.
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel) {
+    if is_cancel_key(&app.bindings, &key) {
         app.close_prefix_picker();
         return false;
     }
@@ -14756,16 +14763,18 @@ fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
 
 
 fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
-    // Esc / Ctrl-C always revert to the original theme and
-    // close. Ctrl-C additionally aborts the whole TUI.
-    if key.code == KeyCode::Esc {
-        app.close_theme_picker_revert();
-        return false;
-    }
+    // Ctrl-C is the panic button (quits the whole TUI) and is
+    // checked before the general Cancel-binding check below, so a
+    // rebound Cancel can't swallow it (Cancel's default binding
+    // happens to include `C-c` too). Both revert the theme.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_theme_picker_revert();
         return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_theme_picker_revert();
+        return false;
     }
 
     // Enter commits the currently-highlighted theme. The live
@@ -14883,7 +14892,7 @@ fn handle_output_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> Out
     // the TUI session, mirroring
     // the convention used
     // elsewhere.
-    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
+    let is_cancel_key = is_cancel_key(&app.bindings, &key);
     let is_toggle_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::ShowOutput);
     let is_close = is_cancel_key || is_toggle_key;
     match key.code {
@@ -15010,21 +15019,23 @@ fn handle_describe_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> b
         let total = text.lines().count();
         total.saturating_sub(page_size.max(1))
     };
-    let is_close = matches!(
-        key.code,
-        KeyCode::Esc
-            | KeyCode::Enter
-            | KeyCode::Char('q')
-            | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL)
-    );
-    if is_close {
-        app.close_describe();
-        return false;
-    }
+    // The dedicated Ctrl-C abort check runs before the general
+    // Cancel-binding check below: Ctrl-C is always the panic button
+    // that quits the whole TUI, regardless of what the user has
+    // `key.cancel=...` bound to (Cancel's own default binding
+    // happens to include `C-c`, but that must not let a rebound
+    // Cancel silently swallow the panic button here).
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.cancelled = true;
         app.close_describe();
         return true;
+    }
+    let is_close = is_cancel_key(&app.bindings, &key)
+        || matches!(key.code, KeyCode::Enter | KeyCode::Char('q'))
+        || (key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL));
+    if is_close {
+        app.close_describe();
+        return false;
     }
     match key.code {
         KeyCode::Up => {
@@ -15078,9 +15089,9 @@ fn handle_describe_view_key(app: &mut App, key: KeyEvent, page_size: usize) -> b
 ///   original as the comment) and returns `true`
 ///   so the run loop exits. The parent shell
 ///   then runs the corrected command.
-/// - `Esc` / `q` — cancel. Closes the overlay,
-///   returns `false` so the TUI stays open with
-///   the user's original list state intact.
+/// - The user's `Cancel` binding (default `Esc`) / `q` — cancel.
+///   Closes the overlay, returns `false` so the TUI stays open
+///   with the user's original list state intact.
 /// - `Ctrl-C` — abort the entire TUI (mirrors the
 ///   other overlay handlers' convention). Sets
 ///   `cancelled = true` and returns `true` so the
@@ -15096,14 +15107,18 @@ fn handle_correct_view_key(app: &mut App, key: KeyEvent) -> bool {
             app.accept_corrected_command();
             true
         }
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.close_correct();
-            false
-        }
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cancelled = true;
             app.close_correct();
             true
+        }
+        _ if is_cancel_key(&app.bindings, &key) || key.code == KeyCode::Char('q') => {
+            app.close_correct();
+            false
         }
         // All other keys are no-ops. The user can
         // only accept or cancel; we don't expose
@@ -15537,11 +15552,11 @@ fn handle_comment_edit_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
 
+    if is_cancel_key(&app.bindings, &key) {
+        app.cancel_comment_edit();
+        return false;
+    }
     match key.code {
-        KeyCode::Esc => {
-            app.cancel_comment_edit();
-            false
-        }
         KeyCode::Enter => {
             let _ = app.save_comment_edit();
             false
@@ -15591,11 +15606,11 @@ fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
 
+    if is_cancel_key(&app.bindings, &key) {
+        app.note_compose_cancel();
+        return false;
+    }
     match key.code {
-        KeyCode::Esc => {
-            app.note_compose_cancel();
-            false
-        }
         KeyCode::Enter => {
             app.note_compose_push_char('\n');
             false
@@ -15647,7 +15662,7 @@ fn handle_note_compose_key(app: &mut App, key: KeyEvent) -> bool {
 /// - Any other key is ignored, so a stray keypress can't discard
 ///   data by accident.
 fn handle_note_create_confirm_key(app: &mut App, key: KeyEvent) -> bool {
-    let is_cancel_key = action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel);
+    let is_cancel_key = is_cancel_key(&app.bindings, &key);
     match key.code {
         KeyCode::Enter => app.note_create_submit(),
         KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -15888,7 +15903,7 @@ fn handle_note_create_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
     match key.code {
-        KeyCode::Esc => {
+        _ if is_cancel_key(&app.bindings, &key) => {
             if app.note_create_confirm_discard_if_dirty() {
                 return false;
             }
@@ -16034,7 +16049,7 @@ pub(crate) fn handle_note_create_completion_key(
     // `Cancel` binding OR
     // `Ctrl-C` — same as the
     // main `CompletionMenu`.
-    if action_for_key(&app.bindings, &key, crate::tui::mode::ModeKind::History) == Some(Action::Cancel)
+    if is_cancel_key(&app.bindings, &key)
         || (key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL))
     {
@@ -16204,8 +16219,8 @@ fn handle_add_entry_dialog_key(app: &mut App, key: KeyEvent) -> bool {
     // the muscle memory is
     // identical: Ctrl-C
     // aborts the whole TUI;
-    // Esc just closes the
-    // dialog.
+    // the Cancel binding just
+    // closes the dialog.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
@@ -16242,16 +16257,16 @@ fn handle_add_entry_dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
 
+    if is_cancel_key(&app.bindings, &key) {
+        // Cancel: close the
+        // dialog without
+        // writing anything to
+        // the config file.
+        app.close_add_entry_dialog();
+        app.set_status_message("add-entry: cancelled".to_string());
+        return false;
+    }
     match key.code {
-        KeyCode::Esc => {
-            // Cancel: close the
-            // dialog without
-            // writing anything to
-            // the config file.
-            app.close_add_entry_dialog();
-            app.set_status_message("add-entry: cancelled".to_string());
-            false
-        }
         KeyCode::Enter => {
             // Commit: validate the
             // required fields, then
@@ -16399,7 +16414,7 @@ fn handle_jira_template_picker_key(app: &mut App, key: KeyEvent) -> bool {
         return true;
     }
     match key.code {
-        KeyCode::Esc => {
+        _ if is_cancel_key(&app.bindings, &key) => {
             app.jira_template_picker = None;
             false
         }
@@ -16475,12 +16490,12 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
 
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_create_jira_issue_dialog();
+        app.set_status_message("create-jira-issue: cancelled".to_string());
+        return false;
+    }
     match key.code {
-        KeyCode::Esc => {
-            app.close_create_jira_issue_dialog();
-            app.set_status_message("create-jira-issue: cancelled".to_string());
-            false
-        }
         KeyCode::Tab => {
             if let Some(d) = app.create_jira_issue_dialog.as_mut() {
                 d.focus_next();
