@@ -32,12 +32,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 pub use bindings::{
-    ALL_ACTIONS, Action, KeyBindings, action_for_key, format_key_spec, format_key_specs,
+    ALL_ACTIONS, Action, KeyBindings, KeySpec, action_for_key, format_key_spec, format_key_specs,
 };
-use bindings::is_cancel_key;
+use bindings::{is_cancel_key, scopes_conflict, write_key_binding_to_config};
 pub use state::{
-    AddEntryDialog, AddEntryKind, ExitFilter, HistoryRow, HostDef, MatchAlgorithm, Mode,
-    PanesFilter, PickMode, SortOrder, TmuxWindowInfo, exit_code,
+    AddEntryDialog, AddEntryKind, ExitFilter, HistoryRow, HostDef, KeyBindingsEditor,
+    MatchAlgorithm, Mode, PanesFilter, PickMode, SortOrder, TmuxWindowInfo, exit_code,
 };
 pub use theme::{BuiltinTheme, SelectedTheme, ThemePicker, install_palette};
 
@@ -1193,6 +1193,10 @@ pub(crate) struct App {
     /// the list applies the selected theme live; `Enter` commits,
     /// `Esc` reverts to the original.
     theme_picker: Option<ThemePicker>,
+    /// When `Some`, the key-bindings editor overlay is open. See
+    /// `KeyBindingsEditor`'s own doc comment for its browse/capture/
+    /// conflict-prompt sub-states.
+    key_bindings_editor: Option<KeyBindingsEditor>,
     /// When `Some`, the tab-completion
     /// menu is open. Shown when the
     /// user presses `Tab` and the
@@ -5064,6 +5068,7 @@ impl App {
             prefix_picker: None,
             codegraph_relations_picker: None,
             theme_picker: None,
+            key_bindings_editor: None,
             completion_menu: None,
             confirm_delete: None,
             confirm_signal: None,
@@ -9060,6 +9065,54 @@ impl App {
         self.theme_picker.is_some()
     }
 
+    fn is_key_bindings_editor_open(&self) -> bool {
+        self.key_bindings_editor.is_some()
+    }
+
+    fn open_key_bindings_editor(&mut self) {
+        self.key_bindings_editor = Some(KeyBindingsEditor::new());
+    }
+
+    fn close_key_bindings_editor(&mut self) {
+        self.key_bindings_editor = None;
+    }
+
+    /// Apply `spec` as `action`'s new (sole) binding, immediately
+    /// in-memory, and best-effort persist it to the config file. A
+    /// write failure surfaces as a status message but never rolls back
+    /// the in-memory rebind — same "in-memory choice still applies for
+    /// this session" policy `close_theme_picker_commit` uses.
+    fn commit_key_binding(&mut self, action: Action, spec: KeySpec) {
+        self.bindings.set(action, vec![spec]);
+        let spec_str = format_key_spec(spec);
+        match write_key_binding_to_config(action, Some(spec)) {
+            Ok(()) => {
+                self.set_status_message(format!("bound {} to {}", action.display_name(), spec_str))
+            }
+            Err(e) => self.set_status_message(format!(
+                "{} is now bound to {} for this session, but the change was not persisted: {}",
+                action.display_name(),
+                spec_str,
+                e
+            )),
+        }
+    }
+
+    /// Unbind `action`, immediately in-memory, and best-effort persist
+    /// `key.<config_key>=none` to the config file. Same
+    /// never-rolls-back-on-write-failure policy as `commit_key_binding`.
+    fn unbind_key_binding(&mut self, action: Action) {
+        self.bindings.unbind(action);
+        match write_key_binding_to_config(action, None) {
+            Ok(()) => self.set_status_message(format!("unbound {}", action.display_name())),
+            Err(e) => self.set_status_message(format!(
+                "{} is now unbound for this session, but the change was not persisted: {}",
+                action.display_name(),
+                e
+            )),
+        }
+    }
+
     fn is_add_entry_dialog_open(&self) -> bool {
         self.add_entry_dialog.is_some()
     }
@@ -13012,6 +13065,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_theme_picker_key(app, key);
     }
 
+    // The key-bindings editor is a sibling of the theme picker: also
+    // takes precedence over the help overlay for the same reason (its
+    // own capture/conflict sub-states need arrow keys and printable
+    // characters routed to it, not treated as a query edit).
+    if app.is_key_bindings_editor_open() {
+        return handle_key_bindings_editor_key(app, key);
+    }
+
     // When the help overlay is open, route all input to its handler
     // (Esc / q / Enter / Ctrl-C close it, arrows scroll).
     if app.is_help_viewing() {
@@ -13580,6 +13641,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::ThemePicker => {
             app.open_theme_picker();
+            false
+        }
+        Action::KeyBindingsEditor => {
+            app.open_key_bindings_editor();
             false
         }
         Action::AddSession => {
@@ -14849,6 +14914,181 @@ fn handle_theme_picker_key(app: &mut App, key: KeyEvent) -> bool {
         picker.move_by(delta);
         app.theme = picker.current();
         install_palette(app.theme);
+    }
+    false
+}
+
+/// Key handler for the `Action::KeyBindingsEditor` overlay. Three
+/// sub-states live on one `KeyBindingsEditor` (see its doc comment in
+/// `src/tui/state.rs`): browsing the filtered action list, capturing a
+/// new key for the highlighted action, and — only reachable from
+/// capturing — confirming a binding that collides with another action
+/// whose scope can genuinely compete for it (`scopes_conflict`).
+///
+/// Each branch below re-borrows `app.key_bindings_editor` locally
+/// rather than holding one borrow across the whole function, so the
+/// branches that need `&mut App` (to call `commit_key_binding`/
+/// `unbind_key_binding`, which also touch `app.bindings` and
+/// `app.status_message`) don't fight the borrow checker — same
+/// per-branch-local-borrow shape `handle_theme_picker_key` uses just
+/// above.
+fn handle_key_bindings_editor_key(app: &mut App, key: KeyEvent) -> bool {
+    // Ctrl-C is the panic button everywhere in this TUI, checked before
+    // anything else (including the sub-state branches below) so a
+    // rebound Cancel can't swallow it.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.cancelled = true;
+        app.close_key_bindings_editor();
+        return true;
+    }
+
+    // --- Conflict-confirmation sub-state ---
+    if let Some((action, spec, _other)) =
+        app.key_bindings_editor.as_ref().and_then(|e| e.pending_conflict)
+    {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y')) {
+            app.commit_key_binding(action, spec);
+            if let Some(editor) = app.key_bindings_editor.as_mut() {
+                editor.capturing = None;
+                editor.pending_conflict = None;
+            }
+            return false;
+        }
+        if is_cancel_key(&app.bindings, &key)
+            || matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Backspace)
+        {
+            // Back out of the conflict prompt, not the whole capture —
+            // the user gets another try at a different key rather than
+            // losing their place and having to re-open the editor.
+            if let Some(editor) = app.key_bindings_editor.as_mut() {
+                editor.pending_conflict = None;
+            }
+        }
+        // Any other key is ignored while the conflict prompt is up —
+        // only y/Enter/n/Cancel/Backspace are meaningful answers.
+        return false;
+    }
+
+    // --- Capture sub-state ---
+    if let Some(action) = app.key_bindings_editor.as_ref().and_then(|e| e.capturing) {
+        if is_cancel_key(&app.bindings, &key) {
+            // Abort capture, back to browsing — no change made. Must be
+            // checked before treating the keypress as a candidate
+            // binding, or the user could give away their only way to
+            // close the editor.
+            if let Some(editor) = app.key_bindings_editor.as_mut() {
+                editor.capturing = None;
+            }
+            return false;
+        }
+        let spec = KeySpec { code: key.code, modifiers: key.modifiers };
+        let conflict = ALL_ACTIONS.iter().copied().find(|&other| {
+            other != action
+                && app
+                    .bindings
+                    .specs(other)
+                    .iter()
+                    .any(|s| s.code == spec.code && s.modifiers == spec.modifiers)
+        });
+        match conflict {
+            Some(other) if scopes_conflict(action.scope(), other.scope()) => {
+                if let Some(editor) = app.key_bindings_editor.as_mut() {
+                    editor.pending_conflict = Some((action, spec, other));
+                }
+            }
+            // No other action holds this key, or the one that does is
+            // scoped to a disjoint prefix mode (`scopes_conflict` is
+            // false) — the tiered `action_for_key` resolution already
+            // makes that case unambiguous, so there's nothing to warn
+            // about; commit straight away.
+            _ => {
+                app.commit_key_binding(action, spec);
+                if let Some(editor) = app.key_bindings_editor.as_mut() {
+                    editor.capturing = None;
+                }
+            }
+        }
+        return false;
+    }
+
+    // --- Browse sub-state ---
+    if is_cancel_key(&app.bindings, &key) {
+        app.close_key_bindings_editor();
+        return false;
+    }
+    if key.code == KeyCode::Enter {
+        let action = app.key_bindings_editor.as_ref().and_then(|editor| {
+            let indices = editor.filtered_indices();
+            indices.get(editor.selected).map(|&idx| ALL_ACTIONS[idx])
+        });
+        if let Some(action) = action
+            && let Some(editor) = app.key_bindings_editor.as_mut()
+        {
+            editor.capturing = Some(action);
+        }
+        return false;
+    }
+    if key.code == KeyCode::Delete {
+        let action = app.key_bindings_editor.as_ref().and_then(|editor| {
+            let indices = editor.filtered_indices();
+            indices.get(editor.selected).map(|&idx| ALL_ACTIONS[idx])
+        });
+        if let Some(action) = action {
+            app.unbind_key_binding(action);
+        }
+        return false;
+    }
+    if key.code == KeyCode::Backspace {
+        if let Some(editor) = app.key_bindings_editor.as_mut()
+            && !editor.query.is_empty()
+        {
+            editor.query.pop();
+            editor.clamp_selection();
+        }
+        return false;
+    }
+    if !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && let KeyCode::Char(c) = key.code
+    {
+        if let Some(editor) = app.key_bindings_editor.as_mut() {
+            editor.query.push(c);
+            editor.clamp_selection();
+        }
+        return false;
+    }
+    if let Some(editor) = app.key_bindings_editor.as_mut() {
+        match key.code {
+            KeyCode::Up => {
+                if editor.selected > 0 {
+                    editor.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                let n = editor.filtered_indices().len();
+                if n > 0 && editor.selected + 1 < n {
+                    editor.selected += 1;
+                }
+            }
+            KeyCode::PageUp => {
+                editor.selected = editor.selected.saturating_sub(5);
+                editor.clamp_selection();
+            }
+            KeyCode::PageDown => {
+                let n = editor.filtered_indices().len();
+                editor.selected = (editor.selected + 5).min(n.saturating_sub(1));
+            }
+            KeyCode::Home => {
+                editor.selected = 0;
+            }
+            KeyCode::End => {
+                let n = editor.filtered_indices().len();
+                if n > 0 {
+                    editor.selected = n - 1;
+                }
+            }
+            _ => {}
+        }
     }
     false
 }

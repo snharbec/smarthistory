@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `Action::KeyBindingsEditor` — configure key bindings from inside the
+  running TUI instead of hand-editing the config file. Browse every action
+  (filterable, current binding shown, same listing the command palette
+  uses), `Enter` to rebind (press the new key, applied immediately and
+  persisted best-effort to `key.<config_key>=<spec>`), `Delete` to unbind.
+  Rebinding to a key already used by another action is only flagged when the
+  two could genuinely compete for it (same mode-scope check
+  `smarthistory config check` already uses) — binding the same key to two
+  actions scoped to different, mutually-exclusive prefix modes is allowed
+  without a warning. Ships unbound by default; open it via the command
+  palette or `key.key-bindings-editor=<spec>`. See
+  [docs/actions.md](docs/actions.md#keybindingseditor).
 - `smarthistory project select <slug> --since <duration>` backdates a project
   switch — for the common "I forgot to switch" case, where the project
   actually started a few minutes before you got around to running the

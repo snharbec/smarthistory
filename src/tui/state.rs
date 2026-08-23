@@ -949,6 +949,91 @@ pub struct TemplateNamePrompt {
     pub error: Option<String>,
 }
 
+/// State for the `Action::KeyBindingsEditor` overlay: browse every
+/// action (filterable, current binding shown — mirrors the command
+/// palette's listing), then rebind or unbind the highlighted one.
+///
+/// Two sub-modes, both tracked on this one struct rather than as
+/// separate `Option` fields on `App` (the command-menu/theme-picker
+/// convention) since they're inherently nested states of the SAME
+/// overlay, not siblings: browsing (`capturing` and `pending_conflict`
+/// both `None`), capturing (`capturing = Some(action)`, waiting for the
+/// next keypress to become that action's new binding), and — only
+/// reachable from capturing — a conflict prompt (`pending_conflict =
+/// Some(..)`, the captured key collides with another action whose
+/// scope can genuinely compete for it; see `scopes_conflict`).
+#[derive(Debug, Clone)]
+pub struct KeyBindingsEditor {
+    /// Search query for narrowing the action list. Matches the command
+    /// palette's own substring-AND-of-words semantics against each
+    /// action's display name and config key.
+    pub query: String,
+    /// Index into the FILTERED action list (not `crate::tui::bindings::ALL_ACTIONS`).
+    pub selected: usize,
+    /// `Some(action)` while waiting for the next keypress to become
+    /// that action's new (sole) binding. `None` in browse mode.
+    pub capturing: Option<crate::tui::bindings::Action>,
+    /// Set when a just-captured key collides with another action that
+    /// can genuinely compete for it (`scopes_conflict` is true) — the
+    /// rebind is held here, not yet applied, until the user confirms
+    /// (`Enter`/`y`) or backs out to try a different key
+    /// (`is_cancel_key`/`n`/`Backspace`). `(rebinding action, candidate
+    /// spec, the other action currently holding that key)`.
+    pub pending_conflict:
+        Option<(crate::tui::bindings::Action, crate::tui::bindings::KeySpec, crate::tui::bindings::Action)>,
+}
+
+impl KeyBindingsEditor {
+    pub fn new() -> Self {
+        KeyBindingsEditor {
+            query: String::new(),
+            selected: 0,
+            capturing: None,
+            pending_conflict: None,
+        }
+    }
+
+    /// The indices (into `crate::tui::bindings::ALL_ACTIONS`) of the actions matching
+    /// `query`. Identical semantics to the command palette's own
+    /// `filtered_indices`: case-insensitive substring AND across
+    /// whitespace-separated words, against either the action's display
+    /// name or its config key. Empty query matches every action.
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..crate::tui::bindings::ALL_ACTIONS.len()).collect();
+        }
+        let q = self.query.to_lowercase();
+        let words: Vec<&str> = q.split_whitespace().collect();
+        crate::tui::bindings::ALL_ACTIONS
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                let name = a.display_name().to_lowercase();
+                let key = a.config_key().to_lowercase();
+                words.iter().all(|w| name.contains(w) || key.contains(w))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Clamp `self.selected` so it remains a valid index into the
+    /// filtered list (which may shrink or grow as the user types).
+    pub fn clamp_selection(&mut self) {
+        let n = self.filtered_indices().len();
+        if n == 0 {
+            self.selected = 0;
+        } else if self.selected >= n {
+            self.selected = n - 1;
+        }
+    }
+}
+
+impl Default for KeyBindingsEditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The step `WorktreeCreateFlow` is currently on. `PickBranch` is
 /// always first; `PickBaseBranch` and `ConfirmCarryOver` are each
 /// conditionally skipped (see the flow's own doc comment), so a given

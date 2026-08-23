@@ -629,6 +629,38 @@ Navigating the list applies the theme live (so the user sees the effect
 immediately), Enter commits, Esc reverts to the original theme. A preview pane
 on the right shows the live palette in action.
 
+### `KeyBindingsEditor`
+
+| Field        | Value                                                                     |
+| ------------ | -------------------------------------------------------------------------- |
+| Config key   | `key-bindings-editor`                                                     |
+| Display name | Key bindings editor                                                       |
+| Default key  | none (open it via the command palette, or bind `key.key-bindings-editor=<spec>`) |
+| Category     | tools                                                                      |
+
+Open the key-bindings editor: every action, filterable, with its current
+binding shown — the same listing and column layout the command palette uses.
+`Enter` on the highlighted action starts key-capture mode; the next keypress
+becomes that action's new (sole) binding, applied immediately in memory and
+persisted (best-effort) to the config file as `key.<config_key> = <spec>`.
+`Delete` unbinds the highlighted action (writes `key.<config_key> = none`).
+`Cancel` (`Esc` by default) during capture backs out to browsing without
+changing anything; `Cancel` while browsing closes the editor.
+
+If the captured key is already held by another action, the rebind is only
+blocked when the two actions could genuinely compete for it — i.e. when
+their [scopes](configuration.md) can both apply in some real prefix mode at
+once (see `scopes_conflict`, mirrored from the same check
+`smarthistory config check` uses). In that case a warning names the other
+action; `y`/`Enter` binds anyway, `n`/`Backspace`/Cancel returns to capture
+so you can try a different key. A key already held by an action scoped to a
+different, mutually-exclusive prefix mode is never flagged — each fires only
+in its own mode.
+
+Rebinding always replaces an action's ENTIRE key list with the one just
+captured; multi-key bindings (`key.foo=C-h, F1`) are still possible, just not
+editable from this overlay — set them by hand in the config file.
+
 ### `YankSelection`
 
 | Field        | Value            |
