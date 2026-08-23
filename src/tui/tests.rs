@@ -23916,6 +23916,51 @@ fn create_jira_template_from_issue_opens_prompt() {
     assert!(prompt.error.is_none());
 }
 
+/// Regression: triggering the action again while a previous fetch is
+/// still in flight used to silently overwrite
+/// `jira_template_fetch_request` — the first fetch's result would then
+/// be dropped with no error when its background thread finished (the
+/// channel receiver it was sending to no longer existed). It must now
+/// refuse with a status message instead of opening a second prompt.
+#[test]
+fn create_jira_template_from_issue_refuses_while_fetch_in_flight() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        issues: vec![crate::jira::JiraIssue { key: "PROJ-42".to_string(), ..Default::default() }],
+        recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..FakeJira::default()
+    };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.query = String::from("-");
+    app.refresh();
+    let past = std::time::Instant::now()
+        - JIRA_IDLE_TIMEOUT
+        - JIRA_DEBOUNCE
+        - std::time::Duration::from_millis(50);
+    app.jira_debounce_started = Some(past);
+    app.jira_idle_started = Some(past);
+    app.jira_maybe_autocall();
+    app.list_state.select(Some(0));
+
+    // Simulate a fetch already in flight (e.g. from a previous row,
+    // still running on a background thread).
+    app.jira_template_fetch_in_flight = true;
+
+    app.create_jira_template_from_issue();
+
+    assert!(
+        app.template_name_prompt.is_none(),
+        "must not open a second prompt while a fetch is already running"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("already in progress"),
+        "status should explain why: {:?}",
+        status
+    );
+}
+
 /// Outside of JIRA mode, the action is a no-op with a status message —
 /// same policy as `download_jira_issue`.
 #[test]

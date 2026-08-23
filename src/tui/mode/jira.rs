@@ -2163,6 +2163,21 @@ impl App {
             );
             return;
         }
+        // A previous invocation's background fetch is still running.
+        // `template_name_prompt` is a modal overlay, so this can only be
+        // reached again after that prompt closed (i.e. the user already
+        // submitted a name and `start_jira_template_fetch` is mid-flight
+        // for a DIFFERENT row) — without this guard, opening a second
+        // prompt and submitting it would silently overwrite
+        // `jira_template_fetch_request`, and the first fetch's result
+        // would be dropped with no error when its thread finished (the
+        // channel receiver it was sending to no longer exists).
+        if self.jira_template_fetch_in_flight {
+            self.set_status_message(
+                "a JIRA template fetch is already in progress; wait for it to finish".to_string(),
+            );
+            return;
+        }
         let Some(row) = self.selected_row().cloned() else {
             self.set_status_message("No JIRA issue selected".to_string());
             return;
