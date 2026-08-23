@@ -16,9 +16,8 @@ rev-parse --show-toplevel`) and the `git` binary on `$PATH`. Outside a repo,
 the mode is empty rather than an error — same "degrade to no rows" policy
 `~` (Zoxide) uses for a missing `zoxide` binary.
 
-Listing + selecting a worktree is read-only; creating one is available via
-the `CreateWorktree` action (see below). Disposing a worktree from inside the
-TUI is still planned as a later addition.
+Beyond listing + selecting, two actions manage worktrees from inside the
+TUI: `CreateWorktree` and `DisposeWorktree` (see below).
 
 ## What it does
 
@@ -54,6 +53,18 @@ stash`), and optionally assign the new worktree to a time-tracking project
 [docs/actions.md#createworktree](../actions.md#createworktree) for the full
 step-by-step and [docs/configuration.md](../configuration.md) for
 `worktree.basedir`/`worktree.defaultbranch`.
+
+## Disposing a worktree
+
+The `DisposeWorktree` action (unbound by default — open it via the command
+palette, or bind `key.dispose-worktree=<spec>`) removes the worktree under
+the cursor. Before removing anything it checks the worktree for uncommitted
+changes and for commits not yet pushed to its upstream, and shows a
+confirmation dialog that warns about whichever of those actually apply (no
+warning at all for a worktree that's clean and fully pushed). Confirming
+with `y` runs `git worktree remove --force`, which deletes the worktree's
+directory as part of removing it; `n` or Cancel leaves it untouched. See
+[docs/actions.md#disposeworktree](../actions.md#disposeworktree) for details.
 
 ## Relationship to Directories and Zoxide mode
 

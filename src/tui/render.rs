@@ -274,6 +274,23 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
                 if *count == 1 { "entry" } else { "entries" },
             ),
         ),
+        ConfirmMode::DisposeWorktree { path, label, dirty, unpushed, .. } => {
+            let warnings = crate::tui::mode::worktree::dispose_warnings(*dirty, *unpushed);
+            let warning_text = if warnings.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nWarning: this worktree has {}.", warnings.join(" and "))
+            };
+            (
+                " Dispose worktree ",
+                format!(
+                    "Remove the worktree for {}:\n  {}{}",
+                    label,
+                    crate::util::shorten_home_path(path, &app.home_list),
+                    warning_text,
+                ),
+            )
+        }
     };
 
     let block = Block::default()

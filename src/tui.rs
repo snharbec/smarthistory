@@ -4059,6 +4059,18 @@ enum ConfirmMode {
     DeleteMarked {
         count: usize,
     },
+    /// Remove a `;` (worktree) row via `git worktree remove`
+    /// (`Action::DisposeWorktree`). `dirty`/`unpushed` are
+    /// pre-computed when the dialog opens (same pattern as
+    /// `DeleteDirectory`'s `count`) so the confirmation message can
+    /// warn about them without re-running `git` at render time.
+    DisposeWorktree {
+        repo_root: std::path::PathBuf,
+        path: String,
+        label: String,
+        dirty: bool,
+        unpushed: crate::tui::mode::worktree::WorktreeUnpushedStatus,
+    },
 }
 
 /// The small, fixed set of signals the `%` (processes) mode
@@ -11133,6 +11145,27 @@ impl App {
         Ok(())
     }
 
+    /// Run `git worktree remove --force` for the `Action::DisposeWorktree`
+    /// confirmation dialog. Unlike the DB-backed `delete_*` methods above,
+    /// this is a fallible external command, so success and failure both
+    /// get a status message — same convention `handle_confirm_signal_key`'s
+    /// `send_signal` call uses. On success, `refresh()` re-runs `git
+    /// worktree list` (the same way every other keystroke does) so the
+    /// row disappears immediately; on failure, the row list is left
+    /// untouched so the user can see what's still there.
+    fn dispose_worktree(&mut self, repo_root: &std::path::Path, path: &str) {
+        match crate::tui::mode::worktree::remove_worktree(repo_root, path) {
+            Ok(()) => {
+                self.refresh();
+                self.set_status_message(format!("removed worktree {path}"));
+            }
+            Err(e) => {
+                self.set_status_message(format!("failed to remove worktree {path}: {e}"));
+            }
+        }
+        self.confirm_delete = None;
+    }
+
     /// Toggle the marked state of the currently selected row
     /// (`Action::ToggleMark`, `C-x` by default). A quiet no-op
     /// when nothing is selected — marking isn't destructive, so
@@ -13398,6 +13431,19 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             app.open_worktree_create_flow();
             false
         }
+        Action::DisposeWorktree => {
+            // Same mode gate as `CreateWorktree`, but this one does
+            // need a selected row — it disposes the row under the
+            // cursor, not "a" worktree in the abstract.
+            if !app.is_worktree_query() {
+                app.set_status_message(
+                    "Dispose-worktree is only available in worktree search (type `;`)".to_string(),
+                );
+                return false;
+            }
+            app.open_worktree_dispose_confirm();
+            false
+        }
         Action::DownloadJiraMatching => {
             // Same mode gate as `DownloadJiraIssue`, for the
             // same reason — a stray key press outside JIRA
@@ -14161,6 +14207,11 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
                 }
                 ConfirmMode::DeleteMarked { .. } => {
                     let _ = app.delete_marked();
+                }
+                ConfirmMode::DisposeWorktree { repo_root, path, .. } => {
+                    let repo_root = repo_root.clone();
+                    let path = path.clone();
+                    app.dispose_worktree(&repo_root, &path);
                 }
             }
             false

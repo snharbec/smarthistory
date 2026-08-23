@@ -10,10 +10,10 @@
 //! `T`-marker render logic) work unchanged without needing to know
 //! which mode produced the row.
 //!
-//! Phase 1 (this module, as it stands) is read-only: list + select to
-//! `cd`. Creating (`Action::CreateWorktree`) and disposing
-//! (`Action::DisposeWorktree`) worktrees are later phases — see
-//! the plan history for the full design.
+//! Beyond listing, this module backs two actions: `Action::CreateWorktree`
+//! (a step-through dialog that runs `git worktree add`) and
+//! `Action::DisposeWorktree` (a confirmation dialog that runs `git
+//! worktree remove`).
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
 use crate::tui::App;
@@ -400,6 +400,105 @@ pub(crate) fn write_project_dir_binding(slug: &str, path: &std::path::Path) -> R
         )
     })?;
     Ok(())
+}
+
+/// How a worktree's branch compares to its upstream, used to warn the
+/// user before `Action::DisposeWorktree` removes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreeUnpushedStatus {
+    /// Has an upstream and no commits ahead of it.
+    UpToDate,
+    /// Has an upstream and `n` commits (`n >= 1`) not yet pushed to it.
+    Ahead(usize),
+    /// The branch has no upstream configured — everything on it is, by
+    /// definition, unpushed.
+    NoUpstream,
+    /// Detached HEAD, a bare worktree, or the `git` calls otherwise
+    /// failed — nothing meaningful to report either way.
+    Unknown,
+}
+
+/// Compare `path`'s branch against its upstream. See
+/// `WorktreeUnpushedStatus` for what each outcome means. A detached HEAD
+/// (no branch, so no upstream concept) is distinguished from "branch
+/// exists but has no upstream" by checking `symbolic-ref HEAD` first.
+pub(crate) fn worktree_unpushed_status(path: &std::path::Path) -> WorktreeUnpushedStatus {
+    let on_branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output();
+    if !matches!(on_branch, Ok(o) if o.status.success()) {
+        return WorktreeUnpushedStatus::Unknown;
+    }
+    let upstream = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        .output();
+    if !matches!(upstream, Ok(o) if o.status.success()) {
+        return WorktreeUnpushedStatus::NoUpstream;
+    }
+    let count = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-list", "--count", "@{upstream}..HEAD"])
+        .output();
+    match count {
+        Ok(o) if o.status.success() => {
+            let n: usize = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0);
+            if n == 0 {
+                WorktreeUnpushedStatus::UpToDate
+            } else {
+                WorktreeUnpushedStatus::Ahead(n)
+            }
+        }
+        _ => WorktreeUnpushedStatus::Unknown,
+    }
+}
+
+/// Remove the worktree at `path` from the repo at `repo_root` — `git -C
+/// <repo_root> worktree remove --force <path>`, which also deletes
+/// `path` itself. `--force` is always passed: by the time the user
+/// presses `y` on the dispose confirmation, they've already seen and
+/// accepted any dirty/unpushed warning, so there's no reason to make
+/// them confirm the same condition a second time at the git-command
+/// level. Git's own refusals for cases that aren't about dirty state
+/// (e.g. removing the main worktree) still surface as the propagated
+/// stderr.
+pub(crate) fn remove_worktree(repo_root: &std::path::Path, path: &str) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "remove", "--force", path])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// The human-readable warnings the `Action::DisposeWorktree` confirmation
+/// dialog shows for a given dirty/unpushed state — a plain string per
+/// condition that's actually true, in a stable order (dirty first, then
+/// unpushed), so `draw_confirm_delete` only has to join them. Pulled out
+/// as its own pure function (rather than inlined in `render.rs`) so the
+/// warning logic is unit-testable without a real terminal frame.
+pub(crate) fn dispose_warnings(dirty: bool, unpushed: WorktreeUnpushedStatus) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if dirty {
+        warnings.push("uncommitted changes".to_string());
+    }
+    match unpushed {
+        WorktreeUnpushedStatus::Ahead(n) => {
+            warnings.push(format!("{n} unpushed commit{}", if n == 1 { "" } else { "s" }))
+        }
+        WorktreeUnpushedStatus::NoUpstream => warnings.push("no upstream (never pushed)".to_string()),
+        WorktreeUnpushedStatus::UpToDate | WorktreeUnpushedStatus::Unknown => {}
+    }
+    warnings
 }
 
 impl App {
