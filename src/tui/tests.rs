@@ -1221,6 +1221,201 @@ fn theme_picker_ctrl_c_aborts_even_though_it_is_also_the_default_cancel_key() {
     assert!(app.theme_picker.is_none());
 }
 
+// ---- Key-bindings editor (`Action::KeyBindingsEditor`) ----
+
+/// `KeyBindingsEditor::filtered_indices` uses the exact same
+/// case-insensitive substring-AND-of-words semantics as
+/// `CommandMenu::filtered_indices`, matched against display name or
+/// config key.
+#[test]
+fn key_bindings_editor_filtered_indices_matches_command_menu_semantics() {
+    let mut editor = crate::tui::KeyBindingsEditor::new();
+    editor.query = "worktree".to_string();
+    let filtered = editor.filtered_indices();
+    assert!(!filtered.is_empty());
+    for &idx in &filtered {
+        let a = ALL_ACTIONS[idx];
+        assert!(
+            a.display_name().to_lowercase().contains("worktree")
+                || a.config_key().to_lowercase().contains("worktree")
+        );
+    }
+    let has = |action: Action| {
+        filtered.contains(&ALL_ACTIONS.iter().position(|a| *a == action).unwrap())
+    };
+    assert!(has(Action::CreateWorktree));
+    assert!(has(Action::DisposeWorktree));
+    assert!(!has(Action::ThemePicker));
+}
+
+/// `Enter` on the highlighted action starts capture mode; it does not
+/// change the binding by itself.
+#[test]
+fn key_bindings_editor_enter_starts_capture_mode() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_key_bindings_editor();
+    let idx = ALL_ACTIONS.iter().position(|a| *a == Action::CreateWorktree).unwrap();
+    app.key_bindings_editor.as_mut().unwrap().selected = idx;
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, enter);
+    assert_eq!(
+        app.key_bindings_editor.as_ref().unwrap().capturing,
+        Some(Action::CreateWorktree)
+    );
+}
+
+/// Capturing a key nothing else is bound to commits immediately —
+/// in-memory `app.bindings` reflects it and the picker returns to
+/// browse mode with no conflict prompt.
+#[test]
+fn key_bindings_editor_capture_commits_immediately_when_no_conflict() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::CreateWorktree);
+    let key = KeyEvent::new(KeyCode::F(19), KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert!(editor.capturing.is_none());
+    assert!(editor.pending_conflict.is_none());
+    let specs = app.bindings.specs(Action::CreateWorktree);
+    assert_eq!(specs, &[bindings::KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() }]);
+}
+
+/// Capturing a key already held by an action scoped to a disjoint
+/// prefix mode commits immediately too — `scopes_conflict` is false,
+/// so `action_for_key`'s tiered resolution already makes this
+/// unambiguous and there's nothing to warn about.
+#[test]
+fn key_bindings_editor_capture_commits_immediately_when_conflicting_action_is_disjoint_scope() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let jira_spec = app.bindings.specs(Action::DownloadJiraIssue)[0];
+    assert!(
+        !crate::tui::bindings::scopes_conflict(Action::DisposeWorktree.scope(), Action::DownloadJiraIssue.scope()),
+        "test premise: worktree- and jira-scoped actions must be disjoint"
+    );
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::DisposeWorktree);
+    let key = KeyEvent::new(jira_spec.code, jira_spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert!(editor.pending_conflict.is_none(), "disjoint-mode-scoped actions must not conflict");
+    assert!(editor.capturing.is_none());
+    assert_eq!(app.bindings.specs(Action::DisposeWorktree), &[jira_spec]);
+    assert_eq!(
+        app.bindings.specs(Action::DownloadJiraIssue),
+        &[jira_spec],
+        "the other action's own binding must be untouched"
+    );
+}
+
+/// Capturing a key already held by another `Global` action sets
+/// `pending_conflict` instead of committing — both actions can
+/// genuinely compete for it.
+#[test]
+fn key_bindings_editor_capture_sets_pending_conflict_for_global_vs_global() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let up_spec = app.bindings.specs(Action::Up)[0];
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::Down);
+    let key = KeyEvent::new(up_spec.code, up_spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert_eq!(editor.capturing, Some(Action::Down));
+    assert_eq!(editor.pending_conflict, Some((Action::Down, up_spec, Action::Up)));
+    assert_ne!(app.bindings.specs(Action::Down)[0], up_spec, "not committed yet");
+}
+
+/// `y`/`Enter` on a conflict prompt commits the pending rebind anyway.
+#[test]
+fn key_bindings_editor_conflict_confirm_commits() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let up_spec = app.bindings.specs(Action::Up)[0];
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::Down);
+    let key = KeyEvent::new(up_spec.code, up_spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    assert!(app.key_bindings_editor.as_ref().unwrap().pending_conflict.is_some());
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, enter);
+    assert_eq!(app.bindings.specs(Action::Down), &[up_spec]);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert!(editor.capturing.is_none());
+    assert!(editor.pending_conflict.is_none());
+}
+
+/// `n`/`Backspace`/Cancel on a conflict prompt backs out to capture
+/// mode (not all the way to browse) and does not commit — the user
+/// gets another try at a different key.
+#[test]
+fn key_bindings_editor_conflict_decline_returns_to_capture() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let up_spec = app.bindings.specs(Action::Up)[0];
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::Down);
+    let key = KeyEvent::new(up_spec.code, up_spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    assert!(app.key_bindings_editor.as_ref().unwrap().pending_conflict.is_some());
+    let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, n);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert!(editor.pending_conflict.is_none());
+    assert_eq!(editor.capturing, Some(Action::Down), "declining returns to capture, not browse");
+    assert_ne!(app.bindings.specs(Action::Down)[0], up_spec);
+}
+
+/// `Delete` on the highlighted action unbinds it immediately, without
+/// closing the editor.
+#[test]
+fn key_bindings_editor_delete_unbinds_highlighted_action() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_key_bindings_editor();
+    let idx = ALL_ACTIONS.iter().position(|a| *a == Action::ThemePicker).unwrap();
+    app.key_bindings_editor.as_mut().unwrap().selected = idx;
+    assert!(!app.bindings.is_unbound(Action::ThemePicker));
+    let del = KeyEvent::new(KeyCode::Delete, KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, del);
+    assert!(app.bindings.is_unbound(Action::ThemePicker));
+    assert!(app.key_bindings_editor.is_some(), "unbinding stays in the editor");
+}
+
+/// The Cancel binding during capture mode aborts the capture (back to
+/// browse) without changing the action's existing binding — checked
+/// before the keypress is ever treated as a candidate spec, so the
+/// user can't accidentally give away their only way to close the
+/// editor.
+#[test]
+fn key_bindings_editor_cancel_during_capture_aborts_without_rebinding() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let original = app.bindings.specs(Action::CreateWorktree).to_vec();
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::CreateWorktree);
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, esc);
+    let editor = app.key_bindings_editor.as_ref().unwrap();
+    assert!(editor.capturing.is_none());
+    assert_eq!(app.bindings.specs(Action::CreateWorktree), original.as_slice());
+}
+
+/// The Cancel binding in browse mode closes the whole editor.
+#[test]
+fn key_bindings_editor_cancel_in_browse_closes_editor() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_key_bindings_editor();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, esc);
+    assert!(app.key_bindings_editor.is_none());
+}
+
+/// A captured spec that would format with `#` in it (only reachable
+/// via `KeyCode::Char('#')`) is refused rather than written — the
+/// config file's comment syntax would silently truncate the line.
+#[test]
+fn write_key_binding_to_config_refuses_hash_spec() {
+    let spec = bindings::KeySpec { code: KeyCode::Char('#'), modifiers: KeyModifiers::empty() };
+    let result = crate::tui::bindings::write_key_binding_to_config(Action::ThemePicker, Some(spec));
+    assert!(result.is_err(), "a `#` spec must be refused, not silently written");
+}
+
 /// Same regression coverage, for the third handler shape this
 /// feature fixed: an unconditional `if key.modifiers.contains(CONTROL)`
 /// block runs first (comment editing's own Ctrl-C-aborts arm lives
