@@ -1325,7 +1325,10 @@ fn key_bindings_editor_capture_sets_pending_conflict_for_global_vs_global() {
     assert_ne!(app.bindings.specs(Action::Down)[0], up_spec, "not committed yet");
 }
 
-/// `y`/`Enter` on a conflict prompt commits the pending rebind anyway.
+/// `y`/`Enter` on a conflict prompt commits the pending rebind anyway,
+/// AND removes the colliding spec from the other action's binding list —
+/// otherwise both actions would still be racing for the same key
+/// afterwards, defeating the point of asking.
 #[test]
 fn key_bindings_editor_conflict_confirm_commits() {
     let mut app = global_test_app(&[("a", 1)]);
@@ -1338,9 +1341,58 @@ fn key_bindings_editor_conflict_confirm_commits() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
     crate::tui::handle_key_bindings_editor_key(&mut app, enter);
     assert_eq!(app.bindings.specs(Action::Down), &[up_spec]);
+    assert!(
+        !app.bindings.specs(Action::Up).contains(&up_spec),
+        "the winning spec must be removed from the action that lost it"
+    );
     let editor = app.key_bindings_editor.as_ref().unwrap();
     assert!(editor.capturing.is_none());
     assert!(editor.pending_conflict.is_none());
+}
+
+/// The conflict removal only strips the ONE colliding spec from the
+/// other action's list, preserving any of its other keys — e.g.
+/// `DeleteWordBackward`'s default `M-Backspace` binding must survive a
+/// confirmed conflict over its `C-w` binding. (Deliberately not `Cancel`/
+/// `Esc` for this test: `Esc` is the default Cancel key, and capture mode
+/// treats `is_cancel_key` as "abort capture" before it ever becomes a
+/// candidate spec — see `key_bindings_editor_conflict_confirm_commits`
+/// for the `Up`/`Down` collision this same commit path already covers.)
+#[test]
+fn key_bindings_editor_conflict_confirm_preserves_other_actions_remaining_keys() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let dwb_specs_before = app.bindings.specs(Action::DeleteWordBackward).to_vec();
+    assert!(
+        dwb_specs_before.len() > 1,
+        "this test needs DeleteWordBackward to ship with more than one default key"
+    );
+    let cw_spec = dwb_specs_before
+        .iter()
+        .copied()
+        .find(|s| s.code == KeyCode::Char('w') && s.modifiers.contains(KeyModifiers::CONTROL))
+        .expect("DeleteWordBackward is bound to C-w by default");
+    app.open_key_bindings_editor();
+    app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::ThemePicker);
+    let key = KeyEvent::new(cw_spec.code, cw_spec.modifiers);
+    crate::tui::handle_key_bindings_editor_key(&mut app, key);
+    assert!(app.key_bindings_editor.as_ref().unwrap().pending_conflict.is_some());
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    crate::tui::handle_key_bindings_editor_key(&mut app, enter);
+    assert_eq!(app.bindings.specs(Action::ThemePicker), &[cw_spec]);
+    let dwb_specs_after = app.bindings.specs(Action::DeleteWordBackward);
+    assert!(
+        !dwb_specs_after.contains(&cw_spec),
+        "C-w must be gone from DeleteWordBackward's list"
+    );
+    for spec in &dwb_specs_before {
+        if *spec != cw_spec {
+            assert!(
+                dwb_specs_after.contains(spec),
+                "DeleteWordBackward's other keys ({:?}) must survive losing just C-w",
+                spec
+            );
+        }
+    }
 }
 
 /// `n`/`Backspace`/Cancel on a conflict prompt backs out to capture
@@ -1412,7 +1464,7 @@ fn key_bindings_editor_cancel_in_browse_closes_editor() {
 #[test]
 fn write_key_binding_to_config_refuses_hash_spec() {
     let spec = bindings::KeySpec { code: KeyCode::Char('#'), modifiers: KeyModifiers::empty() };
-    let result = crate::tui::bindings::write_key_binding_to_config(Action::ThemePicker, Some(spec));
+    let result = crate::tui::bindings::write_key_binding_to_config(Action::ThemePicker, &[spec]);
     assert!(result.is_err(), "a `#` spec must be refused, not silently written");
 }
 

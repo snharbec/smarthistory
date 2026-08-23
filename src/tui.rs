@@ -9085,7 +9085,7 @@ impl App {
     fn commit_key_binding(&mut self, action: Action, spec: KeySpec) {
         self.bindings.set(action, vec![spec]);
         let spec_str = format_key_spec(spec);
-        match write_key_binding_to_config(action, Some(spec)) {
+        match write_key_binding_to_config(action, &[spec]) {
             Ok(()) => {
                 self.set_status_message(format!("bound {} to {}", action.display_name(), spec_str))
             }
@@ -9103,7 +9103,7 @@ impl App {
     /// never-rolls-back-on-write-failure policy as `commit_key_binding`.
     fn unbind_key_binding(&mut self, action: Action) {
         self.bindings.unbind(action);
-        match write_key_binding_to_config(action, None) {
+        match write_key_binding_to_config(action, &[]) {
             Ok(()) => self.set_status_message(format!("unbound {}", action.display_name())),
             Err(e) => self.set_status_message(format!(
                 "{} is now unbound for this session, but the change was not persisted: {}",
@@ -9111,6 +9111,49 @@ impl App {
                 e
             )),
         }
+    }
+
+    /// Apply `spec` as `action`'s new (sole) binding, same as
+    /// `commit_key_binding`, but first strips `spec` out of `other`'s
+    /// binding list (leaving any of `other`'s other keys intact) so the
+    /// two actions don't end up racing for the same key after the user
+    /// confirms a conflict in the key-bindings editor. Both mutations are
+    /// applied in-memory unconditionally; either write failure is folded
+    /// into one combined status message rather than the second call
+    /// silently overwriting the first's.
+    fn commit_key_binding_over_conflict(&mut self, action: Action, spec: KeySpec, other: Action) {
+        let remaining: Vec<KeySpec> = self
+            .bindings
+            .specs(other)
+            .iter()
+            .copied()
+            .filter(|s| !(s.code == spec.code && s.modifiers == spec.modifiers))
+            .collect();
+        self.bindings.set(other, remaining.clone());
+        let other_result = write_key_binding_to_config(other, &remaining);
+
+        self.bindings.set(action, vec![spec]);
+        let action_result = write_key_binding_to_config(action, &[spec]);
+
+        let spec_str = format_key_spec(spec);
+        let mut message = format!(
+            "bound {} to {} (removed it from {})",
+            action.display_name(),
+            spec_str,
+            other.display_name()
+        );
+        if let Err(e) = other_result {
+            message = format!(
+                "{} — but removing it from {} was not persisted: {}",
+                message,
+                other.display_name(),
+                e
+            );
+        }
+        if let Err(e) = action_result {
+            message = format!("{} — but binding {} was not persisted: {}", message, action.display_name(), e);
+        }
+        self.set_status_message(message);
     }
 
     fn is_add_entry_dialog_open(&self) -> bool {
@@ -14943,11 +14986,11 @@ fn handle_key_bindings_editor_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     // --- Conflict-confirmation sub-state ---
-    if let Some((action, spec, _other)) =
+    if let Some((action, spec, other)) =
         app.key_bindings_editor.as_ref().and_then(|e| e.pending_conflict)
     {
         if matches!(key.code, KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y')) {
-            app.commit_key_binding(action, spec);
+            app.commit_key_binding_over_conflict(action, spec, other);
             if let Some(editor) = app.key_bindings_editor.as_mut() {
                 editor.capturing = None;
                 editor.pending_conflict = None;

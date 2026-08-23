@@ -1816,17 +1816,21 @@ pub fn format_key_specs(specs: &[KeySpec]) -> String {
 /// A later `key.<config_key>=` line always wins over an earlier one
 /// (`Config::parse_multi`'s documented "later line wins" rule), so
 /// appending is correct — no need to find and replace an existing line.
-pub(crate) fn write_key_binding_to_config(action: Action, spec: Option<KeySpec>) -> Result<(), String> {
-    let value = match spec {
-        Some(spec) => {
-            let formatted = format_key_spec(spec);
-            // `Config::parse_multi` treats `#` as a comment-start
-            // anywhere in the line (`raw_line.split('#').next()`), so
-            // a formatted spec containing it would silently truncate
-            // the line and corrupt the binding. No named key or
-            // modifier prefix ever formats to a bare `#`, so this only
-            // fires for `KeySpec { code: KeyCode::Char('#'), .. }` —
-            // rare, but a real corruption path worth refusing outright.
+pub(crate) fn write_key_binding_to_config(action: Action, specs: &[KeySpec]) -> Result<(), String> {
+    let value = if specs.is_empty() {
+        "none".to_string()
+    } else {
+        // `Config::parse_multi` treats `#` as a comment-start
+        // anywhere in the line (`raw_line.split('#').next()`), so a
+        // formatted spec containing it would silently truncate the
+        // line and corrupt the binding. No named key or modifier
+        // prefix ever formats to a bare `#`, so this only fires for
+        // `KeySpec { code: KeyCode::Char('#'), .. }` — rare, but a
+        // real corruption path worth refusing outright. Checked per
+        // spec (not the joined string) so one bad spec in a longer
+        // list is reported precisely.
+        for spec in specs {
+            let formatted = format_key_spec(*spec);
             if formatted.contains('#') {
                 return Err(format!(
                     "cannot persist a binding that formats to {:?} — the config file's \
@@ -1834,9 +1838,8 @@ pub(crate) fn write_key_binding_to_config(action: Action, spec: Option<KeySpec>)
                     formatted
                 ));
             }
-            formatted
         }
-        None => "none".to_string(),
+        format_key_specs(specs)
     };
     let target_path =
         crate::config_path().ok_or_else(|| "no config directory path (HOME is not set)".to_string())?;
@@ -1905,7 +1908,8 @@ mod write_key_binding_to_config_tests {
         unsafe {
             std::env::set_var("HOME", &tmp_home);
         }
-        let result = write_key_binding_to_config(action, spec);
+        let specs: Vec<KeySpec> = spec.into_iter().collect();
+        let result = write_key_binding_to_config(action, &specs);
         unsafe {
             match prev_home {
                 Some(v) => std::env::set_var("HOME", v),
