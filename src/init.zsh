@@ -1812,6 +1812,24 @@ _smarthistory_register_hook() {
     local current="${(P)hooks_name}"
     [[ " $current " == *" $hookfn "* ]] || eval "${hooks_name}=\"\${${hooks_name}} ${hookfn}\""
 }
+# Clear a stray box on any buffer edit, UNCONDITIONALLY — i.e. even
+# when `dropdown.enabled=0` (the default), unlike the render hooks
+# registered just below this block. Up/Down's real-history preview box
+# (`_smarthistory_history_walk_paint`, further down this file) is
+# always active regardless of `dropdown.enabled` — plain history
+# recall isn't an opt-in feature — so without this, editing a recalled
+# command (typing over it, Backspace, …) would leave a now-stale box
+# sitting on screen forever whenever the (opt-in) typed-search dropdown
+# happens to be off, since nothing else would ever clear it.
+# `_smarthistory_dropdown_clear` is safe to call unconditionally even
+# when nothing is showing (see its own doc comment), so this is a
+# harmless no-op the vast majority of keystrokes.
+for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
+    backward-delete-char delete-char backward-kill-word \
+    kill-whole-line bracketed-paste; do
+    _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_clear
+done
+unset _smarthistory_dropdown_w
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
         backward-delete-char delete-char backward-kill-word \
@@ -2317,6 +2335,58 @@ _smarthistory_try_activate_predictions() {
     return 1
 }
 
+# Build the 3-item (or fewer, near the end of the match list) sliding
+# window around the current real-history position and paint it through
+# the exact same box `_smarthistory_dropdown_paint` already draws for
+# the typed-search dropdown, reusing its module-level state
+# (`_smarthistory_dropdown_candidates` etc.) instead of a second
+# rendering path. Called by `_smarthistory_up_history`/
+# `_smarthistory_down_history` right after they've already updated
+# `_smarthistory_index`/`BUFFER` exactly as they always have — this only
+# adds a read-only preview on top; it never feeds back into which
+# command gets recalled.
+#
+# Reads `_smarthistory_index` and `_smarthistory_lines` from the
+# caller's scope rather than taking parameters — zsh's function scoping
+# is dynamic by default, so the `local` copies `_smarthistory_up_history`/
+# `_smarthistory_down_history` already built are visible here as long as
+# this is always called from within one of those two function bodies
+# (never standalone), which it is.
+#
+# `_smarthistory_lines` is newest-first, so a larger index is an OLDER
+# entry. The window is the current index plus the next two older
+# entries, clamped to the end of the list. Candidates are appended
+# oldest-first so `_smarthistory_dropdown_paint`'s plain top-to-bottom
+# render puts the oldest of the three at the top and the current
+# selection — always the last entry appended — at the bottom.
+_smarthistory_history_walk_paint() {
+    _smarthistory_dropdown_candidates=()
+    # No exit-code / age / highlight-span columns for the real-history
+    # box (v1): `smarthistory search`'s plain output (what
+    # `_smarthistory_prime_cache` already calls for Up/Down) doesn't
+    # carry those fields, unlike the typed-search dropdown's own richer
+    # query. `_smarthistory_dropdown_paint` already degrades cleanly to
+    # a plain list when these are empty (confirmed by reading it), so
+    # resetting them here is all that's needed — no new query, no new
+    # column logic.
+    _smarthistory_dropdown_meta=()
+    _smarthistory_dropdown_exit=()
+    _smarthistory_dropdown_hl_spans=()
+    local n=${#_smarthistory_lines}
+    local off idx
+    for off in 2 1 0; do
+        idx=$((_smarthistory_index + off))
+        (( idx <= n )) && _smarthistory_dropdown_candidates+=("${_smarthistory_lines[$idx]}")
+    done
+    # The current selection (`off == 0`) is always appended last,
+    # regardless of how many of the two older preview rows got clamped
+    # away near the end of the list — so the last array slot is always
+    # the right one to highlight.
+    _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
+    _smarthistory_dropdown_chosen=1
+    _smarthistory_dropdown_visible=1
+    _smarthistory_dropdown_paint
+}
 _smarthistory_up_history() {
     # When the live dropdown is showing, Up navigates the candidate
     # list backward (`_smarthistory_dropdown_navigate_prev`) instead
@@ -2393,7 +2463,16 @@ _smarthistory_up_history() {
         return
     fi
     if [ $_smarthistory_index -ge $n ]; then
-        # Already at the newest entry; stay put.
+        # Already at the newest entry; stay put. `_smarthistory_index`
+        # doesn't change, so BUFFER doesn't either — but the box DOES
+        # need an explicit repaint here despite nothing having moved:
+        # `POSTDISPLAY` does not reliably survive the redisplay a `zle
+        # -M` status message triggers unless something re-asserts it
+        # within this same widget invocation (confirmed empirically —
+        # without this call the box visibly vanishes on the press that
+        # hits this boundary, which reads as "the whole preview just
+        # broke" rather than "you're at the oldest entry").
+        _smarthistory_history_walk_paint
         zle -M "no more history"
         _smarthistory_debug_log "up: at end of list (index=$_smarthistory_index/$n), no-op"
         return
@@ -2418,6 +2497,13 @@ _smarthistory_up_history() {
     # newlines, not `\n` escapes.
     _smarthistory_last_match="$match"
     _smarthistory_debug_log "up: index=$_smarthistory_index/$n BUFFER=[$match]"
+    # Preview the next couple of older entries alongside the one just
+    # recalled into BUFFER above — purely additive, see
+    # `_smarthistory_history_walk_paint`'s doc comment. The "already at
+    # the oldest entry" no-op branch above calls this same helper
+    # itself (to keep the box visible there too, see its own comment)
+    # rather than falling through to here, since it returns early.
+    _smarthistory_history_walk_paint
 }
 _smarthistory_down_history() {
     # When the live dropdown is showing, Down navigates the candidate
@@ -2480,6 +2566,17 @@ _smarthistory_down_history() {
         BUFFER=""
         CURSOR=0
         _smarthistory_last_match=""
+        # Unlike Up's "already at the oldest entry" no-op branch, this
+        # boundary DOES change what's on screen (BUFFER just got
+        # cleared above) even when nothing further happens below, so a
+        # real-history preview box left over from the previous Up/Down
+        # press would now be stale and must go. Safe to call
+        # unconditionally even when predictions activate right after:
+        # `_smarthistory_dropdown_render` (inside
+        # `_smarthistory_try_activate_predictions`) rebuilds the same
+        # candidate arrays from scratch for its own render, so this
+        # clear is a harmless no-op in that case, not a double-paint.
+        _smarthistory_dropdown_clear
         if _smarthistory_try_activate_predictions; then
             _smarthistory_debug_log "down: real history exhausted, activated predictions"
             return
@@ -2498,6 +2595,11 @@ _smarthistory_down_history() {
     CURSOR=${#BUFFER}
     _smarthistory_last_match="$match"
     _smarthistory_debug_log "down: index=$_smarthistory_index/$n BUFFER=[$match]"
+    # Mirror image of the preview painted at the end of
+    # `_smarthistory_up_history` — see its call site for why this isn't
+    # needed in the boundary branch above (that path already handles
+    # clearing the box itself).
+    _smarthistory_history_walk_paint
 }
 # Reset bindings for accept-line and send-break are defined further
 # down (next to the keybindings).
