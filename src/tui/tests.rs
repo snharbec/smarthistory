@@ -1328,6 +1328,8 @@ fn stats_test_app(rows: &[(&str, i64)]) -> App {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -1413,6 +1415,8 @@ fn global_test_app(rows: &[(&str, i64)]) -> App {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -1490,6 +1494,8 @@ fn global_test_app_with_dedup_index(rows: &[(&str, i64)]) -> App {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -1738,6 +1744,8 @@ fn cycle_exit_filter_refreshes_rows() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -2412,6 +2420,8 @@ fn selected_row_finds_labeled_only_rows() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -2545,6 +2555,8 @@ fn select_for_run_on_labeled_only_row_stages_command() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -3758,6 +3770,8 @@ fn make_llm_app(query: &str, fake: FakeLlm) -> App {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -3973,6 +3987,8 @@ fn run_llm_query_surfaces_not_configured_when_client_is_none() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -5070,6 +5086,8 @@ fn output_test_app(rows: &[(&str, &str)]) -> App {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -7409,6 +7427,8 @@ fn labeled_only_row_appears_at_end_of_merged_list() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -7532,6 +7552,8 @@ fn refresh_does_not_requery_labeled_rows_on_keystroke() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -7673,6 +7695,8 @@ fn labeled_row_already_in_primary_list_is_not_duplicated() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -7808,6 +7832,8 @@ fn labeled_only_row_stays_at_end_even_if_newer() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -7948,6 +7974,8 @@ fn labeled_only_partition_in_frequency_mode() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -11347,6 +11375,8 @@ fn directories_test_app(rows: &[(&str, &str, i64)]) -> App {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         // No JIRA fragments in the default
         // test app. Tests that exercise the
@@ -12046,6 +12076,327 @@ fn worktree_select_for_run_stages_cd_not_plain_command() {
         staged.contains("/repo/feature"),
         "expected a cd/session-create command referencing the worktree path, got: {staged:?}"
     );
+}
+
+// ---- Worktree create flow (`Action::CreateWorktree`) ----
+//
+// These exercise real `git` subprocesses against a scratch repo under
+// the OS temp dir (never the real smarthistory checkout) — the same
+// "best-effort, silently skip if `git` misbehaves" discipline
+// `src/files/tests.rs::walk_dir_uses_git_commit_timestamp_when_available`
+// uses, since these functions shell out and there's no pure-parsing
+// core to isolate the way `parse_worktree_list` has for Phase 1.
+
+/// Create a scratch git repo with one commit on `default_branch`,
+/// under a uniquely-named directory in the OS temp dir. Returns
+/// `None` (rather than panicking) if `git` isn't usable, so these
+/// tests degrade to a no-op on a machine without git, matching
+/// `walk_dir_uses_git_commit_timestamp_when_available`'s convention.
+fn worktree_scratch_repo(name: &str, default_branch: &str) -> Option<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_create_{}_{}_{}", std::process::id(), name, n));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok()?;
+    let init = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["init", "-b", default_branch])
+        .output();
+    if !init.map(|o| o.status.success()).unwrap_or(false) {
+        return None;
+    }
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["config", "user.email", "test@example.com"])
+        .output();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["config", "user.name", "Test User"])
+        .output();
+    std::fs::write(dir.join("README.md"), "scratch").ok()?;
+    let _ = std::process::Command::new("git").arg("-C").arg(&dir).args(["add", "README.md"]).output();
+    let commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["commit", "-m", "init"])
+        .env("GIT_COMMITTER_DATE", "1577836800 +0000")
+        .env("GIT_AUTHOR_DATE", "1577836800 +0000")
+        .output();
+    if !commit.map(|o| o.status.success()).unwrap_or(false) {
+        return None;
+    }
+    Some(dir)
+}
+
+#[test]
+fn worktree_list_branches_lists_local_branches() {
+    let Some(repo) = worktree_scratch_repo("list_branches", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let branches = crate::tui::mode::worktree::list_branches(&repo);
+    assert!(branches.contains(&"trunk".to_string()), "got: {branches:?}");
+    assert!(branches.contains(&"feature".to_string()), "got: {branches:?}");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// With no remote and no `main`/`master` branch, the base falls back
+/// to the repo's own current branch.
+#[test]
+fn worktree_default_base_branch_falls_back_to_current_branch() {
+    let Some(repo) = worktree_scratch_repo("default_base_fallback", "trunk") else {
+        return;
+    };
+    assert_eq!(crate::tui::mode::worktree::default_base_branch(&repo), "trunk");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// A local `main` branch is preferred over the (non-`main`) current
+/// branch when no remote `HEAD` is configured.
+#[test]
+fn worktree_default_base_branch_prefers_local_main_over_current() {
+    let Some(repo) = worktree_scratch_repo("default_base_main", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "main"]).output();
+    assert_eq!(crate::tui::mode::worktree::default_base_branch(&repo), "main");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn worktree_repo_is_dirty_reflects_uncommitted_changes() {
+    let Some(repo) = worktree_scratch_repo("dirty_check", "trunk") else {
+        return;
+    };
+    assert!(!crate::tui::mode::worktree::repo_is_dirty(&repo), "freshly committed repo must be clean");
+    std::fs::write(repo.join("untracked.txt"), "x").expect("write");
+    assert!(crate::tui::mode::worktree::repo_is_dirty(&repo), "an untracked file must count as dirty");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn worktree_create_worktree_existing_branch_checks_it_out() {
+    let Some(repo) = worktree_scratch_repo("create_existing", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!("{}-wt", repo.file_name().unwrap().to_str().unwrap()));
+    let result =
+        crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "");
+    assert!(result.is_ok(), "expected success, got {result:?}");
+    assert!(target.is_dir());
+    let branch_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&target)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("git rev-parse");
+    assert_eq!(String::from_utf8_lossy(&branch_out.stdout).trim(), "feature");
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", "--force"]).arg(&target).output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[test]
+fn worktree_create_worktree_new_branch_creates_it_off_base() {
+    let Some(repo) = worktree_scratch_repo("create_new_branch", "trunk") else {
+        return;
+    };
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-new",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    let result =
+        crate::tui::mode::worktree::create_worktree(&repo, &target, "feature/login", true, "trunk");
+    assert!(result.is_ok(), "expected success, got {result:?}");
+    let branch_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&target)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("git rev-parse");
+    assert_eq!(String::from_utf8_lossy(&branch_out.stdout).trim(), "feature/login");
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", "--force"]).arg(&target).output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+/// Selecting an existing branch on a clean repo skips both
+/// `PickBaseBranch` (no new branch to base) and `ConfirmCarryOver` (no
+/// dirty state to ask about), landing directly on `PickProject`.
+#[test]
+fn worktree_create_flow_existing_branch_on_clean_repo_skips_to_pick_project() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_existing_clean", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow());
+        let flow = app.worktree_create_flow.as_ref().expect("flow still open");
+        assert_eq!(flow.step, WorktreeCreateStep::PickProject);
+        assert_eq!(flow.branch, "feature");
+        assert!(!flow.is_new_branch);
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Typing a name that matches no existing branch creates a new
+/// branch and advances to `PickBaseBranch`.
+#[test]
+fn worktree_create_flow_new_branch_name_advances_to_pick_base_branch() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_new_branch", "trunk") else {
+        return;
+    };
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "brand-new-branch".to_string();
+        assert!(!app.advance_worktree_create_flow());
+        let flow = app.worktree_create_flow.as_ref().expect("flow still open");
+        assert_eq!(flow.step, WorktreeCreateStep::PickBaseBranch);
+        assert_eq!(flow.branch, "brand-new-branch");
+        assert!(flow.is_new_branch);
+        assert_eq!(flow.base_branch, "trunk", "falls back to the current branch as the base");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// A dirty repo opens `ConfirmCarryOver` before `PickProject`.
+#[test]
+fn worktree_create_flow_dirty_repo_opens_confirm_carry_over() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_dirty", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    std::fs::write(repo.join("dirty.txt"), "x").expect("write");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow());
+        let flow = app.worktree_create_flow.as_ref().expect("flow still open");
+        assert_eq!(flow.step, WorktreeCreateStep::ConfirmCarryOver);
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// A blank `Enter` on `PickProject` skips assignment (no
+/// `project.<slug>.dir=` write) but still creates the worktree and
+/// stages a `cd` into it.
+#[test]
+fn worktree_create_flow_blank_pick_project_skips_assignment_but_creates_worktree() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_blank_project", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let base_dir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_create_target_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.worktree_basedir = Some(base_dir.clone());
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> PickProject (clean repo)
+        assert_eq!(
+            app.worktree_create_flow.as_ref().map(|f| f.step),
+            Some(WorktreeCreateStep::PickProject)
+        );
+        // Blank filter: Enter must skip assignment and execute.
+        let ret = app.advance_worktree_create_flow();
+        assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
+        assert!(ret || app.selection.is_some(), "a cd command must be staged on success");
+        let staged = app.selection.as_deref().unwrap_or("");
+        assert!(
+            staged.contains("feature"),
+            "expected the staged command to reference the new worktree, got: {staged:?}"
+        );
+        assert!(base_dir.join("feature").is_dir(), "the worktree directory must exist");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(base_dir.join("feature"))
+        .output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&base_dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// `Esc` cancels the whole flow from any step and leaves nothing
+/// partially created — no worktree directory, dialog closed.
+#[test]
+fn worktree_create_flow_esc_cancels_without_creating_anything() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_esc_cancel", "trunk") else {
+        return;
+    };
+    let base_dir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_create_esc_target_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.worktree_basedir = Some(base_dir.clone());
+        app.open_worktree_create_flow();
+        assert!(app.worktree_create_flow.is_some());
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        let quit = handle_worktree_create_flow_key(&mut app, esc);
+        assert!(!quit);
+        assert!(app.worktree_create_flow.is_none(), "Esc must close the dialog");
+        assert!(!base_dir.exists(), "nothing should have been created");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&base_dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }
 
 /// Selecting a zoxide row must go through the same staging as a
@@ -20562,6 +20913,8 @@ fn push_char_in_global_mode_fires_search_immediately() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -20694,6 +21047,8 @@ fn backspace_in_global_mode_fires_search_immediately() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),
@@ -20813,6 +21168,8 @@ fn push_char_then_backspace_to_empty_does_not_re_fetch() {
         crate::QueryPrefixes::default(),
         None,
         None,
+        None, // worktree_basedir
+        None, // worktree_default_branch
         String::from("+$LINE"),
         std::collections::HashMap::new(),
         Vec::new(),

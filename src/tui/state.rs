@@ -949,6 +949,100 @@ pub struct TemplateNamePrompt {
     pub error: Option<String>,
 }
 
+/// The step `WorktreeCreateFlow` is currently on. `PickBranch` is
+/// always first; `PickBaseBranch` and `ConfirmCarryOver` are each
+/// conditionally skipped (see the flow's own doc comment), so a given
+/// run of the dialog may never visit them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeCreateStep {
+    /// Pick an existing branch (creates the worktree on it directly),
+    /// or type a name that matches nothing to create a new branch.
+    PickBranch,
+    /// Only reached when `PickBranch` created a new branch: pick the
+    /// existing branch the new one is created from.
+    PickBaseBranch,
+    /// Only reached when `git status --porcelain` on the repo is
+    /// non-empty: `y` stashes the current checkout's uncommitted
+    /// changes and applies them in the new worktree, `n` leaves them.
+    ConfirmCarryOver,
+    /// Pick an existing `project.<slug>.dir=` slug, type a new one, or
+    /// submit blank to skip assignment entirely. The last step —
+    /// `Enter` here creates the worktree and closes the dialog.
+    PickProject,
+}
+
+/// State for the `Action::CreateWorktree` dialog (`;` mode, `;<query>`
+/// with the query matching zero or more existing worktrees — the
+/// action opens regardless of whether any row is selected, since it
+/// creates a *new* worktree rather than acting on an existing row).
+/// Steps through `WorktreeCreateStep` in order, deferring all the real
+/// work (git calls, config write, `cd` staging) to the final `Enter`
+/// on `PickProject` — same "accumulate decisions, execute once" shape
+/// `ProjectSincePrompt`/`TemplateNamePrompt` use, generalized from one
+/// step to several.
+///
+/// The three list-driven steps (`PickBranch`, `PickBaseBranch`,
+/// `PickProject`) all share `options`/`filter`/`cursor`/`selected`,
+/// repopulated by `App::advance_worktree_create_flow` on every step
+/// transition — they're structurally identical "pick from a list or
+/// type something new" pickers, just fed different candidate lists and
+/// interpreting "matches nothing" differently (see each step's own
+/// handling in `App::advance_worktree_create_flow`).
+#[derive(Debug, Clone)]
+pub struct WorktreeCreateFlow {
+    /// Root of the repo the new worktree is created in/from, resolved
+    /// once when the dialog opens.
+    pub repo_root: std::path::PathBuf,
+    /// Which step is currently showing.
+    pub step: WorktreeCreateStep,
+    /// The branch to check out into the new worktree — either an
+    /// existing branch name (picked on `PickBranch`) or a new one
+    /// (typed on `PickBranch`, created off `base_branch`).
+    pub branch: String,
+    /// True when `branch` doesn't exist yet and must be created
+    /// (`git worktree add -b`) rather than simply checked out.
+    pub is_new_branch: bool,
+    /// The existing branch a new `branch` is created from. Only
+    /// meaningful when `is_new_branch` is true.
+    pub base_branch: String,
+    /// Whether to `git stash push`/`stash apply` the source checkout's
+    /// uncommitted changes into the new worktree. Only asked (and only
+    /// meaningful) when the source checkout was dirty.
+    pub carry_over: bool,
+    /// The `project.<slug>` to bind the new worktree's directory to,
+    /// or `None` to skip assignment (a blank `Enter` on `PickProject`).
+    pub project_slug: Option<String>,
+    /// Candidate list for whichever list-driven step is active
+    /// (branches for `PickBranch`/`PickBaseBranch`, project slugs for
+    /// `PickProject`), repopulated on every step transition.
+    pub options: Vec<String>,
+    /// Text typed so far, filtering `options` by substring match.
+    pub filter: String,
+    /// Character-index cursor into `filter` (0..=len).
+    pub cursor: usize,
+    /// Index into the *filtered* `options` list currently highlighted.
+    pub selected: usize,
+    /// Validation error from the last `Enter` press (e.g. `git
+    /// worktree add` failing, or submitting `PickBaseBranch` with no
+    /// match), shown in the dialog until the user edits the filter or
+    /// tries again. Does not close the dialog.
+    pub error: Option<String>,
+}
+
+/// `flow.options` narrowed by `flow.filter` (case-insensitive
+/// substring match), in `options`' own order. Shared by the key
+/// handler (`Enter`/`Up`/`Down` all need to know what's currently
+/// highlighted) and the renderer (draws the same filtered list),
+/// so filtering logic lives in exactly one place.
+pub(crate) fn worktree_create_filtered_options(flow: &WorktreeCreateFlow) -> Vec<String> {
+    let filter = flow.filter.trim().to_lowercase();
+    if filter.is_empty() {
+        flow.options.clone()
+    } else {
+        flow.options.iter().filter(|o| o.to_lowercase().contains(&filter)).cloned().collect()
+    }
+}
+
 /// Short flags — across `ssh`/`scp`/`sftp`/`rsync`/`mosh` — that take
 /// a separate following argument (`-p 2222`, `-i ~/.ssh/id_ed25519`,
 /// …), as opposed to a bare boolean flag (`-4`, `-C`, …) or a flag

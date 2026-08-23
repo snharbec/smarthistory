@@ -112,6 +112,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_template_name_prompt(f, app, prompt);
     }
 
+    if let Some(ref flow) = app.worktree_create_flow {
+        draw_worktree_create_flow(f, flow);
+    }
+
     if let Some(view) = app.help_view.as_ref() {
         draw_help_view(f, app, view);
     }
@@ -1652,6 +1656,117 @@ fn draw_jira_template_picker(f: &mut Frame, picker: &crate::tui::state::JiraTemp
         .highlight_style(highlight_style)
         .highlight_symbol("▌");
     f.render_stateful_widget(list, inner, &mut list_state);
+}
+
+/// Renders the `Action::CreateWorktree` dialog (`WorktreeCreateFlow`).
+/// The three list-driven steps (`PickBranch`/`PickBaseBranch`/
+/// `PickProject`) share this layout: a title describing the step, a
+/// filter-input line (cursor rendered the same reversed-character
+/// convention every other single-line input uses), an optional error
+/// line, and the filtered option list below. `ConfirmCarryOver` swaps
+/// the filter/list for a plain y/n prompt.
+fn draw_worktree_create_flow(f: &mut Frame, flow: &crate::tui::state::WorktreeCreateFlow) {
+    use crate::tui::state::WorktreeCreateStep;
+    use ratatui::widgets::{List, ListItem};
+
+    let title = match flow.step {
+        WorktreeCreateStep::PickBranch => " Create worktree — pick or create a branch ",
+        WorktreeCreateStep::PickBaseBranch => " Create worktree — pick a base branch ",
+        WorktreeCreateStep::ConfirmCarryOver => " Create worktree — carry over uncommitted changes? ",
+        WorktreeCreateStep::PickProject => " Create worktree — assign to a project (optional) ",
+    };
+    let inner = overlay(f, title, 60, 60);
+
+    if flow.step == WorktreeCreateStep::ConfirmCarryOver {
+        let text = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "The current checkout has uncommitted changes.",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Stash them and apply the stash in the new worktree?"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", Theme::highlight()),
+                Span::raw(" carry over, "),
+                Span::styled("n", Theme::highlight()),
+                Span::raw(" leave them, "),
+                Span::styled("Esc", Theme::highlight()),
+                Span::raw(" cancel."),
+            ]),
+        ];
+        let paragraph = Paragraph::new(text)
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(Wrap { trim: true });
+        f.render_widget(paragraph, inner);
+        return;
+    }
+
+    let has_error = flow.error.is_some();
+    let mut constraints = vec![Constraint::Length(1)]; // filter input
+    if has_error {
+        constraints.push(Constraint::Length(1)); // error line
+    }
+    constraints.push(Constraint::Fill(1)); // option list
+    constraints.push(Constraint::Length(1)); // footer hint
+    let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
+
+    // Same reversed-character/reversed-space cursor convention every
+    // other single-line input in the TUI uses.
+    let chars: Vec<char> = flow.filter.chars().collect();
+    let mut filter_spans: Vec<Span> = vec![Span::styled("> ", Theme::dim())];
+    if chars.is_empty() {
+        filter_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+    } else {
+        let pre: String = chars.iter().take(flow.cursor).collect();
+        filter_spans.push(Span::raw(pre));
+        if flow.cursor < chars.len() {
+            filter_spans.push(Span::styled(
+                chars[flow.cursor].to_string(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+            let post: String = chars.iter().skip(flow.cursor + 1).collect();
+            if !post.is_empty() {
+                filter_spans.push(Span::raw(post));
+            }
+        } else {
+            filter_spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(filter_spans)), chunks[0]);
+
+    let mut next_idx = 1;
+    if has_error {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                flow.error.as_deref().unwrap_or_default(),
+                Style::default().fg(Theme::error_color()),
+            ))),
+            chunks[next_idx],
+        );
+        next_idx += 1;
+    }
+
+    let filtered = crate::tui::state::worktree_create_filtered_options(flow);
+    let items: Vec<ListItem> = filtered.iter().map(|o| ListItem::new(o.as_str())).collect();
+    let highlight_style = Style::default().bg(Theme::selection_color()).add_modifier(Modifier::BOLD);
+    let selected = if filtered.is_empty() { None } else { Some(flow.selected.min(filtered.len() - 1)) };
+    let mut list_state = ratatui::widgets::ListState::default().with_selected(selected);
+    let list = List::new(items).highlight_style(highlight_style).highlight_symbol("▌");
+    f.render_stateful_widget(list, chunks[next_idx], &mut list_state);
+    next_idx += 1;
+
+    let footer = match flow.step {
+        WorktreeCreateStep::PickBranch => {
+            "↑/↓ select · Enter pick/create · Esc cancel"
+        }
+        WorktreeCreateStep::PickBaseBranch => "↑/↓ select · Enter pick · Esc cancel",
+        WorktreeCreateStep::PickProject => {
+            "↑/↓ select · Enter pick/create/skip (blank) · Esc cancel"
+        }
+        WorktreeCreateStep::ConfirmCarryOver => unreachable!("handled above"),
+    };
+    f.render_widget(Paragraph::new(Line::from(Span::styled(footer, Theme::dim()))), chunks[next_idx]);
 }
 
 /// Render a Project/Issue Type selector row: `<name>: ◂ value ▸`.

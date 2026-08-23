@@ -38,9 +38,17 @@ All notable changes to this project will be documented in this file.
   repo containing the current directory (`git worktree list --porcelain`),
   filtered by the typed query. Selecting a row creates a new tmux session /
   herdr workspace rooted there, the same staging `#` Directories / `~`
-  Zoxide use. Read-only for now (list + select); creating and disposing
-  worktrees from the TUI are planned as follow-ups. See
-  [docs/modes/worktree.md](docs/modes/worktree.md).
+  Zoxide use. Disposing worktrees from the TUI is still planned as a
+  follow-up. See [docs/modes/worktree.md](docs/modes/worktree.md).
+- New `Action::CreateWorktree` (unbound by default, `;` mode only) — a
+  step-through dialog that creates a new `git worktree` checkout: pick or
+  create a branch, optionally pick a base branch for a new branch,
+  optionally carry over the current checkout's uncommitted changes (`git
+  stash`), and optionally bind the new worktree to a time-tracking project
+  (`project.<slug>.dir=`). New `worktree.basedir`/`worktree.defaultbranch`
+  config keys control where new worktrees are created and which branch is
+  preselected as the base. See
+  [docs/actions.md#createworktree](docs/actions.md#createworktree).
 
 ## 2.1.0 - 2026-08-20
 
