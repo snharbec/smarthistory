@@ -181,6 +181,46 @@ fn highlight_matches_multi_word_out_of_order() {
     assert_eq!(content, vec!["git", " ", "commit", " -m"]);
 }
 
+/// Reproduces a real reported freeze: typing a two-word query
+/// (`"classification database"`) into `:` (segments) mode made the
+/// whole TUI stall for ~12 seconds while rendering a large flattened
+/// segment. Diagnosed via `SMARTHISTORY_DEBUG_PERF` logging (added to
+/// investigate the report) down to `highlight_matches` doing
+/// `lower_text.chars().skip(i).take(word_len)` *inside* the position
+/// loop — re-walking the string from its start on every position,
+/// O(n) per position and O(n²) overall, since `&str`'s `Chars`
+/// iterator has no random-access skip. A `command` field spanning an
+/// entire note section (segments mode's contract — see
+/// `map_segment_results`) can be tens of thousands of characters, so
+/// this was invisible for ordinary shell commands but catastrophic
+/// there. This test would have taken minutes (not milliseconds)
+/// against the pre-fix implementation.
+#[test]
+fn highlight_matches_stays_fast_on_a_very_long_row() {
+    let filler = "the quick brown fox jumps over the lazy dog ".repeat(4000);
+    let text = format!("{filler}classification database{filler}");
+    let start = std::time::Instant::now();
+    let spans = super::render::highlight_matches(&text, "classification database");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_millis() < 500,
+        "highlight_matches took {:?} on a {}-char string — expected sub-linear-in-practice, \
+         got quadratic-looking behavior",
+        elapsed,
+        text.chars().count(),
+    );
+    let highlighted: Vec<String> = spans
+        .iter()
+        .filter(|s| s.style.add_modifier.contains(ratatui::style::Modifier::BOLD))
+        .map(|s| s.content.to_string())
+        .collect();
+    assert_eq!(
+        highlighted,
+        vec!["classification", "database"],
+        "the match itself must still be found correctly, not just fast"
+    );
+}
+
 #[test]
 fn build_implicit_regex_plain() {
     // No anchors → wrap with `.*` on both sides.

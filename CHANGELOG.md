@@ -44,6 +44,17 @@ All notable changes to this project will be documented in this file.
   posted result). `refresh()` now keys its short-circuit on each mode's own
   result-version counter instead, so typing no longer re-clones anything until
   a debounced search actually completes.
+- The TUI could stall for 10+ seconds while a `:` (segments) result list was
+  on screen, independent of the search itself (already fast/backgrounded).
+  Root-caused via the new `SMARTHISTORY_DEBUG_PERF` log to `highlight_matches`
+  (the query-match bolding in each visible row): it re-walked the row's text
+  from the start on every character position (`.chars().skip(i)` inside the
+  position loop) to check for a match there, making it O(n²) in the row's
+  text length. Invisible for an ordinary shell command, but segments mode's
+  `command` field can be an entire flattened note section — tens of thousands
+  of characters — so a multi-word query against a large note turned every
+  redraw into a multi-second (or worse) stall. Now precomputes both char
+  buffers once and slice-compares per position instead of re-scanning.
 
 ## 2.2.0 - 2026-08-23
 

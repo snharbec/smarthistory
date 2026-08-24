@@ -5952,24 +5952,37 @@ pub(super) fn highlight_matches(text: &str, query: &str) -> Vec<Span<'static>> {
         return vec![Span::raw(text.to_string())];
     }
 
-    let lower_text = text.to_lowercase();
     let text_chars: Vec<char> = text.chars().collect();
+    // Precomputed once, indexed by position below — the previous
+    // version did `lower_text.chars().skip(i).take(word_chars.len())`
+    // *inside* the position loop, which re-walks the string from its
+    // start on every `i` (a `&str`'s `Chars` iterator has no
+    // random-access skip): O(n) per position, O(n²) overall. For a
+    // short shell command that's invisible; for a segments-mode row
+    // (`row.command` can be an entire flattened note section, tens of
+    // thousands of characters) it's a multi-second stall on every
+    // frame the row is visible — reproduced live via
+    // `SMARTHISTORY_DEBUG_PERF`, which pinned an 11.9s `draw_list`
+    // stall to exactly this call.
+    let lower_chars: Vec<char> = text.to_lowercase().chars().collect();
+    // `to_lowercase()` can change the character count for a handful
+    // of code points (e.g. Turkish İ folds to two chars), which would
+    // desync `highlights` indices from `text_chars` below. Bail to
+    // unhighlighted plain text for those rare inputs rather than risk
+    // a misaligned highlight or an out-of-bounds index.
+    if lower_chars.len() != text_chars.len() {
+        return vec![Span::raw(text.to_string())];
+    }
     let mut highlights = vec![false; text_chars.len()];
 
     for word in words {
         let word_chars: Vec<char> = word.chars().collect();
-        if word_chars.is_empty() {
+        if word_chars.is_empty() || word_chars.len() > lower_chars.len() {
             continue;
         }
         let mut i = 0;
-        while i + word_chars.len() <= text_chars.len() {
-            if lower_text
-                .chars()
-                .skip(i)
-                .take(word_chars.len())
-                .collect::<Vec<char>>()
-                == word_chars
-            {
+        while i + word_chars.len() <= lower_chars.len() {
+            if lower_chars[i..i + word_chars.len()] == word_chars[..] {
                 for j in 0..word_chars.len() {
                     highlights[i + j] = true;
                 }
