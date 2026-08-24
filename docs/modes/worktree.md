@@ -54,6 +54,11 @@ stash`), and optionally assign the new worktree to a time-tracking project
 step-by-step and [docs/configuration.md](../configuration.md) for
 `worktree.basedir`/`worktree.defaultbranch`.
 
+Opened with a JIRA row selected (`-` mode), the branch-name step starts
+pre-filled with `feature/<KEY>`, or `bug/<KEY>` when the issue's type is Bug
+(case-insensitive) — edit or confirm as usual. Every other selected row (or
+none) starts blank as before.
+
 ## Disposing a worktree
 
 The `DisposeWorktree` action (unbound by default — open it via the command

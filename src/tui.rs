@@ -1794,6 +1794,15 @@ pub(crate) struct App {
     /// ~400ms-after-keystroke background fetch hits the
     /// server.
     jira_rows: Vec<crate::tui::state::HistoryRow>,
+    /// Issue key -> issue type (e.g. `"Bug"`, `"Story"`), from the
+    /// most recent JIRA search result. `HistoryRow` doesn't carry
+    /// issue type (only key/summary/a free-text details blob), so
+    /// this is a small side cache populated alongside `jira_rows` —
+    /// see `src/tui/mode/jira.rs`'s result-processing step. Read by
+    /// `open_worktree_create_flow` to pre-fill the new branch name
+    /// (`feature/<KEY>` / `bug/<KEY>`) when `Action::CreateWorktree`
+    /// is pressed on a selected JIRA row.
+    jira_issue_types: std::collections::HashMap<String, String>,
     /// `Some` when a JIRA search is in flight (background
     /// thread). Polled by the run loop mirror of the LLM
     /// poll. Cancelled on the `Cancel` action.
@@ -5201,6 +5210,7 @@ impl App {
             file_picker_lock: None,
             process_picker_lock: None,
             jira_rows: Vec::new(),
+            jira_issue_types: std::collections::HashMap::new(),
             jira_request: None,
             jira_in_flight: false,
             jira_debounce_started: None,
@@ -9562,7 +9572,15 @@ impl App {
             source_key: source_key.clone(),
             prefill_loading,
             error: None,
+            epic_name_field: config.epic_name_field.clone(),
         });
+        // Covers the case where `Epic` is already the default-selected
+        // issue type (e.g. the built-in default list has it at index
+        // 0) — without this, a user who never touches the Issue Type
+        // selector would never get the field.
+        if let Some(d) = self.create_jira_issue_dialog.as_mut() {
+            d.sync_epic_name_field();
+        }
         if let Some(key) = source_key {
             self.start_jira_prefill_fetch(key, config.clone_fields.clone());
         }
@@ -13662,12 +13680,17 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CreateWorktree => {
             // Same mode gate shape as `DownloadJiraIssue`, adapted to
-            // worktree mode. Unlike a JIRA-row action, this doesn't
-            // need a selected row — it creates a *new* worktree, so
-            // it's meaningful anywhere inside `;` mode.
-            if !app.is_worktree_query() {
+            // worktree mode. Also reachable from `-` (JIRA) mode —
+            // not just to select something to act ON (this doesn't
+            // need a selected row; it creates a *new* worktree
+            // either way), but because `open_worktree_create_flow`
+            // pre-fills the branch-name filter from a selected JIRA
+            // row's key/type when one is selected. Without this arm
+            // the gate below would refuse the action before that
+            // logic ever runs.
+            if !app.is_worktree_query() && !app.is_jira_query() {
                 app.set_status_message(
-                    "Create-worktree is only available in worktree search (type `;`)".to_string(),
+                    "Create-worktree is only available in worktree search (type `;`) or JIRA search (type `-`)".to_string(),
                 );
                 return false;
             }
@@ -17060,7 +17083,10 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
             if let Some(d) = app.create_jira_issue_dialog.as_mut() {
                 match d.focused {
                     CreateJiraIssueFocus::Project => d.cycle_project(false),
-                    CreateJiraIssueFocus::IssueType => d.cycle_issue_type(false),
+                    CreateJiraIssueFocus::IssueType => {
+                        d.cycle_issue_type(false);
+                        d.sync_epic_name_field();
+                    }
                     _ => {
                         if let Some(field) = d.focused_field_mut()
                             && field.cursor > 0
@@ -17076,7 +17102,10 @@ fn handle_create_jira_issue_dialog_key(app: &mut App, key: KeyEvent) -> bool {
             if let Some(d) = app.create_jira_issue_dialog.as_mut() {
                 match d.focused {
                     CreateJiraIssueFocus::Project => d.cycle_project(true),
-                    CreateJiraIssueFocus::IssueType => d.cycle_issue_type(true),
+                    CreateJiraIssueFocus::IssueType => {
+                        d.cycle_issue_type(true);
+                        d.sync_epic_name_field();
+                    }
                     _ => {
                         if let Some(field) = d.focused_field_mut()
                             && field.cursor < field.value.chars().count()

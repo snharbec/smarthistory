@@ -370,6 +370,17 @@ pub struct JiraConfig {
     /// uses — see `cf_bracket_field_id`). Unset/empty, or every entry
     /// malformed, means no fields are cloned.
     pub clone_fields: Vec<String>,
+    /// The custom-field id (`customfield_<digits>`) JIRA uses for the
+    /// required "Epic Name" field on an Epic-type issue. Read from
+    /// `JIRA_EPIC_NAME_FIELD`, accepting either the `cf[<digits>]`
+    /// bracket form (see `cf_bracket_field_id`) or a literal
+    /// `customfield_<digits>` string. `None` when unset/empty —
+    /// the auto-fill feature (`CreateJiraIssueDialog::sync_epic_name_field`)
+    /// is inert without it, same "garbled or absent config can't wedge
+    /// the app" policy every other field here follows. There's no safe
+    /// universal default to fall back to (the field id is genuinely
+    /// instance-specific), unlike `available_issue_types`.
+    pub epic_name_field: Option<String>,
 }
 
 /// Parse a comma-separated env var value into a trimmed,
@@ -410,6 +421,19 @@ fn resolve_clone_fields(clone_fields_env: Option<&str>) -> Vec<String> {
         .iter()
         .filter_map(|s| cf_bracket_field_id(s))
         .collect()
+}
+
+/// `JiraConfig::epic_name_field`'s resolution rule — same
+/// "pure function for testability" reasoning as `resolve_clone_fields`.
+/// Accepts either the `cf[<digits>]` bracket form (converted via
+/// `cf_bracket_field_id`) or a literal `customfield_<digits>` string
+/// passed straight through; anything else (or unset/empty) is `None`.
+fn resolve_epic_name_field(epic_name_field_env: Option<&str>) -> Option<String> {
+    let raw = epic_name_field_env?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    cf_bracket_field_id(raw).or_else(|| Some(raw.to_string()))
 }
 
 /// `JiraConfig::available_projects`' resolution rule, pulled out as a
@@ -492,6 +516,8 @@ impl JiraConfig {
         );
         let clone_fields =
             resolve_clone_fields(std::env::var("JIRA_CLONE_FIELDS").ok().as_deref());
+        let epic_name_field =
+            resolve_epic_name_field(std::env::var("JIRA_EPIC_NAME_FIELD").ok().as_deref());
         Some(JiraConfig {
             server: server.trim_end_matches('/').to_string(),
             token,
@@ -504,6 +530,7 @@ impl JiraConfig {
             available_projects,
             available_issue_types,
             clone_fields,
+            epic_name_field,
         })
     }
 

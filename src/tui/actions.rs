@@ -382,6 +382,28 @@ impl App {
             return;
         };
         let options = crate::tui::mode::worktree::list_branches(&repo_root);
+        // Pre-fill the branch-name filter from a selected JIRA row:
+        // `feature/<KEY>` normally, `bug/<KEY>` when the issue type is
+        // Bug — reuses the PickBranch step's existing "type a name that
+        // matches nothing to create a new branch" filter field, so this
+        // is just a better starting point, not new UI. Every other
+        // selected row (or a JIRA row whose type wasn't in the last
+        // search result, e.g. a stale/missing cache entry) keeps
+        // today's behavior: an empty filter.
+        let filter = self
+            .selected_row()
+            .filter(|row| row.mode == "jira")
+            .and_then(|row| {
+                let issuetype = self.jira_issue_types.get(&row.command)?;
+                let prefix = if issuetype.eq_ignore_ascii_case("bug") {
+                    "bug"
+                } else {
+                    "feature"
+                };
+                Some(format!("{prefix}/{}", row.command))
+            })
+            .unwrap_or_default();
+        let cursor = filter.chars().count();
         self.worktree_create_flow = Some(crate::tui::state::WorktreeCreateFlow {
             repo_root,
             step: crate::tui::state::WorktreeCreateStep::PickBranch,
@@ -391,8 +413,8 @@ impl App {
             carry_over: false,
             project_slug: None,
             options,
-            filter: String::new(),
-            cursor: 0,
+            filter,
+            cursor,
             selected: 0,
             error: None,
         });

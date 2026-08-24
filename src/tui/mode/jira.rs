@@ -1156,6 +1156,16 @@ impl App {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 let mut next_id: i64 = -1;
+                // Pre-pass over the still-unconsumed issues: `issuetype`
+                // is discarded during the `JiraIssue` -> `HistoryRow`
+                // mapping below (the row has no field for it), but
+                // `open_worktree_create_flow` needs it to pick
+                // `feature/`/`bug/` for the branch-name prefill —
+                // see `App::jira_issue_types`'s doc comment.
+                let issue_types: std::collections::HashMap<String, String> = issues
+                    .iter()
+                    .map(|issue| (issue.key.clone(), issue.issuetype.clone()))
+                    .collect();
                 let rows = issues
                     .into_iter()
                     .map(|issue| {
@@ -1290,6 +1300,7 @@ impl App {
                     })
                     .collect();
                 self.jira_rows = rows;
+                self.jira_issue_types = issue_types;
                 self.status_message = None;
                 self.refresh();
             }
