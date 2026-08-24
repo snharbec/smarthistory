@@ -64,6 +64,17 @@ A phrase that's _only_ negation tokens (e.g. `"[type:jira]!` with nothing else)
 has nothing left to embed, so it's a no-op — same as an empty `"` — rather than
 "rank everything, then exclude", which similarity search has no baseline for.
 
+The shorter `type`-specific shorthand also works here: `"!!jira` excludes
+`type: jira` (an alias for `[type:jira]!`), and `"!jira` restricts the ranked
+results to **only** `type: jira` — same strip-before-embed mechanism, applied
+as a post-filter via a single extra query covering every restricted type
+(`included_similar_identities` in
+[`src/tui/mode/similar.rs`](../../src/tui/mode/similar.rs), mirroring
+`excluded_similar_identities` above). A phrase that's only a `!type`
+restriction token is likewise a no-op, same as negation-only. See
+[Type shorthand](notes.md#type-shorthand) in the Notes doc for the full
+syntax.
+
 ## Debounce
 
 Same 400ms-after-last-keystroke, background-thread architecture as

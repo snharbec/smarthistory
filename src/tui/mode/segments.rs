@@ -210,18 +210,38 @@ fn run_segments_search(
     pattern: &str,
     min_words: usize,
 ) -> Result<Vec<HistoryRow>, String> {
-    // `#tag!` / `[[link]]!` negation tokens are stripped BEFORE
-    // `parse_query` sees the pattern — it has no negation
-    // primitive and would either error on the trailing `!` or
-    // silently fold it into a bare-word token. See
+    // `#tag!` / `[[link]]!` negation tokens (and the `!!type`/`!type`
+    // shorthand) are stripped BEFORE `parse_query` sees the pattern —
+    // it has no negation primitive and would either error on the
+    // trailing `!` or silently fold it into a bare-word token. See
     // `crate::tui::mode::query_negation`'s module doc comment.
-    let (pattern, negations) = crate::tui::mode::query_negation::split_negations(pattern);
+    let (pattern, negations, type_restrictions) =
+        crate::tui::mode::query_negation::split_negations(pattern);
     let pattern = pattern.as_str();
-    let query_expr = if pattern.is_empty() {
+    let mut query_expr = if pattern.is_empty() {
         None
     } else {
         Some(note_search::parse_query(pattern).map_err(|e| format!("invalid query: {}", e))?)
     };
+    // `!type` restricts results to ONLY the given type(s) — `note_search`
+    // has a native `Or`, so "type is jira OR meeting" is one query
+    // clause, ANDed with whatever else the user typed, not an extra
+    // round-trip the way exclusion needs.
+    if !type_restrictions.is_empty() {
+        let restriction = note_search::QueryExpr::Or(
+            type_restrictions
+                .iter()
+                .map(|v| note_search::QueryExpr::Attribute {
+                    key: "type".to_string(),
+                    value: Some(v.clone()),
+                })
+                .collect(),
+        );
+        query_expr = Some(match query_expr {
+            Some(existing) => note_search::QueryExpr::And(vec![existing, restriction]),
+            None => restriction,
+        });
+    }
 
     let criteria = note_search::SearchCriteria {
         database_path: db_path.to_string_lossy().to_string(),
