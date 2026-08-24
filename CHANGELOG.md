@@ -23,6 +23,22 @@ All notable changes to this project will be documented in this file.
   `clap` command definition, so it never drifts out of sync as subcommands
   are added.
 
+### Fixed
+
+- Six `KeyBindingsEditor` integration tests ran with no `$HOME` sandbox, so
+  every `cargo test` silently rebound/unbound real actions in the
+  *developer's own* `~/.config/smarthistory/config` — confirmed live
+  (`key.create-worktree = F19` and `key.theme-picker = none`, matching two
+  of the tests' hardcoded values, after nothing but running the test
+  suite). Each now runs behind a `HomeSandbox` RAII guard (scratch `$HOME`,
+  serialised via the crate-wide `ENV_LOCK`, restored on `Drop` so a failed
+  assertion mid-test can't leak the override into later tests) — the same
+  sandboxing `write_key_binding_to_config_tests` already used for its own,
+  lower-level tests. If you've run the test suite locally, check
+  `~/.config/smarthistory/config` for `key.create-worktree`,
+  `key.theme-picker`, `key.dispose-worktree`, `key.down`, `key.up`, and
+  `key.delete-word-backward` — any of these may have been overwritten.
+
 ## 2.2.0 - 2026-08-23
 
 ### Added

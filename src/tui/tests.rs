@@ -1404,11 +1404,79 @@ fn key_bindings_editor_enter_starts_capture_mode() {
     );
 }
 
+/// RAII guard sandboxing `$HOME` to a scratch directory, serialised
+/// via the crate-wide `ENV_LOCK`. Every `KeyBindingsEditor`
+/// integration test below that reaches a real commit path
+/// (`App::commit_key_binding` / `unbind_key_binding` /
+/// `commit_key_binding_over_conflict`, all of which call the real
+/// `write_key_binding_to_config`) MUST hold one of these for its
+/// whole body.
+///
+/// This guard exists because of a real incident: those tests used to
+/// run with no `$HOME` override at all, so every `cargo test`
+/// silently rebinds/unbinds real actions in the *developer's own*
+/// `~/.config/smarthistory/config` — confirmed live (`key.create-worktree
+/// = F19` and `key.theme-picker = none` in a real config, exactly
+/// matching two of these tests' hardcoded values, after nothing but
+/// running the test suite). See `write_key_binding_to_config_tests`
+/// (`src/tui/bindings.rs`) for the sibling pattern this mirrors —
+/// that module already sandboxed its own (lower-level, direct-call)
+/// tests; this one only ever covers the `App`-level integration
+/// tests that reach the same write function indirectly.
+///
+/// Restoring `$HOME` on `Drop` (not just at the end of a manually
+/// written test body) matters: a failed `assert!` mid-test unwinds
+/// through the body, and without a `Drop` impl `$HOME` would stay
+/// pointed at the (now-removed) scratch dir for every test that
+/// happens to run afterward in the same `cargo test` process.
+struct HomeSandbox {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    prev_home: Option<String>,
+    scratch: std::path::PathBuf,
+}
+
+impl HomeSandbox {
+    fn new(label: &str) -> Self {
+        let guard = lock_or_recover(&ENV_LOCK);
+        let scratch = std::env::temp_dir().join(format!(
+            "smarthistory_kbe_test_{}_{}",
+            std::process::id(),
+            label,
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("create scratch HOME");
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: serialised by `ENV_LOCK` (held via `_guard` for
+        // this struct's whole lifetime), restored on `Drop`.
+        unsafe {
+            std::env::set_var("HOME", &scratch);
+        }
+        HomeSandbox { _guard: guard, prev_home, scratch }
+    }
+}
+
+impl Drop for HomeSandbox {
+    fn drop(&mut self) {
+        // SAFETY: see `new` — same lock, same single-threaded-within-
+        // the-critical-section reasoning, run unconditionally
+        // (including during an assertion-panic unwind) so `$HOME`
+        // never leaks into a later test.
+        unsafe {
+            match &self.prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+}
+
 /// Capturing a key nothing else is bound to commits immediately —
 /// in-memory `app.bindings` reflects it and the picker returns to
 /// browse mode with no conflict prompt.
 #[test]
 fn key_bindings_editor_capture_commits_immediately_when_no_conflict() {
+    let _sandbox = HomeSandbox::new("capture_commits_no_conflict");
     let mut app = global_test_app(&[("a", 1)]);
     app.open_key_bindings_editor();
     app.key_bindings_editor.as_mut().unwrap().capturing = Some(Action::CreateWorktree);
@@ -1427,6 +1495,7 @@ fn key_bindings_editor_capture_commits_immediately_when_no_conflict() {
 /// unambiguous and there's nothing to warn about.
 #[test]
 fn key_bindings_editor_capture_commits_immediately_when_conflicting_action_is_disjoint_scope() {
+    let _sandbox = HomeSandbox::new("capture_commits_disjoint_scope");
     let mut app = global_test_app(&[("a", 1)]);
     let jira_spec = app.bindings.specs(Action::DownloadJiraIssue)[0];
     assert!(
@@ -1510,6 +1579,7 @@ fn key_bindings_editor_capture_finds_conflict_past_a_disjoint_first_holder() {
 /// afterwards, defeating the point of asking.
 #[test]
 fn key_bindings_editor_conflict_confirm_commits() {
+    let _sandbox = HomeSandbox::new("conflict_confirm_commits");
     let mut app = global_test_app(&[("a", 1)]);
     let up_spec = app.bindings.specs(Action::Up)[0];
     app.open_key_bindings_editor();
@@ -1539,6 +1609,7 @@ fn key_bindings_editor_conflict_confirm_commits() {
 /// for the `Up`/`Down` collision this same commit path already covers.)
 #[test]
 fn key_bindings_editor_conflict_confirm_preserves_other_actions_remaining_keys() {
+    let _sandbox = HomeSandbox::new("conflict_confirm_preserves_remaining_keys");
     let mut app = global_test_app(&[("a", 1)]);
     let dwb_specs_before = app.bindings.specs(Action::DeleteWordBackward).to_vec();
     assert!(
@@ -1598,6 +1669,7 @@ fn key_bindings_editor_conflict_decline_returns_to_capture() {
 /// closing the editor.
 #[test]
 fn key_bindings_editor_delete_unbinds_highlighted_action() {
+    let _sandbox = HomeSandbox::new("delete_unbinds_highlighted_action");
     let mut app = global_test_app(&[("a", 1)]);
     app.open_key_bindings_editor();
     let idx = ALL_ACTIONS.iter().position(|a| *a == Action::ThemePicker).unwrap();
@@ -1642,6 +1714,12 @@ fn key_bindings_editor_cancel_in_browse_closes_editor() {
 /// config file's comment syntax would silently truncate the line.
 #[test]
 fn write_key_binding_to_config_refuses_hash_spec() {
+    // Defensive sandbox: `write_key_binding_to_config` currently
+    // refuses a `#`-containing spec before ever touching
+    // `config_path()`/`$HOME`, but this test calls the real function
+    // directly — sandboxing here doesn't depend on that ordering
+    // never changing.
+    let _sandbox = HomeSandbox::new("refuses_hash_spec");
     let spec = bindings::KeySpec { code: KeyCode::Char('#'), modifiers: KeyModifiers::empty() };
     let result = crate::tui::bindings::write_key_binding_to_config(Action::ThemePicker, &[spec]);
     assert!(result.is_err(), "a `#` spec must be refused, not silently written");
