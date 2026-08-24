@@ -22,6 +22,14 @@ All notable changes to this project will be documented in this file.
   `smarthistory <TAB>` and its flags. Generated directly from the CLI's own
   `clap` command definition, so it never drifts out of sync as subcommands
   are added.
+- Two opt-in debug logs for investigating reported TUI responsiveness/config
+  issues, off by default: `SMARTHISTORY_DEBUG_PERF=1` writes timings (over
+  ~30ms) for the main loop's per-frame and per-key work, plus the segments
+  background search and its highlight step, to
+  `~/.local/cache/smarthistory/perf-debug.log`; `SMARTHISTORY_DEBUG_KEYBINDINGS=1`
+  logs every actual write to a `key.*` config line to
+  `~/.local/cache/smarthistory/keybindings-debug.log`. Same pattern as the
+  existing `SMARTHISTORY_DEBUG_HERDR` tmux-snapshot log.
 
 ### Fixed
 

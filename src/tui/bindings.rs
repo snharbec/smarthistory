@@ -1827,6 +1827,11 @@ pub fn format_key_specs(specs: &[KeySpec]) -> String {
 /// (`Config::parse_multi`'s documented "later line wins" rule), so
 /// appending is correct — no need to find and replace an existing line.
 pub(crate) fn write_key_binding_to_config(action: Action, specs: &[KeySpec]) -> Result<(), String> {
+    crate::tui::keybinding_debug_log(&format!(
+        "write_key_binding_to_config: action={} specs={}",
+        action.config_key(),
+        format_key_specs(specs),
+    ));
     let value = if specs.is_empty() {
         "none".to_string()
     } else {
@@ -1892,6 +1897,21 @@ pub(crate) fn write_key_binding_to_config(action: Action, specs: &[KeySpec]) -> 
     }
     if !replaced {
         new_lines.push(new_line);
+    }
+    let dropped_duplicates = contents
+        .lines()
+        .filter(|raw_line| {
+            let before_comment = raw_line.split('#').next().unwrap_or("");
+            matches!(before_comment.split_once('='), Some((k, _)) if k.trim() == target_key)
+        })
+        .count()
+        .saturating_sub(1);
+    if dropped_duplicates > 0 {
+        crate::tui::keybinding_debug_log(&format!(
+            "write_key_binding_to_config: action={} self-healed {} pre-existing duplicate line(s)",
+            action.config_key(),
+            dropped_duplicates,
+        ));
     }
     let mut new_contents = new_lines.join("\n");
     new_contents.push('\n');
