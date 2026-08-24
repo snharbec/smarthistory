@@ -224,7 +224,8 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // disappears the moment the user clears
     // the alias token).
     app.notes_date_filter = filter;
-    let (pattern, negations) = crate::tui::mode::query_negation::split_negations(&pattern);
+    let (pattern, negations, type_restrictions) =
+        crate::tui::mode::query_negation::split_negations(&pattern);
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
     let excluded = match excluded_note_filenames(&service, &negations) {
         Ok(excluded) => excluded,
@@ -233,7 +234,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             return Ok(Vec::new());
         }
     };
-    if pattern.is_empty() {
+    if pattern.is_empty() && type_restrictions.is_empty() {
         // The user typed only the
         // date alias (e.g. `@today`)
         // and/or only negated terms
@@ -253,7 +254,45 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         return fetch_recent_with_filter(app, &service, filter, &excluded);
     }
 
-    match service.search_notes_by_query(&pattern) {
+    // `!type` restricts results to ONLY the given type(s) — build a
+    // `QueryExpr` directly (native `Or`, ANDed with whatever else was
+    // typed) and go through `search_notes` instead of the
+    // `search_notes_by_query` string-DSL sugar, which has no hook for
+    // a hand-assembled expression tree. Only taken when a restriction
+    // is actually present — the plain-string path below is unchanged
+    // and untouched otherwise.
+    let query_results: std::result::Result<Vec<note_search::NoteResult>, String> =
+        if type_restrictions.is_empty() {
+            service.search_notes_by_query(&pattern)
+        } else {
+            let mut query_expr = if pattern.is_empty() {
+                None
+            } else {
+                match note_search::parse_query(&pattern) {
+                    Ok(expr) => Some(expr),
+                    Err(e) => {
+                        app.set_status_message(format!("Notes mode: invalid query: {}", e));
+                        return Ok(Vec::new());
+                    }
+                }
+            };
+            let restriction = note_search::QueryExpr::Or(
+                type_restrictions
+                    .iter()
+                    .map(|v| note_search::QueryExpr::Attribute {
+                        key: "type".to_string(),
+                        value: Some(v.clone()),
+                    })
+                    .collect(),
+            );
+            query_expr = Some(match query_expr {
+                Some(existing) => note_search::QueryExpr::And(vec![existing, restriction]),
+                None => restriction,
+            });
+            let criteria = note_search::SearchCriteria { query_expr, ..Default::default() };
+            service.search_notes(&criteria).map_err(|e| e.to_string())
+        };
+    match query_results {
         Ok(results) => {
             // Apply the date filter (if any)
             // before building `HistoryRow`

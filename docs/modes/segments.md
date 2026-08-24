@@ -72,6 +72,9 @@ changed more than once upstream; this describes the current one.)
   [Negated tag/link/attribute search](notes.md#negated-taglinkattribute-search)
   in the Notes doc — the syntax and implementation are shared across `@`/`!`/`:`
   modes.
+- `:!!jira` / `:!jira` — the shorter `type`-specific shorthand: exclude /
+  restrict-to `type: jira`. See
+  [Type shorthand](notes.md#type-shorthand) in the Notes doc.
 - A segment with a heading starts with a literal `#`/`##`/... in the result list
   — that's the segment's own header line (verbatim, as written in the file), not
   a prefix smarthistory adds.

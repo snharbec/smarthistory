@@ -9224,6 +9224,71 @@ fn notes_negation_excludes_note_with_matching_attribute() {
     let _ = fs::remove_file(&db_path);
 }
 
+/// `!<value>` restricts results to ONLY notes whose `type` attribute is
+/// one of the given value(s) — the new counterpart to `[type:value]!`'s
+/// exclusion. Three notes (jira/meeting/plain-typed); `!jira` must show
+/// only the jira one, not the union of "everything except meeting" the
+/// way a naive implementation confusing restriction with exclusion
+/// would produce.
+#[test]
+fn notes_restriction_shows_only_matching_type() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-notes-attr-restrict-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(dir.join("jira.md"), "---\ntype: jira\n---\n\n# Jira\n").expect("write jira");
+    fs::write(dir.join("meeting.md"), "---\ntype: meeting\n---\n\n# Meeting\n")
+        .expect("write meeting");
+    fs::write(dir.join("plain.md"), "# Plain\n").expect("write plain");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-notes-attr-restrict-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["jira.md", "meeting.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = "@".to_string();
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 3);
+    app.query = "@!jira".to_string();
+    app.refresh();
+    let cmds: Vec<&str> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        cmds,
+        vec!["jira.md"],
+        "!jira must restrict to only the jira-typed note: {:?}",
+        cmds
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&db_path);
+}
+
 /// Regression test for the user's
 /// report in todo mode:
 /// `!@today` should restrict
@@ -9955,6 +10020,70 @@ fn fetch_todos_negation_excludes_todos_with_matching_attribute() {
         cmds,
         vec!["plain task"],
         "negated attribute must exclude both of project.md's todos: {:?}",
+        cmds
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `!<value>` restricts todo-mode results to ONLY todos in files whose
+/// `type` attribute is one of the given value(s) — same new capability
+/// as `notes_restriction_shows_only_matching_type`, for `!` mode.
+#[test]
+fn todo_restriction_shows_only_matching_type() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-todo-attr-restrict-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("project.md"),
+        "---\ntype: project\n---\n\n- [ ] project task\n",
+    )
+    .expect("write project");
+    fs::write(dir.join("plain.md"), "# Plain\n\n- [ ] plain task\n").expect("write plain");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-todo-attr-restrict-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["project.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.query = "!".to_string();
+    app.refresh();
+    assert_eq!(app.merged_rows().len(), 2);
+    app.query = "!!project".to_string();
+    app.refresh();
+    let cmds: Vec<&str> = app
+        .merged_rows()
+        .iter()
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(
+        cmds,
+        vec!["project task"],
+        "!project must restrict to only project.md's todo: {:?}",
         cmds
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -10961,6 +11090,31 @@ fn spawn_similar_search_with_only_negation_tokens_returns_empty_without_network(
     );
 }
 
+/// Same short-circuit, for a phrase that's only a `!type` restriction
+/// token (the new bare-`!` shorthand) — restriction tokens are stripped
+/// by the same `split_negations` call as negation tokens, so a
+/// restriction-only phrase hits the identical empty-remaining-phrase
+/// early return, with no embed/query call.
+#[test]
+fn spawn_similar_search_with_only_restriction_token_returns_empty_without_network() {
+    let request = crate::tui::mode::similar::spawn_similar_search(
+        std::path::PathBuf::from("/nonexistent/notes.sqlite"),
+        None,
+        "!jira".to_string(),
+        0,
+    );
+    let result = request
+        .receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("restriction-only phrase should resolve immediately");
+    assert_eq!(
+        result,
+        Ok(Vec::new()),
+        "a phrase that's only a !type restriction token must short-circuit to an empty result: {:?}",
+        result
+    );
+}
+
 /// `build_merged_rows` takes the same cheap early-return path for
 /// similar-mode rows as segments mode (`self.rows.clone()`, no
 /// labeled-row interleave, no re-sort) — results are already ranked
@@ -11617,6 +11771,84 @@ fn fetch_segments_negation_excludes_matching_attribute() {
         app.merged_rows().is_empty(),
         "negated attribute must exclude the file's only segment, got: {:?}",
         app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    // `!!type` is a pure parser-level alias for `[type:value]!` (proven
+    // directly in query_negation.rs's own unit tests) — one end-to-end
+    // sanity check here is enough, not a full duplicate fixture.
+    app.query = ":!!project".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert!(
+        app.merged_rows().is_empty(),
+        "!!project shorthand must exclude exactly like [type:project]! does: {:?}",
+        app.merged_rows().iter().map(|r| &r.command).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `!<value>` restricts segments-mode results to ONLY segments in files
+/// whose `type` attribute is one of the given value(s).
+#[test]
+fn segments_restriction_shows_only_matching_type() {
+    use rusqlite::Connection;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory-segments-attr-restrict-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create notes dir");
+    fs::write(
+        dir.join("jira.md"),
+        "---\ntype: jira\n---\n\n# Jira\n\nsome body text\n",
+    )
+    .expect("write jira.md");
+    fs::write(
+        dir.join("plain.md"),
+        "# Plain\n\nsome other body text\n",
+    )
+    .expect("write plain.md");
+    let db_path = std::env::temp_dir().join(format!(
+        "smarthistory-segments-attr-restrict-db-{}-{}.sqlite",
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_file(&db_path);
+    let conn = Connection::open(&db_path).expect("open db");
+    note_search::init_database_schema(&conn)
+        .map_err(|e| format!("schema: {e}"))
+        .expect("init schema");
+    for name in ["jira.md", "plain.md"] {
+        let data = note_search::markdown_parser::process_markdown_file(&dir.join(name), &dir)
+            .expect("process file");
+        note_search::write_markdown_data_to_sqlite_with_conn(&data, &conn)
+            .map_err(|e| format!("write: {e}"))
+            .expect("write db");
+    }
+    drop(conn);
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+    app.segments_min_words = 0;
+    app.query = ":".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    assert_eq!(app.merged_rows().len(), 2, "fixture must have two segments");
+
+    app.query = ":!jira".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    let cmds: Vec<String> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(
+        app.merged_rows().len(),
+        1,
+        "!jira must restrict to only jira.md's segment: {:?}",
+        cmds
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);

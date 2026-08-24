@@ -188,15 +188,16 @@ fn run_similar_search(
     // structural exclusion filter, not semantic content to rank
     // against. See this module's doc comment and
     // `crate::tui::mode::query_negation`.
-    let (phrase, negations) = crate::tui::mode::query_negation::split_negations(phrase);
+    let (phrase, negations, type_restrictions) =
+        crate::tui::mode::query_negation::split_negations(phrase);
     let phrase = phrase.as_str();
     // An empty remaining phrase has nothing to embed or compare
     // against — unlike `:` mode's bare-prefix "list everything",
     // similarity search is meaningless without a phrase. No-op
     // rather than an error. This also covers a query that's ONLY
-    // negation tokens (e.g. `[type:jira]!` alone) — there's no
-    // "rank everything, then exclude" baseline for similarity
-    // search the way there is for `:` mode's bare `:`.
+    // negation/restriction tokens (e.g. `[type:jira]!` or `!jira`
+    // alone) — there's no "rank everything, then filter" baseline
+    // for similarity search the way there is for `:` mode's bare `:`.
     if phrase.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -210,6 +211,18 @@ fn run_similar_search(
     if !negations.is_empty() {
         let excluded = excluded_similar_identities(&service, db_path, &negations)?;
         results.retain(|(el, _score)| !excluded.contains(&(el.filename.clone(), el.start_line)));
+    }
+
+    // `!type` restricts results to ONLY the given type(s).
+    // `search_similar_segments` has no `QueryExpr` hook at all (only a
+    // plain embedding vector + tag/link string filters) and
+    // `SegmentResult` carries no `type` field to post-filter on
+    // directly, so — same as exclusion above — this needs a separate
+    // lookup. Unlike exclusion's one-query-per-term loop, this is ONE
+    // query covering every restricted type via `Or`.
+    if !type_restrictions.is_empty() {
+        let included = included_similar_identities(&service, db_path, &type_restrictions)?;
+        results.retain(|(el, _score)| included.contains(&(el.filename.clone(), el.start_line)));
     }
 
     if min_words > 0 {
@@ -251,6 +264,39 @@ fn excluded_similar_identities(
         excluded.extend(rows.into_iter().map(|r| (r.filename, r.start_line)));
     }
     Ok(excluded)
+}
+
+/// The inclusion counterpart to [`excluded_similar_identities`]: one
+/// combined lookup (not one per value — `note_search::QueryExpr::Or`
+/// expresses "type is any of these" natively) returning the
+/// `(filename, start_line)` identity of every segment whose `type`
+/// attribute matches ANY of `type_restrictions` — the set
+/// `run_similar_search` retains from its own similarity-ranked
+/// results, discarding everything else.
+fn included_similar_identities(
+    service: &note_search::database_service::DatabaseService,
+    db_path: &std::path::Path,
+    type_restrictions: &[String],
+) -> Result<std::collections::HashSet<(String, i32)>, String> {
+    let restriction = note_search::QueryExpr::Or(
+        type_restrictions
+            .iter()
+            .map(|v| note_search::QueryExpr::Attribute {
+                key: "type".to_string(),
+                value: Some(v.clone()),
+            })
+            .collect(),
+    );
+    let criteria = note_search::SearchCriteria {
+        database_path: db_path.to_string_lossy().to_string(),
+        query_expr: Some(restriction),
+        list_only: true,
+        ..Default::default()
+    };
+    let rows = service
+        .search_segments(&criteria)
+        .map_err(|e| format!("type restriction lookup failed: {}", e))?;
+    Ok(rows.into_iter().map(|r| (r.filename, r.start_line)).collect())
 }
 
 /// Map `note_search`'s `(SegmentResult, similarity_score)` pairs into

@@ -265,13 +265,14 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // contain `older`.
     let raw_pattern = pattern(app).trim();
     let (pattern, filter) = crate::tui::mode::notes::parse_notes_query(raw_pattern);
-    // `#tag!` / `[[link]]!` negation tokens are stripped BEFORE
-    // `parse_query` sees the pattern — it has no negation
-    // primitive and would either error on the trailing `!` or fold
-    // it into a bare-word token. See
+    // `#tag!` / `[[link]]!` negation tokens (and the `!!type`/`!type`
+    // shorthand) are stripped BEFORE `parse_query` sees the pattern —
+    // it has no negation primitive and would either error on the
+    // trailing `!` or fold it into a bare-word token. See
     // `crate::tui::mode::query_negation`'s module doc comment.
-    let (pattern, negations) = crate::tui::mode::query_negation::split_negations(&pattern);
-    let query_expr = if pattern.is_empty() {
+    let (pattern, negations, type_restrictions) =
+        crate::tui::mode::query_negation::split_negations(&pattern);
+    let mut query_expr = if pattern.is_empty() {
         None
     } else {
         match note_search::parse_query(&pattern) {
@@ -282,6 +283,24 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             }
         }
     };
+    // `!type` restricts results to ONLY the given type(s) — native
+    // `Or`, ANDed with whatever else was typed, no extra round-trip
+    // (unlike exclusion below, which needs one).
+    if !type_restrictions.is_empty() {
+        let restriction = note_search::QueryExpr::Or(
+            type_restrictions
+                .iter()
+                .map(|v| note_search::QueryExpr::Attribute {
+                    key: "type".to_string(),
+                    value: Some(v.clone()),
+                })
+                .collect(),
+        );
+        query_expr = Some(match query_expr {
+            Some(existing) => note_search::QueryExpr::And(vec![existing, restriction]),
+            None => restriction,
+        });
+    }
 
     // Build the criteria. We always pin
     // `open: Some(true)` so the user sees

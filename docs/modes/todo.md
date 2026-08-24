@@ -22,6 +22,10 @@ checkbox.
   whose note has the tag/link/attribute-value instead of requiring it. See
   [Negated tag/link/attribute search](notes.md#negated-taglinkattribute-search)
   — the syntax and implementation are shared across `@`/`!`/`:` modes.
+- `!!!jira` / `!!jira` — the shorter `type`-specific shorthand (the extra `!`
+  at the front is the todo-mode prefix, unrelated to the shorthand itself):
+  exclude / restrict-to `type: jira`. See
+  [Type shorthand](notes.md#type-shorthand) in the Notes doc.
 - `!@new remember to buy milk` — quick-create a new todo entry in today's daily
   note (see Quick-create below).
 - The displayed list shows the todo text (first column), the note basename

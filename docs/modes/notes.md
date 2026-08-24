@@ -152,6 +152,30 @@ note body — a YAML front-matter `tags:` array does not populate the same tag
 index and won't match `#tag` / `#tag!`. Use `[attr:value]` / `[attr:value]!`
 front-matter search for that instead.
 
+### `!!type` / `!type` — type shorthand
+
+A shorter, `type`-specific alternative to the general `[type:value]` /
+`[type:value]!` attribute syntax above, since restricting or excluding by
+`type` is by far the most common case:
+
+- `!!jira` — exclude `type: jira`. A pure alias for `[type:jira]!`: it
+  produces the identical negated term, so it combines with everything else
+  negation already does and needs no separate explanation.
+- `!jira` — restrict to **only** `type: jira`. New capability, not just a
+  shorthand — there's no equivalent single-token way to say "only this type"
+  with the general `[attr:value]` syntax (a bare `[type:jira]` works too, but
+  only as an AND-ed positive clause, not as an allow-list). Repeatable: `!jira
+  !meeting` means "type is jira **or** meeting", not "jira and meeting" (which
+  would always match nothing, since a note/todo/segment has exactly one
+  `type`).
+
+Both forms work the same everywhere the general attribute syntax does — `@`
+notes, `!` todo, `:` segments, and `"` similar (via the same
+strip-before-embed / post-filter mechanism the general negation syntax
+already uses there). `!type` restriction combines with a positive `AND` the
+same way the rest of the query does: `rust !jira` finds entries that mention
+"rust" **and** have `type: jira`.
+
 ## Tab completion
 
 Press `Tab` while typing in `@` mode (also works identically in

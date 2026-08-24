@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `!!type` / `!type` query shorthand in `@` notes, `!` todo, `:` segments,
+  and `"` similar mode — a shorter, `type`-specific alternative to the general
+  `[type:value]!` attribute syntax. `!!jira` excludes `type: jira` (a pure
+  alias for `[type:jira]!`); `!jira` restricts results to **only** `type:
+  jira`, a new capability, repeatable as an OR allow-list (`!jira !meeting`
+  means "jira or meeting"). See
+  [docs/modes/notes.md#type-shorthand](docs/modes/notes.md#type-shorthand).
 - New `smarthistory completions <shell>` — prints a shell tab-completion
   script for `smarthistory`'s own subcommands and flags to stdout
   (`eval "$(smarthistory completions zsh)"`; bash/fish/powershell/elvish
