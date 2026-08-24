@@ -13373,6 +13373,34 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                 app.set_status_message("LLM request cancelled".to_string());
                 return false;
             }
+            // Same for every other debounced background search
+            // (`crate::debounce::cancel_in_flight`) — none of these
+            // should force the whole TUI to exit just because the
+            // ONLY way to interrupt a slow one (an embedding HTTP
+            // round-trip on an overloaded machine, in particular) used
+            // to be "quit everything." Only one prefix mode is ever
+            // active at a time, so at most one of these actually has
+            // anything to cancel; order doesn't matter beyond that.
+            if crate::debounce::cancel_in_flight(&mut app.similar_state) {
+                app.set_status_message("Similarity search cancelled".to_string());
+                return false;
+            }
+            if crate::debounce::cancel_in_flight(&mut app.segments_state) {
+                app.set_status_message("Segment search cancelled".to_string());
+                return false;
+            }
+            if crate::debounce::cancel_in_flight(&mut app.paperless_state) {
+                app.set_status_message("Paperless search cancelled".to_string());
+                return false;
+            }
+            if crate::debounce::cancel_in_flight(&mut app.ag_state) {
+                app.set_status_message("Search cancelled".to_string());
+                return false;
+            }
+            if crate::debounce::cancel_in_flight(&mut app.browser_state) {
+                app.set_status_message("Browser search cancelled".to_string());
+                return false;
+            }
             app.cancelled = true;
             true
         }

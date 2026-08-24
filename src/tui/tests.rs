@@ -10762,6 +10762,90 @@ fn segments_default_prefix_is_colon() {
     assert_eq!(crate::QueryPrefixes::default().segments, ':');
 }
 
+/// Regression: `Action::Cancel` used to only know about `llm_request` —
+/// pressing Cancel while a segments-mode search was in flight fell
+/// through to the "no in-flight request" default (`app.cancelled = true`,
+/// exiting the whole TUI) instead of just interrupting the search. A
+/// request is constructed directly here (a channel nothing ever sends
+/// on, standing in for "still running") rather than driving a real
+/// background search, so this stays fast and doesn't depend on a
+/// configured `notes.database`.
+#[test]
+fn cancel_action_interrupts_in_flight_segments_search_without_exiting_tui() {
+    let mut app = stats_test_app(&[]);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.segments_state.request = Some(crate::tui::mode::segments::SegmentsRequest {
+        receiver: rx,
+        cancelled: cancelled.clone(),
+        pattern: "test".to_string(),
+    });
+    app.segments_state.in_flight = true;
+
+    let quit = dispatch_action(&mut app, Action::Cancel);
+
+    assert!(!quit, "cancelling an in-flight search must not exit the TUI");
+    assert!(!app.cancelled, "the whole-app cancel flag must not be set");
+    assert!(
+        cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "the background thread's cancellation flag must be set"
+    );
+    assert!(app.segments_state.request.is_none());
+    assert!(!app.segments_state.in_flight);
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("cancelled"),
+        "expected a cancellation status message, got: {:?}",
+        status
+    );
+}
+
+/// Same regression, for similar-mode (`"` prefix) — the mode the user
+/// actually reported this against: the embedding HTTP round-trip can
+/// take a long time on a slow/overloaded machine, and Cancel needs to
+/// interrupt it without exiting the TUI, same as `cancel_action_
+/// interrupts_in_flight_segments_search_without_exiting_tui` above.
+#[test]
+fn cancel_action_interrupts_in_flight_similar_search_without_exiting_tui() {
+    let mut app = stats_test_app(&[]);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.similar_state.request = Some(crate::tui::mode::similar::SimilarRequest {
+        receiver: rx,
+        cancelled: cancelled.clone(),
+        pattern: "test".to_string(),
+    });
+    app.similar_state.in_flight = true;
+
+    let quit = dispatch_action(&mut app, Action::Cancel);
+
+    assert!(!quit, "cancelling an in-flight search must not exit the TUI");
+    assert!(!app.cancelled, "the whole-app cancel flag must not be set");
+    assert!(
+        cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "the background thread's cancellation flag must be set"
+    );
+    assert!(app.similar_state.request.is_none());
+    assert!(!app.similar_state.in_flight);
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(
+        status.contains("cancelled"),
+        "expected a cancellation status message, got: {:?}",
+        status
+    );
+}
+
+/// A plain `Cancel` with nothing in flight anywhere still exits the TUI
+/// exactly as before — this fix only adds new interception points
+/// ahead of that fallback, it doesn't change the no-op case.
+#[test]
+fn cancel_action_still_exits_tui_when_nothing_is_in_flight() {
+    let mut app = stats_test_app(&[]);
+    let quit = dispatch_action(&mut app, Action::Cancel);
+    assert!(quit, "Cancel with nothing in flight must still exit the TUI");
+    assert!(app.cancelled);
+}
+
 /// `is_segments_query` recognises the `:` prefix, matching the
 /// `is_todo_query` / `is_notes_query` contract.
 #[test]
