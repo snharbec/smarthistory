@@ -70,28 +70,73 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         )
         .split(f.area());
 
+    let mode_strip_start = std::time::Instant::now();
     draw_mode_strip(f, app, chunks[0]);
-    draw_list(f, app, chunks[1]);
+    let mode_strip_elapsed = mode_strip_start.elapsed();
 
+    let list_start = std::time::Instant::now();
+    draw_list(f, app, chunks[1]);
+    let list_elapsed = list_start.elapsed();
+
+    let mut details_elapsed = std::time::Duration::ZERO;
+    let mut output_preview_elapsed = std::time::Duration::ZERO;
     match app.pane_visibility {
         crate::tui::state::PaneVisibility::Both => {
             let detail_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
                 .split(chunks[2]);
+            let details_start = std::time::Instant::now();
             draw_details(f, app, detail_chunks[0]);
+            details_elapsed = details_start.elapsed();
+            let output_preview_start = std::time::Instant::now();
             draw_output_preview(f, app, detail_chunks[1]);
+            output_preview_elapsed = output_preview_start.elapsed();
         }
         crate::tui::state::PaneVisibility::Details => {
+            let details_start = std::time::Instant::now();
             draw_details(f, app, chunks[2]);
+            details_elapsed = details_start.elapsed();
         }
         crate::tui::state::PaneVisibility::OutputPreview => {
+            let output_preview_start = std::time::Instant::now();
             draw_output_preview(f, app, chunks[2]);
+            output_preview_elapsed = output_preview_start.elapsed();
         }
     }
 
+    let input_start = std::time::Instant::now();
     draw_input(f, app, chunks[3]);
+    let input_elapsed = input_start.elapsed();
+
+    let status_start = std::time::Instant::now();
     draw_status(f, app, chunks[4]);
+    let status_elapsed = status_start.elapsed();
+
+    // Breaks down a slow `terminal.draw()` call (already logged as
+    // one number by `run_loop`) into which sub-widget is actually
+    // responsible — reported after a `draw=11839ms`-style stall
+    // narrowed the freeze to *somewhere* inside `ui()`, but not to
+    // which pane.
+    if mode_strip_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || list_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || details_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || output_preview_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || input_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || status_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+    {
+        crate::tui::perf_debug_log(&format!(
+            "ui: mode_strip={}ms list={}ms details={}ms output_preview={}ms input={}ms status={}ms rows={} selected={:?}",
+            mode_strip_elapsed.as_millis(),
+            list_elapsed.as_millis(),
+            details_elapsed.as_millis(),
+            output_preview_elapsed.as_millis(),
+            input_elapsed.as_millis(),
+            status_elapsed.as_millis(),
+            app.merged_rows().len(),
+            app.list_state.selected(),
+        ));
+    }
 
     if let Some(ref mode) = app.confirm_delete {
         draw_confirm_delete(f, app, mode);
