@@ -181,6 +181,46 @@ fn highlight_matches_multi_word_out_of_order() {
     assert_eq!(content, vec!["git", " ", "commit", " -m"]);
 }
 
+/// Reproduces a real reported freeze: typing a two-word query
+/// (`"classification database"`) into `:` (segments) mode made the
+/// whole TUI stall for ~12 seconds while rendering a large flattened
+/// segment. Diagnosed via `SMARTHISTORY_DEBUG_PERF` logging (added to
+/// investigate the report) down to `highlight_matches` doing
+/// `lower_text.chars().skip(i).take(word_len)` *inside* the position
+/// loop — re-walking the string from its start on every position,
+/// O(n) per position and O(n²) overall, since `&str`'s `Chars`
+/// iterator has no random-access skip. A `command` field spanning an
+/// entire note section (segments mode's contract — see
+/// `map_segment_results`) can be tens of thousands of characters, so
+/// this was invisible for ordinary shell commands but catastrophic
+/// there. This test would have taken minutes (not milliseconds)
+/// against the pre-fix implementation.
+#[test]
+fn highlight_matches_stays_fast_on_a_very_long_row() {
+    let filler = "the quick brown fox jumps over the lazy dog ".repeat(4000);
+    let text = format!("{filler}classification database{filler}");
+    let start = std::time::Instant::now();
+    let spans = super::render::highlight_matches(&text, "classification database");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_millis() < 500,
+        "highlight_matches took {:?} on a {}-char string — expected sub-linear-in-practice, \
+         got quadratic-looking behavior",
+        elapsed,
+        text.chars().count(),
+    );
+    let highlighted: Vec<String> = spans
+        .iter()
+        .filter(|s| s.style.add_modifier.contains(ratatui::style::Modifier::BOLD))
+        .map(|s| s.content.to_string())
+        .collect();
+    assert_eq!(
+        highlighted,
+        vec!["classification", "database"],
+        "the match itself must still be found correctly, not just fast"
+    );
+}
+
 #[test]
 fn build_implicit_regex_plain() {
     // No anchors → wrap with `.*` on both sides.
@@ -11374,6 +11414,101 @@ fn fetch_segments_applies_text_filter() {
         commands
     );
     assert!(commands[0].contains("prose"), "got: {:?}", commands);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// `App::refresh()` runs on every keystroke, but `segments::fetch()`
+/// ignores `app.query` entirely — it just clones whatever the
+/// debounced background thread last posted to
+/// `segments_state.rows`. Before the `rows_version`-keyed
+/// short-circuit in `refresh()`, every keystroke re-cloned the full
+/// result set twice (once in `fetch()`, once in
+/// `build_merged_rows()`'s passthrough early return) regardless of
+/// whether a new result had actually arrived — the root cause of
+/// the UI freezing while typing a multi-word segments-mode query on
+/// a large notes vault. This locks in that `merged_rows()` stays
+/// untouched across repeated `refresh()` calls (simulated
+/// keystrokes) until a fresh search actually completes, and still
+/// updates correctly once one does.
+#[test]
+fn refresh_short_circuits_segments_mode_between_keystrokes_until_new_result_arrives() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+
+    app.query = ":pro".to_string();
+    app.refresh();
+    assert!(
+        app.merged_rows().is_empty(),
+        "no search has completed yet, so there should be nothing to show"
+    );
+
+    // Simulate more keystrokes narrowing towards "prose" — none of
+    // these should trigger a new fetch/merge, since the debounced
+    // background search hasn't completed for any of them yet
+    // (`segments_state.rows_version` is unchanged).
+    for query in [":pros", ":prose"] {
+        app.query = query.to_string();
+        app.refresh();
+        assert!(
+            app.merged_rows().is_empty(),
+            "merged_rows should stay untouched between keystrokes until a search actually completes, got: {:?}",
+            app.merged_rows()
+        );
+    }
+
+    drive_segments_search(&mut app);
+    let after_first_search: Vec<String> =
+        app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(
+        after_first_search.len(),
+        1,
+        "expected exactly the '# Older' segment, got: {:?}",
+        after_first_search
+    );
+    assert!(
+        after_first_search[0].contains("prose"),
+        "got: {:?}",
+        after_first_search
+    );
+
+    // More keystrokes after the search completed, still without a
+    // new search — merged_rows should keep showing the previous
+    // result, not go blank or drift.
+    for query in [":prosex", ":prose"] {
+        app.query = query.to_string();
+        app.refresh();
+        assert_eq!(
+            app.merged_rows()
+                .iter()
+                .map(|r| r.command.clone())
+                .collect::<Vec<_>>(),
+            after_first_search,
+            "merged_rows should stay pinned to the last completed search's result between keystrokes"
+        );
+    }
+
+    // A genuinely new search (different pattern) must still update
+    // the results once it completes.
+    app.query = ":newer".to_string();
+    app.refresh();
+    drive_segments_search(&mut app);
+    let after_second_search: Vec<String> =
+        app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(
+        after_second_search.len(),
+        1,
+        "expected exactly the '# Newer' segment, got: {:?}",
+        after_second_search
+    );
+    assert!(
+        after_second_search[0].contains("Newer"),
+        "got: {:?}",
+        after_second_search
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }

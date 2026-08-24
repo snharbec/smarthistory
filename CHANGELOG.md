@@ -22,6 +22,39 @@ All notable changes to this project will be documented in this file.
   `smarthistory <TAB>` and its flags. Generated directly from the CLI's own
   `clap` command definition, so it never drifts out of sync as subcommands
   are added.
+- Two opt-in debug logs for investigating reported TUI responsiveness/config
+  issues, off by default: `SMARTHISTORY_DEBUG_PERF=1` writes timings (over
+  ~30ms) for the main loop's per-frame and per-key work, plus the segments
+  background search and its highlight step, to
+  `~/.local/cache/smarthistory/perf-debug.log`; `SMARTHISTORY_DEBUG_KEYBINDINGS=1`
+  logs every actual write to a `key.*` config line to
+  `~/.local/cache/smarthistory/keybindings-debug.log`. Same pattern as the
+  existing `SMARTHISTORY_DEBUG_HERDR` tmux-snapshot log.
+
+### Fixed
+
+- The typing UI could freeze for several seconds when a `:` (segments) query
+  narrowed on a large notes vault (e.g. a multi-word query like "classification
+  database"). The search itself was already backgrounded and debounced, but
+  `App::refresh()` — run on every keystroke — re-cloned the entire cached
+  result set twice on the main thread regardless of whether a new result had
+  actually arrived, since its cache short-circuit was keyed on the typed query
+  text even though segments/similar/paperless/browser mode's fetch step
+  ignores the query text entirely (it only reads the background thread's last
+  posted result). `refresh()` now keys its short-circuit on each mode's own
+  result-version counter instead, so typing no longer re-clones anything until
+  a debounced search actually completes.
+- The TUI could stall for 10+ seconds while a `:` (segments) result list was
+  on screen, independent of the search itself (already fast/backgrounded).
+  Root-caused via the new `SMARTHISTORY_DEBUG_PERF` log to `highlight_matches`
+  (the query-match bolding in each visible row): it re-walked the row's text
+  from the start on every character position (`.chars().skip(i)` inside the
+  position loop) to check for a match there, making it O(n²) in the row's
+  text length. Invisible for an ordinary shell command, but segments mode's
+  `command` field can be an entire flattened note section — tens of thousands
+  of characters — so a multi-word query against a large note turned every
+  redraw into a multi-second (or worse) stall. Now precomputes both char
+  buffers once and slice-compares per position instead of re-scanning.
 
 ## 2.2.0 - 2026-08-23
 

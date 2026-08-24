@@ -93,6 +93,14 @@ pub struct SegmentsState {
     pub request: Option<SegmentsRequest>,
     /// Cached results of the most recent search.
     pub rows: Vec<HistoryRow>,
+    /// Bumped every time `rows` is replaced by a fresh search
+    /// result. `segments::fetch()` ignores `App::query` entirely
+    /// (it just clones `rows`), so `App::refresh()` uses this
+    /// instead of the query text to detect whether there's
+    /// actually anything new to re-clone into `merged_rows` — the
+    /// query text changes on every keystroke, but `rows` only
+    /// changes when a debounced search completes.
+    pub rows_version: u64,
     /// Syntax-highlighted output preview, keyed by (absolute file
     /// path, 1-based start line). `App::refresh()` runs on every
     /// keystroke, which rebuilds `merged_rows` from scratch (from
@@ -115,6 +123,7 @@ impl SegmentsState {
             in_flight: false,
             request: None,
             rows: Vec::new(),
+            rows_version: 0,
             context_cache: std::collections::HashMap::new(),
         }
     }
@@ -256,21 +265,43 @@ fn run_segments_search(
     // for its own `debug_assert!`).
     debug_assert!(criteria.text.is_none());
 
+    let search_start = std::time::Instant::now();
     let service = note_search::database_service::DatabaseService::new(&db_path.to_string_lossy());
     let mut results = service
         .search_segments(&criteria)
         .map_err(|e| format!("search failed: {}", e))?;
+    let search_elapsed = search_start.elapsed();
 
+    let negation_start = std::time::Instant::now();
     if !negations.is_empty() {
         let excluded = excluded_segment_identities(&service, db_path, &negations)?;
         results.retain(|r| !excluded.contains(&(r.filename.clone(), r.start_line)));
     }
+    let negation_elapsed = negation_start.elapsed();
 
     if min_words > 0 {
         results.retain(|r| segment_body_word_count(&r.text, r.heading_level) > min_words);
     }
 
-    Ok(map_segment_results(&results, notes_dir))
+    let mapped = map_segment_results(&results, notes_dir);
+    // Runs on the background thread, so it never blocks the UI
+    // directly — logged anyway so a slow *search* (vs. a slow main
+    // thread) can be told apart when investigating a reported
+    // responsiveness stall.
+    if search_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || negation_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+    {
+        crate::tui::perf_debug_log(&format!(
+            "run_segments_search: search={}ms negations={}ms ({} terms) results={} pattern={:?}",
+            search_elapsed.as_millis(),
+            negation_elapsed.as_millis(),
+            negations.len(),
+            mapped.len(),
+            pattern,
+        ));
+    }
+
+    Ok(mapped)
 }
 
 /// Word count of a segment's body, excluding its own header line.
@@ -600,6 +631,7 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     let highlighted = if let Some(cached) = app.segments_state.context_cache.get(&cache_key) {
         cached.clone()
     } else {
+        let miss_start = std::time::Instant::now();
         let path = std::path::PathBuf::from(&filepath);
         if !app.tags_source_cache.contains_key(&path) {
             match std::fs::read_to_string(&path) {
@@ -629,6 +661,18 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
 
         let highlighted =
             crate::highlight::highlight_with_bat_auto(&window, &filepath).unwrap_or(window);
+        // Runs synchronously on the main thread (unlike the search
+        // itself) — a slow highlight here is a direct candidate for
+        // a reported "selecting a result is slow" stall.
+        let miss_elapsed = miss_start.elapsed();
+        if miss_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS {
+            crate::tui::perf_debug_log(&format!(
+                "segments ensure_selected_context (cache miss): {}ms file={:?} line={}",
+                miss_elapsed.as_millis(),
+                filepath,
+                line_number,
+            ));
+        }
         app.segments_state
             .context_cache
             .insert(cache_key, highlighted.clone());
@@ -769,6 +813,7 @@ impl App {
         match result {
             Ok(rows) => {
                 self.segments_state.rows = rows;
+                self.segments_state.rows_version = self.segments_state.rows_version.wrapping_add(1);
                 self.refresh();
             }
             Err(e) => {

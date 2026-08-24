@@ -70,28 +70,73 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         )
         .split(f.area());
 
+    let mode_strip_start = std::time::Instant::now();
     draw_mode_strip(f, app, chunks[0]);
-    draw_list(f, app, chunks[1]);
+    let mode_strip_elapsed = mode_strip_start.elapsed();
 
+    let list_start = std::time::Instant::now();
+    draw_list(f, app, chunks[1]);
+    let list_elapsed = list_start.elapsed();
+
+    let mut details_elapsed = std::time::Duration::ZERO;
+    let mut output_preview_elapsed = std::time::Duration::ZERO;
     match app.pane_visibility {
         crate::tui::state::PaneVisibility::Both => {
             let detail_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
                 .split(chunks[2]);
+            let details_start = std::time::Instant::now();
             draw_details(f, app, detail_chunks[0]);
+            details_elapsed = details_start.elapsed();
+            let output_preview_start = std::time::Instant::now();
             draw_output_preview(f, app, detail_chunks[1]);
+            output_preview_elapsed = output_preview_start.elapsed();
         }
         crate::tui::state::PaneVisibility::Details => {
+            let details_start = std::time::Instant::now();
             draw_details(f, app, chunks[2]);
+            details_elapsed = details_start.elapsed();
         }
         crate::tui::state::PaneVisibility::OutputPreview => {
+            let output_preview_start = std::time::Instant::now();
             draw_output_preview(f, app, chunks[2]);
+            output_preview_elapsed = output_preview_start.elapsed();
         }
     }
 
+    let input_start = std::time::Instant::now();
     draw_input(f, app, chunks[3]);
+    let input_elapsed = input_start.elapsed();
+
+    let status_start = std::time::Instant::now();
     draw_status(f, app, chunks[4]);
+    let status_elapsed = status_start.elapsed();
+
+    // Breaks down a slow `terminal.draw()` call (already logged as
+    // one number by `run_loop`) into which sub-widget is actually
+    // responsible — reported after a `draw=11839ms`-style stall
+    // narrowed the freeze to *somewhere* inside `ui()`, but not to
+    // which pane.
+    if mode_strip_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || list_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || details_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || output_preview_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || input_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+        || status_elapsed.as_millis() >= crate::tui::PERF_LOG_THRESHOLD_MS
+    {
+        crate::tui::perf_debug_log(&format!(
+            "ui: mode_strip={}ms list={}ms details={}ms output_preview={}ms input={}ms status={}ms rows={} selected={:?}",
+            mode_strip_elapsed.as_millis(),
+            list_elapsed.as_millis(),
+            details_elapsed.as_millis(),
+            output_preview_elapsed.as_millis(),
+            input_elapsed.as_millis(),
+            status_elapsed.as_millis(),
+            app.merged_rows().len(),
+            app.list_state.selected(),
+        ));
+    }
 
     if let Some(ref mode) = app.confirm_delete {
         draw_confirm_delete(f, app, mode);
@@ -5907,24 +5952,37 @@ pub(super) fn highlight_matches(text: &str, query: &str) -> Vec<Span<'static>> {
         return vec![Span::raw(text.to_string())];
     }
 
-    let lower_text = text.to_lowercase();
     let text_chars: Vec<char> = text.chars().collect();
+    // Precomputed once, indexed by position below — the previous
+    // version did `lower_text.chars().skip(i).take(word_chars.len())`
+    // *inside* the position loop, which re-walks the string from its
+    // start on every `i` (a `&str`'s `Chars` iterator has no
+    // random-access skip): O(n) per position, O(n²) overall. For a
+    // short shell command that's invisible; for a segments-mode row
+    // (`row.command` can be an entire flattened note section, tens of
+    // thousands of characters) it's a multi-second stall on every
+    // frame the row is visible — reproduced live via
+    // `SMARTHISTORY_DEBUG_PERF`, which pinned an 11.9s `draw_list`
+    // stall to exactly this call.
+    let lower_chars: Vec<char> = text.to_lowercase().chars().collect();
+    // `to_lowercase()` can change the character count for a handful
+    // of code points (e.g. Turkish İ folds to two chars), which would
+    // desync `highlights` indices from `text_chars` below. Bail to
+    // unhighlighted plain text for those rare inputs rather than risk
+    // a misaligned highlight or an out-of-bounds index.
+    if lower_chars.len() != text_chars.len() {
+        return vec![Span::raw(text.to_string())];
+    }
     let mut highlights = vec![false; text_chars.len()];
 
     for word in words {
         let word_chars: Vec<char> = word.chars().collect();
-        if word_chars.is_empty() {
+        if word_chars.is_empty() || word_chars.len() > lower_chars.len() {
             continue;
         }
         let mut i = 0;
-        while i + word_chars.len() <= text_chars.len() {
-            if lower_text
-                .chars()
-                .skip(i)
-                .take(word_chars.len())
-                .collect::<Vec<char>>()
-                == word_chars
-            {
+        while i + word_chars.len() <= lower_chars.len() {
+            if lower_chars[i..i + word_chars.len()] == word_chars[..] {
                 for j in 0..word_chars.len() {
                     highlights[i + j] = true;
                 }

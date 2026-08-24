@@ -176,6 +176,7 @@ impl App {
         );
         if current == request.pattern {
             self.browser_state.rows = rows;
+            self.browser_state.rows_version = self.browser_state.rows_version.wrapping_add(1);
             self.status_message = None;
             self.refresh();
         }

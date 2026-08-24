@@ -76,6 +76,9 @@ pub struct SimilarState {
     pub in_flight: bool,
     pub request: Option<SimilarRequest>,
     pub rows: Vec<HistoryRow>,
+    /// Bumped every time `rows` is replaced by a fresh search
+    /// result. See `SegmentsState::rows_version` — same rationale.
+    pub rows_version: u64,
     /// Syntax-highlighted output preview, keyed by (absolute file
     /// path, 1-based start line) — same rationale as
     /// `SegmentsState::context_cache`.
@@ -90,6 +93,7 @@ impl SimilarState {
             in_flight: false,
             request: None,
             rows: Vec::new(),
+            rows_version: 0,
             context_cache: std::collections::HashMap::new(),
         }
     }
@@ -683,6 +687,7 @@ impl App {
         match result {
             Ok(rows) => {
                 self.similar_state.rows = rows;
+                self.similar_state.rows_version = self.similar_state.rows_version.wrapping_add(1);
                 self.refresh();
             }
             Err(e) => {

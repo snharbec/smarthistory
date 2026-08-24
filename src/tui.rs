@@ -5401,8 +5401,50 @@ impl App {
         // applied in `build_merged_rows`, not in `fetch()`, and
         // `build_merged_rows` runs unconditionally on every
         // `refresh()` call regardless of the cache short-circuit.
+        // Segments/Similar/Paperless/Browser mode's `fetch()`
+        // doesn't read `self.query` at all — it just clones
+        // whatever the debounced background thread last posted to
+        // `{segments,similar,paperless,browser}_state.rows` (see
+        // each mode's `fetch()`). Keying the cache on `self.query`
+        // was therefore *always* a cache miss while typing in
+        // these modes (the query text changes every keystroke even
+        // though `fetch()`'s actual output doesn't), forcing a full
+        // `Vec<HistoryRow>` clone of segment/document text — twice,
+        // once here and again in `build_merged_rows`'s passthrough
+        // early return for these modes — on every single keystroke.
+        // For a large notes vault this is what actually froze the
+        // UI while typing a segments-mode query, not the
+        // (correctly backgrounded) search itself. Use each mode's
+        // own `rows_version` counter instead, which only changes
+        // when the background thread actually replaces `rows`.
+        //
+        // Restricted to the default Substring match algorithm:
+        // Regex/Fuzzy mode re-filters `self.rows` against the
+        // typed body below on every fetch, which does need to
+        // re-run on every keystroke. `match_algorithm` is already
+        // its own cache-key field, so switching into Regex/Fuzzy
+        // still correctly invalidates the cache on its own.
+        let passthrough_rows_mode = matches!(self.match_algorithm, MatchAlgorithm::Substring)
+            && (self.is_segments_query()
+                || self.is_similar_query()
+                || self.is_paperless_query()
+                || self.is_browser_query());
+        let query_key = if passthrough_rows_mode {
+            let version = if self.is_segments_query() {
+                self.segments_state.rows_version
+            } else if self.is_similar_query() {
+                self.similar_state.rows_version
+            } else if self.is_paperless_query() {
+                self.paperless_state.rows_version
+            } else {
+                self.browser_state.rows_version
+            };
+            format!("\0v{version}")
+        } else {
+            self.query.clone()
+        };
         let cache_key = (
-            self.query.clone(),
+            query_key,
             self.mode,
             self.exit_filter,
             self.match_algorithm,
@@ -5410,8 +5452,15 @@ impl App {
         );
         if self.last_fetch_key.as_ref() == Some(&cache_key) {
             // Still need to rebuild the merged rows (the
-            // duplicate filter may have been toggled).
-            self.merged_rows = self.build_merged_rows();
+            // duplicate filter may have been toggled) — except
+            // for a passthrough mode, where `merged_rows` is
+            // always an unmodified clone of `rows` (see
+            // `build_merged_rows`'s early return for each) and
+            // `rows` hasn't changed since last time (that's what
+            // the cache hit means here): nothing to rebuild.
+            if !passthrough_rows_mode {
+                self.merged_rows = self.build_merged_rows();
+            }
             // Re-select if the current selection was lost
             // (e.g. the previous fetch returned 0 rows but
             // this one has rows). Use the same
@@ -5480,7 +5529,9 @@ impl App {
         if self.is_panes_query() {
             crate::tui::mode::panes::refresh_session_panes(self);
         }
+        let fetch_start = std::time::Instant::now();
         self.rows = self.fetch().unwrap_or_default();
+        let fetch_elapsed = fetch_start.elapsed();
         if self.match_algorithm != MatchAlgorithm::Substring
             && !self.is_ag_query()
             && !self.is_codegraph_query()
@@ -5540,7 +5591,21 @@ impl App {
         // times per render frame); caching is a measurable win
         // for long lists and also gives us a stable borrow for
         // `selected_row()`.
+        let merge_start = std::time::Instant::now();
         self.merged_rows = self.build_merged_rows();
+        let merge_elapsed = merge_start.elapsed();
+        if fetch_elapsed.as_millis() >= PERF_LOG_THRESHOLD_MS
+            || merge_elapsed.as_millis() >= PERF_LOG_THRESHOLD_MS
+        {
+            perf_debug_log(&format!(
+                "refresh (miss path): fetch={}ms build_merged_rows={}ms mode={:?} rows={} query_len={}",
+                fetch_elapsed.as_millis(),
+                merge_elapsed.as_millis(),
+                self.mode,
+                self.rows.len(),
+                self.query.chars().count(),
+            ));
+        }
         self.select_initial_row();
         // Load the lazy preview context (source lines for
         // tags/codegraph, note/todo/file previews, herdr pane
@@ -12480,9 +12545,24 @@ fn run_loop(
         // each draw so the details/output pane never stays
         // empty just because selection changed through a
         // path we didn't instrument explicitly.
+        let context_start = std::time::Instant::now();
         crate::tui::mode::ensure_selected_context(app);
+        let context_elapsed = context_start.elapsed();
+        let draw_start = std::time::Instant::now();
         if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
+        }
+        let draw_elapsed = draw_start.elapsed();
+        if context_elapsed.as_millis() >= PERF_LOG_THRESHOLD_MS
+            || draw_elapsed.as_millis() >= PERF_LOG_THRESHOLD_MS
+        {
+            perf_debug_log(&format!(
+                "frame: ensure_selected_context={}ms draw={}ms mode={:?} query_len={}",
+                context_elapsed.as_millis(),
+                draw_elapsed.as_millis(),
+                app.mode,
+                app.query.chars().count(),
+            ));
         }
 
         // Check for LLM result from background thread.
@@ -12990,7 +13070,18 @@ fn run_loop(
             continue;
         }
 
-        if handle_key(app, key) {
+        let key_start = std::time::Instant::now();
+        let terminate = handle_key(app, key);
+        let key_elapsed = key_start.elapsed();
+        if key_elapsed.as_millis() >= PERF_LOG_THRESHOLD_MS {
+            perf_debug_log(&format!(
+                "handle_key: {}ms mode={:?} query_len={}",
+                key_elapsed.as_millis(),
+                app.mode,
+                app.query.chars().count(),
+            ));
+        }
+        if terminate {
             return Ok(());
         }
     }
@@ -15724,6 +15815,86 @@ pub(crate) fn herdr_snapshot_debug_log(message: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let line = format!("[{}] [smarthistory] {}\n", now, message);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
+/// Elapsed time worth logging via `perf_debug_log` — below this,
+/// per-frame/per-key jitter is noise, not a responsiveness problem
+/// worth capturing.
+pub(crate) const PERF_LOG_THRESHOLD_MS: u128 = 30;
+
+/// Debug-log helper for investigating reported segments-mode
+/// responsiveness issues: typing a multi-word query, and separately
+/// navigating/selecting a result, can make the whole TUI stall.
+/// Gated behind `SMARTHISTORY_DEBUG_PERF` — same env-gated file-log
+/// pattern as `herdr_snapshot_debug_log`, since this is a diagnostic
+/// tool for one reported issue rather than a permanent logging
+/// feature. Callers only log once elapsed time crosses
+/// `PERF_LOG_THRESHOLD_MS`, so a normal session produces an empty
+/// (or near-empty) file; only the actual stalls show up. Writes to
+/// `~/.local/cache/smarthistory/perf-debug.log`, millisecond epoch
+/// timestamps (finer-grained than `herdr_snapshot_debug_log`'s
+/// second resolution, needed to compare sub-frame timings).
+pub(crate) fn perf_debug_log(message: &str) {
+    if std::env::var("SMARTHISTORY_DEBUG_PERF").is_err() {
+        return;
+    }
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let path = std::path::Path::new(&home)
+        .join(".local")
+        .join("cache")
+        .join("smarthistory")
+        .join("perf-debug.log");
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{}] {}\n", now, message);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
+/// Debug-log helper for investigating a reported "key bindings
+/// changed without editing them" issue. Every actual write to the
+/// config file's `key.*` lines goes through
+/// `write_key_binding_to_config` — logging every call here, gated
+/// behind `SMARTHISTORY_DEBUG_KEYBINDINGS`, turns "I have the
+/// impression bindings changed" into hard evidence: either the log
+/// shows an unexpected write (a real bug to chase down) or it stays
+/// empty across a session where the user nonetheless sees a changed
+/// binding, which would point at binding lookup/parsing instead of
+/// writing. Writes to
+/// `~/.local/cache/smarthistory/keybindings-debug.log`.
+pub(crate) fn keybinding_debug_log(message: &str) {
+    if std::env::var("SMARTHISTORY_DEBUG_KEYBINDINGS").is_err() {
+        return;
+    }
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let path = std::path::Path::new(&home)
+        .join(".local")
+        .join("cache")
+        .join("smarthistory")
+        .join("keybindings-debug.log");
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{}] {}\n", now, message);
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

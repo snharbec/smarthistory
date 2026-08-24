@@ -168,6 +168,7 @@ impl App {
         match result {
             Ok(outcome) => {
                 self.paperless_state.rows = outcome.rows;
+                self.paperless_state.rows_version = self.paperless_state.rows_version.wrapping_add(1);
                 // The name catalogues are independent of the
                 // matched rows (see `PaperlessSearchResult`'s doc
                 // comment) — refreshed on every successful search

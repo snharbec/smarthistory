@@ -539,6 +539,9 @@ pub struct PaperlessState {
     pub in_flight: bool,
     pub request: Option<PaperlessRequest>,
     pub rows: Vec<HistoryRow>,
+    /// Bumped every time `rows` is replaced by a fresh search
+    /// result. See `SegmentsState::rows_version` — same rationale.
+    pub rows_version: u64,
     /// Full tag name catalogue from the last successful search
     /// (`/api/tags/`, not just tags on currently-visible rows).
     /// Read by `App::paperless_tab_complete_at_cursor` for `<#`
@@ -559,6 +562,7 @@ impl PaperlessState {
             in_flight: false,
             request: None,
             rows: Vec::new(),
+            rows_version: 0,
             tag_names: Vec::new(),
             correspondent_names: Vec::new(),
         }
