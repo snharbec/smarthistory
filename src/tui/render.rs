@@ -20,7 +20,7 @@ use super::state::{
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
-    AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView, NotesDateFilter, OutputView, PrefixPicker, QuestionView,
+    AddEntryDialog, AddEntryKind, App, CommandMenu, ConfirmMode, CorrectView, DescribeView, HelpView, NotesDateFilter, OutputView, PrefixHelpView, PrefixPicker, QuestionView,
     char_to_byte_index, format_diff, format_time, mark_key,
 };
 use super::CodeGraphRelationsPicker;
@@ -182,6 +182,15 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // from the command menu).
     if let Some(picker) = app.prefix_picker.as_ref() {
         draw_prefix_picker(f, app, picker);
+    }
+
+    // The prefix query-syntax help overlay can be opened FROM the
+    // picker above (via `F3` on a highlighted row) without closing
+    // it, so it's drawn after — full-screen `Clear` means it covers
+    // the picker entirely while open, matching `handle_key`'s
+    // priority ordering for the same pair.
+    if let Some(view) = app.prefix_help_view.as_ref() {
+        draw_prefix_help_view(f, app, view);
     }
 
     // The CodeGraph relations picker is a sibling overlay of the
@@ -2577,6 +2586,104 @@ fn draw_help_view(f: &mut Frame, app: &App, view: &HelpView) {
                         // also pick up the theme background, so
                         // gaps between styled runs don't show
                         // through to the terminal's default.
+                        let mut style = s.style;
+                        style = style.bg(bg);
+                        Span::styled(s.content, style)
+                    }
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(visible)
+        .block(block)
+        .style(Style::default().bg(bg))
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    // Footer with scroll position.
+    if area.height >= 3 {
+        let footer = format!(
+            " {}-{} / {}  ↑↓ scroll · PgUp/PgDn page · Home/End jump ",
+            scroll + 1,
+            (scroll + inner_h).min(total),
+            total
+        );
+        let para = Paragraph::new(Line::from(Span::styled(footer, Theme::dim())))
+            .style(Style::default().bg(bg));
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(para, footer_area);
+    }
+}
+
+/// Mirrors `draw_help_view` exactly (same bespoke full-screen `Clear`
+/// + rounded-border `Block` + theme-tinted scrollable `Paragraph` +
+/// scroll-position footer chrome), just backed by
+/// `PrefixHelpView`/`prefix_help::lines_for` instead of
+/// `HelpView`/`build_help_lines`. Kept as a separate function rather
+/// than parameterizing `draw_help_view` — the two overlays' content
+/// sources and title text differ enough (mode-specific title here)
+/// that sharing would need its own indirection layer for little gain.
+fn draw_prefix_help_view(f: &mut Frame, app: &App, view: &PrefixHelpView) {
+    // Cover the whole screen so the help is the only thing visible.
+    let area = f.area();
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let bg = PALETTE.with(|p| p.borrow().bg);
+    let fg = PALETTE.with(|p| p.borrow().fg);
+
+    let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
+    let close_hint = if cancel_keys.is_empty() {
+        String::from("(no key bound)")
+    } else {
+        format!("{} to close", cancel_keys)
+    };
+    let title = match view.mode {
+        Some(mode) => format!(
+            " Prefix help — {} ({}) — {} ",
+            mode.list_title(),
+            mode.prefix(&app.query_prefixes),
+            close_hint
+        ),
+        None => format!(" Prefix help — {} ", close_hint),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg));
+
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let lines = crate::tui::mode::prefix_help::lines_for(view.mode, &app.query_prefixes);
+    let total = lines.len();
+
+    // Clamp the scroll position to a valid range.
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = view.scroll.min(max_scroll);
+
+    // Color the default text (rows that have no per-span style)
+    // using the theme foreground so the help is readable on any
+    // background — including light themes.
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(inner_h)
+        .map(|line| {
+            let spans: Vec<Span> = line
+                .spans
+                .into_iter()
+                .map(|s| {
+                    if s.style.fg.is_none() && s.style.bg.is_none() {
+                        Span::styled(s.content, Style::default().fg(fg).bg(bg))
+                    } else {
                         let mut style = s.style;
                         style = style.bg(bg);
                         Span::styled(s.content, style)

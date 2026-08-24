@@ -17,7 +17,7 @@ documentation debt.
 
 | Concept         | What it is                                                                                                                                                                                                                                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Action**      | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 54 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`.                                        |
+| **Action**      | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 65 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`.                                        |
 | **Key binding** | The mapping from a `KeySpec` (e.g. `C-c`, `F1`, `Up`) to an action. Multiple keys can map to the same action (`delete-word-backward` ships with both `C-w` and `M-Backspace`). The same key can't map to two actions — the first one in `ALL_ACTIONS` order wins (see [`KeyBindings::defaults`](../src/tui/bindings.rs)). |
 | **Mode**        | The active prefix mode (history, output, `/`, `$`, `&`, etc. — see [`docs/modes/`](modes/README.md)). Most actions work in every mode; a few are mode-specific (`MarkTodoDone` is a no-op outside `!` mode, `JiraFieldComplete` only completes inside `-`, `CodegraphRelations` is meaningful only in `&` / `$`).         |
 | **Overlay**     | When an overlay is open (command palette, prefix picker, theme picker, completion menu, help, output view, describe view, add-entry dialog, note/todo compose dialog, delete-confirmation), it captures key routing until it closes; the global actions don't fire underneath it.                                         |
@@ -52,7 +52,7 @@ Actions are grouped in the command palette by their `category()`:
 | [`search`](#search)         | CycleMode, CycleNavPrefix, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix                                                              |
 | [`todo`](#todo)             | MarkTodoDone                                                                                                                                                                                                   |
 | [`theme`](#theme)           | CycleThemeNext, CycleThemePrev                                                                                                                                                                                 |
-| [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, ComposeNoteEntry, CreateNote, CreateJiraIssue, CreateJiraIssueFromTemplate |
+| [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, PrefixHelp, ComposeNoteEntry, CreateNote, CreateJiraIssue, CreateJiraIssueFromTemplate |
 | [`llm`](#llm)               | Describe, Correct                                                                                                                                                                                              |
 | [`delete`](#delete)         | DeleteSelected, DeleteMatching, ToggleMark, ClearMarks, BulkDeleteMarked                                                                                                                                       |
 | [`config`](#config)         | AddSession, AddHost                                                                                                                                                                                            |
@@ -797,6 +797,27 @@ emits reliably. Chosen over the more semantic `S-Return` because many terminals
 emit Shift-Return as a non-standard sequence crossterm 0.29 can't decode. Users
 on kitty-protocol terminals (Kitty / WezTerm / Alacritty / iTerm2+CSI-u) who
 prefer Shift-Return can rebind via `key.smart-open=S-Return` in the config file.
+
+### `PrefixHelp`
+
+| Field        | Value                     |
+| ------------ | ------------------------- |
+| Config key   | `prefix-help`             |
+| Display name | Prefix query syntax help  |
+| Default key  | `F3`                      |
+| Category     | tools                     |
+
+Open the prefix query-syntax help overlay — a cheatsheet of the QUERY SYNTAX
+the active prefix mode accepts (`#tag`, `[[link]]`, `[attr:value]`, `(a OR b)`
+grouping, negation, `!!type`/`!type`, etc.), distinct from `OpenHelp`'s
+keyboard-shortcut reference. Resolves which mode to show from, in order: the
+`PrefixPicker`'s highlighted row if it's open (so `F1` to browse, `F3` on a
+highlighted entry shows that mode's syntax without switching to it), otherwise
+the currently typed query's prefix. With neither (plain history mode, no
+picker open), shows a one-line-per-prefix overview instead. `Esc` / `Enter` /
+`q` / `Ctrl-C` close it; `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll.
+See [`docs/modes/README.md`](modes/README.md) for the per-mode query syntax
+this overlay's content is condensed from.
 
 ---
 
