@@ -93,6 +93,14 @@ pub struct SegmentsState {
     pub request: Option<SegmentsRequest>,
     /// Cached results of the most recent search.
     pub rows: Vec<HistoryRow>,
+    /// Bumped every time `rows` is replaced by a fresh search
+    /// result. `segments::fetch()` ignores `App::query` entirely
+    /// (it just clones `rows`), so `App::refresh()` uses this
+    /// instead of the query text to detect whether there's
+    /// actually anything new to re-clone into `merged_rows` — the
+    /// query text changes on every keystroke, but `rows` only
+    /// changes when a debounced search completes.
+    pub rows_version: u64,
     /// Syntax-highlighted output preview, keyed by (absolute file
     /// path, 1-based start line). `App::refresh()` runs on every
     /// keystroke, which rebuilds `merged_rows` from scratch (from
@@ -115,6 +123,7 @@ impl SegmentsState {
             in_flight: false,
             request: None,
             rows: Vec::new(),
+            rows_version: 0,
             context_cache: std::collections::HashMap::new(),
         }
     }
@@ -769,6 +778,7 @@ impl App {
         match result {
             Ok(rows) => {
                 self.segments_state.rows = rows;
+                self.segments_state.rows_version = self.segments_state.rows_version.wrapping_add(1);
                 self.refresh();
             }
             Err(e) => {

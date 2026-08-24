@@ -5401,8 +5401,50 @@ impl App {
         // applied in `build_merged_rows`, not in `fetch()`, and
         // `build_merged_rows` runs unconditionally on every
         // `refresh()` call regardless of the cache short-circuit.
+        // Segments/Similar/Paperless/Browser mode's `fetch()`
+        // doesn't read `self.query` at all — it just clones
+        // whatever the debounced background thread last posted to
+        // `{segments,similar,paperless,browser}_state.rows` (see
+        // each mode's `fetch()`). Keying the cache on `self.query`
+        // was therefore *always* a cache miss while typing in
+        // these modes (the query text changes every keystroke even
+        // though `fetch()`'s actual output doesn't), forcing a full
+        // `Vec<HistoryRow>` clone of segment/document text — twice,
+        // once here and again in `build_merged_rows`'s passthrough
+        // early return for these modes — on every single keystroke.
+        // For a large notes vault this is what actually froze the
+        // UI while typing a segments-mode query, not the
+        // (correctly backgrounded) search itself. Use each mode's
+        // own `rows_version` counter instead, which only changes
+        // when the background thread actually replaces `rows`.
+        //
+        // Restricted to the default Substring match algorithm:
+        // Regex/Fuzzy mode re-filters `self.rows` against the
+        // typed body below on every fetch, which does need to
+        // re-run on every keystroke. `match_algorithm` is already
+        // its own cache-key field, so switching into Regex/Fuzzy
+        // still correctly invalidates the cache on its own.
+        let passthrough_rows_mode = matches!(self.match_algorithm, MatchAlgorithm::Substring)
+            && (self.is_segments_query()
+                || self.is_similar_query()
+                || self.is_paperless_query()
+                || self.is_browser_query());
+        let query_key = if passthrough_rows_mode {
+            let version = if self.is_segments_query() {
+                self.segments_state.rows_version
+            } else if self.is_similar_query() {
+                self.similar_state.rows_version
+            } else if self.is_paperless_query() {
+                self.paperless_state.rows_version
+            } else {
+                self.browser_state.rows_version
+            };
+            format!("\0v{version}")
+        } else {
+            self.query.clone()
+        };
         let cache_key = (
-            self.query.clone(),
+            query_key,
             self.mode,
             self.exit_filter,
             self.match_algorithm,
@@ -5410,8 +5452,15 @@ impl App {
         );
         if self.last_fetch_key.as_ref() == Some(&cache_key) {
             // Still need to rebuild the merged rows (the
-            // duplicate filter may have been toggled).
-            self.merged_rows = self.build_merged_rows();
+            // duplicate filter may have been toggled) — except
+            // for a passthrough mode, where `merged_rows` is
+            // always an unmodified clone of `rows` (see
+            // `build_merged_rows`'s early return for each) and
+            // `rows` hasn't changed since last time (that's what
+            // the cache hit means here): nothing to rebuild.
+            if !passthrough_rows_mode {
+                self.merged_rows = self.build_merged_rows();
+            }
             // Re-select if the current selection was lost
             // (e.g. the previous fetch returned 0 rows but
             // this one has rows). Use the same

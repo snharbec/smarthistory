@@ -724,6 +724,9 @@ pub struct BrowserState {
     pub in_flight: bool,
     pub request: Option<BrowserRequest>,
     pub rows: Vec<HistoryRow>,
+    /// Bumped every time `rows` is replaced by a fresh search
+    /// result. See `SegmentsState::rows_version` — same rationale.
+    pub rows_version: u64,
 }
 
 impl BrowserState {
@@ -734,6 +737,7 @@ impl BrowserState {
             in_flight: false,
             request: None,
             rows: Vec::new(),
+            rows_version: 0,
         }
     }
 

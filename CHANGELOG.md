@@ -23,6 +23,20 @@ All notable changes to this project will be documented in this file.
   `clap` command definition, so it never drifts out of sync as subcommands
   are added.
 
+### Fixed
+
+- The typing UI could freeze for several seconds when a `:` (segments) query
+  narrowed on a large notes vault (e.g. a multi-word query like "classification
+  database"). The search itself was already backgrounded and debounced, but
+  `App::refresh()` — run on every keystroke — re-cloned the entire cached
+  result set twice on the main thread regardless of whether a new result had
+  actually arrived, since its cache short-circuit was keyed on the typed query
+  text even though segments/similar/paperless/browser mode's fetch step
+  ignores the query text entirely (it only reads the background thread's last
+  posted result). `refresh()` now keys its short-circuit on each mode's own
+  result-version counter instead, so typing no longer re-clones anything until
+  a debounced search actually completes.
+
 ## 2.2.0 - 2026-08-23
 
 ### Added
