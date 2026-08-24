@@ -1858,11 +1858,43 @@ pub(crate) fn write_key_binding_to_config(action: Action, specs: &[KeySpec]) -> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("failed to read {}: {}", target_path.display(), e)),
     };
-    let mut new_contents = contents.clone();
-    if !new_contents.is_empty() && !new_contents.ends_with('\n') {
-        new_contents.push('\n');
+    // `key.<config_key>` is the exact left-hand side `Config::parse_multi`
+    // matches on (after its own `#`-comment stripping and `=`-splitting) —
+    // matched the same way here so a hand-edited file's spacing
+    // (`key.foo=X` vs `key.foo = X`) doesn't stop this from finding the
+    // line the parser would actually treat as this action's binding.
+    let target_key = format!("key.{}", action.config_key());
+    let new_line = format!("key.{} = {}", action.config_key(), value);
+    // Replace the FIRST existing line for this action in place (keeps the
+    // edit visually local instead of always growing the file at the
+    // bottom), and drop every OTHER line for the same action — self-
+    // healing any duplicates a previous append-only version of this
+    // function already left behind, not just preventing new ones. Only
+    // the line search key is derived from `config_key()`; unrelated
+    // `key.*` lines are copied through untouched.
+    let mut replaced = false;
+    let mut new_lines: Vec<String> = Vec::new();
+    for raw_line in contents.lines() {
+        let before_comment = raw_line.split('#').next().unwrap_or("");
+        let is_this_action = match before_comment.split_once('=') {
+            Some((k, _)) => k.trim() == target_key,
+            None => false,
+        };
+        if is_this_action {
+            if !replaced {
+                new_lines.push(new_line.clone());
+                replaced = true;
+            }
+            // else: drop this stale duplicate line entirely.
+        } else {
+            new_lines.push(raw_line.to_string());
+        }
     }
-    new_contents.push_str(&format!("key.{} = {}\n", action.config_key(), value));
+    if !replaced {
+        new_lines.push(new_line);
+    }
+    let mut new_contents = new_lines.join("\n");
+    new_contents.push('\n');
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
@@ -1966,20 +1998,91 @@ mod write_key_binding_to_config_tests {
         );
     }
 
-    /// A later `key.<config_key>=` line wins over an earlier one
-    /// (`Config::parse_multi`'s documented rule), so appending after
-    /// an existing line for the same action is correct — no find-and-
-    /// replace needed. This test just confirms the append actually
-    /// happens (both lines present, new one last), not the parse-time
-    /// resolution itself (covered by `Config::parse_multi`'s own
-    /// tests).
+    /// A rebind replaces an existing `key.<config_key>=` line for the
+    /// SAME action in place rather than appending a new one below it —
+    /// repeatedly rebinding one action through the editor must not
+    /// accumulate an ever-growing pile of stale, superseded lines for it
+    /// (each rebind used to append a fresh line and leave every earlier
+    /// one behind — technically still correct under `Config::parse_multi`'s
+    /// "later line wins" rule, but confusing to read and unbounded in
+    /// file size).
     #[test]
-    fn appends_rather_than_replacing_existing_line() {
+    fn replaces_existing_line_in_place_instead_of_appending() {
         let spec = KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
         let result = run_with_existing("key.theme-picker = T\n", Action::ThemePicker, Some(spec))
             .expect("write should succeed");
-        let t_pos = result.find("key.theme-picker = T").expect("original line preserved");
-        let f19_pos = result.find("key.theme-picker = F19").expect("new line appended");
-        assert!(f19_pos > t_pos, "the new line must come after the old one so it wins");
+        assert!(
+            !result.contains("key.theme-picker = T\n"),
+            "the superseded line must be gone, not left behind:\n{}",
+            result
+        );
+        assert_eq!(
+            result.matches("key.theme-picker").count(),
+            1,
+            "exactly one line for this action, not a growing pile:\n{}",
+            result
+        );
+        assert!(result.contains("key.theme-picker = F19\n"));
+    }
+
+    /// A file that already accumulated duplicate lines for one action
+    /// (e.g. from before this fix) self-heals down to a single line the
+    /// next time that action is rebound — not just "stop making it
+    /// worse," but "clean up what's already there."
+    #[test]
+    fn collapses_pre_existing_duplicate_lines_down_to_one() {
+        let spec = KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+        let result = run_with_existing(
+            "key.theme-picker = T\nkey.theme-picker = C-t\nkey.theme-picker = F5\n",
+            Action::ThemePicker,
+            Some(spec),
+        )
+        .expect("write should succeed");
+        assert_eq!(
+            result.matches("key.theme-picker").count(),
+            1,
+            "every duplicate collapses to one line:\n{}",
+            result
+        );
+        assert!(result.contains("key.theme-picker = F19\n"));
+    }
+
+    /// Replacing one action's binding must not touch another action's
+    /// line — the match is on the whole left-hand side up to `=`
+    /// (exact equality), not a substring/prefix check, so this can't
+    /// accidentally over-match a differently-named action.
+    #[test]
+    fn leaves_other_actions_lines_untouched() {
+        let spec = KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+        let result = run_with_existing(
+            "key.cancel = Esc\nkey.theme-picker = T\n",
+            Action::ThemePicker,
+            Some(spec),
+        )
+        .expect("write should succeed");
+        assert!(
+            result.contains("key.cancel = Esc\n"),
+            "an unrelated action's line must survive untouched:\n{}",
+            result
+        );
+        assert!(result.contains("key.theme-picker = F19\n"));
+        assert!(!result.contains("key.theme-picker = T\n"));
+    }
+
+    /// The replacement keeps the line at its original position in the
+    /// file rather than always relocating it to the end — a rebind
+    /// should read as a small, local edit, not shuffle unrelated
+    /// surrounding lines around.
+    #[test]
+    fn replacement_stays_at_the_original_lines_position() {
+        let spec = KeySpec { code: KeyCode::F(19), modifiers: KeyModifiers::empty() };
+        let result = run_with_existing(
+            "key.cancel = Esc\nkey.theme-picker = T\nkey.open-help = C-a\n",
+            Action::ThemePicker,
+            Some(spec),
+        )
+        .expect("write should succeed");
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines, vec!["key.cancel = Esc", "key.theme-picker = F19", "key.open-help = C-a"]);
     }
 }
