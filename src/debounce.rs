@@ -75,3 +75,32 @@ pub fn debounce_elapsed<S: Debounced>(state: &mut S, debounce: Duration) -> bool
         None => false,
     }
 }
+
+/// Cancel a mode's in-flight request, if any, without touching its
+/// debounce timer or cached results — the shared body `Action::Cancel`
+/// uses to let the user interrupt a slow background search (an
+/// embedding HTTP round-trip that's taking too long on an overloaded
+/// machine, a stuck `ag`/paperless/browser query, …) without the only
+/// way out being "quit the whole TUI." Returns `true` (and clears
+/// `in_flight`) when something was actually cancelled, so the caller
+/// knows whether to report it and stop, or fall through to whatever's
+/// next (e.g. cancelling the next mode's request, or the default
+/// "no in-flight requests left; exit the TUI instead" behavior).
+///
+/// This only flips the shared `cancelled` flag the background thread
+/// checks before sending its result — the same cooperative-cancellation
+/// contract `Action::Cancel`'s existing `llm_request` handling already
+/// uses. It can't forcibly abort a blocking network call already in
+/// progress (Rust has no safe way to do that to a running thread), so
+/// the thread itself keeps running until its call naturally completes
+/// or errors out; only its result is discarded. The user gets control
+/// of the TUI back immediately either way, which is the actual point.
+pub fn cancel_in_flight<S: Debounced>(state: &mut S) -> bool {
+    if let Some(request) = state.request().take() {
+        request.cancelled_flag().store(true, Ordering::Relaxed);
+        *state.in_flight() = false;
+        true
+    } else {
+        false
+    }
+}
