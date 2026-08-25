@@ -1166,6 +1166,9 @@ pub(crate) struct App {
     /// When `Some`, the help overlay is open. The contained `scroll`
     /// tracks how far down the user has scrolled.
     help_view: Option<HelpView>,
+    /// When `Some`, the prefix query-syntax help overlay
+    /// ([`Action::PrefixHelp`]) is open.
+    prefix_help_view: Option<PrefixHelpView>,
     /// When `Some`, the command-palette overlay is open.
     command_menu: Option<CommandMenu>,
     /// Actions previously run FROM the command palette (via Enter, not
@@ -4324,6 +4327,17 @@ struct HelpView {
     scroll: usize,
 }
 
+/// State for the prefix query-syntax help overlay
+/// ([`Action::PrefixHelp`], default `F3`) — a sibling of `HelpView`
+/// covering QUERY SYNTAX (`#tag`, `[[link]]`, `!!type`, ...) rather
+/// than keyboard shortcuts.
+struct PrefixHelpView {
+    scroll: usize,
+    /// `None` = the general overview (one line per prefix, shown
+    /// when no prefix mode is active and the picker isn't open).
+    mode: Option<crate::tui::mode::ModeKind>,
+}
+
 /// State for the command-palette overlay. The user types into
 /// `query` to filter the action list; `selected` is the index of
 /// the currently-highlighted action (relative to the filtered
@@ -5072,6 +5086,7 @@ impl App {
             correct_view: None,
             question_view: None,
             help_view: None,
+            prefix_help_view: None,
             command_menu: None,
             command_menu_recent: Vec::new(),
             prefix_picker: None,
@@ -8571,6 +8586,18 @@ impl App {
 
     fn close_help(&mut self) {
         self.help_view = None;
+    }
+
+    fn is_prefix_help_viewing(&self) -> bool {
+        self.prefix_help_view.is_some()
+    }
+
+    fn open_prefix_help(&mut self, mode: Option<crate::tui::mode::ModeKind>) {
+        self.prefix_help_view = Some(PrefixHelpView { scroll: 0, mode });
+    }
+
+    fn close_prefix_help(&mut self) {
+        self.prefix_help_view = None;
     }
 
     fn is_command_menu_open(&self) -> bool {
@@ -13187,6 +13214,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_command_menu_key(app, key);
     }
 
+    // The prefix-syntax help overlay (`F3`) can be opened FROM the
+    // prefix picker (to show the highlighted row's query syntax
+    // without switching mode), so it must take priority over the
+    // picker's own key routing below — otherwise its Esc/scroll keys
+    // would be swallowed by the picker's char-filter instead of
+    // closing the help view and returning to the still-open picker.
+    if app.is_prefix_help_viewing() {
+        return handle_prefix_help_view_key(app, key);
+    }
+
     // The prefix picker is a
     // sibling to the command
     // palette: it also sits
@@ -13553,6 +13590,24 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::OpenHelp => {
             app.open_help();
+            false
+        }
+        Action::PrefixHelp => {
+            // Prefer the prefix picker's highlighted row (if open)
+            // over the currently typed query, so browsing the
+            // picker with F1 and pressing F3 on a highlighted entry
+            // shows THAT mode's syntax, not whatever was typed
+            // before the picker opened.
+            let mode = if let Some(picker) = &app.prefix_picker {
+                picker
+                    .selected()
+                    .and_then(|opt| crate::tui::mode::mode_kind_by_display_name(opt.name))
+                    .filter(|m| *m != crate::tui::mode::ModeKind::History)
+            } else {
+                let m = crate::tui::mode::active_mode(app);
+                (m != crate::tui::mode::ModeKind::History).then_some(m)
+            };
+            app.open_prefix_help(mode);
             false
         }
         Action::DeleteSelected => {
@@ -14655,6 +14710,71 @@ fn handle_help_view_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Key handler used while the prefix query-syntax help overlay is
+/// open. Mirrors `handle_help_view_key` exactly (same Ctrl-C /
+/// Cancel / scroll behavior); a separate function because it's
+/// backed by a different `Option` field (`prefix_help_view`, not
+/// `help_view`). Returns `true` only when the user aborts the whole
+/// TUI with Ctrl+C.
+fn handle_prefix_help_view_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        // Ctrl-C is the panic button (quits the whole TUI) and must
+        // stay reachable even though Cancel's default binding also
+        // includes `C-c` — checked before the general Cancel-binding
+        // arm below so a rebound Cancel can't swallow it.
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancelled = true;
+            app.close_prefix_help();
+            true
+        }
+        _ if is_cancel_key(&app.bindings, &key)
+            || matches!(key.code, KeyCode::Enter | KeyCode::Char('q')) =>
+        {
+            app.close_prefix_help();
+            false
+        }
+        KeyCode::Up => {
+            if let Some(ref mut view) = app.prefix_help_view {
+                view.scroll = view.scroll.saturating_sub(1);
+            }
+            false
+        }
+        KeyCode::Down => {
+            if let Some(ref mut view) = app.prefix_help_view {
+                view.scroll = view.scroll.saturating_add(1);
+            }
+            false
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut view) = app.prefix_help_view {
+                view.scroll = view.scroll.saturating_sub(10);
+            }
+            false
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut view) = app.prefix_help_view {
+                view.scroll = view.scroll.saturating_add(10);
+            }
+            false
+        }
+        KeyCode::Home => {
+            if let Some(ref mut view) = app.prefix_help_view {
+                view.scroll = 0;
+            }
+            false
+        }
+        KeyCode::End => {
+            // Clamped on render. We just push the scroll forward so
+            // the user can always reach the bottom.
+            if let Some(ref mut view) = app.prefix_help_view {
+                view.scroll = view.scroll.saturating_add(usize::MAX / 2);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Key handler used while viewing captured output. Returns `true` only
 /// when the user aborts the whole TUI with Ctrl+C.
 /// Result of handling a key event in the captured-output overlay.
@@ -14986,6 +15106,19 @@ fn handle_prefix_picker_key(app: &mut App, key: KeyEvent) -> bool {
     if is_cancel_key(&app.bindings, &key) {
         app.close_prefix_picker();
         return false;
+    }
+
+    // Checked via the binding table (not a hardcoded `KeyCode::F(3)`)
+    // so a user-rebound `key.prefix-help=...` still works here. The
+    // picker's own `match` below only recognises a fixed set of
+    // literal `KeyCode`s with an unconditional `_ => false` catch-all
+    // — without this check, `PrefixHelp` would be silently swallowed
+    // as a no-op instead of reaching `dispatch_action`, which is the
+    // only place that knows how to resolve the highlighted row into
+    // a `ModeKind` and open the overlay. Delegates to `dispatch_action`
+    // rather than duplicating its picker-aware mode resolution here.
+    if action_for_key(&app.bindings, &key, crate::tui::mode::active_mode(app)) == Some(Action::PrefixHelp) {
+        return dispatch_action(app, Action::PrefixHelp);
     }
 
     // Capture a mutable borrow of the picker once.

@@ -1109,6 +1109,179 @@ fn handle_key_falls_through_to_push_char_when_unbound_and_no_overlay() {
     assert_eq!(app.query, "z");
 }
 
+/// `Action::PrefixHelp` (`F3`) with no prefix mode active and the
+/// picker closed shows the general per-prefix overview (`mode: None`).
+#[test]
+fn prefix_help_f3_from_history_mode_shows_general_overview() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = String::new();
+    let f3 = KeyEvent::new(KeyCode::F(3), KeyModifiers::empty());
+    let quit = handle_key(&mut app, f3);
+    assert!(!quit);
+    assert!(app.is_prefix_help_viewing());
+    assert_eq!(app.prefix_help_view.as_ref().unwrap().mode, None);
+}
+
+/// `F3` while typing a `:`-prefixed query resolves the mode via
+/// `active_mode` and shows Segments' own query-syntax cheatsheet —
+/// content assertions lock in that the DSL tokens are actually
+/// present, not just that SOME text renders.
+#[test]
+fn prefix_help_f3_while_typing_segments_query_shows_segments_syntax() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.query = ":foo".to_string();
+    let f3 = KeyEvent::new(KeyCode::F(3), KeyModifiers::empty());
+    let quit = handle_key(&mut app, f3);
+    assert!(!quit);
+    let mode = app.prefix_help_view.as_ref().unwrap().mode;
+    assert_eq!(mode, Some(crate::tui::mode::ModeKind::Segments));
+    let lines = crate::tui::mode::prefix_help::lines_for(mode, &app.query_prefixes);
+    let rendered: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(rendered.contains("#tag"), "got: {rendered:?}");
+    assert!(rendered.contains("!!type"), "got: {rendered:?}");
+    assert!(rendered.contains("(a OR b)"), "got: {rendered:?}");
+}
+
+/// `F3` while the `F1` prefix picker is open resolves the mode from
+/// the HIGHLIGHTED row (not the query text), and — since the help
+/// overlay is drawn on top rather than replacing the picker — leaves
+/// the picker open underneath.
+#[test]
+fn prefix_help_f3_from_open_picker_uses_highlighted_row_and_leaves_picker_open() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let options = crate::tui::PrefixPicker::build_options(&app.query_prefixes);
+    let idx = options
+        .iter()
+        .position(|o| o.name == "paperless")
+        .expect("paperless option must exist in the picker");
+    app.prefix_picker = Some(crate::tui::PrefixPicker { options, selected: idx, activate_only: false });
+    assert!(app.is_prefix_picker_open());
+
+    let f3 = KeyEvent::new(KeyCode::F(3), KeyModifiers::empty());
+    let quit = handle_key(&mut app, f3);
+    assert!(!quit);
+    assert!(app.is_prefix_help_viewing());
+    assert_eq!(
+        app.prefix_help_view.as_ref().unwrap().mode,
+        Some(crate::tui::mode::ModeKind::Paperless)
+    );
+    assert!(
+        app.is_prefix_picker_open(),
+        "the picker must stay open underneath the help overlay"
+    );
+}
+
+/// Once the help overlay (opened from an open picker) is closed via
+/// Cancel, the still-open picker underneath must take back key
+/// routing — the overlay must not have consumed/closed it too.
+#[test]
+fn prefix_help_esc_closes_help_and_returns_to_the_still_open_picker() {
+    let mut app = global_test_app(&[("a", 1)]);
+    let options = crate::tui::PrefixPicker::build_options(&app.query_prefixes);
+    app.prefix_picker = Some(crate::tui::PrefixPicker { options, selected: 0, activate_only: false });
+    app.open_prefix_help(Some(crate::tui::mode::ModeKind::Notes));
+    assert!(app.is_prefix_help_viewing());
+
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+    let quit = handle_key(&mut app, esc);
+    assert!(!quit);
+    assert!(
+        !app.is_prefix_help_viewing(),
+        "Esc must close the prefix-help overlay"
+    );
+    assert!(
+        app.is_prefix_picker_open(),
+        "the picker underneath must still be open"
+    );
+}
+
+/// `q` and the configured Cancel binding both close the overlay too
+/// (mirrors `handle_help_view_key`'s own accepted close keys).
+#[test]
+fn prefix_help_q_key_also_closes_the_overlay() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_prefix_help(None);
+    let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+    let quit = handle_key(&mut app, q);
+    assert!(!quit);
+    assert!(!app.is_prefix_help_viewing());
+}
+
+/// Ctrl-C inside the prefix-help overlay still aborts the whole TUI
+/// (checked before the general Cancel-binding arm — mirrors
+/// `handle_help_view_key`'s own Ctrl-C-first ordering, the same
+/// dialog-cancel-consistency fix applied everywhere else).
+#[test]
+fn prefix_help_ctrl_c_aborts_whole_tui() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_prefix_help(None);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let quit = handle_key(&mut app, ctrl_c);
+    assert!(quit, "Ctrl-C must abort the whole TUI even from inside the overlay");
+    assert!(app.cancelled);
+}
+
+/// Up/Down scroll the overlay's own `scroll` offset without closing
+/// it — mirrors the equivalent `handle_help_view_key` coverage.
+#[test]
+fn prefix_help_arrow_keys_scroll_without_closing() {
+    let mut app = global_test_app(&[("a", 1)]);
+    app.open_prefix_help(Some(crate::tui::mode::ModeKind::Notes));
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+    handle_key(&mut app, down);
+    assert!(app.is_prefix_help_viewing());
+    assert_eq!(app.prefix_help_view.as_ref().unwrap().scroll, 1);
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+    handle_key(&mut app, up);
+    assert_eq!(app.prefix_help_view.as_ref().unwrap().scroll, 0);
+}
+
+/// `lines_for` covers every `ModeKind` variant without panicking and
+/// never returns an empty cheatsheet — a cheap smoke test that the
+/// big per-mode `match` in `prefix_help.rs` has no missing/blank arm,
+/// since most of the individual mode entries above only spot-check
+/// one or two modes' exact content.
+#[test]
+fn prefix_help_lines_for_covers_every_mode_kind_non_empty() {
+    let prefixes = QueryPrefixes::default();
+    for &mode in [
+        crate::tui::mode::ModeKind::History,
+        crate::tui::mode::ModeKind::Output,
+        crate::tui::mode::ModeKind::Llm,
+        crate::tui::mode::ModeKind::Question,
+        crate::tui::mode::ModeKind::Notes,
+        crate::tui::mode::ModeKind::Todo,
+        crate::tui::mode::ModeKind::Directories,
+        crate::tui::mode::ModeKind::Panes,
+        crate::tui::mode::ModeKind::Files,
+        crate::tui::mode::ModeKind::Tags,
+        crate::tui::mode::ModeKind::Ag,
+        crate::tui::mode::ModeKind::Codegraph,
+        crate::tui::mode::ModeKind::Jira,
+        crate::tui::mode::ModeKind::Segments,
+        crate::tui::mode::ModeKind::Similar,
+        crate::tui::mode::ModeKind::Paperless,
+        crate::tui::mode::ModeKind::Browser,
+        crate::tui::mode::ModeKind::Zoxide,
+        crate::tui::mode::ModeKind::Processes,
+        crate::tui::mode::ModeKind::Pass,
+        crate::tui::mode::ModeKind::ProjectPick,
+        crate::tui::mode::ModeKind::Worktree,
+    ]
+    .iter()
+    {
+        let lines = crate::tui::mode::prefix_help::lines_for(Some(mode), &prefixes);
+        assert!(!lines.is_empty(), "{mode:?} must have non-empty help content");
+    }
+    let overview = crate::tui::mode::prefix_help::lines_for(None, &prefixes);
+    assert!(!overview.is_empty());
+}
+
 /// `F11` grows the pane height, `Shift-F11` shrinks it — the
 /// replacement for the old single-key 3-preset toggle. Verifies
 /// both the default bindings and that they route to the right
