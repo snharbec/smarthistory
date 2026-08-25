@@ -488,7 +488,7 @@ impl App {
                     let selected_idx =
                         base_options.iter().position(|b| *b == default_base).unwrap_or(0);
                     if let Some(f) = self.worktree_create_flow.as_mut() {
-                        f.branch = typed;
+                        f.branch = crate::tui::mode::worktree::sanitize_new_branch_name(&typed);
                         f.is_new_branch = true;
                         f.step = WorktreeCreateStep::PickBaseBranch;
                         f.base_branch = default_base;
