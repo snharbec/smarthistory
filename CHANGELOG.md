@@ -49,6 +49,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- "Create JIRA template from issue" could silently fail to write the
+  template: once the "Template name?" prompt was submitted, the
+  background fetch it kicked off had no keymap guard beyond
+  `Action::Cancel` — a stray keypress (most commonly Enter) while the
+  fetch was in flight fell through to the normal dispatch and
+  staged-and-exited on the still-selected source JIRA row before the
+  fetch (and the template write it triggers) ever completed, which
+  looked like "it just opens the previous ticket instead of writing the
+  template." `run_loop` now swallows every key except `Action::Cancel`
+  while that fetch is outstanding, same as its sibling in-flight guards.
 - The typing UI could freeze for several seconds when a `:` (segments) query
   narrowed on a large notes vault (e.g. a multi-word query like "classification
   database"). The search itself was already backgrounded and debounced, but
