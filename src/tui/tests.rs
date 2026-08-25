@@ -13704,6 +13704,157 @@ fn worktree_create_flow_new_branch_name_advances_to_pick_base_branch() {
     }
 }
 
+/// Helper: a `directories_test_app` with one JIRA issue selected via
+/// the real `-` mode search path (`FakeJira` + `jira_maybe_autocall`,
+/// same fixture shape `jira_edit_comment_opens_jira_add_comment_mode`
+/// uses) — populates both `app.jira_rows` and `app.jira_issue_types`
+/// exactly like a real search result would, rather than poking the
+/// private fields directly.
+fn jira_row_selected_test_app(key: &str, issuetype: &str) -> App {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        issues: vec![crate::jira::JiraIssue {
+            key: key.to_string(),
+            summary: "test issue".to_string(),
+            status: "Open".to_string(),
+            issuetype: issuetype.to_string(),
+            ..Default::default()
+        }],
+        recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..FakeJira::default()
+    };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.query = String::from("-");
+    app.refresh();
+    let past = std::time::Instant::now()
+        - JIRA_IDLE_TIMEOUT
+        - JIRA_DEBOUNCE
+        - std::time::Duration::from_millis(50);
+    app.jira_debounce_started = Some(past);
+    app.jira_idle_started = Some(past);
+    app.jira_maybe_autocall();
+    app.list_state.select(Some(0));
+    app
+}
+
+/// `Action::CreateWorktree` on a selected JIRA row of type `Bug`
+/// pre-fills the `PickBranch` filter as `bug/<KEY>` — reuses the
+/// existing "type a name to create a new branch" filter field, so the
+/// user just confirms/edits instead of retyping the key by hand.
+#[test]
+fn open_worktree_create_flow_prefills_branch_for_bug_issue() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("jira_bug_prefill", "trunk") else {
+        return;
+    };
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = jira_row_selected_test_app("PROJ-7", "Bug");
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_ref().expect("flow open");
+        assert_eq!(flow.filter, "bug/PROJ-7");
+        assert_eq!(flow.cursor, flow.filter.chars().count());
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// A non-Bug issue type (case-insensitively anything other than
+/// `"bug"`) pre-fills with the `feature/` prefix instead.
+#[test]
+fn open_worktree_create_flow_prefills_branch_for_non_bug_issue() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("jira_story_prefill", "trunk") else {
+        return;
+    };
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = jira_row_selected_test_app("PROJ-8", "Story");
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_ref().expect("flow open");
+        assert_eq!(flow.filter, "feature/PROJ-8");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// A non-JIRA selected row (or none) keeps today's behavior: an
+/// empty filter, no prefix guessing.
+#[test]
+fn open_worktree_create_flow_leaves_filter_empty_for_non_jira_row() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("non_jira_no_prefill", "trunk") else {
+        return;
+    };
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_ref().expect("flow open");
+        assert_eq!(flow.filter, "");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Wiring check: `Action::CreateWorktree` dispatched through the real
+/// key-handling path (not a direct `open_worktree_create_flow()`
+/// call) from `-` (JIRA) mode with a selected row actually opens the
+/// flow, pre-filled — the mode gate must let JIRA mode through, not
+/// just worktree mode.
+#[test]
+fn create_worktree_action_from_jira_mode_opens_prefilled_flow() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("jira_dispatch_prefill", "trunk") else {
+        return;
+    };
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = jira_row_selected_test_app("PROJ-9", "Bug");
+        let terminate = dispatch_action(&mut app, Action::CreateWorktree);
+        assert!(!terminate, "CreateWorktree must not close the TUI");
+        let flow = app
+            .worktree_create_flow
+            .as_ref()
+            .expect("CreateWorktree from JIRA mode must open the flow, not just show a status message");
+        assert_eq!(flow.filter, "bug/PROJ-9");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// The mode gate still refuses `Action::CreateWorktree` from a mode
+/// that's neither `;` (worktree) nor `-` (JIRA) — this isn't a
+/// blanket "any mode with a selected row" relaxation.
+#[test]
+fn create_worktree_action_refused_outside_worktree_and_jira_modes() {
+    let mut app = directories_test_app(&[]);
+    dispatch_action(&mut app, Action::CreateWorktree);
+    assert!(
+        app.worktree_create_flow.is_none(),
+        "CreateWorktree must stay gated outside worktree/JIRA modes"
+    );
+    let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+    assert!(status.contains("worktree search") && status.contains("JIRA search"), "got: {status:?}");
+}
+
 /// A dirty repo opens `ConfirmCarryOver` before `PickProject`.
 #[test]
 fn worktree_create_flow_dirty_repo_opens_confirm_carry_over() {
@@ -32848,7 +32999,160 @@ fn test_create_jira_issue_dialog(
         source_key: source_key.map(|s| s.to_string()),
         prefill_loading: false,
         error: None,
+        epic_name_field: None,
     }
+}
+
+// ---- CreateJiraIssueDialog::sync_epic_name_field ----
+
+/// Cycling to `Epic` (case-insensitive) with a configured
+/// `epic_name_field` inserts a new extra field seeded from the
+/// current Subject value, cursor at the end.
+#[test]
+fn sync_epic_name_field_inserts_seeded_from_subject_when_epic_and_configured() {
+    let mut dialog = test_create_jira_issue_dialog("New epic title", "", "", None);
+    dialog.issue_types = vec!["Task".to_string(), "epic".to_string()];
+    dialog.issue_type_index = 1;
+    dialog.epic_name_field = Some("customfield_10011".to_string());
+    dialog.sync_epic_name_field();
+
+    assert_eq!(dialog.extra_fields.len(), 1);
+    assert_eq!(dialog.extra_fields[0].name, "Epic Name");
+    assert_eq!(dialog.extra_fields[0].value, "New epic title");
+    assert_eq!(dialog.extra_fields[0].cursor, "New epic title".chars().count());
+    assert_eq!(
+        dialog.extra_field_kinds,
+        vec![crate::tui::state::ExtraFieldKind::CustomField("customfield_10011".to_string())]
+    );
+}
+
+/// Without `JIRA_EPIC_NAME_FIELD` configured (`epic_name_field: None`),
+/// `sync_epic_name_field` never inserts anything, regardless of issue
+/// type — the feature is inert until configured.
+#[test]
+fn sync_epic_name_field_noop_without_configured_field_id() {
+    let mut dialog = test_create_jira_issue_dialog("New epic title", "", "", None);
+    dialog.issue_types = vec!["Epic".to_string()];
+    dialog.issue_type_index = 0;
+    assert!(dialog.epic_name_field.is_none());
+    dialog.sync_epic_name_field();
+    assert!(dialog.extra_fields.is_empty());
+    assert!(dialog.extra_field_kinds.is_empty());
+}
+
+/// Switching the issue type away from `Epic` removes the auto-managed
+/// field — an inapplicable custom field could be rejected by JIRA's
+/// screen scheme for other issue types.
+#[test]
+fn sync_epic_name_field_removes_when_switching_away_from_epic() {
+    let mut dialog = test_create_jira_issue_dialog("New epic title", "", "", None);
+    dialog.issue_types = vec!["Task".to_string(), "Epic".to_string()];
+    dialog.issue_type_index = 1;
+    dialog.epic_name_field = Some("customfield_10011".to_string());
+    dialog.sync_epic_name_field();
+    assert_eq!(dialog.extra_fields.len(), 1, "sanity: field inserted while on Epic");
+
+    dialog.issue_type_index = 0;
+    dialog.sync_epic_name_field();
+    assert!(dialog.extra_fields.is_empty(), "field must be removed once no longer on Epic");
+    assert!(dialog.extra_field_kinds.is_empty());
+}
+
+/// A one-time seed, not a live sync: once inserted, editing the field
+/// and then calling `sync_epic_name_field` again (e.g. from an
+/// unrelated keystroke while still on Epic) must not clobber the
+/// user's edit with the (possibly now-different) Subject text.
+#[test]
+fn sync_epic_name_field_does_not_overwrite_an_existing_field() {
+    let mut dialog = test_create_jira_issue_dialog("Original subject", "", "", None);
+    dialog.issue_types = vec!["Epic".to_string()];
+    dialog.issue_type_index = 0;
+    dialog.epic_name_field = Some("customfield_10011".to_string());
+    dialog.sync_epic_name_field();
+    assert_eq!(dialog.extra_fields[0].value, "Original subject");
+
+    dialog.extra_fields[0].value = "User-edited epic name".to_string();
+    dialog.fields[0].value = "Subject changed after the fact".to_string();
+    dialog.sync_epic_name_field();
+    assert_eq!(
+        dialog.extra_fields[0].value, "User-edited epic name",
+        "must not overwrite a manually-edited value"
+    );
+    assert_eq!(dialog.extra_fields.len(), 1, "must not duplicate the entry either");
+}
+
+/// Switching away from Epic and back reseeds the field fresh from
+/// whatever Subject says at that later moment, not the original seed.
+#[test]
+fn sync_epic_name_field_reseeds_fresh_when_switching_back_to_epic() {
+    let mut dialog = test_create_jira_issue_dialog("First subject", "", "", None);
+    dialog.issue_types = vec!["Task".to_string(), "Epic".to_string()];
+    dialog.issue_type_index = 1;
+    dialog.epic_name_field = Some("customfield_10011".to_string());
+    dialog.sync_epic_name_field();
+    assert_eq!(dialog.extra_fields[0].value, "First subject");
+
+    dialog.issue_type_index = 0;
+    dialog.sync_epic_name_field();
+    assert!(dialog.extra_fields.is_empty());
+
+    dialog.fields[0].value = "Second subject".to_string();
+    dialog.issue_type_index = 1;
+    dialog.sync_epic_name_field();
+    assert_eq!(dialog.extra_fields.len(), 1);
+    assert_eq!(dialog.extra_fields[0].value, "Second subject");
+}
+
+/// Wiring check: pressing `Right` while the Issue Type selector is
+/// focused, through the real key handler, cycles to `Epic` AND
+/// inserts the field — not just a direct call to
+/// `sync_epic_name_field` in isolation.
+#[test]
+fn create_jira_issue_dialog_right_key_on_issue_type_syncs_epic_name_field() {
+    let mut app = directories_test_app(&[]);
+    let mut dialog = test_create_jira_issue_dialog("Cycle me", "", "", None);
+    dialog.issue_types = vec!["Task".to_string(), "Epic".to_string()];
+    dialog.issue_type_index = 0;
+    dialog.epic_name_field = Some("customfield_10011".to_string());
+    dialog.focused = crate::tui::state::CreateJiraIssueFocus::IssueType;
+    app.create_jira_issue_dialog = Some(dialog);
+
+    let right = KeyEvent::new(KeyCode::Right, KeyModifiers::empty());
+    handle_key(&mut app, right);
+
+    let dialog = app.create_jira_issue_dialog.as_ref().expect("dialog still open");
+    assert_eq!(dialog.issue_types[dialog.issue_type_index], "Epic");
+    assert_eq!(dialog.extra_fields.len(), 1);
+    assert_eq!(dialog.extra_fields[0].value, "Cycle me");
+}
+
+/// End-to-end: submitting with `Epic` selected and the auto-filled
+/// Epic Name field present sends it as a real custom field alongside
+/// the other fields, via the existing `CustomField` submit path.
+#[test]
+fn create_jira_issue_dialog_submit_sends_epic_name_custom_field() {
+    use std::sync::Arc;
+    let fake = FakeJira {
+        created_issue_key: "PROJ-99".to_string(),
+        ..FakeJira::default()
+    };
+    let created_custom_fields = fake.created_issue_custom_fields.clone();
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    let mut dialog = test_create_jira_issue_dialog("My new epic", "", "", None);
+    dialog.issue_types = vec!["Epic".to_string()];
+    dialog.issue_type_index = 0;
+    dialog.epic_name_field = Some("customfield_10011".to_string());
+    dialog.sync_epic_name_field();
+    app.create_jira_issue_dialog = Some(dialog);
+    app.create_jira_issue_dialog_submit();
+
+    let custom_fields = created_custom_fields.lock().unwrap();
+    assert_eq!(custom_fields.len(), 1);
+    assert_eq!(
+        custom_fields[0],
+        vec![("customfield_10011".to_string(), "My new epic".to_string())]
+    );
 }
 
 /// Submitting with a non-empty Subject and no `source_key` calls

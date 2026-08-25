@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `-` (JIRA) mode: cycling the "create JIRA issue" dialog's Issue Type to
+  `Epic` now auto-inserts an "Epic Name" field (JIRA's own required field for
+  Epics, distinct from Subject) seeded from the current Subject text —
+  requires the new `JIRA_EPIC_NAME_FIELD` env var (see
+  [docs/configuration.md](docs/configuration.md#jira--mode)); unconfigured,
+  nothing changes. Selecting a JIRA row and pressing `Action::CreateWorktree`
+  now opens the create-worktree dialog (previously gated to `;` mode only)
+  with the branch-name filter pre-filled `feature/<KEY>`, or `bug/<KEY>` when
+  the issue's type is Bug.
 - New prefix query-syntax help overlay (`F3`, `Action::PrefixHelp`) — a
   cheatsheet of the actual query syntax the active prefix mode accepts
   (`#tag`, `[[link]]`, `[attr:value]`, `(a OR b)` grouping, negation,

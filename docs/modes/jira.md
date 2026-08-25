@@ -77,6 +77,14 @@ version:
   issue gets a `Relates` link back to the selected one. If `JIRA_CLONE_FIELDS`
   is set, the listed custom fields are also cloned from the source issue,
   shown read-only, and sent unchanged to the new issue.
+- Cycling **Issue Type** to `Epic` (case-insensitive) auto-inserts an "Epic
+  Name" extra field — JIRA's own required field for Epics, distinct from
+  Subject — seeded from the current Subject text. Requires
+  `JIRA_EPIC_NAME_FIELD` (see [Configuration](../configuration.md#jira--mode));
+  unconfigured, nothing happens. It's a one-time seed, not a live sync: freely
+  editable afterward, never overwritten again. Switching away from `Epic`
+  removes it; switching back reseeds it fresh from whatever Subject says at
+  that later moment.
 - `Ctrl-S` submits, `Esc` cancels.
 
 ### Creating from a template

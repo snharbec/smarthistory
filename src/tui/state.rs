@@ -1563,6 +1563,13 @@ pub struct CreateJiraIssueDialog {
     /// into them) and to render a "(loading…)" hint.
     pub prefill_loading: bool,
     pub error: Option<String>,
+    /// Copied from `JiraConfig::epic_name_field` once at dialog-open
+    /// time (not re-read from the environment on every keystroke).
+    /// `None` when `JIRA_EPIC_NAME_FIELD` isn't configured — in that
+    /// case `sync_epic_name_field` never does anything, same
+    /// unconfigured-is-inert policy the rest of the JIRA integration
+    /// follows.
+    pub epic_name_field: Option<String>,
 }
 
 impl CreateJiraIssueDialog {
@@ -1589,6 +1596,53 @@ impl CreateJiraIssueDialog {
             return;
         }
         self.issue_type_index = cycle_index(self.issue_type_index, self.issue_types.len(), forward);
+    }
+
+    /// Insert or remove the auto-managed "Epic Name" extra field based
+    /// on the current issue type. JIRA requires a real "Epic Name"
+    /// custom field on create for `Epic`-type issues, distinct from
+    /// Subject even though it's almost always the same text — this
+    /// seeds it from the current Subject value so the user doesn't
+    /// have to type it twice.
+    ///
+    /// Call this after anything that can change `issue_type_index`
+    /// (both `cycle_issue_type` call sites in `src/tui.rs`) and once
+    /// right after the dialog is constructed (covers `Epic` already
+    /// being the default-selected issue type).
+    ///
+    /// One-time seed, not a live sync: once inserted, the field is
+    /// ordinary — freely editable, never overwritten again even if
+    /// Subject changes afterward. Switching away from `Epic` removes
+    /// it (an inapplicable custom field could be rejected by JIRA's
+    /// screen scheme for other issue types); switching back reseeds
+    /// it fresh from whatever Subject says at that moment.
+    pub fn sync_epic_name_field(&mut self) {
+        let Some(field_id) = self.epic_name_field.clone() else {
+            return;
+        };
+        let is_epic = self
+            .issue_types
+            .get(self.issue_type_index)
+            .is_some_and(|t| t.eq_ignore_ascii_case("epic"));
+        let existing = self.extra_field_kinds.iter().position(|kind| {
+            matches!(kind, ExtraFieldKind::CustomField(id) if *id == field_id)
+        });
+        if is_epic {
+            if existing.is_none() {
+                let subject = self.fields.first().map(|f| f.value.clone()).unwrap_or_default();
+                self.extra_fields.push(DialogField::prefilled(
+                    "Epic Name",
+                    "",
+                    false,
+                    "",
+                    subject,
+                ));
+                self.extra_field_kinds.push(ExtraFieldKind::CustomField(field_id));
+            }
+        } else if let Some(i) = existing {
+            self.extra_fields.remove(i);
+            self.extra_field_kinds.remove(i);
+        }
     }
 
     /// The `DialogField` the current focus points at, or `None` when

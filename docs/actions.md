@@ -1186,6 +1186,15 @@ created, so the status message shows the new key alongside a warning that the
 link didn't take. A create failure keeps the dialog open (with the error
 shown) so the user can retry without retyping.
 
+**Epic Name auto-fill** — when `JIRA_EPIC_NAME_FIELD` is set (see
+[`docs/configuration.md`](configuration.md#jira--mode)) and Issue Type is
+cycled to `Epic`, an "Epic Name" field is auto-inserted (JIRA's own required
+field for Epics, distinct from Subject) seeded from the current Subject text.
+It's a one-time seed, not a live sync — freely editable afterward, never
+overwritten again even if Subject changes later. Switching Issue Type away
+from `Epic` removes it; switching back reseeds it fresh from whatever Subject
+says at that later moment. Unconfigured, nothing happens.
+
 ### `CreateJiraIssueFromTemplate`
 
 | Field        | Value                                                                                                    |
@@ -1282,8 +1291,8 @@ silently clobbering it. Either fetch call failing fails the whole request
 | Default key  | none (open it via the command palette, or bind `key.create-worktree=<spec>`)             |
 | Category     | tools                                                                                    |
 
-Only available in `;` (worktree) mode; a no-op with a status message
-everywhere else. Opens a step-through dialog that creates a new `git
+Available in `;` (worktree) mode and `-` (JIRA) mode; a no-op with a status
+message everywhere else. Opens a step-through dialog that creates a new `git
 worktree` checkout for the repo containing the current directory:
 
 1. **Branch** — pick an existing local branch from a filtered list, or type a

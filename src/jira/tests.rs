@@ -1007,6 +1007,7 @@
             available_projects: Vec::new(),
             available_issue_types: Vec::new(),
             clone_fields: Vec::new(),
+            epic_name_field: None,
         };
         assert_eq!(
             cfg.browse_url("PROJ-123"),
@@ -1030,6 +1031,7 @@
             available_projects: Vec::new(),
             available_issue_types: Vec::new(),
             clone_fields: Vec::new(),
+            epic_name_field: None,
         };
         assert_eq!(cfg.browse_url("X-1"), "https://jira/browse/X-1");
     }
@@ -1174,6 +1176,39 @@
     #[test]
     fn resolve_clone_fields_unset_is_empty() {
         assert_eq!(resolve_clone_fields(None), Vec::<String>::new());
+    }
+
+    // ---- resolve_epic_name_field ----
+
+    #[test]
+    fn resolve_epic_name_field_accepts_bracket_form() {
+        assert_eq!(
+            resolve_epic_name_field(Some("cf[10011]")),
+            Some("customfield_10011".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_epic_name_field_accepts_literal_customfield_id() {
+        assert_eq!(
+            resolve_epic_name_field(Some("customfield_10011")),
+            Some("customfield_10011".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_epic_name_field_trims_whitespace() {
+        assert_eq!(
+            resolve_epic_name_field(Some("  customfield_10011  ")),
+            Some("customfield_10011".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_epic_name_field_empty_or_unset_is_none() {
+        assert_eq!(resolve_epic_name_field(Some("")), None);
+        assert_eq!(resolve_epic_name_field(Some("   ")), None);
+        assert_eq!(resolve_epic_name_field(None), None);
     }
 
     // ---- extract_custom_field_value ----
