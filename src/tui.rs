@@ -13025,6 +13025,25 @@ fn run_loop(
             continue;
         }
 
+        // Any OTHER key while that same fetch is in flight: the
+        // `TemplateNamePrompt` overlay that used to own the keymap is
+        // already closed by this point (`start_jira_template_fetch`
+        // clears it before spawning the background thread), and there's
+        // no replacement modal to route input through — so without this
+        // guard, a stray keypress (most importantly Enter/`Run`) falls
+        // through all the way to the normal dispatch below and
+        // stages-and-exits on the currently selected JIRA row before the
+        // background fetch — and the template file write it triggers —
+        // gets a chance to finish. That's the reported "opens the
+        // previous ticket instead of writing the template" bug: the
+        // process exits before `process_jira_template_fetch_result` ever
+        // runs, so the template is never written. `Action::Cancel` is
+        // still handled above this block, same "check the specific case
+        // first" ordering every other in-flight guard here uses.
+        if app.jira_template_fetch_request.is_some() {
+            continue;
+        }
+
         // Same cancel handling for an in-flight
         // ag search. Pressing Esc sets the
         // cancelled flag on the worker thread.
