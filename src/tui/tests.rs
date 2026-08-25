@@ -33887,6 +33887,87 @@ fn write_jira_template_file_writes_and_refuses_overwrite() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Regression test for a real reported bug: submitting the "Template
+/// name?" prompt must write the template and leave the TUI running —
+/// it must NOT stage a selection (which exits the TUI). The actual bug
+/// was in `run_loop`'s per-key in-flight-fetch guards: once the prompt
+/// closed and `start_jira_template_fetch` spawned the background fetch,
+/// nothing guarded keys other than `Action::Cancel` while
+/// `jira_template_fetch_request` was still `Some`, so a stray keypress
+/// (most importantly Enter/`Run`) fell through to the normal dispatch
+/// and staged-and-exited on the still-selected source JIRA row before
+/// the fetch — and the template file write it triggers — ever
+/// completed. This test can't reach that exact async race (`run_loop`
+/// isn't unit-testable, and none of its sibling in-flight-cancel blocks
+/// have test coverage either), but it locks in the invariant the fix
+/// restores: creating a template from a selected JIRA issue never
+/// touches `selection`/`pick_mode`, regardless of how fast the fetch
+/// resolves.
+#[test]
+fn create_jira_template_from_issue_writes_file_without_staging_a_selection() {
+    use std::sync::Arc;
+    let _sandbox = HomeSandbox::new("create_jira_template_from_issue");
+    let fake = FakeJira {
+        issues: vec![crate::jira::JiraIssue {
+            key: "PROJ-1".to_string(),
+            summary: "login crash".to_string(),
+            status: "Open".to_string(),
+            issuetype: "Bug".to_string(),
+            ..Default::default()
+        }],
+        recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ..FakeJira::default()
+    };
+    let mut app = directories_test_app(&[]);
+    app.set_jira_client(Arc::new(fake));
+    app.query = String::from("-");
+    app.refresh();
+    let past = std::time::Instant::now()
+        - JIRA_IDLE_TIMEOUT
+        - JIRA_DEBOUNCE
+        - std::time::Duration::from_millis(50);
+    app.jira_debounce_started = Some(past);
+    app.jira_idle_started = Some(past);
+    app.jira_maybe_autocall();
+    app.list_state.select(Some(0));
+
+    app.create_jira_template_from_issue();
+    let prompt = app.template_name_prompt.as_ref().expect("prompt should open");
+    assert_eq!(prompt.source_key, "PROJ-1");
+
+    for c in "My Bug Template".chars() {
+        crate::tui::handle_template_name_prompt_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()),
+        );
+    }
+    crate::tui::handle_template_name_prompt_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+    );
+
+    assert!(app.template_name_prompt.is_none(), "prompt should close on submit");
+    assert!(
+        app.selection.is_none(),
+        "creating a template must never stage a selection (that would exit the TUI \
+         before the template write completes)"
+    );
+    assert!(app.pick_mode.is_none());
+    assert!(!app.jira_template_fetch_in_flight);
+    assert!(app.jira_template_fetch_request.is_none());
+
+    let path = crate::tui::jira_templates_dir()
+        .expect("HOME is set")
+        .join("my-bug-template.md");
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("template file should have been written to {}: {}", path.display(), e)
+    });
+    assert!(
+        content.contains("login crash") && content.contains("Bug"),
+        "template should reflect the source issue's fields: {content}"
+    );
+}
+
 /// `jira_dialog_row_prefill` returns the template-provided defaults
 /// unchanged when nothing is selected — the "cold open" / "non-note/jira
 /// row" fallback case.
