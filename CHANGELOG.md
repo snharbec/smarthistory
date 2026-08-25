@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New prefix query-syntax help overlay (`F3`, `Action::PrefixHelp`) — a
+  cheatsheet of the actual query syntax the active prefix mode accepts
+  (`#tag`, `[[link]]`, `[attr:value]`, `(a OR b)` grouping, negation,
+  `!!type`/`!type`, per-mode specifics), distinct from the existing `Ctrl-A`
+  help overlay (keyboard shortcuts only). Resolves the mode from the `F1`
+  prefix picker's highlighted row if it's open, otherwise the currently
+  typed query's prefix; with neither, shows a one-line-per-prefix overview.
 - New `!!type` / `!type` query shorthand in `@` notes, `!` todo, `:` segments,
   and `"` similar mode — a shorter, `type`-specific alternative to the general
   `[type:value]!` attribute syntax. `!!jira` excludes `type: jira` (a pure

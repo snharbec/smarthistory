@@ -706,6 +706,14 @@ pub enum Action {
     /// the LLM), so the key works as an ergonomic Enter
     /// replacement everywhere.
     SmartOpen,
+    /// Show the query-syntax cheatsheet for the active prefix mode
+    /// (default `F3`) — distinct from [`Action::OpenHelp`], which
+    /// documents keyboard shortcuts, not query syntax. Resolves the
+    /// target mode from whichever `PrefixPicker` row is highlighted
+    /// if the picker (`F1`) is open, otherwise from the currently
+    /// typed query's prefix (`crate::tui::mode::active_mode`); with
+    /// neither, shows a one-line-per-prefix overview instead.
+    PrefixHelp,
 }
 
 impl Action {
@@ -778,6 +786,7 @@ impl Action {
             Action::PreviousGlobalHistory => "previous-global-history",
             Action::NextGlobalHistory => "next-global-history",
             Action::SmartOpen => "smart-open",
+            Action::PrefixHelp => "prefix-help",
         }
     }
 
@@ -848,6 +857,7 @@ impl Action {
             Action::PreviousGlobalHistory => "Previous global history entry (all modes)",
             Action::NextGlobalHistory => "Next global history entry (all modes)",
             Action::SmartOpen => "Smart open (context dive)",
+            Action::PrefixHelp => "Prefix query syntax help",
         }
     }
 
@@ -904,6 +914,7 @@ impl Action {
             Action::PreviousGlobalHistory => "navigation",
             Action::NextGlobalHistory => "navigation",
             Action::SmartOpen => "tools",
+            Action::PrefixHelp => "tools",
             Action::JiraFieldComplete => "tools",
             Action::DeleteSelected | Action::DeleteMatching => "delete",
             Action::ToggleMark | Action::ClearMarks | Action::BulkDeleteMarked => "delete",
@@ -1096,6 +1107,10 @@ impl Action {
             // who prefer Shift-Return can rebind via
             // `key.smart-open=S-Return` in the config file.
             Action::SmartOpen => "C-]",
+            // Sits next to `F1` (`PickPrefix`) and `F2`
+            // (`ComposeNoteEntry`) — "F1 to pick a prefix, F3 to see
+            // what its query syntax is".
+            Action::PrefixHelp => "F3",
         }
     }
 
@@ -1599,6 +1614,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::PreviousGlobalHistory,
     Action::NextGlobalHistory,
     Action::SmartOpen,
+    Action::PrefixHelp,
 ];
 
 /// The inverse of `Action::config_key()` — look up an action by its
