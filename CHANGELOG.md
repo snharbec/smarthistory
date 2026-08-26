@@ -47,6 +47,22 @@ All notable changes to this project will be documented in this file.
   `~/.local/cache/smarthistory/keybindings-debug.log`. Same pattern as the
   existing `SMARTHISTORY_DEBUG_HERDR` tmux-snapshot log.
 
+### Changed
+
+- **Breaking**: `host.<key>` entries (the `# hosts` block in `*` panes mode) no
+  longer read `~/.ssh/config` at all. Previously, every `Host` block there
+  without a matching `host.<key>` was auto-appended as a synthetic host row,
+  and a `host.<key>` entry you did define had any field you left blank
+  (`hostname`/`user`/`port`/`identity`) silently filled in from a matching SSH
+  config block. Both are gone — the hosts list is now exactly, and only, your
+  explicit `host.<key>` entries, with every field using just what you set (or
+  its own fallback: `host` for `hostname`, `$USER` for `user`, port 22). A
+  `host.<key>.host` naming an `ssh` alias still works fine — the actual `ssh`
+  invocation still consults `~/.ssh/config` normally, this only removes
+  smarthistory's own parsing of it. If you relied on auto-appended hosts,
+  add an explicit `host.<key>` entry for each one you still want (see
+  [docs/configuration.md#hostkey](docs/configuration.md#hostkey)).
+
 ### Fixed
 
 - `;` (worktree) create flow: typing a new branch name containing a space

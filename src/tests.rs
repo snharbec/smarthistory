@@ -1825,38 +1825,25 @@ tmuxpaneoutputdir=~/custom-tmux
     }
 
     /// Same as above, but for `host.<id>` entries and a `hosts`
-    /// file source.
-    ///
-    /// Doesn't assert an exact row count: `Config::parse` also
-    /// merges the machine's real `~/.ssh/config` into `self.hosts`
-    /// (auto-appending a synthetic entry per SSH `Host` block with
-    /// no matching `host.<id>`), so a dev machine with its own SSH
-    /// config produces extra rows here — that's real, correct
-    /// behavior, not something this test should fight. Assert only
-    /// that the entry from OUR source is present among whatever
-    /// else got merged in.
+    /// file source. `host.<id>` entries are entirely self-defined
+    /// (`~/.ssh/config` is never read), so the row set is
+    /// deterministic — exactly the one entry from OUR source.
     #[test]
     fn parse_multi_merges_hosts_from_a_separate_source() {
         let mut cfg = Config::default();
         cfg.parse_multi(&["", "host.1 = \"Proxmox\"\nhost.1.host = \"pve-1\"\n", ""]);
         let hosts = cfg.hosts();
-        assert!(
-            hosts.iter().any(|r| r.command == "Proxmox"),
-            "got: {:?}",
-            hosts
-        );
-        assert!(
-            cfg.host_defs().iter().any(|h| h.host == "pve-1"),
-            "got: {:?}",
-            cfg.host_defs()
-        );
+        assert_eq!(hosts.len(), 1, "got: {:?}", hosts);
+        assert_eq!(hosts[0].command, "Proxmox");
+        let host_defs = cfg.host_defs();
+        assert_eq!(host_defs.len(), 1, "got: {:?}", host_defs);
+        assert_eq!(host_defs[0].host, "pve-1");
     }
 
     /// The three-source shape `load_tui` actually uses (main
     /// config, hosts file, sessions file) merges all three kinds
     /// of content in one pass, matching what a real split-file
-    /// setup looks like. Same "don't fight the real SSH-config
-    /// merge" caveat as `parse_multi_merges_hosts_from_a_separate_source`.
+    /// setup looks like.
     #[test]
     fn parse_multi_merges_main_hosts_and_sessions_sources() {
         let mut cfg = Config::default();
@@ -1865,7 +1852,8 @@ tmuxpaneoutputdir=~/custom-tmux
             "host.1 = \"Proxmox\"\nhost.1.host = \"pve-1\"\n",
             "session.1 = \"Foo\"\n",
         ]);
-        assert!(cfg.hosts().iter().any(|r| r.command == "Proxmox"));
+        assert_eq!(cfg.hosts().len(), 1);
+        assert_eq!(cfg.hosts()[0].command, "Proxmox");
         assert_eq!(cfg.sessions().len(), 1);
         assert_eq!(cfg.query_prefixes().jira, '`');
     }
