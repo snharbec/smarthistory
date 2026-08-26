@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `Action::CycleRecentPrefixes` (`F12`) — cycle through every prefix mode
+  except `*` panes, ordered most-recently-used first (a mode never used this
+  session falls back to its declared order). Unlike the existing
+  `CycleNavPrefix` (`C-z`, a fixed panes/directories/zoxide sequence), this
+  covers the whole prefix set and reorders itself as you work. The typed query
+  body is preserved across the switch, same as `CycleNavPrefix`/`PickPrefix`.
+  See [docs/actions.md#cyclerecentprefixes](docs/actions.md#cyclerecentprefixes).
 - `-` (JIRA) mode: cycling the "create JIRA issue" dialog's Issue Type to
   `Epic` now auto-inserts an "Epic Name" field (JIRA's own required field for
   Epics, distinct from Subject) seeded from the current Subject text —

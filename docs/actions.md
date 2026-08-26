@@ -17,7 +17,7 @@ documentation debt.
 
 | Concept         | What it is                                                                                                                                                                                                                                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Action**      | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 65 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`.                                        |
+| **Action**      | A named behavior (e.g. `Cancel`, `Run`, `SmartOpen`). 66 actions ship in `ALL_ACTIONS`. Each has a stable kebab-case `config_key` for the config file, a `display_name` for the palette / status messages, a `default_key` (or `"none"` for unbound-by-default), and a `category`.                                        |
 | **Key binding** | The mapping from a `KeySpec` (e.g. `C-c`, `F1`, `Up`) to an action. Multiple keys can map to the same action (`delete-word-backward` ships with both `C-w` and `M-Backspace`). The same key can't map to two actions — the first one in `ALL_ACTIONS` order wins (see [`KeyBindings::defaults`](../src/tui/bindings.rs)). |
 | **Mode**        | The active prefix mode (history, output, `/`, `$`, `&`, etc. — see [`docs/modes/`](modes/README.md)). Most actions work in every mode; a few are mode-specific (`MarkTodoDone` is a no-op outside `!` mode, `JiraFieldComplete` only completes inside `-`, `CodegraphRelations` is meaningful only in `&` / `$`).         |
 | **Overlay**     | When an overlay is open (command palette, prefix picker, theme picker, completion menu, help, output view, describe view, add-entry dialog, note/todo compose dialog, delete-confirmation), it captures key routing until it closes; the global actions don't fire underneath it.                                         |
@@ -49,7 +49,7 @@ Actions are grouped in the command palette by their `category()`:
 | Category                    | Actions                                                                                                                                                                                                        |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`navigation`](#navigation) | Cancel, Run, EditStart, EditEnd, Up, Down, MoveCursorLeft, MoveCursorRight, PageUp, PageDown, Home, End, Backspace, DeleteWordBackward, PreviousHistory, NextHistory, PreviousGlobalHistory, NextGlobalHistory |
-| [`search`](#search)         | CycleMode, CycleNavPrefix, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix                                                              |
+| [`search`](#search)         | CycleMode, CycleNavPrefix, CycleRecentPrefixes, ToggleDuplicateFilter, CycleExitFilter, CycleSortOrder, CycleDirectorySource, ClearQuery, ToggleSearchMode, PickPrefix                                          |
 | [`todo`](#todo)             | MarkTodoDone                                                                                                                                                                                                   |
 | [`theme`](#theme)           | CycleThemeNext, CycleThemePrev                                                                                                                                                                                 |
 | [`tools`](#tools)           | EditComment, ShowOutput, OpenHelp, CommandAction, ThemePicker, YankSelection, EditFileReference, DownloadJiraIssue, DownloadJiraMatching, JiraFieldComplete, SmartOpen, PrefixHelp, ComposeNoteEntry, CreateNote, CreateJiraIssue, CreateJiraIssueFromTemplate |
@@ -382,6 +382,26 @@ still cycles correctly. From any OTHER mode (plain history, another prefix mode,
 or an empty query), jumps straight to panes — the first of the three — rather
 than no-op-ing. The typed body (if any) is preserved across the switch, same as
 picking a new mode from `PickPrefix` does.
+
+### `CycleRecentPrefixes`
+
+| Field        | Value                       |
+| ------------ | ---------------------------- |
+| Config key   | `cycle-recent-prefixes`     |
+| Display name | Cycle recent prefix modes   |
+| Default key  | `F12`                       |
+| Category     | search                      |
+
+Cycle through every prefix mode EXCEPT `*` panes, ordered most-recently-used
+first — unlike `CycleNavPrefix`'s fixed 3-mode sequence, this covers the whole
+prefix set and reorders itself as you work. "Used" means switched into (typing
+a fresh prefix, `PickPrefix`, `CycleNavPrefix`, or this action landing you
+somewhere new) — cycling itself doesn't count as using the modes it passes
+through, or every press would just promote whatever it lands on back to the
+front. A mode never used this session sorts after every used one, in
+`ModeKind`'s declaration order. From `History` (no prefix) or an empty query, jumps straight
+to the single most-recently-used mode. The typed body (if any) is preserved
+across the switch, same as `CycleNavPrefix`/`PickPrefix`.
 
 ### `ToggleDuplicateFilter`
 
