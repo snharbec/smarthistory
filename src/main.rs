@@ -12,7 +12,6 @@ mod llm;
 mod multiplexer;
 mod paperless;
 mod server;
-mod ssh_config;
 mod tui;
 mod util;
 
@@ -2584,9 +2583,10 @@ pub struct Config {
     /// `host.<key>.exec = "cmd"`. Each entry
     /// becomes a row in the `# hosts`
     /// section of the panes (`*`) view.
-    /// SSH config (`~/.ssh/config`) entries
-    /// without a config-file companion are
-    /// auto-appended by `Config::load`.
+    /// Entirely self-defined — `~/.ssh/config`
+    /// is never read (a host you want in the
+    /// panes view needs an explicit
+    /// `host.<key>` entry).
     hosts: Vec<(String, crate::tui::state::HostDef)>,
     /// Browser sources for the `^`-prefix mode, parsed from
     /// `browser.<id>.type = "chrome"|"firefox"` /
@@ -2870,17 +2870,12 @@ impl Config {
     /// win for any key set more than once, matching the "later
     /// line wins" rule that already applies within a single file.
     /// Finalization (the `ollama.*` / `paperless.*` pairing
-    /// validation, the `~/.ssh/config` merge into `self.hosts`, and
-    /// applying the collected `key.*` entries) runs exactly ONCE,
-    /// after every source has been read — not per-source. This
-    /// matters concretely for the SSH-config merge: it both fills
-    /// in gaps on existing `host.<id>` entries AND auto-appends a
-    /// synthetic entry for any SSH `Host` block with no matching
-    /// explicit entry. Running it after only a partial host list
-    /// (e.g. before the `hosts` file has contributed its entries)
-    /// would auto-append a synthetic entry for an alias the `hosts`
-    /// file was ABOUT to define explicitly, producing a duplicate
-    /// row in the `*`-mode panes view.
+    /// validation and applying the collected `key.*` entries) runs
+    /// exactly ONCE, after every source has been read — not
+    /// per-source. Running the pairing validation after only a
+    /// partial read (e.g. `ollama.url` from the main config file but
+    /// `ollama.model` from a source not yet read) would falsely warn
+    /// that only half the pair is set.
     ///
     /// Used by [`Config::load_tui`] to fold `~/.config/smarthistory/
     /// hosts` and `~/.config/smarthistory/sessions` into the main
@@ -3574,12 +3569,14 @@ impl Config {
                         // opaque join key (numeric or slug — see the
                         // `session.` branch above for why both work).
                         //
-                        // `host` is the SSH config
-                        // `Host` alias (also used as
-                        // the connection target when
-                        // no `hostname` is set);
-                        // `hostname` is the real
-                        // `HostName` to connect to.
+                        // `host` is the ssh connection
+                        // target used verbatim when no
+                        // `hostname` is set (an alias
+                        // already in the user's own
+                        // ~/.ssh/config, or a bare
+                        // hostname/IP); `hostname`
+                        // overrides it with the real
+                        // host to connect to.
                         let unquoted = value.trim().trim_matches('"').trim();
                         if let Some((key, field)) = rest.split_once('.') {
                             let pos = self.hosts.iter().position(|(k, _)| k == key);
@@ -3735,109 +3732,6 @@ impl Config {
                     url: paperless_url,
                     token: paperless_token,
                 });
-            }
-        }
-        // Merge `~/.ssh/config` into `self.hosts`.
-        // For every `Host` block in the SSH
-        // config, look up a `host.<key>` entry
-        // whose `host` field matches the
-        // alias. If found, the explicit
-        // entry wins for every set field;
-        // unset fields inherit from the SSH
-        // config. If not found, auto-append
-        // a new entry using the SSH config
-        // block as the source of truth
-        // (display name = the alias, real
-        // hostname = `HostName`, user =
-        // `User`, identity = first
-        // `IdentityFile`, port = `Port`).
-        //
-        // Auto-appended entries key off the
-        // SSH alias itself (slugified —
-        // aliases are almost always already
-        // key-safe), disambiguated against
-        // every existing key via
-        // `unique_slug` so an alias that
-        // collides with an explicit
-        // `host.<key>` entry gets `-2`
-        // appended rather than silently
-        // merging into it.
-        if let Some(home) = env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| env::var_os("USERPROFILE").map(std::path::PathBuf::from))
-        {
-            let ssh_blocks = ssh_config::load_ssh_config(&home);
-            for block in ssh_blocks {
-                // Look up an explicit
-                // `host.<id>` whose
-                // `host` field matches
-                // the SSH config
-                // alias. (Empty `host`
-                // would match every
-                // SSH block, which
-                // isn't what we want;
-                // skip those.)
-                let pos = if block.alias.is_empty() {
-                    None
-                } else {
-                    self.hosts.iter().position(|(_, h)| h.host == block.alias)
-                };
-                match pos {
-                    Some(idx) => {
-                        // Merge: explicit
-                        // wins for every
-                        // set field, SSH
-                        // config fills
-                        // the gaps.
-                        let (_, host) = &mut self.hosts[idx];
-                        if host.hostname.is_empty() {
-                            host.hostname = block.hostname.clone();
-                        }
-                        if host.user.is_empty() {
-                            host.user = block.user.clone();
-                        }
-                        if host.port == 0 {
-                            host.port = block.port;
-                        }
-                        if host.identity.is_empty() {
-                            host.identity = block.identity.clone();
-                        }
-                        // Auto-fill the
-                        // display name
-                        // when the user
-                        // didn't set
-                        // `host.<id> =
-                        // "..."` but did
-                        // set `host.<id>.host
-                        // = "alias"`.
-                        if host.name.is_empty() {
-                            host.name = block.alias.clone();
-                        }
-                    }
-                    None => {
-                        // Auto-append, keyed off the SSH alias
-                        // (slugified, disambiguated against every
-                        // existing key).
-                        let key = crate::util::unique_slug(
-                            self.hosts.iter().map(|(k, _)| k.as_str()),
-                            &block.alias,
-                            "host",
-                        );
-                        self.hosts.push((
-                            key,
-                            crate::tui::state::HostDef {
-                                name: block.alias.clone(),
-                                host: block.alias.clone(),
-                                hostname: block.hostname.clone(),
-                                user: block.user.clone(),
-                                port: block.port,
-                                identity: block.identity.clone(),
-                                dir: String::new(),
-                                exec: String::new(),
-                            },
-                        ));
-                    }
-                }
             }
         }
         // Apply the collected `key.*` entries on top of the
@@ -4460,8 +4354,9 @@ impl Config {
 
     /// Hosts parsed from the config file
     /// (`host.<id>=...`, `host.<id>.host=...`,
-    /// `host.<id>.hostname=...`, etc.) merged
-    /// with `~/.ssh/config` entries. Each entry
+    /// `host.<id>.hostname=...`, etc.) —
+    /// entirely self-defined, `~/.ssh/config`
+    /// is never read. Each entry
     /// becomes a row in the `# hosts` section
     /// of the panes (`*`) view. Selecting a
     /// row creates/switches a workspace via

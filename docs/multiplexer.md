@@ -133,10 +133,11 @@ The `*` view lists every pane across every session / workspace as a tree
 
 A `# hosts` block at the bottom of the panes view. Each `host.<key>` from
 `~/.config/smarthistory/hosts` (or the main config file — see
-[`docs/configuration.md#hostkey`](configuration.md#hostkey)), merged with
-`~/.ssh/config`, becomes a row; selecting a row either focuses an existing
-workspace already running that host's `ssh` connection, or creates a new
-workspace and bootstraps the `ssh` body into its first pane.
+[`docs/configuration.md#hostkey`](configuration.md#hostkey)) becomes a row —
+`~/.ssh/config` is never read, hosts here are entirely self-defined; selecting
+a row either focuses an existing workspace already running that host's `ssh`
+connection, or creates a new workspace and bootstraps the `ssh` body into its
+first pane.
 
 - **tmux**: matches a pane whose `#{pane_current_command}` starts with `ssh` and
   contains the host's `user@host`. If found, focuses that pane. Otherwise stages

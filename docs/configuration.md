@@ -1042,24 +1042,24 @@ that no longer exist, after listing them and asking for confirmation
 |                     |                                                                                                 |
 | ------------------- | ----------------------------------------------------------------------------------------------- |
 | **Type**            | sub-keyed group (`<key>` is an arbitrary identifier — see [`session.<key>`](#sessionkey) above) |
-| **Default**         | — (auto-appended from `~/.ssh/config`)                                                          |
+| **Default**         | — (none; entirely self-defined)                                                                 |
 | **File**            | `~/.config/smarthistory/hosts` (or the main config file — see below)                            |
 | **Tilde expansion** | Yes (on `dir`, `identity`)                                                                      |
 | **Env override**    | —                                                                                               |
 
-An SSH host row in the `# hosts` block of the `*` (panes) view. Same key scheme
-as `session.<key>` above — display order is file declaration order, and `<key>`
-is just a join key (auto-picked as a slug of the display name when written by
-the TUI, hand-editable to anything unique otherwise). Hosts in `~/.ssh/config`
-are auto-appended (one per `Host` block, keyed off the SSH alias itself) when
-the config is loaded, so users only need explicit `host.<key>` entries for the
-fields `~/.ssh/config` doesn't already cover, or to override what the SSH config
-says.
+A host row in the `# hosts` block of the `*` (panes) view. Same key scheme as
+`session.<key>` above — display order is file declaration order, and `<key>` is
+just a join key (auto-picked as a slug of the display name when written by the
+TUI, hand-editable to anything unique otherwise). `~/.ssh/config` is never read
+— every host that should appear in the panes view needs an explicit
+`host.<key>` entry (though `host.<key>.host` can still name an alias already
+defined in your own `~/.ssh/config`: the actual `ssh` invocation that connects
+to it consults that file normally, smarthistory just doesn't parse it itself).
 
 | Sub-key               | Meaning                                                                                  |
 | --------------------- | ---------------------------------------------------------------------------------------- |
 | `host.<key>`          | Display name (used in the picker)                                                        |
-| `host.<key>.host`     | The SSH `Host` alias (the connection target)                                             |
+| `host.<key>.host`     | The connection target (an `ssh` alias or bare hostname/IP)                               |
 | `host.<key>.hostname` | The real `HostName` to connect to (falls back to `host` if unset)                        |
 | `host.<key>.user`     | The SSH `User`                                                                           |
 | `host.<key>.port`     | The SSH `Port` (positive integer; invalid values are dropped with a warning)             |
@@ -1424,7 +1424,7 @@ to keep secrets out of a dotfile repo or override per-invocation.
 
 | Variable                         | Overrides        | Purpose                                                                                                                                                                                               |
 | -------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HOME`                           | —                | Used to locate `~/.config/smarthistory/config`, `~/.local/cache/smarthistory/`, and `~/.cache/tmux-history/` (and `~/.ssh/config` for host auto-append). On Windows, `USERPROFILE` is also consulted. |
+| `HOME`                           | —                | Used to locate `~/.config/smarthistory/config`, `~/.local/cache/smarthistory/`, and `~/.cache/tmux-history/`. |
 | `TMUX`                           | —                | Set by tmux when running inside a session. Without it, the `SESS` and `DIR` scopes fall back to `GLOBAL` and the `*` mode shows nothing.                                                              |
 | `TMUX_PANE`                      | —                | The TUI's own pane id (set by tmux). Used to filter "self" out of the `*`-mode list, and as the suffix of the per-pane log file (`output-${TMUX_PANE}.log`).                                          |
 | `SMARTHISTORY_TUI_MODE`          | `initialmode`    | Initial TUI scope: `SESS` / `DIR` / `GLOBAL` (case-insensitive).                                                                                                                                      |
@@ -1588,7 +1588,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `session.<key>.dir`             | path                              | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.exec`            | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.startup_command` | string                            | (reserved)                                                       | [Multiplexer integration](#multiplexer-integration)                       |
-| `host.<key>`                    | string                            | — (auto from `~/.ssh/config`)                                    | [Multiplexer integration](#multiplexer-integration)                       |
+| `host.<key>`                    | string                            | —                                                                 | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>.host`               | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>.hostname`           | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>.user`               | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
