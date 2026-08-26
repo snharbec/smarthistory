@@ -13704,6 +13704,71 @@ fn worktree_create_flow_new_branch_name_advances_to_pick_base_branch() {
     }
 }
 
+/// Regression test for a reported bug: typing a new branch name that
+/// contains a space (natural language, e.g. "fix login bug") used to
+/// reach `create_worktree` untouched — git branch names can't contain
+/// spaces at all, so `git worktree add -b "fix login bug" ...` failed
+/// with a raw git stderr message instead of just working. Mirrors
+/// `worktree_create_flow_new_branch_name_advances_to_pick_base_branch`
+/// exactly, just with a space (and a run of several) in the typed text.
+#[test]
+fn worktree_create_flow_new_branch_name_with_spaces_is_sanitized() {
+    use crate::tui::state::WorktreeCreateStep;
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_new_branch_spaces", "trunk") else {
+        return;
+    };
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "fix  login   bug".to_string();
+        assert!(!app.advance_worktree_create_flow());
+        let flow = app.worktree_create_flow.as_ref().expect("flow still open");
+        assert_eq!(flow.step, WorktreeCreateStep::PickBaseBranch);
+        assert_eq!(
+            flow.branch, "fix-login-bug",
+            "whitespace runs collapse to a single '-', a valid git ref character"
+        );
+        assert!(flow.is_new_branch);
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&repo);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// `sanitize_new_branch_name` unit tests — pure function, no fixture
+/// needed. Confirms it fixes exactly what breaks git ref names
+/// (spaces) without touching the `feature/PROJ-123`-style `/`
+/// hierarchy or case the JIRA-prefill worktree feature relies on.
+#[test]
+fn sanitize_new_branch_name_collapses_whitespace_runs() {
+    use crate::tui::mode::worktree::sanitize_new_branch_name;
+    assert_eq!(sanitize_new_branch_name("fix login bug"), "fix-login-bug");
+    assert_eq!(sanitize_new_branch_name("fix  login   bug"), "fix-login-bug");
+    assert_eq!(sanitize_new_branch_name("fix\tlogin\nbug"), "fix-login-bug");
+}
+
+#[test]
+fn sanitize_new_branch_name_preserves_slash_and_case() {
+    use crate::tui::mode::worktree::sanitize_new_branch_name;
+    assert_eq!(sanitize_new_branch_name("feature/PROJ-123"), "feature/PROJ-123");
+    assert_eq!(
+        sanitize_new_branch_name("feature/PROJ-123 fix login"),
+        "feature/PROJ-123-fix-login"
+    );
+}
+
+#[test]
+fn sanitize_new_branch_name_no_whitespace_is_unchanged() {
+    use crate::tui::mode::worktree::sanitize_new_branch_name;
+    assert_eq!(sanitize_new_branch_name("brand-new-branch"), "brand-new-branch");
+}
+
 /// Helper: a `directories_test_app` with one JIRA issue selected via
 /// the real `-` mode search path (`FakeJira` + `jira_maybe_autocall`,
 /// same fixture shape `jira_edit_comment_opens_jira_add_comment_mode`

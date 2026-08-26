@@ -49,6 +49,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `;` (worktree) create flow: typing a new branch name containing a space
+  (e.g. "fix login bug") reached `git worktree add -b` untouched — git
+  branch names can't contain spaces at all, so the create failed with a
+  raw git error instead of just working. Whitespace runs in a typed new
+  branch name now collapse to a single `-` (matching the sanitization the
+  `PickProject` step already did for project slugs), without touching the
+  `feature/PROJ-123` / `bug/PROJ-123` `/`-hierarchy or case the JIRA-row
+  branch-name prefill relies on.
 - "Create JIRA template from issue" could silently fail to write the
   template: once the "Template name?" prompt was submitted, the
   background fetch it kicked off had no keymap guard beyond

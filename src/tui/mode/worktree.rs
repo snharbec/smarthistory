@@ -319,6 +319,25 @@ pub(crate) fn default_base_branch(repo_root: &std::path::Path) -> String {
     }
 }
 
+/// Collapse whitespace runs in a freshly-typed new-branch name into a
+/// single `-` — git branch names can't contain spaces at all
+/// (`git check-ref-format` rejects them outright), so a name typed as
+/// natural language (e.g. "fix login bug") would otherwise reach
+/// `create_worktree` untouched and fail there with a raw git stderr
+/// message instead of just working. `typed` is expected already
+/// `.trim()`-ed by the caller, so only *internal* whitespace runs need
+/// collapsing here.
+///
+/// Deliberately narrower than `crate::util::slugify` (used one step
+/// later, for `PickProject`'s slug): that also lowercases and collapses
+/// `/` into `-`, which would silently break the `feature/PROJ-123` /
+/// `bug/PROJ-123` branch-naming convention `App::open_worktree_create_flow`
+/// pre-fills from a selected JIRA row — a branch name's `/` hierarchy and
+/// case both need to survive untouched here.
+pub(crate) fn sanitize_new_branch_name(typed: &str) -> String {
+    typed.split_whitespace().collect::<Vec<_>>().join("-")
+}
+
 /// Create a new `git worktree` checkout at `path`. When `is_new_branch`
 /// is true, `-b <branch>` creates the branch off `base_branch`;
 /// otherwise `branch` must already exist and is simply checked out
