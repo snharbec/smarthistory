@@ -21,6 +21,15 @@ pub enum Action {
     /// typed body (if any) is preserved across the switch exactly
     /// like picking a new mode from `PickPrefix` does.
     CycleNavPrefix,
+    /// Cycle through every prefix mode EXCEPT `*` panes, ordered
+    /// most-recently-used first (`App::mode_use_generation`, bumped
+    /// on every mode switch — a mode never used this session falls
+    /// back to `ALL_MODE_KINDS`'s declared order). Unlike
+    /// `CycleNavPrefix`'s fixed 3-mode sequence, this covers the
+    /// whole prefix set and reorders itself as you work. Reuses
+    /// `App::apply_prefix`, so the typed body (if any) survives the
+    /// switch exactly like `CycleNavPrefix`/`PickPrefix` do.
+    CycleRecentPrefixes,
     /// Toggle the duplicate filter.
     ToggleDuplicateFilter,
     /// Toggle between the active color scheme
@@ -725,6 +734,7 @@ impl Action {
             Action::Cancel => "cancel",
             Action::CycleMode => "cycle-mode",
             Action::CycleNavPrefix => "cycle-nav-prefix",
+            Action::CycleRecentPrefixes => "cycle-recent-prefixes",
             Action::ToggleDuplicateFilter => "toggle-duplicate-filter",
             Action::ToggleColorScheme => "toggle-color-scheme",
             Action::EditComment => "edit-comment",
@@ -796,6 +806,7 @@ impl Action {
             Action::Cancel => "Cancel",
             Action::CycleMode => "Cycle scope",
             Action::CycleNavPrefix => "Cycle panes/directories/zoxide",
+            Action::CycleRecentPrefixes => "Cycle recent prefix modes",
             Action::ToggleDuplicateFilter => "Toggle dedup",
             Action::ToggleColorScheme => "Toggle color scheme",
             Action::EditComment => "Edit comment",
@@ -882,6 +893,7 @@ impl Action {
             | Action::DeleteWordBackward => "navigation",
             Action::CycleMode
             | Action::CycleNavPrefix
+            | Action::CycleRecentPrefixes
             | Action::ToggleDuplicateFilter
             | Action::CycleExitFilter
             | Action::CycleSortOrder
@@ -975,6 +987,7 @@ impl Action {
             Action::Cancel => "C-c",
             Action::CycleMode => "C-g",
             Action::CycleNavPrefix => "C-z",
+            Action::CycleRecentPrefixes => "F12",
             Action::ToggleDuplicateFilter => "none",
             // `C-l` (ASCII 0x0C, form feed) is a free
             // key and a natural mnemonic for "Light
@@ -1553,6 +1566,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::Cancel,
     Action::CycleMode,
     Action::CycleNavPrefix,
+    Action::CycleRecentPrefixes,
     Action::ToggleDuplicateFilter,
     Action::ToggleColorScheme,
     Action::EditComment,

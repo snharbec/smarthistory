@@ -345,39 +345,44 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
     }
 }
 
+/// Every `ModeKind` variant, declaration order. The canonical
+/// "every variant" list — unlike [`ModeKind::all`], which is scoped
+/// to `check --prefix` diagnostics and excludes `History`/`Output`/
+/// `Question`. Used by [`mode_kind_by_display_name`] and by
+/// `App::cycle_recent_prefix_modes`'s recency-ordered candidate list
+/// (its fallback order for never-used modes).
+pub(crate) const ALL_MODE_KINDS: [ModeKind; 22] = [
+    ModeKind::History,
+    ModeKind::Output,
+    ModeKind::Llm,
+    ModeKind::Question,
+    ModeKind::Notes,
+    ModeKind::Todo,
+    ModeKind::Directories,
+    ModeKind::Panes,
+    ModeKind::Files,
+    ModeKind::Tags,
+    ModeKind::Ag,
+    ModeKind::Codegraph,
+    ModeKind::Jira,
+    ModeKind::Segments,
+    ModeKind::Similar,
+    ModeKind::Paperless,
+    ModeKind::Browser,
+    ModeKind::Zoxide,
+    ModeKind::Processes,
+    ModeKind::Pass,
+    ModeKind::ProjectPick,
+    ModeKind::Worktree,
+];
+
 /// Resolve a `ModeKind` from its `display_name()` string — the
-/// inverse of `display_name()`, covering every variant (unlike
-/// [`ModeKind::all`], which is scoped to `check --prefix` diagnostics
-/// and excludes `History`/`Output`/`Question`). Used by
+/// inverse of `display_name()`, covering every variant. Used by
 /// `Action::PrefixHelp` to map a highlighted `PrefixPicker` row
 /// (`PrefixOption::name`, which is documented to match this exactly)
 /// back to its mode.
 pub(crate) fn mode_kind_by_display_name(name: &str) -> Option<ModeKind> {
-    const ALL: [ModeKind; 22] = [
-        ModeKind::History,
-        ModeKind::Output,
-        ModeKind::Llm,
-        ModeKind::Question,
-        ModeKind::Notes,
-        ModeKind::Todo,
-        ModeKind::Directories,
-        ModeKind::Panes,
-        ModeKind::Files,
-        ModeKind::Tags,
-        ModeKind::Ag,
-        ModeKind::Codegraph,
-        ModeKind::Jira,
-        ModeKind::Segments,
-        ModeKind::Similar,
-        ModeKind::Paperless,
-        ModeKind::Browser,
-        ModeKind::Zoxide,
-        ModeKind::Processes,
-        ModeKind::Pass,
-        ModeKind::ProjectPick,
-        ModeKind::Worktree,
-    ];
-    ALL.iter().copied().find(|m| m.display_name() == name)
+    ALL_MODE_KINDS.iter().copied().find(|m| m.display_name() == name)
 }
 
 pub mod ag;

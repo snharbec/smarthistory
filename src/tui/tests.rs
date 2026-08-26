@@ -26236,6 +26236,134 @@ fn ctrl_z_dispatches_cycle_nav_prefix() {
     assert_eq!(app.query, format!("{}thing", p.directories));
 }
 
+// ===== Cycle recent prefix modes (F12) =====
+
+/// Using Notes, then Todo, then Segments (in that order) puts them in
+/// the cycle most-recently-used first: from Segments (the current
+/// mode), cycling steps to Todo, then Notes, then falls through to
+/// the untouched modes in `ALL_MODE_KINDS`'s declared order (`Output`
+/// is the first non-History/non-Panes entry there). A full lap (20
+/// presses — every `ModeKind` except `History` and `Panes`) returns
+/// to the starting mode.
+#[test]
+fn cycle_recent_prefix_modes_orders_by_most_recently_used_then_wraps() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+
+    app.query = format!("{}foo", p.notes);
+    app.refresh();
+    app.query = format!("{}foo", p.todo);
+    app.refresh();
+    app.query = format!("{}foo", p.segments);
+    app.refresh();
+
+    app.cycle_recent_prefix_modes();
+    assert_eq!(app.query, format!("{}foo", p.todo), "2nd most recent");
+
+    app.cycle_recent_prefix_modes();
+    assert_eq!(app.query, format!("{}foo", p.notes), "3rd most recent");
+
+    app.cycle_recent_prefix_modes();
+    assert_eq!(
+        app.query,
+        format!("{}foo", p.output),
+        "first untouched mode in ALL_MODE_KINDS's declared order"
+    );
+
+    // 17 more presses complete a full 20-mode lap back to Segments
+    // (Notes, Todo, Segments used + 17 untouched = 20 candidates:
+    // every ModeKind except History and Panes).
+    for _ in 0..17 {
+        app.cycle_recent_prefix_modes();
+    }
+    assert_eq!(
+        app.query,
+        format!("{}foo", p.segments),
+        "a full lap must wrap back to the starting mode"
+    );
+}
+
+/// `*` panes is never a candidate: being the active mode doesn't add
+/// it to the cycle, and cycling FROM panes mode jumps straight past
+/// it to the most-recently-used real candidate (here, the only one
+/// used at all: `Output`, since nothing else has been touched).
+#[test]
+fn cycle_recent_prefix_modes_never_visits_panes() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+
+    app.query = format!("{}foo", p.panes);
+    app.refresh();
+    app.cycle_recent_prefix_modes();
+    assert_eq!(
+        app.query,
+        format!("{}foo", p.output),
+        "panes must be skipped entirely, landing on the first ALL_MODE_KINDS candidate"
+    );
+
+    for _ in 0..25 {
+        assert_ne!(
+            app.query.chars().next(),
+            Some(p.panes),
+            "panes must never appear across a full cycle"
+        );
+        app.cycle_recent_prefix_modes();
+    }
+}
+
+/// Cycling from plain history (no prefix, or no query at all) jumps
+/// straight to the single most-recently-used mode — same "jump to
+/// the front" shape `cycle_nav_prefix`'s own unrelated-mode case uses.
+#[test]
+fn cycle_recent_prefix_modes_from_history_jumps_to_most_recent() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+
+    app.query = format!("{}search", p.jira);
+    app.refresh();
+    app.query = String::new();
+    app.cycle_recent_prefix_modes();
+    assert_eq!(app.query, p.jira.to_string());
+}
+
+/// The typed query body survives a cycle hop, same `apply_prefix`
+/// semantics every other prefix-switching action already guarantees.
+#[test]
+fn cycle_recent_prefix_modes_preserves_typed_body() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+
+    app.query = format!("{}hello world", p.notes);
+    app.refresh();
+    app.query = format!("{}hello world", p.todo);
+    app.refresh();
+
+    app.cycle_recent_prefix_modes();
+    assert_eq!(app.query, format!("{}hello world", p.notes));
+}
+
+/// `F12` is the documented default binding for `CycleRecentPrefixes`,
+/// and it must actually dispatch to `cycle_recent_prefix_modes` (not
+/// just be registered in the default-key table with nothing wired
+/// up) — same regression shape as `ctrl_z_dispatches_cycle_nav_prefix`.
+#[test]
+fn f12_dispatches_cycle_recent_prefix_modes() {
+    let mut app = global_test_app(&[("thing", 1)]);
+    let p = app.query_prefixes.clone();
+    app.query = format!("{}foo", p.notes);
+    app.refresh();
+    app.query = format!("{}foo", p.todo);
+    app.refresh();
+    handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(12),
+            crossterm::event::KeyModifiers::empty(),
+        ),
+    );
+    assert_eq!(app.query, format!("{}foo", p.notes));
+}
+
 #[test]
 fn prefix_picker_new_preselects_none_for_plain_query() {
     let app = global_test_app(&[("hello", 1)]);

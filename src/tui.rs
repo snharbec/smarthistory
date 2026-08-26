@@ -1285,6 +1285,30 @@ pub(crate) struct App {
     /// the same mode (e.g. narrowing a filter), since real
     /// history-table ids stay stable and useful across that.
     marked_mode_kind: Option<crate::tui::mode::ModeKind>,
+    /// Per-mode "last used" generation, bumped by `touch_mode_recency`
+    /// every time `refresh()` sees the active mode change (mirroring
+    /// `marked_mode_kind`'s own change-detection, not per-keystroke).
+    /// A monotonic counter rather than a wall-clock timestamp — only
+    /// relative order matters, and this sidesteps `Instant`
+    /// comparisons/serialization entirely. Read by
+    /// `cycle_recent_prefix_modes` (`Action::CycleRecentPrefixes`,
+    /// `F12`) to sort candidate modes most-recently-used first; a
+    /// mode absent from this map (never used this session) sorts as
+    /// if its generation were `0`, i.e. least recent.
+    mode_use_generation: std::collections::HashMap<crate::tui::mode::ModeKind, u64>,
+    /// The next value `touch_mode_recency` will hand out.
+    mode_use_counter: u64,
+    /// Set for the duration of `cycle_recent_prefix_modes`'s own
+    /// `apply_prefix` call. `apply_prefix` calls `self.refresh()`
+    /// internally, which would otherwise re-trigger the same
+    /// mode-change detection that bumps `mode_use_generation` —
+    /// meaning every cycle step would immediately promote the mode
+    /// it just landed ON to "most recent," collapsing the whole
+    /// feature into a toggle between the two most-recent modes.
+    /// Cycling is browsing, not "using" each mode it passes through;
+    /// only a real switch (typing a fresh prefix, `PickPrefix`,
+    /// `CycleNavPrefix`) should count.
+    suppress_mode_recency_touch: bool,
     /// True when the initial query was loaded from the persisted
     /// session file (so the user is editing a previously-saved query
     /// rather than typing fresh text). The first character typed
@@ -5107,6 +5131,9 @@ impl App {
             // it (rather than special-casing `ModeKind::History`
             // as the implicit starting mode).
             marked_mode_kind: None,
+            mode_use_generation: std::collections::HashMap::new(),
+            mode_use_counter: 0,
+            suppress_mode_recency_touch: false,
             query_prefilled,
             query_touched: false,
             // Start the cursor at the end of the query so the
@@ -5402,6 +5429,22 @@ impl App {
         if self.marked_mode_kind != Some(current_mode_kind) {
             self.marked_ids.clear();
             self.marked_mode_kind = Some(current_mode_kind);
+            // Record "last used" for `Action::CycleRecentPrefixes`.
+            // `History` (no prefix) and `Panes` are excluded — neither
+            // is ever a candidate in that cycle (see
+            // `cycle_recent_prefix_modes`), so there's no reason to
+            // grow the map with entries that can never matter.
+            // `suppress_mode_recency_touch` is set while that same
+            // cycle action is landing on a mode — see its own doc
+            // comment for why that transition must NOT count as a use.
+            if !self.suppress_mode_recency_touch
+                && !matches!(
+                    current_mode_kind,
+                    crate::tui::mode::ModeKind::History | crate::tui::mode::ModeKind::Panes
+                )
+            {
+                self.touch_mode_recency(current_mode_kind);
+            }
         }
         // Short-circuit: if the query text, mode, match
         // algorithm, exit filter, sort order, and directory
@@ -6452,6 +6495,46 @@ impl App {
             None => seq[0],
         };
         self.apply_prefix(Some(next));
+    }
+
+    /// Record that `mode` is the one just switched into, for
+    /// `cycle_recent_prefix_modes`'s most-recently-used ordering.
+    /// Called from `refresh()`'s mode-change detection, so this runs
+    /// once per mode *entry*, not once per keystroke.
+    fn touch_mode_recency(&mut self, mode: crate::tui::mode::ModeKind) {
+        self.mode_use_counter += 1;
+        self.mode_use_generation.insert(mode, self.mode_use_counter);
+    }
+
+    /// `Action::CycleRecentPrefixes` (`F12`): cycle through every
+    /// prefix mode EXCEPT `*` panes, most-recently-used first. Unlike
+    /// `cycle_nav_prefix`'s fixed 3-mode sequence, the order here is
+    /// dynamic — `mode_use_generation`, bumped on every mode switch —
+    /// with modes never used this session falling back to
+    /// `ALL_MODE_KINDS`'s declared order (a stable sort keeps ties in
+    /// that order). Delegates to `apply_prefix`, so the typed query
+    /// body survives the switch exactly like `cycle_nav_prefix`/the
+    /// `PickPrefix` picker.
+    fn cycle_recent_prefix_modes(&mut self) {
+        use crate::tui::mode::ModeKind;
+        let mut candidates: Vec<ModeKind> = crate::tui::mode::ALL_MODE_KINDS
+            .iter()
+            .copied()
+            .filter(|m| *m != ModeKind::History && *m != ModeKind::Panes)
+            .collect();
+        candidates.sort_by_key(|m| {
+            std::cmp::Reverse(self.mode_use_generation.get(m).copied().unwrap_or(0))
+        });
+        let current = crate::tui::mode::active_mode(self);
+        let next = match candidates.iter().position(|m| *m == current) {
+            Some(idx) => candidates[(idx + 1) % candidates.len()],
+            // Currently in History, Panes, or no query yet: jump
+            // straight to the single most-recently-used mode.
+            None => candidates[0],
+        };
+        self.suppress_mode_recency_touch = true;
+        self.apply_prefix(Some(next.prefix(&self.query_prefixes)));
+        self.suppress_mode_recency_touch = false;
     }
 
     /// Cycle the exit-code filter (All → Success → Failed → All).
@@ -13575,6 +13658,10 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
         }
         Action::CycleNavPrefix => {
             app.cycle_nav_prefix();
+            false
+        }
+        Action::CycleRecentPrefixes => {
+            app.cycle_recent_prefix_modes();
             false
         }
         Action::ToggleDuplicateFilter => {
