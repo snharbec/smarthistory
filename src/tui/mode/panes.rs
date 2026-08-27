@@ -385,64 +385,71 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     };
     let filter = app.panes_pattern().trim();
     let case_sensitive = app.is_case_sensitive();
-    // Group-scoping tokens (e.g. `note` -> a live `NoteSearch`
-    // workspace, `dir` -> the `Directories` group) are a
-    // Substring-mode-only convenience layered on top of the plain
-    // AND-token check — Fuzzy/Regex mode matches the whole
-    // `app.query` as one pattern via `query_matches_text` below,
-    // not per-token, so scoping is skipped there and `tokens` is
-    // computed the plain way (unchanged from before this feature
-    // existed).
-    let groups = compute_groups(&section_rows);
-    let (tokens, scoped_group_idxs): (Vec<String>, Option<std::collections::HashSet<usize>>) =
-        if app.match_algorithm == MatchAlgorithm::Substring {
-            classify_pattern_tokens(filter, case_sensitive, &groups)
-        } else {
-            (
-                filter
-                    .split_whitespace()
-                    .filter(|t| !t.is_empty())
-                    .map(|t| if case_sensitive { t.to_string() } else { t.to_lowercase() })
-                    .collect(),
-                None,
-            )
-        };
-    // Narrow to the scoped group(s), if any token matched a
-    // group's header label. Applied on top of the F7/F8/F9
-    // panes-filter restriction above.
-    let section_rows: Vec<HistoryRow> = match &scoped_group_idxs {
-        Some(idxs) => {
-            let mut sorted: Vec<&usize> = idxs.iter().collect();
-            sorted.sort();
-            let mut kept = Vec::new();
-            for &i in sorted {
-                kept.extend_from_slice(&section_rows[groups[i].start..groups[i].end]);
-            }
-            kept
-        }
-        None => section_rows,
-    };
-    if tokens.is_empty() && scoped_group_idxs.is_none() {
+    // Every whitespace-separated word in the query is a content
+    // token that must appear (AND) as a substring of a matching
+    // row's own command/comment/output. ALL tokens are always
+    // required — e.g. "ship1 host" only matches rows containing
+    // both "ship1" and "host" — with exactly one exemption, applied
+    // per group (see `remaining_tokens_for_group` below): a token
+    // that's a substring of a GROUP's own header label (e.g. "host"
+    // -> the `hosts` group's label) is implied for that group's own
+    // rows (they're trivially "hosts"), so it's dropped from the AND
+    // check for members of THAT group only — every other token still
+    // applies there, and the full token list still applies, unexempt,
+    // to every other group. If every token in the query happens to be
+    // consumed by one group's heading this way (e.g. typing just
+    // "hosts"), that group's AND check becomes vacuous and the whole
+    // group is shown — but that's a side effect of the AND rule, not
+    // a separate "show everything" special case.
+    let tokens: Vec<String> = filter
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| if case_sensitive { t.to_string() } else { t.to_lowercase() })
+        .collect();
+    if tokens.is_empty() {
         return Ok(apply_collapsed_groups(
             insert_sessions_group_header(section_rows),
             &app.collapsed_pane_groups,
         ));
     }
-    // Per-row match predicate. Used for both
-    // the Substring fast path and the Fuzzy /
-    // Regex delegating path.
-    let row_matches = |r: &HistoryRow| -> bool {
-        // When the match algorithm is Substring,
-        // use the fast inline AND-by-token check.
-        // When it's Fuzzy or Regex, delegate to
-        // `query_matches_text` so the active
-        // algorithm is honored.
+    let groups = compute_groups(&section_rows);
+    // Lower-cased once per token for the heading-match check below,
+    // which (like `classify_pattern_tokens`) is always
+    // case-insensitive regardless of `case_sensitive` — a group's
+    // own label matches "host" the same whether the user typed
+    // "Host" or "host".
+    let tokens_lc: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+    // For group `gi`, the tokens that still have to be checked
+    // against each of its own rows — every token EXCEPT one that's a
+    // substring of that group's own header label. Substring-mode
+    // only; Fuzzy/Regex has no per-token heading exemption (matches
+    // `app.query` as one whole pattern via `query_matches_text`
+    // instead, unaffected by this).
+    let remaining_tokens_for_group = |gi: usize| -> Vec<String> {
+        if app.match_algorithm != MatchAlgorithm::Substring {
+            return tokens.clone();
+        }
+        tokens
+            .iter()
+            .zip(tokens_lc.iter())
+            .filter(|(_, lower)| {
+                !(lower.chars().count() >= MIN_GROUP_SCOPE_TOKEN_LEN
+                    && groups[gi].label_lc.contains(lower.as_str()))
+            })
+            .map(|(t, _)| t.clone())
+            .collect()
+    };
+    // Per-row match predicate against an explicit token list. Used
+    // for both the Substring fast path and the Fuzzy / Regex
+    // delegating path (which ignores `toks` and matches the whole
+    // query instead).
+    let matches_with = |r: &HistoryRow, toks: &[String]| -> bool {
         if app.match_algorithm != MatchAlgorithm::Substring {
             return app.query_matches_text(&r.command)
                 || app.query_matches_text(&r.comment)
                 || (!r.output.is_empty() && app.query_matches_text(&r.output));
         }
-        row_matches_content_tokens(r, &tokens, case_sensitive)
+        row_matches_content_tokens(r, toks, case_sensitive)
     };
     // Group-aware filter: the panes-mode rows are already laid
     // out as a linearised tree (`header, child, child, …,
@@ -451,18 +458,25 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // `mode == "workspace"` (live workspace, the `Directories`
     // section, or the `hosts` section), followed by its
     // zero-or-more children (`pane` / `session` / `host`) up to
-    // the next header or end of list. A group matches if ANY
-    // row in it matches (header-label match OR any-child
-    // match), in which case the WHOLE group is emitted — the
-    // parent-wins-and-child-wins semantic: typing a workspace
-    // label keeps the whole workspace, typing a pane command
-    // keeps that pane AND its parent header, and typing (say)
-    // "Home" keeps the `Directories` header AND every configured
-    // session, not just the one that matched — the header would
-    // otherwise vanish from a list where the only match is one
-    // of its children.
+    // the next header or end of list.
+    //
+    // Only the header itself is exempt from having to match the
+    // query — a group with at least one matching child keeps its
+    // header (so the user sees which workspace/section a match
+    // belongs to), but non-matching siblings are dropped, not kept
+    // along for the ride. E.g. `*Home` shows the `Directories`
+    // header plus only the `Home` session, not every other
+    // configured session too. Each row is checked against that
+    // group's `remaining_tokens_for_group` (see above), so a token
+    // consumed by the group's own heading doesn't have to appear in
+    // its rows' own text.
     let mut out: Vec<HistoryRow> = Vec::new();
     let mut idx = 0;
+    // Tracks the position in `groups` (built by `compute_groups`
+    // above, over this same `section_rows`) so it can be passed to
+    // `remaining_tokens_for_group` — the two traversals segment
+    // `section_rows` identically, so the indices stay in lockstep.
+    let mut group_idx = 0usize;
     while idx < section_rows.len() {
         let row = &section_rows[idx];
         if row.mode == "workspace" {
@@ -472,15 +486,26 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                 group_end += 1;
             }
             let group = &section_rows[group_start..group_end];
-            if group.iter().any(row_matches) {
-                out.extend_from_slice(group);
+            let remaining = remaining_tokens_for_group(group_idx);
+            let header = &group[0];
+            let matching_children: Vec<HistoryRow> = group[1..]
+                .iter()
+                .filter(|r| matches_with(r, &remaining))
+                .cloned()
+                .collect();
+            if matches_with(header, &remaining) || !matching_children.is_empty() {
+                out.push(header.clone());
+                out.extend(matching_children);
             }
+            group_idx += 1;
             idx = group_end;
         } else {
             // A stray child that lost its header for any reason
             // (defensive — shouldn't happen given the two
-            // builders above always emit header-then-children).
-            if row_matches(row) {
+            // builders above always emit header-then-children). No
+            // group means no heading exemption, so it's checked
+            // against the full, unreduced token list.
+            if matches_with(row, &tokens) {
                 out.push(row.clone());
             }
             idx += 1;
