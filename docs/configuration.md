@@ -485,9 +485,11 @@ dropdown.matchmode=substring
 When the command line is empty, show predicted next commands instead of showing
 nothing. Predictions come from the same successor-frequency data
 `Ctrl+S`/`smarthistory next` already uses — the commands that most often
-followed the last command actually run in this shell — capped at 3 candidates
-regardless of [`dropdown.limit`](#dropdownlimit): a "what's next" hint at the
-very start of a line is meant to be a quick glance, not a long list to scan.
+followed the last command actually run in this shell — the passive glance shown
+on a fresh prompt is capped at 3 candidates regardless of
+[`dropdown.limit`](#dropdownlimit): a "what's next" hint at the very start of a
+line is meant to be a quick glance, not a long list to scan. Explicitly paging
+through it with `Up`/`Down` (see below) draws from a deeper pool of up to 15.
 With nothing run yet in the session — a brand-new shell, before any command has
 executed — there's no last command to predict a successor from, so the dropdown
 falls back to the most frequent commands among the last 100 history rows instead
@@ -516,12 +518,17 @@ opposite direction, and once it runs out of more-recent real history to show —
 either because you pressed `Down` first, with nothing navigated yet, or because
 you `Up`'d several times and `Down`'d all the way back — the next `Down`
 continues past "the most recent thing that happened" into "what usually happens
-next": it activates the prediction dropdown and highlights its first (most
-likely) candidate, exactly as if you'd navigated there with the arrow keys. From
-there, `Up`/`Down` cycle the (up to 3) predicted candidates like a normal
-typed-search dropdown — except pressing `Up` again at the very top (most likely)
-candidate exits predictions and resumes real history right where `Down` left
-off, the mirror image of how you got there. Typing, running a command, or
+next": it activates the prediction list and highlights its first (most likely)
+candidate, exactly as if you'd navigated there with the arrow keys. From there,
+`Up`/`Down` page through a deeper pool of up to 15 candidates 3 at a time — the
+box always shows the current pick plus the next couple of runners-up, the same
+sliding-window preview real history walking uses — rather than wrapping back to
+the first candidate once you've stepped past the initial 3. Reaching either end
+of the pool stops there with a status hint instead of wrapping: pressing `Up`
+again at the very top (most likely) candidate exits predictions and resumes
+real history right where `Down` left off, the mirror image of how you got
+there; pressing `Down` past the last (least likely) candidate in the pool just
+stays put with a "no more suggestions" hint. Typing, running a command, or
 cancelling (`Ctrl+C`/`Esc`) resets everything back to a fresh empty line.
 `Tab`/`Enter` accept whichever candidate is currently highlighted at any point
 along the way, same as a normal search result.

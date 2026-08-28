@@ -193,16 +193,19 @@ bindkey '^R' _smarthistory_select
 
 # Up-arrow: when the user has typed something, replace the current line
 # with the next match from the smarthistory DB. Each press moves back
-# through the result set. When the line is empty, fall through to
-# zsh's native history walk so empty Up/Down still does what the user
-# expects.
+# through the result set. When the result set is exhausted (either the
+# typed query matches nothing, or the current scope — SESS / DIR /
+# GLOBAL, set by Ctrl-g — has no older entries), the widget stops
+# advancing and prints a hint. There is NO fallthrough to zsh's native
+# history walk: that would defeat the whole point of this widget, and
+# the project docs ("never falls through to zsh's native history")
+# promise exactly that. The user widens the scope manually with Ctrl-G.
 #
 # State is cached in two module-level variables so subsequent Up presses
 # can walk the result set without re-querying the DB:
 #   _smarthistory_matches : newline-separated list of all matches
 #   _smarthistory_index   : 0-based position of the currently shown match
 # Both are reset whenever LBUFFER changes (see the zle-line-precmd hook).
-_smarthistory_matches=""
 _smarthistory_index=0
 # Cache key for the last search: "mode|pwd|prefix". Used to detect when
 # the user changes directory, switches scope (Ctrl-g), or types a new
@@ -542,6 +545,21 @@ typeset -ga _smarthistory_dropdown_exit
 # with the two arrays above by `_smarthistory_dropdown_render`, read
 # only by `_smarthistory_dropdown_paint`.
 typeset -ga _smarthistory_dropdown_hl_spans
+
+# Larger look-ahead pool for the "what usually comes next" predictions
+# reached via Down once real history is exhausted (see
+# `_smarthistory_try_activate_predictions` further down this file) —
+# fetched once per activation and then paged through 3 at a time by
+# `_smarthistory_prediction_walk_paint`, the same way
+# `_smarthistory_history_walk_paint` pages through real history. Kept
+# separate from `_smarthistory_dropdown_candidates` (which only ever
+# holds the currently-VISIBLE 3-item window, shared with the generic
+# dropdown paint) so continuing past that window reveals further,
+# already-fetched predictions instead of wrapping back to the first
+# one. `_smarthistory_prediction_index` is a 1-based index into this
+# array, same convention as `_smarthistory_index` for real history.
+typeset -ga _smarthistory_prediction_lines
+typeset -g _smarthistory_prediction_index=0
 
 # Clear the menu (if any) and mark it not visible. Safe to call
 # unconditionally (e.g. from precmd) even when nothing is showing.
@@ -1495,6 +1513,34 @@ _smarthistory_dropdown_paint() {
 # Re-query smarthistory for the current LBUFFER and redraw. Called
 # after every keystroke (via the wrapped self-insert/delete/paste
 # widgets below) when the dropdown is enabled.
+# Shared "what usually comes next" query — the same successor-frequency
+# lookup (or, with no last command yet, the frequent-recent-commands
+# fallback) both the passive 3-row glance `_smarthistory_dropdown_render`
+# shows on a fresh empty prompt AND the deeper paging pool
+# `_smarthistory_fetch_prediction_pool` fetches need. Parameterized on
+# `$1` (the candidate limit) instead of each call site hardcoding its
+# own. Sets `REPLY` to the raw, already `cut -f2`'d command list (one
+# per line) — same shape the old inline version produced.
+_smarthistory_predict_raw() {
+    local limit=$1
+    local -a _sm_predict_scope_args
+    case "$_smarthistory_mode" in
+        sess)   _sm_predict_scope_args=(--session) ;;
+        dir)    _sm_predict_scope_args=(--directory "$PWD") ;;
+        global) _sm_predict_scope_args=() ;;
+    esac
+    if [[ -n "$_smarthistory_last_cmd" ]]; then
+        REPLY=$(smarthistory next "$_smarthistory_last_cmd" --limit "$limit" "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
+    else
+        local -a _sm_frequent_scope_args
+        case "$_smarthistory_mode" in
+            dir) _sm_frequent_scope_args=(--directory "$PWD") ;;
+            *)   _sm_frequent_scope_args=() ;;
+        esac
+        REPLY=$(smarthistory next --limit "$limit" "${_sm_frequent_scope_args[@]}" 2>/dev/null | cut -f2)
+    fi
+}
+
 _smarthistory_dropdown_render() {
     # See `_smarthistory_dropdown_paint` for why we disable
     # `xtrace` here too — the render function calls paint, and
@@ -1566,33 +1612,8 @@ _smarthistory_dropdown_render() {
         # below uses — a SESS-scoped prediction only ever suggests a
         # successor actually observed in this session, not one
         # pulled in from an unrelated concurrently-active pane.
-        local -a _sm_predict_scope_args
-        case "$_smarthistory_mode" in
-            sess)   _sm_predict_scope_args=(--session) ;;
-            dir)    _sm_predict_scope_args=(--directory "$PWD") ;;
-            global) _sm_predict_scope_args=() ;;
-        esac
-        if [[ -n "$_smarthistory_last_cmd" ]]; then
-            raw=$(smarthistory next "$_smarthistory_last_cmd" --limit 3 "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
-        else
-            # Nothing run yet this session — no successor to predict
-            # from. Fall back to the most frequent commands among the
-            # last 100 history rows, so the dropdown still has
-            # something useful instead of staying empty. NOT scoped
-            # by SESS here even in SESS mode: precmd only records a
-            # row under this session's id once a command actually
-            # completes, so a `--session`-scoped query is guaranteed
-            # to find zero rows at this exact moment, on every single
-            # new shell -- the scope itself would be self-defeating.
-            # DIR scope stays, since prior sessions in this same
-            # directory are a genuinely useful signal here.
-            local -a _sm_frequent_scope_args
-            case "$_smarthistory_mode" in
-                dir) _sm_frequent_scope_args=(--directory "$PWD") ;;
-                *)   _sm_frequent_scope_args=() ;;
-            esac
-            raw=$(smarthistory next --limit 3 "${_sm_frequent_scope_args[@]}" 2>/dev/null | cut -f2)
-        fi
+        _smarthistory_predict_raw 3
+        raw=$REPLY
     else
         local -a args
         # `--prefix`: match commands that START WITH what's typed, not a
@@ -2327,12 +2348,85 @@ _smarthistory_unescape() {
 _smarthistory_try_activate_predictions() {
     [[ "$_smarthistory_dropdown_enabled" = "1" ]] || return 1
     [[ -z "$LBUFFER" ]] || return 1
-    _smarthistory_dropdown_render
-    if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-        _smarthistory_dropdown_navigate_next
-        return 0
+    _smarthistory_fetch_prediction_pool
+    (( ${#_smarthistory_prediction_lines} == 0 )) && return 1
+    _smarthistory_prediction_index=1
+    _smarthistory_prediction_walk_paint
+    return 0
+}
+
+# Fetch a deeper "what usually comes next" pool than the 3-row passive
+# glance `_smarthistory_dropdown_render` shows on a fresh empty prompt
+# — populates `_smarthistory_prediction_lines` so Down can keep paging
+# 3-at-a-time through further candidates (`_smarthistory_prediction_next`)
+# instead of wrapping back to the first one once the initial 3 are
+# exhausted. 15 is a generous but bounded look-ahead: `smarthistory
+# next` ranks by frequency, so candidates past the first dozen or so
+# are rarely worth scrolling to, and an unbounded fetch would turn a
+# quick "what usually comes next" glance into a full history browse —
+# that's already what plain Up/Down real-history walking is for.
+_smarthistory_fetch_prediction_pool() {
+    _smarthistory_predict_raw 15
+    _smarthistory_prediction_lines=("${(f)REPLY}")
+    # `${(f)REPLY}` on an empty string yields one empty element, not
+    # zero — drop it, same fix `_smarthistory_dropdown_render` already
+    # applies to its own raw-lines split.
+    if (( ${#_smarthistory_prediction_lines} == 1 )) && [[ -z "${_smarthistory_prediction_lines[1]}" ]]; then
+        _smarthistory_prediction_lines=()
     fi
-    return 1
+    _smarthistory_prediction_index=0
+}
+
+# Build the 3-item look-ahead window around the current position in
+# `_smarthistory_prediction_lines` and paint it through the same box
+# `_smarthistory_history_walk_paint` draws for real history, reusing
+# its module-level state instead of a second rendering path. Candidates
+# are appended furthest-ahead-first so the current selection (always
+# `off == 0`, appended last) lands at the bottom of the box, exactly
+# mirroring the real-history box's layout.
+_smarthistory_prediction_walk_paint() {
+    _smarthistory_dropdown_candidates=()
+    _smarthistory_dropdown_meta=()
+    _smarthistory_dropdown_exit=()
+    _smarthistory_dropdown_hl_spans=()
+    local n=${#_smarthistory_prediction_lines}
+    local off idx
+    for off in 2 1 0; do
+        idx=$((_smarthistory_prediction_index + off))
+        (( idx <= n )) && _smarthistory_dropdown_candidates+=("${_smarthistory_prediction_lines[$idx]}")
+    done
+    _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
+    _smarthistory_dropdown_chosen=1
+    _smarthistory_dropdown_visible=1
+    _smarthistory_dropdown_paint
+}
+
+# Page forward through the prediction pool one at a time. Unlike the
+# generic `_smarthistory_dropdown_navigate_next` the typed-search
+# dropdown uses, this never wraps: the pool can hold up to 15
+# candidates, far more than the 3 visible at once, so wrapping back to
+# the first prediction after scrolling past a dozen of them would read
+# as far more broken than simply stopping. At the end of the pool,
+# stays put and warns — same convention as `_smarthistory_up_history`'s
+# oldest-real-history-entry boundary.
+_smarthistory_prediction_next() {
+    local n=${#_smarthistory_prediction_lines}
+    if (( _smarthistory_prediction_index >= n )); then
+        _smarthistory_prediction_walk_paint
+        zle -M "no more suggestions"
+        return
+    fi
+    _smarthistory_prediction_index=$(( _smarthistory_prediction_index + 1 ))
+    _smarthistory_prediction_walk_paint
+}
+
+# Page backward through the prediction pool one at a time. The very
+# top (index 1, most likely) is handled by the caller
+# (`_smarthistory_up_history`), which exits predictions entirely
+# instead of calling this — the `> 1` guard here is defensive only.
+_smarthistory_prediction_prev() {
+    (( _smarthistory_prediction_index > 1 )) && _smarthistory_prediction_index=$(( _smarthistory_prediction_index - 1 ))
+    _smarthistory_prediction_walk_paint
 }
 
 # Build the 3-item (or fewer, near the end of the match list) sliding
@@ -2420,7 +2514,7 @@ _smarthistory_up_history() {
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         if [[ -z "$LBUFFER" && $_smarthistory_dropdown_chosen -eq 1 \
-            && $_smarthistory_dropdown_selected -eq 0 ]]; then
+            && $_smarthistory_prediction_index -eq 1 ]]; then
             _smarthistory_dropdown_clear
             # Resume real-history walking at exactly the entry Down
             # couldn't get past (rather than skipping beyond it): the
@@ -2437,6 +2531,13 @@ _smarthistory_up_history() {
             _smarthistory_debug_log "up: exiting predictions at top, resuming real history"
             # Falls through to the shared real-history logic below —
             # no `return` here.
+        elif [[ -z "$LBUFFER" ]]; then
+            # Mid-pool (not yet at the very top prediction): page
+            # backward within `_smarthistory_prediction_lines` instead
+            # of the generic wraparound cycle — see
+            # `_smarthistory_prediction_prev`.
+            _smarthistory_prediction_prev
+            return
         else
             _smarthistory_dropdown_navigate_prev
             return
@@ -2473,7 +2574,14 @@ _smarthistory_up_history() {
         # hits this boundary, which reads as "the whole preview just
         # broke" rather than "you're at the oldest entry").
         _smarthistory_history_walk_paint
-        zle -M "no more history"
+        # The previous "no more history" was too generic — it looked
+        # like the widget had broken, especially because the box
+        # itself stays put at the boundary (index never advances),
+        # which users reported as a "wrap to the first element." The
+        # actual cause is just that the current scope (SESS / DIR /
+        # GLOBAL) is exhausted; the fix is to widen the scope with
+        # Ctrl-G. Spell it out so the next step is obvious.
+        zle -M "oldest in ${(U)_smarthistory_mode}; Ctrl-G for broader scope"
         _smarthistory_debug_log "up: at end of list (index=$_smarthistory_index/$n), no-op"
         return
     fi
@@ -2516,7 +2624,14 @@ _smarthistory_down_history() {
     # intercepted here.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
-        _smarthistory_dropdown_navigate_next
+        if [[ -z "$LBUFFER" ]]; then
+            # Already inside the prediction list: page forward within
+            # `_smarthistory_prediction_lines` instead of the generic
+            # wraparound cycle — see `_smarthistory_prediction_next`.
+            _smarthistory_prediction_next
+        else
+            _smarthistory_dropdown_navigate_next
+        fi
         return
     fi
     [[ $_smarthistory_dropdown_visible -eq 1 ]] && _smarthistory_dropdown_clear
@@ -2583,7 +2698,10 @@ _smarthistory_down_history() {
         fi
         # No prediction available (disabled, or nothing to predict) —
         # buffer is already cleared, same as before predictions existed.
-        zle -M "no older history (line cleared)"
+        # Mirror the Up boundary's Ctrl-G hint: the user just hit the
+        # newest entry in the current scope, and "Ctrl-G for broader
+        # scope" is the same way out as the top-of-list case.
+        zle -M "newest in ${(U)_smarthistory_mode} (line cleared); Ctrl-G for broader scope"
         _smarthistory_debug_log "down: at start of list, cleared BUFFER"
         return
     fi

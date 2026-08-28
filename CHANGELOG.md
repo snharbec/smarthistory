@@ -72,6 +72,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `dropdown.predict`'s prediction list (reached via `Down` once real history
+  on an empty line is exhausted): pressing `Down` repeatedly past the 3
+  initially-shown candidates wrapped straight back to the first one instead
+  of revealing further suggestions, which read as the widget being stuck.
+  `Up`/`Down` now page through a deeper pool of up to 15 predicted
+  candidates 3 at a time, mirroring the sliding-window preview real
+  history walking already uses, and stop with a status hint at either end
+  instead of wrapping — `Up` at the top still exits back into real history
+  as before. See
+  [docs/configuration.md#dropdownpredict](docs/configuration.md#dropdownpredict).
 - `;` (worktree) create flow: typing a new branch name containing a space
   (e.g. "fix login bug") reached `git worktree add -b` untouched — git
   branch names can't contain spaces at all, so the create failed with a
