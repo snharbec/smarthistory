@@ -13562,6 +13562,76 @@ fn worktree_list_branches_lists_local_branches() {
     let _ = std::fs::remove_dir_all(&repo);
 }
 
+/// Regression test: a repo with branches that exist only on the
+/// remote (never checked out locally) previously showed just the
+/// handful of local branches in the `PickBranch`/`PickBaseBranch`
+/// picker — `list_branches` only queried `refs/heads`. It must also
+/// surface remote-tracking branches under their bare short name
+/// (`remote-only`, not `origin/remote-only` — see `list_branches`'s
+/// doc comment for why), without duplicating a branch that exists
+/// both locally and on the remote.
+#[test]
+fn worktree_list_branches_includes_remote_only_branches_deduped() {
+    let Some(local) = worktree_scratch_repo("list_branches_remote", "trunk") else {
+        return;
+    };
+    let bare = std::env::temp_dir().join(format!(
+        "smarthistory_worktree_create_list_branches_remote_bare_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&bare);
+    if !std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&bare)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_dir_all(&local);
+        return;
+    }
+    let run = |args: &[&str], dir: &std::path::Path| {
+        std::process::Command::new("git").arg("-C").arg(dir).args(args).output()
+    };
+    // "shared" exists both locally and on the remote once pushed —
+    // must appear exactly once in the result, not duplicated.
+    let _ = run(&["branch", "shared"], &local);
+    let _ = run(&["remote", "add", "origin", bare.to_str().unwrap()], &local);
+    let _ = run(&["push", "origin", "trunk", "shared"], &local);
+    // "remote-only" is pushed from a second clone, so it never
+    // becomes a local branch of `local` until (if ever) checked out.
+    let other_clone = std::env::temp_dir().join(format!(
+        "smarthistory_worktree_create_list_branches_remote_other_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&other_clone);
+    let _ = std::process::Command::new("git")
+        .args(["clone", bare.to_str().unwrap(), other_clone.to_str().unwrap()])
+        .output();
+    // The bare repo's own `HEAD` symref points nowhere until
+    // something is pushed with `git push -u` / `set-head`, so a
+    // fresh clone lands with no checkout — check out `trunk`
+    // explicitly first, otherwise `checkout -b` has no commit to
+    // branch from and the later push has nothing to send.
+    let _ = run(&["checkout", "trunk"], &other_clone);
+    let _ = run(&["checkout", "-b", "remote-only"], &other_clone);
+    let _ = run(&["push", "origin", "remote-only"], &other_clone);
+    let _ = run(&["fetch", "origin"], &local);
+
+    let branches = crate::tui::mode::worktree::list_branches(&local);
+    assert!(branches.contains(&"remote-only".to_string()), "got: {branches:?}");
+    assert_eq!(
+        branches.iter().filter(|b| *b == "shared").count(),
+        1,
+        "branch existing both locally and remotely must not be duplicated, got: {branches:?}"
+    );
+    assert!(!branches.iter().any(|b| b.contains("HEAD")), "got: {branches:?}");
+
+    let _ = std::fs::remove_dir_all(&local);
+    let _ = std::fs::remove_dir_all(&bare);
+    let _ = std::fs::remove_dir_all(&other_clone);
+}
+
 /// With no remote and no `main`/`master` branch, the base falls back
 /// to the repo's own current branch.
 #[test]

@@ -260,16 +260,16 @@ pub(crate) fn build_rows(
     rows
 }
 
-/// List every local branch of the repo at `repo_root`, in `git
-/// for-each-ref`'s own order. Used to populate the `PickBranch` /
-/// `PickBaseBranch` steps of the `Action::CreateWorktree` flow.
-/// `--format='%(refname:short)'` gives bare branch names with none of
-/// `git branch --list`'s `*`/indentation markers to strip.
-pub(crate) fn list_branches(repo_root: &std::path::Path) -> Vec<String> {
+/// `--format='%(refname:short)'` names under `pattern` (e.g.
+/// `refs/heads` or `refs/remotes`), in `git for-each-ref`'s own
+/// (alphabetical) order. Degrades to empty on any git failure, the
+/// same best-effort convention every other listing function in this
+/// module uses.
+fn ref_short_names(repo_root: &std::path::Path, pattern: &str) -> Vec<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
-        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .args(["for-each-ref", "--format=%(refname:short)", pattern])
         .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
@@ -279,6 +279,36 @@ pub(crate) fn list_branches(repo_root: &std::path::Path) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Every branch the repo at `repo_root` knows about: local branches
+/// first (in their own order, unchanged from before), then any
+/// remote-tracking branch (`refs/remotes/<remote>/<name>`, symbolic
+/// `HEAD` refs like `origin/HEAD` excluded) that has no local branch
+/// of the same short name, appended in their own order. Used to
+/// populate the `PickBranch` / `PickBaseBranch` steps of the
+/// `Action::CreateWorktree` flow — a repo with dozens of remote
+/// branches that were never checked out locally previously showed
+/// only the handful of local ones. Deliberately kept as bare short
+/// names (`feature/x`, not `origin/feature/x`): passed straight to
+/// `git worktree add <path> <branch>`, that's exactly the form git
+/// itself DWIMs into "create a local branch tracking the matching
+/// remote branch".
+pub(crate) fn list_branches(repo_root: &std::path::Path) -> Vec<String> {
+    let mut branches = ref_short_names(repo_root, "refs/heads");
+    let mut seen: std::collections::HashSet<String> = branches.iter().cloned().collect();
+    for remote_ref in ref_short_names(repo_root, "refs/remotes") {
+        let Some((_remote, short)) = remote_ref.split_once('/') else {
+            continue;
+        };
+        if short == "HEAD" {
+            continue;
+        }
+        if seen.insert(short.to_string()) {
+            branches.push(short.to_string());
+        }
+    }
+    branches
 }
 
 /// The branch to preselect as the base for a new worktree branch:
