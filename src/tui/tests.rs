@@ -29232,19 +29232,15 @@ fn panes_select_initial_row_finds_pane_matching_query() {
     assert_eq!(selected_row.session_id, "w34:p1");
 }
 
-/// The user's follow-up report: group-name scoping worked for the
-/// fixed `Directories`/`hosts` groups but not for live tmux/herdr
-/// workspaces. "note claude" against a `NoteSearch` workspace (one
-/// header, two panes — built via `panes_sort_test_app`, which
-/// groups same-labeled panes under a single header, matching real
-/// multiplexer behavior) must scope to that workspace via "note" (a
-/// substring of its own label, not either pane's text), keep the
-/// WHOLE workspace visible (header + both panes, not narrowed to
-/// just the claude match), and select the pane matching "claude" —
-/// not fall back to selecting the `NoteSearch` header, which is
-/// what happened before `classify_pattern_tokens` learned to treat
-/// every `mode == "workspace"` header's own label as a scope
-/// candidate instead of only the two fixed configured groups.
+/// group-name scoping for live tmux/herdr workspaces. "note claude"
+/// against a `NoteSearch` workspace (one header, two panes — built
+/// via `panes_sort_test_app`, which groups same-labeled panes under
+/// a single header, matching real multiplexer behavior) scopes to
+/// that workspace via "note" (a substring of its own label, not
+/// either pane's text) — but every OTHER token is still required
+/// (AND) against each row's own text, so only the `claude` pane
+/// survives, not the non-matching `zsh` sibling. Selection lands on
+/// that `claude` pane, not the `NoteSearch` header.
 #[test]
 fn panes_select_initial_row_selects_pane_with_workspace_scope_and_content_query() {
     let mut app = panes_sort_test_app(vec![
@@ -29260,8 +29256,8 @@ fn panes_select_initial_row_selects_pane_with_workspace_scope_and_content_query(
     app.merged_rows = app.rows.clone();
     assert_eq!(
         app.merged_rows.iter().filter(|r| r.mode == "pane").count(),
-        2,
-        "the whole NoteSearch group must stay visible, not just the claude match, got: {:?}",
+        1,
+        "only the claude pane matches (AND with the remaining, non-heading token), got: {:?}",
         app.merged_rows.iter().map(|r| &r.command).collect::<Vec<_>>()
     );
     app.select_initial_row();
@@ -29360,11 +29356,13 @@ fn panes_select_initial_row_falls_back_to_workspace_header_when_no_pane_matches(
 /// The configured-sessions group header is displayed as
 /// "Directories" (renamed from "sessions" — these are directory
 /// quick-launch shortcuts, not multiplexer sessions), and it must
-/// stay visible — along with every sibling entry, not just the
-/// one that matched — when a query matches one of its children.
-/// Before this fix, the header used the standalone per-row filter
-/// (not the group-aware one live workspaces use), so a query that
-/// only matched a child's text made the header disappear entirely.
+/// stay visible when a query matches one of its children — the
+/// header itself is exempt from having to match — but a NON-matching
+/// sibling (here "Downloads") must be dropped: the user asked to see
+/// only what matches "Home", not every configured session along with
+/// it. (Contrast with `*dir`, which matches the `Directories` header
+/// label itself and so force-includes the whole group — see
+/// `panes_directories_scope_token_narrows_to_directories_group_only`.)
 #[test]
 fn panes_directories_group_header_is_renamed_and_stays_visible_when_child_matches() {
     use crate::tui::state::HistoryRow;
@@ -29390,11 +29388,94 @@ fn panes_directories_group_header_is_renamed_and_stays_visible_when_child_matche
     assert_eq!(header.command, "Directories");
     let session_count = rows.iter().filter(|r| r.mode == "session").count();
     assert_eq!(
-        session_count, 2,
-        "group visibility keeps every sibling session, not just the one that matched"
+        session_count, 1,
+        "only the matching sibling session is shown, not every configured session"
     );
     assert!(rows.iter().any(|r| r.mode == "session" && r.command.contains("Home")));
-    assert!(rows.iter().any(|r| r.mode == "session" && r.command.contains("Downloads")));
+    assert!(!rows.iter().any(|r| r.mode == "session" && r.command.contains("Downloads")));
+}
+
+/// User report: searching the configured `hosts` section for a
+/// specific host (e.g. "ship1") showed EVERY configured host, not
+/// just the matching one, because the group-aware filter used to
+/// keep every sibling once any child matched. "ship1" is not itself
+/// a substring of the `hosts` group's own label, so no token is
+/// exempted here — only the one host whose own text contains
+/// "ship1" should survive.
+#[test]
+fn panes_hosts_section_only_shows_matching_host_not_every_configured_host() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    app.hosts = vec![
+        HistoryRow {
+            command: "ship1".to_string(),
+            directory: "root@ship1.example.com".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "ship2".to_string(),
+            directory: "root@ship2.example.com".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "Proxmox".to_string(),
+            directory: "root@pve-1".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*ship1".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let host_count = rows.iter().filter(|r| r.mode == "host").count();
+    assert_eq!(
+        host_count, 1,
+        "only the matching host must be shown, got: {:?}",
+        rows.iter().filter(|r| r.mode == "host").map(|r| &r.command).collect::<Vec<_>>()
+    );
+    assert!(rows.iter().any(|r| r.mode == "host" && r.command == "ship1"));
+    let header = rows
+        .iter()
+        .find(|r| r.mode == "workspace" && r.source == "hosts")
+        .expect("hosts header must stay visible when a child matches");
+    assert_eq!(header.command, "hosts");
+}
+
+/// User's follow-up report: "ship1 host" still showed every
+/// configured host, because a token matching the section's own
+/// heading ("host" -> `hosts`) used to force the WHOLE section
+/// visible unconditionally. Strict AND means "host" is only implied
+/// for members of the `hosts` group (they're trivially hosts) — the
+/// OTHER token, "ship1", must still literally match each row, so
+/// only `ship1` survives, not `ship2` or `Proxmox`.
+#[test]
+fn panes_hosts_section_combined_with_heading_token_still_requires_other_token() {
+    use crate::tui::state::HistoryRow;
+    let mut app = panes_test_app(&[]);
+    app.hosts = vec![
+        HistoryRow {
+            command: "ship1".to_string(),
+            directory: "root@ship1.example.com".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "ship2".to_string(),
+            directory: "root@ship2.example.com".to_string(),
+            ..Default::default()
+        },
+        HistoryRow {
+            command: "Proxmox".to_string(),
+            directory: "root@pve-1".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.query = "*ship1 host".to_string();
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let host_count = rows.iter().filter(|r| r.mode == "host").count();
+    assert_eq!(
+        host_count, 1,
+        "\"ship1 host\" must still only match ship1 (AND), got: {:?}",
+        rows.iter().filter(|r| r.mode == "host").map(|r| &r.command).collect::<Vec<_>>()
+    );
+    assert!(rows.iter().any(|r| r.mode == "host" && r.command == "ship1"));
 }
 
 /// A query token that's a case-insensitive substring of the
@@ -29428,8 +29509,10 @@ fn panes_directories_scope_token_narrows_to_directories_group_only() {
 /// Combining a group-scope token with a content token — `"Home
 /// dir"` — selects the `Home` entry specifically (not the
 /// `Directories` header), even though "dir" never appears in the
-/// `Home` row's own text; "dir" scopes to the group instead of
-/// needing to be literal row content.
+/// `Home` row's own text; "dir" is implied by the `Directories`
+/// group's own label, but "home" is still required (AND) against
+/// each row's own text, so the non-matching `Downloads` sibling is
+/// excluded.
 #[test]
 fn panes_select_initial_row_selects_session_with_combined_scope_and_content_query() {
     use crate::tui::state::HistoryRow;
@@ -29449,8 +29532,8 @@ fn panes_select_initial_row_selects_session_with_combined_scope_and_content_quer
     app.merged_rows = app.rows.clone();
     assert_eq!(
         app.merged_rows.iter().filter(|r| r.mode == "session").count(),
-        2,
-        "the whole Directories group must stay visible, not just the Home match"
+        1,
+        "only the matching Home session is shown, not the non-matching Downloads sibling"
     );
     app.select_initial_row();
     let selected = app.list_state.selected().expect("selected");
