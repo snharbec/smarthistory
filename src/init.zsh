@@ -207,6 +207,27 @@ bindkey '^R' _smarthistory_select
 #   _smarthistory_index   : 0-based position of the currently shown match
 # Both are reset whenever LBUFFER changes (see the zle-line-precmd hook).
 _smarthistory_index=0
+# Set to 1 by `_smarthistory_history_walk_paint` (real history's own
+# preview box) whenever it has most recently claimed the shared
+# `_smarthistory_dropdown_*` paint state — see its doc comment for why
+# that state is shared with the typed-search dropdown and predictions
+# in the first place. `_smarthistory_up_history`/`_smarthistory_down_history`
+# check this BEFORE routing a keypress into dropdown/prediction
+# navigation: without it, a plain continued Up/Down press after the
+# very first real-history recall (which sets `_smarthistory_dropdown_visible`
+# / `_smarthistory_dropdown_chosen` purely to draw its own box, and
+# leaves `LBUFFER` non-empty from here on) satisfies that routing
+# check's `-n LBUFFER || chosen == 1` test on every subsequent press —
+# misrouting the walk into the generic wraparound-cycling dropdown
+# navigation instead of continuing to advance through real history.
+# Cleared back to 0 by every OTHER function that claims the shared
+# paint state for itself (`_smarthistory_dropdown_clear`,
+# `_smarthistory_dropdown_render`'s typed-search/predict-glance render,
+# `_smarthistory_prediction_walk_paint`) — the same "whoever painted
+# last owns it" rule `_smarthistory_dropdown_chosen`/`_visible`
+# themselves already follow, just made explicit for the one case that
+# needs to be told apart from the others.
+typeset -g _smarthistory_walking_history=0
 # Cache key for the last search: "mode|pwd|prefix". Used to detect when
 # the user changes directory, switches scope (Ctrl-g), or types a new
 # prefix, so the match list gets re-queried in those cases.
@@ -573,6 +594,7 @@ _smarthistory_dropdown_clear() {
     _smarthistory_dropdown_hl_prune
     _smarthistory_dropdown_visible=0
     _smarthistory_dropdown_chosen=0
+    _smarthistory_walking_history=0
 }
 
 # Remove every `region_highlight` entry whose start offset falls
@@ -1741,6 +1763,10 @@ _smarthistory_dropdown_render() {
         unset _sm_hl_raw _sm_hl_line _sm_hl_i _sm_hl_lines _sm_hl_row_spans
     fi
     _smarthistory_dropdown_visible=1
+    # This render (typed-search results, or the passive predict glance
+    # on an empty prompt) is now what owns the shared paint state —
+    # see `_smarthistory_walking_history`'s doc comment.
+    _smarthistory_walking_history=0
     # A fresh candidate set from a new keystroke always starts
     # unchosen — the user must re-navigate (Up / Down) to pick a
     # row again, even if they had one highlighted before this render.
@@ -2398,6 +2424,9 @@ _smarthistory_prediction_walk_paint() {
     _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
     _smarthistory_dropdown_chosen=1
     _smarthistory_dropdown_visible=1
+    # Predictions now own the shared paint state, not real-history
+    # walking — see `_smarthistory_walking_history`'s doc comment.
+    _smarthistory_walking_history=0
     _smarthistory_dropdown_paint
 }
 
@@ -2479,6 +2508,13 @@ _smarthistory_history_walk_paint() {
     _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
     _smarthistory_dropdown_chosen=1
     _smarthistory_dropdown_visible=1
+    # Claim the shared paint state for real-history walking — see
+    # `_smarthistory_walking_history`'s doc comment. Set every call
+    # (not just the first), since `_smarthistory_dropdown_clear`
+    # (called by the outer `else` branch below on some paths) would
+    # otherwise leave it cleared right up until this same widget
+    # invocation's own repaint.
+    _smarthistory_walking_history=1
     _smarthistory_dropdown_paint
 }
 _smarthistory_up_history() {
@@ -2512,6 +2548,7 @@ _smarthistory_up_history() {
     # predictions" transition — instead of wrapping around to the
     # bottom of the prediction list forever.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
+        && $_smarthistory_walking_history -eq 0 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         if [[ -z "$LBUFFER" && $_smarthistory_dropdown_chosen -eq 1 \
             && $_smarthistory_prediction_index -eq 1 ]]; then
@@ -2623,6 +2660,7 @@ _smarthistory_down_history() {
     # through to the real history walk below instead of being
     # intercepted here.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
+        && $_smarthistory_walking_history -eq 0 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         if [[ -z "$LBUFFER" ]]; then
             # Already inside the prediction list: page forward within

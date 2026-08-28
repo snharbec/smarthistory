@@ -72,6 +72,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Real-history `Up`/`Down` walking (an empty line, recalling past commands):
+  every press after the very first one could get misrouted into the
+  typed-search dropdown's generic candidate-cycling instead of continuing
+  to walk history — visible as the recalled command appearing "stuck" or
+  cycling back to the first entry after only a few presses. Cause: the
+  real-history preview box reuses the same `_smarthistory_dropdown_visible`/
+  `_smarthistory_dropdown_chosen` state the typed-search dropdown and
+  prediction list paint through, and once the first press recalled a
+  non-empty command into `BUFFER` (making `LBUFFER` non-empty from then
+  on), `Up`/`Down`'s dropdown-routing check treated every later press as
+  "a dropdown is showing" too. A new `_smarthistory_walking_history` flag
+  now tracks which of the three actually owns that shared paint state, and
+  the routing check defers to plain real-history continuation whenever
+  it's real-history's own box on screen.
 - `dropdown.predict`'s prediction list (reached via `Down` once real history
   on an empty line is exhausted): pressing `Down` repeatedly past the 3
   initially-shown candidates wrapped straight back to the first one instead
