@@ -53,6 +53,12 @@ All notable changes to this project will be documented in this file.
   logs every actual write to a `key.*` config line to
   `~/.local/cache/smarthistory/keybindings-debug.log`. Same pattern as the
   existing `SMARTHISTORY_DEBUG_HERDR` tmux-snapshot log.
+- The `dropdown.predict` prediction box's border now draws in `tuicolor.warning`
+  instead of the `tuicolor.accent` every other dropdown box (real history,
+  typed search) uses — a guess is now visually distinct from a real past
+  command at a glance, using colors already read from the active theme, no new
+  config setting needed. See
+  [docs/configuration.md#dropdownpredict](docs/configuration.md#dropdownpredict).
 
 ### Changed
 
@@ -72,6 +78,30 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Real-history `Up`/`Down` walking (an empty line, recalling past commands):
+  every press after the very first one could get misrouted into the
+  typed-search dropdown's generic candidate-cycling instead of continuing
+  to walk history — visible as the recalled command appearing "stuck" or
+  cycling back to the first entry after only a few presses. Cause: the
+  real-history preview box reuses the same `_smarthistory_dropdown_visible`/
+  `_smarthistory_dropdown_chosen` state the typed-search dropdown and
+  prediction list paint through, and once the first press recalled a
+  non-empty command into `BUFFER` (making `LBUFFER` non-empty from then
+  on), `Up`/`Down`'s dropdown-routing check treated every later press as
+  "a dropdown is showing" too. A new `_smarthistory_walking_history` flag
+  now tracks which of the three actually owns that shared paint state, and
+  the routing check defers to plain real-history continuation whenever
+  it's real-history's own box on screen.
+- `dropdown.predict`'s prediction list (reached via `Down` once real history
+  on an empty line is exhausted): pressing `Down` repeatedly past the 3
+  initially-shown candidates wrapped straight back to the first one instead
+  of revealing further suggestions, which read as the widget being stuck.
+  `Up`/`Down` now page through a deeper pool of up to 15 predicted
+  candidates 3 at a time, mirroring the sliding-window preview real
+  history walking already uses, and stop with a status hint at either end
+  instead of wrapping — `Up` at the top still exits back into real history
+  as before. See
+  [docs/configuration.md#dropdownpredict](docs/configuration.md#dropdownpredict).
 - `;` (worktree) create flow: typing a new branch name containing a space
   (e.g. "fix login bug") reached `git worktree add -b` untouched — git
   branch names can't contain spaces at all, so the create failed with a
