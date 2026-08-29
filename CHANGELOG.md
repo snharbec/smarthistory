@@ -53,6 +53,12 @@ All notable changes to this project will be documented in this file.
   logs every actual write to a `key.*` config line to
   `~/.local/cache/smarthistory/keybindings-debug.log`. Same pattern as the
   existing `SMARTHISTORY_DEBUG_HERDR` tmux-snapshot log.
+- The `dropdown.predict` prediction box's border now draws in `tuicolor.warning`
+  instead of the `tuicolor.accent` every other dropdown box (real history,
+  typed search) uses — a guess is now visually distinct from a real past
+  command at a glance, using colors already read from the active theme, no new
+  config setting needed. See
+  [docs/configuration.md#dropdownpredict](docs/configuration.md#dropdownpredict).
 
 ### Changed
 

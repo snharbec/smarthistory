@@ -228,6 +228,18 @@ _smarthistory_index=0
 # themselves already follow, just made explicit for the one case that
 # needs to be told apart from the others.
 typeset -g _smarthistory_walking_history=0
+# Which of the three box "owners" most recently painted the shared
+# `_smarthistory_dropdown_*` state: "history" (real-history walk),
+# "predict" (the prediction list, active glance or explicitly
+# navigated), or "search" (typed-search results). Purely presentational
+# — `_smarthistory_dropdown_paint` reads it to pick the box's border
+# color, so a prediction is visually distinguishable from a real past
+# command at a glance (`_smarthistory_dropdown_hl_warning` instead of
+# the normal `_smarthistory_dropdown_hl_accent`). Set by whichever of
+# `_smarthistory_history_walk_paint`, `_smarthistory_prediction_walk_paint`,
+# or `_smarthistory_dropdown_render` last ran — the same "whoever
+# painted last owns it" rule `_smarthistory_walking_history` follows.
+typeset -g _smarthistory_dropdown_active_kind=""
 # Cache key for the last search: "mode|pwd|prefix". Used to detect when
 # the user changes directory, switches scope (Ctrl-g), or types a new
 # prefix, so the match list gets re-queried in those cases.
@@ -595,6 +607,7 @@ _smarthistory_dropdown_clear() {
     _smarthistory_dropdown_visible=0
     _smarthistory_dropdown_chosen=0
     _smarthistory_walking_history=0
+    _smarthistory_dropdown_active_kind=""
 }
 
 # Remove every `region_highlight` entry whose start offset falls
@@ -874,9 +887,12 @@ _smarthistory_command_validity_hlspec() {
 # a subprocess to every typed character when the dropdown is
 # visible — not worth it.
 #
-# The values land in two `region_highlight` spec strings:
+# The values land in three `region_highlight` spec strings:
 #   _smarthistory_dropdown_hl_accent   — box corners, top/bottom border, unselected-row gutter
 #   _smarthistory_dropdown_hl_select   — selected-row gutter
+#   _smarthistory_dropdown_hl_warning  — same slots as `_hl_accent`, used instead of it for
+#                                         the prediction box specifically (see
+#                                         `_smarthistory_dropdown_active_kind`)
 # (no trailing "reset" string is needed — region_highlight entries
 # are scoped by explicit start/end offsets, so there's nothing to
 # bleed into the next region the way a raw SGR code can.)
@@ -895,6 +911,14 @@ _smarthistory_command_validity_hlspec() {
 # above).
 typeset -g _smarthistory_dropdown_hl_accent="fg=6"  # cyan fallback
 typeset -g _smarthistory_dropdown_hl_select="fg=4"  # blue fallback
+# Border/corner/gutter color for the prediction box specifically
+# (`_smarthistory_dropdown_active_kind == "predict"`) — swapped in for
+# `_smarthistory_dropdown_hl_accent` by `_smarthistory_dropdown_paint`
+# so a "what usually comes next" guess is visually distinct from the
+# real-history box's normal theme-accent border at a glance, same
+# `tuicolor.warning` slot the TUI itself uses for "this isn't a fact,
+# it's a hint" chrome.
+typeset -g _smarthistory_dropdown_hl_warning="fg=3"  # yellow fallback
 # Used by the optional `dropdown.highlight` syntax-highlighting
 # feature (see `_smarthistory_command_validity_hlspec` below) to mark
 # a candidate's first word as a resolvable command (green) or not
@@ -978,6 +1002,7 @@ if (( _smarthistory_dropdown_color_ok == 0 )); then
     _smarthistory_dropdown_hl_success=""
     _smarthistory_dropdown_hl_error=""
     _smarthistory_dropdown_hl_dim=""
+    _smarthistory_dropdown_hl_warning=""
 fi
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # Disable `xtrace` for the palette-init block too — see
@@ -1025,6 +1050,11 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                 error)
                     local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
                     [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_error=$_hlspec
+                    unset _hlspec
+                    ;;
+                warning)
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_warning=$_hlspec
                     unset _hlspec
                     ;;
                 dim)
@@ -1100,6 +1130,16 @@ _smarthistory_dropdown_paint() {
     # *inherited* xtrace state.
     local _sm_dropdown_xtrace_was=$options[xtrace]
     setopt NO_XTRACE
+    # Predictions get a visually distinct border color
+    # (`_smarthistory_dropdown_hl_warning`) instead of the normal
+    # theme-accent border every other box uses — a `local` of the same
+    # name shadows the global for the rest of this function call only,
+    # auto-restored on return regardless of which of the several
+    # `return`s below fires (same reason the `bg` shorthand doesn't
+    # need its own manual restore either).
+    if [[ "$_smarthistory_dropdown_active_kind" == "predict" ]]; then
+        local _smarthistory_dropdown_hl_accent=$_smarthistory_dropdown_hl_warning
+    fi
     local -a rows
     local raw c marker exit_char row i=0
     # Leave margin for the box border (`│ ` / ` │` on each side, 4
@@ -1613,7 +1653,14 @@ _smarthistory_dropdown_render() {
         return
     fi
     local raw
+    # Which kind of box this render is about to draw — read by the
+    # `_smarthistory_dropdown_active_kind` assignment below, which in
+    # turn decides the box's border color (see that variable's own
+    # doc comment). "predict" for the passive glance, "search" for a
+    # normal typed-search result set.
+    local _sm_dropdown_kind="search"
     if (( $#LBUFFER == 0 )); then
+        _sm_dropdown_kind="predict"
         # Prediction branch (`dropdown.predict=on`, reached only when
         # the gate above already confirmed it's enabled): same
         # successor-frequency data Ctrl-S (`_smarthistory_next_history`)
@@ -1767,6 +1814,7 @@ _smarthistory_dropdown_render() {
     # on an empty prompt) is now what owns the shared paint state —
     # see `_smarthistory_walking_history`'s doc comment.
     _smarthistory_walking_history=0
+    _smarthistory_dropdown_active_kind=$_sm_dropdown_kind
     # A fresh candidate set from a new keystroke always starts
     # unchosen — the user must re-navigate (Up / Down) to pick a
     # row again, even if they had one highlighted before this render.
@@ -2427,6 +2475,7 @@ _smarthistory_prediction_walk_paint() {
     # Predictions now own the shared paint state, not real-history
     # walking — see `_smarthistory_walking_history`'s doc comment.
     _smarthistory_walking_history=0
+    _smarthistory_dropdown_active_kind="predict"
     _smarthistory_dropdown_paint
 }
 
@@ -2515,6 +2564,7 @@ _smarthistory_history_walk_paint() {
     # otherwise leave it cleared right up until this same widget
     # invocation's own repaint.
     _smarthistory_walking_history=1
+    _smarthistory_dropdown_active_kind="history"
     _smarthistory_dropdown_paint
 }
 _smarthistory_up_history() {

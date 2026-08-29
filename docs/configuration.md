@@ -533,6 +533,11 @@ cancelling (`Ctrl+C`/`Esc`) resets everything back to a fresh empty line.
 `Tab`/`Enter` accept whichever candidate is currently highlighted at any point
 along the way, same as a normal search result.
 
+The prediction box's border draws in `tuicolor.warning` instead of the
+`tuicolor.accent` every other box (real history, typed search) uses, so a guess
+is visually distinct from a real past command at a glance — no separate color
+setting needed, it's read from the same theme.
+
 Predictions are available from the very first empty prompt in a brand-new shell,
 even before any command has run — with no last command to predict a successor
 from, `Down` there activates the frequent-commands fallback above instead of a
