@@ -14927,6 +14927,65 @@ fn output_preview_shows_more_than_four_lines_when_pane_is_tall_enough() {
     );
 }
 
+/// Below 20 terminal lines, `ui()` hides both the Details and Output
+/// Preview panes entirely (rather than squeezing them into an
+/// unreadable sliver) and gives that space back to the list — neither
+/// pane's block title should appear onscreen at all.
+#[test]
+fn details_and_output_preview_hidden_below_20_lines() {
+    let mut app = directories_test_app(&[]);
+
+    let backend = ratatui::backend::TestBackend::new(80, 19);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        !text.contains("Details"),
+        "Details pane must be hidden below 20 lines, got: {text:?}"
+    );
+    assert!(
+        !text.contains("Output Preview"),
+        "Output Preview pane must be hidden below 20 lines, got: {text:?}"
+    );
+}
+
+/// At exactly 20 terminal lines (the threshold itself), both panes
+/// are shown as usual — the cutoff in `details_and_output_preview_hidden_below_20_lines`
+/// is a strict `<`, not `<=`.
+#[test]
+fn details_and_output_preview_shown_at_20_lines() {
+    let mut app = directories_test_app(&[]);
+
+    let backend = ratatui::backend::TestBackend::new(80, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("Details"),
+        "Details pane should be shown at 20 lines, got: {text:?}"
+    );
+    assert!(
+        text.contains("Output Preview"),
+        "Output Preview pane should be shown at 20 lines, got: {text:?}"
+    );
+}
+
 // --- processes mode (`%` prefix) ----
 
 /// `%` mode parses the same as every other prefix mode: the query's
