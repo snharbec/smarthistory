@@ -1432,6 +1432,12 @@ side-by-side) → `Details` only → `Output Preview` only → `BOTH`. When only
 pane is visible, the remaining pane uses the full detail-row height — useful on
 narrow terminals where the side-by-side layout would be cramped.
 
+Below 20 terminal lines, both panes are hidden automatically regardless of this
+setting — there isn't room for a details row without squeezing the history list
+itself down to almost nothing, so the space goes back to the list instead. The
+setting is remembered as-is; the panes reappear on their own once the terminal
+is tall enough again, no action needed.
+
 ### `IncreasePaneHeight`
 
 | Field        | Value                  |

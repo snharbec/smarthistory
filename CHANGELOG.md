@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- The Details and Output Preview panes now hide automatically below 20
+  terminal lines, giving that space back to the history list instead of
+  squeezing both into an unreadable sliver. Purely a rendering change — the
+  `Action::TogglePaneVisibility`/`Action::IncreasePaneHeight` settings are
+  unaffected and the panes reappear on their own once the terminal is tall
+  enough again. See
+  [docs/actions.md#togglepanevisibility](docs/actions.md#togglepanevisibility).
 - New `Action::CycleRecentPrefixes` (`F12`) — cycle through every prefix mode
   except `*` panes, ordered most-recently-used first (a mode never used this
   session falls back to its declared order). Unlike the existing

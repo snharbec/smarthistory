@@ -47,15 +47,24 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    // Below 20 lines there isn't room for a details row without
+    // squeezing the list itself down to nothing (`PaneHeight`'s own
+    // `MIN` floor of 8 lines for the row alone already eats most of a
+    // terminal that short) — hide Details/Output Preview entirely and
+    // give that space back to the list, rather than showing a
+    // barely-readable sliver of both.
+    let show_panes = f.area().height >= 20;
     // The details row height adapts to the user's
     // `pane_height` setting (Default: 8 lines,
     // Tall: ~70% of the list area). `page_size`
     // is the total terminal height minus the
     // fixed chrome; `detail_row_height` returns
     // the right value for each variant.
-    let detail_h = app
-        .pane_height
-        .detail_row_height(f.area().height as usize);
+    let detail_h = if show_panes {
+        app.pane_height.detail_row_height(f.area().height as usize)
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -80,28 +89,30 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 
     let mut details_elapsed = std::time::Duration::ZERO;
     let mut output_preview_elapsed = std::time::Duration::ZERO;
-    match app.pane_visibility {
-        crate::tui::state::PaneVisibility::Both => {
-            let detail_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-                .split(chunks[2]);
-            let details_start = std::time::Instant::now();
-            draw_details(f, app, detail_chunks[0]);
-            details_elapsed = details_start.elapsed();
-            let output_preview_start = std::time::Instant::now();
-            draw_output_preview(f, app, detail_chunks[1]);
-            output_preview_elapsed = output_preview_start.elapsed();
-        }
-        crate::tui::state::PaneVisibility::Details => {
-            let details_start = std::time::Instant::now();
-            draw_details(f, app, chunks[2]);
-            details_elapsed = details_start.elapsed();
-        }
-        crate::tui::state::PaneVisibility::OutputPreview => {
-            let output_preview_start = std::time::Instant::now();
-            draw_output_preview(f, app, chunks[2]);
-            output_preview_elapsed = output_preview_start.elapsed();
+    if show_panes {
+        match app.pane_visibility {
+            crate::tui::state::PaneVisibility::Both => {
+                let detail_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+                    .split(chunks[2]);
+                let details_start = std::time::Instant::now();
+                draw_details(f, app, detail_chunks[0]);
+                details_elapsed = details_start.elapsed();
+                let output_preview_start = std::time::Instant::now();
+                draw_output_preview(f, app, detail_chunks[1]);
+                output_preview_elapsed = output_preview_start.elapsed();
+            }
+            crate::tui::state::PaneVisibility::Details => {
+                let details_start = std::time::Instant::now();
+                draw_details(f, app, chunks[2]);
+                details_elapsed = details_start.elapsed();
+            }
+            crate::tui::state::PaneVisibility::OutputPreview => {
+                let output_preview_start = std::time::Instant::now();
+                draw_output_preview(f, app, chunks[2]);
+                output_preview_elapsed = output_preview_start.elapsed();
+            }
         }
     }
 
