@@ -896,12 +896,16 @@ fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
         }
         let mut chunk = [0u8; 4096];
         match stdout.read(&mut chunk) {
+            // A closed pipe still delivers whatever the OS
+            // buffered even after the child has exited — only
+            // Ok(0) means the buffer is actually drained. Do NOT
+            // break early on `child.try_wait()` here: `tmux`
+            // routinely finishes before we've read all of a
+            // >4096-byte response, and breaking on "child already
+            // exited" truncates the output.
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(_) => break,
-        }
-        if let Ok(Some(_)) = child.try_wait() {
-            break;
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
@@ -1190,12 +1194,17 @@ fn herdr_run_json(args: &[&str]) -> Option<serde_json::Value> {
     loop {
         let mut chunk = [0u8; 4096];
         match stdout.read(&mut chunk) {
+            // A closed pipe still delivers whatever the OS
+            // buffered even after the child has exited — only
+            // Ok(0) means the buffer is actually drained. Do NOT
+            // break early on `child.try_wait()` here: `herdr`
+            // subcommands routinely finish before we've read all
+            // of a >4096-byte response (each chunk is 4096 bytes),
+            // and breaking on "child already exited" truncates the
+            // JSON mid-value, which then fails to parse.
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(_) => break,
-        }
-        if let Ok(Some(_)) = child.try_wait() {
-            break;
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
@@ -1538,12 +1547,16 @@ pub fn herdr_pane_read(pane_id: &str, lines: usize) -> Option<String> {
     loop {
         let mut chunk = [0u8; 4096];
         match stdout.read(&mut chunk) {
+            // A closed pipe still delivers whatever the OS
+            // buffered even after the child has exited — only
+            // Ok(0) means the buffer is actually drained. Do NOT
+            // break early on `child.try_wait()` here: `herdr`
+            // subcommands routinely finish before we've read all
+            // of a >4096-byte response, and breaking on "child
+            // already exited" truncates the output.
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(_) => break,
-        }
-        if let Ok(Some(_)) = child.try_wait() {
-            break;
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
