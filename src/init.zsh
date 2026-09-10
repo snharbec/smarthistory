@@ -1142,11 +1142,14 @@ _smarthistory_dropdown_paint() {
     fi
     local -a rows
     local raw c marker exit_char row i=0
-    # Leave margin for the box border (`│ ` / ` │` on each side, 4
-    # columns) plus a little breathing room, so a candidate can't
-    # wrap onto a second physical row (which would desync "one
-    # candidate = one POSTDISPLAY row").
-    local interior_max=$(( COLUMNS > 12 ? COLUMNS - 8 : 4 ))
+    # The box is one column narrower than the terminal: `╭─` + hr +
+    # `─╮` is `width + 4` display columns (2 border chars + 1 padding
+    # column each side), so `width = COLUMNS - 5` leaves the last
+    # terminal column free — the box's right border never sits on the
+    # edge column, where some terminals drop/clipped glyphs.
+    # The same budget is the command-text truncation cap — the padding
+    # columns are part of the interior, not slack outside it.
+    local interior_max=$(( COLUMNS > 12 ? COLUMNS - 5 : 4 ))
     # Clamp to available terminal rows so a long candidate list can't
     # push content off the bottom of the screen. The extra -2 (on top
     # of the existing headroom) accounts for the box's own top/bottom
@@ -1223,37 +1226,13 @@ _smarthistory_dropdown_paint() {
         _smarthistory_dropdown_hl_prune
         return
     fi
-    # Box width = the widest row actually produced this render (not
-    # the full interior_max budget) — every row pads to this exact
-    # width so the right border lines up, and the box visibly shrinks
-    # when the candidate set does, same as the un-boxed layout did.
-    #
-    # Width is measured on the SGR-stripped row (a defensive no-op
-    # today — `--ansi=off` means `row` never actually carries escape
-    # codes, see the comment on the per-row `_smarthistory_strip_ansi`
-    # call above) so the `─` border can't be desynced if that ever
-    # changes.
-    # `width` is computed as the maximum visible row width; the
-    # display loop below reads it once per row. We deliberately
-    # re-use the existing `row_visible` parameter (declared in
-    # the per-row loop above) instead of re-declaring it via
-    # `local width=0 row_visible` — re-declaring an existing
-    # local parameter in zsh emits a `varname=oldvalue` line
-    # to stdout as a side effect of the declaration itself,
-    # which leaks `row_visible=N` debug text into the user's
-    # terminal on every keystroke. Same reason we don't use a
-    # separate `local` for the second-loop variable below.
-    local cmd_width=0
-    for row in "${rows[@]}"; do
-        _smarthistory_strip_ansi "$row"
-        row_visible=$REPLY
-        (( row_visible > cmd_width )) && cmd_width=$row_visible
-    done
-    # Total interior width = the command column plus (when there IS
-    # an age column to draw) a fixed gap and the age column itself —
-    # everything below this point (`hr`, the borders, the per-row
-    # pad) reads `width` exactly like before the age column existed.
-    local width=$(( age_width > 0 ? cmd_width + age_gap + age_width : cmd_width ))
+    # Box width = full terminal width, always — not the widest row.
+    # `interior_max` is `COLUMNS - 4`, which makes `╭─<hr>─╮` (width+4
+    # display columns) span the terminal edge-to-edge. Rows pad to the
+    # command budget (`interior_cmd_max`) and the age column, when
+    # drawn, lands at the far right edge, so the box is edge-to-edge
+    # regardless of how short the candidates are.
+    local width=$interior_max
     # `${(l:width::─:)}` pads an empty string to `width` columns using
     # `─` as the fill character — i.e. `width` dashes, built by zsh's
     # own padding expansion rather than a manual loop.
@@ -1366,7 +1345,7 @@ _smarthistory_dropdown_paint() {
     # today (`--ansi=off`), but the pad is still built from
     # `row_visible` rather than `${#row}` as a defensive measure —
     # see the per-row `_smarthistory_strip_ansi` comment above. Build
-    # the pad by hand: `width - row_visible` spaces appended to the
+    # the pad by hand: `interior_cmd_max - row_visible` spaces appended to the
     # raw row (the matched-prefix / selected-row emphasis is applied
     # afterwards via `region_highlight`, not embedded in `row`
     # itself, so it can never desync this math).
@@ -1432,9 +1411,10 @@ _smarthistory_dropdown_paint() {
         else
             age_field=""
         fi
-        # Pad fills up to `cmd_width` ONLY (so every row's command
-        # column left-aligns to the same width) — NOT the overall
-        # `width`, which also includes the age gap/column. The fixed
+        # Pad stretches every row to the command column's full budget
+        # (`interior_cmd_max` = terminal width minus borders/age), so
+        # the age column — when drawn — right-aligns at the box's far
+        # edge and the box itself is always terminal-wide. The fixed
         # `age_gap` separator is emitted unconditionally right before
         # the age field below, regardless of how much (if any) pad
         # this particular row needed; folding the gap into `pad`
@@ -1442,7 +1422,7 @@ _smarthistory_dropdown_paint() {
         # silently vanished for the widest row (whichever row's
         # `pad` computed to 0), leaving its age column one gap short
         # of every other row's.
-        pad=$(( cmd_width - row_visible ))
+        pad=$(( interior_cmd_max - row_visible ))
         # `(l:0:: :)` is the empty-pad guard — `${(l:-1:: :)}` is a
         # zsh error. Clamp to 0 so the negative case (the row was
         # already truncated to `interior_cmd_max - 1` cols) is harmless.
