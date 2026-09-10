@@ -2538,19 +2538,21 @@ tmuxpaneoutputdir=~/custom-tmux
         ]);
     }
 
-    /// The boundary check itself rejects a candidate earlier than the
+    /// The boundary check itself flags a candidate earlier than the
     /// currently-open session's start — `ProjectAction::Select`'s
-    /// handler bails out (no mutation) rather than ever calling
-    /// `switch_project` with such a value.
+    /// handler clamps `effective_ts` to `boundary` in that case
+    /// (rather than ever calling `switch_project` with the
+    /// out-of-range candidate), so the switch still happens instead
+    /// of erroring out.
     #[test]
-    fn latest_project_session_boundary_rejects_reaching_before_it() {
+    fn latest_project_session_boundary_flags_reaching_before_it() {
         let conn = project_lifecycle_test_conn();
         switch_project(&conn, Some("demo"), 1000, 1800, None).expect("switch");
         let boundary = latest_project_session_boundary(&conn).unwrap();
         let candidate = 500; // earlier than boundary (1000)
         assert!(
             candidate < boundary,
-            "the handler's own `if candidate < boundary` check would reject this"
+            "the handler's own `if candidate < boundary` check would clamp this to `boundary`"
         );
     }
 
