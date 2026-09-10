@@ -918,8 +918,10 @@ enum ProjectAction {
         /// re-attributed to `slug`. Only the single most-recent
         /// `project_sessions` boundary can be moved back this way
         /// (whatever's currently open, or the end of the most
-        /// recently closed session) — not arbitrary history; see
-        /// the handler for the exact boundary check.
+        /// recently closed session) — not arbitrary history. If the
+        /// requested offset would reach earlier than that boundary,
+        /// it's silently clamped to start right at the boundary
+        /// instead of erroring; see the handler for the exact check.
         #[arg(long)]
         since: Option<String>,
     },
@@ -9203,13 +9205,14 @@ fn main() -> anyhow::Result<()> {
                         let candidate = now - offset;
                         let boundary = latest_project_session_boundary(&conn)?;
                         if candidate < boundary {
-                            anyhow::bail!(
-                                "--since {s:?} would start before {}; the earliest allowed --since is {} (only the current/most recent session boundary can be moved back, not arbitrary history)",
+                            eprintln!(
+                                "smarthistory: --since {s:?} would start before {}; clamped to start right there instead (only the current/most recent session boundary can be moved back, not arbitrary history)",
                                 crate::util::format_time(boundary),
-                                format_duration_secs(now - boundary),
                             );
+                            boundary
+                        } else {
+                            candidate
                         }
-                        candidate
                     }
                 };
                 // `set_ts` records when this preference was touched,
