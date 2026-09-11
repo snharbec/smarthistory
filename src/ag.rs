@@ -20,10 +20,37 @@
 //! Examples:
 //!   `,result @rust`     -> `ag ... --rust "result"`
 //!   `,tui *.rs @rust`   -> `ag ... -G '.*\.rs$' --rust "tui"`
+//!
+//! ## Performance characteristics
+//!
+//! - **Context/highlight only the rows that survive truncation:**
+//!   `run_ag` parses every matched line into a lightweight
+//!   `HistoryRow` (file, line, matched text, file mtime) FIRST, sorts
+//!   by mtime, and truncates to 1000 — only THEN does it read each
+//!   surviving row's source context and (for up to 50) syntax-
+//!   highlight it. A broad search term that matches thousands of
+//!   lines used to pay that file-read + highlight cost for every one
+//!   of them before truncating; now it's bounded by what's actually
+//!   shown.
+//! - **One file read per search, not one per match:** the
+//!   context-reading pass uses `read_source_context_with_cache`, so
+//!   a file with many surviving matches is read from disk once and
+//!   reused, instead of a fresh `read_to_string` per match line.
+//! - **A superseded search's `ag` process is killed, not abandoned:**
+//!   `run_ag` polls its child process (rather than blocking on
+//!   `Command::output()`) and checks the same `cancelled` flag the
+//!   run loop sets when a newer keystroke supersedes this search —
+//!   see `crate::debounce::touch`. On cancellation it kills the
+//!   child and bails out immediately, including mid-way through the
+//!   context/highlight pass, instead of letting a stale search's
+//!   real OS process and file I/O keep competing with the next one
+//!   for CPU/disk.
 
 use crate::highlight::{highlight_with_bat, highlight_with_bat_auto, parse_query_tokens};
-use crate::tui::read_source_context;
+use crate::tui::read_source_context_with_cache;
 use crate::tui::state::HistoryRow;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -126,7 +153,15 @@ pub fn spawn_ag_search(pattern: String) -> AgRequest {
     let pattern_for_thread = pattern.clone();
 
     std::thread::spawn(move || {
-        let rows = run_ag(&pattern_for_thread);
+        // `run_ag` is handed the SAME flag `touch`/`cancel_in_flight`
+        // set when this search gets superseded, so it can kill its
+        // own `ag` child process and stop mid-parse instead of
+        // grinding through a (possibly large) result set that's
+        // just going to be thrown away by the `!cancelled` check
+        // below anyway — see the module-level doc comment on why
+        // that matters here specifically (unlike a plain HTTP call,
+        // an `ag` child process CAN be killed).
+        let rows = run_ag(&pattern_for_thread, &cancelled_clone);
         if !cancelled_clone.load(Ordering::Relaxed) {
             let _ = tx.send(rows);
         }
@@ -193,7 +228,14 @@ fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
 }
 
 /// Build and run the `ag` command for the given user pattern.
-fn run_ag(pattern: &str) -> Vec<HistoryRow> {
+/// `cancelled` is the same flag the run loop flips when a newer
+/// keystroke supersedes this search (see `crate::debounce::touch`);
+/// this function checks it both while `ag` itself is still running
+/// (killing the child rather than waiting it out) and while doing
+/// the context-read/highlight pass afterward, so a superseded search
+/// stops doing real work as soon as it's noticed, instead of only
+/// having its *result* discarded once finished.
+fn run_ag(pattern: &str, cancelled: &Arc<AtomicBool>) -> Vec<HistoryRow> {
     // If the pattern is empty, return nothing.
     if pattern.is_empty() {
         return Vec::new();
@@ -241,12 +283,45 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     // Current directory.
     cmd.arg(".");
 
-    let output = match cmd.output() {
-        Ok(o) => o,
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(_) => return Vec::new(), // ag not on PATH, or other error.
     };
 
-    if !output.status.success() {
+    // Drain stdout on a dedicated thread WHILE we poll for exit
+    // below, instead of reading it only after the process ends.
+    // `ag` can emit far more than the OS pipe buffer holds; without
+    // something reading concurrently, a large result set would make
+    // the child block on a full pipe forever while we're separately
+    // waiting for it to exit — a classic self-deadlock. `Command::
+    // output()`/`wait_with_output()` avoid this internally too, but
+    // block uninterruptibly, giving no chance to check `cancelled`
+    // mid-run.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped above");
+    let (out_tx, out_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        let _ = out_tx.send(buf);
+    });
+
+    let status = loop {
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Vec::new();
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return Vec::new(),
+        }
+    };
+
+    if !status.success() {
         // Exit code 1 means "no matches" —
         // that's a valid, empty result.
         // Anything else (e.g. 2 = error) also
@@ -254,7 +329,8 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
         return Vec::new();
     }
 
-    let stdout = match String::from_utf8(output.stdout) {
+    let stdout_bytes = out_rx.recv().unwrap_or_default();
+    let stdout = match String::from_utf8(stdout_bytes) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -264,7 +340,7 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     let mut next_id: i64 = -1;
     // Cache each file's mtime by absolute path — a file with many
     // matches would otherwise `stat` it once per match line.
-    let mut mtime_cache: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut mtime_cache: HashMap<String, i64> = HashMap::new();
 
     // Use the first explicit language for syntax highlighting. If
     // multiple languages were specified we use only the first to
@@ -272,10 +348,16 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
     // kicks in when no language is given, but here we prefer the
     // user's explicit choice.
     let highlight_lang = tokens.languages.first().map(String::as_str);
-    let mut highlight_count = 0usize;
-    const HIGHLIGHT_MAX: usize = 50;
 
+    // First pass: parse every matched line into a `HistoryRow` with
+    // NO context/highlight yet (`output`/`source` filled in below).
+    // This is deliberately cheap — no file reads beyond the mtime
+    // stat — so sorting and truncating to 1000 next doesn't waste
+    // I/O on matches that won't be shown.
     for line in stdout.lines() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
         // Format: file:line_number:matched_content
         // (or file:line_number:column:matched_content when --column is used,
         // but we avoid --column for broader compatibility).
@@ -322,43 +404,11 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             .entry(abs_path.clone())
             .or_insert_with(|| file_mtime(&abs_path));
 
-        // Read 5 lines of context around the match (2 before,
-        // the match line, 2 after) so the details pane shows
-        // the surrounding code — same pattern as tags mode.
         let line_number = line_num.parse::<usize>().unwrap_or(0);
-        let context = read_source_context(&abs_path, line_number);
-
-        // If a language was specified, pipe the context through
-        // `highlight_with_bat` for syntax highlighting. We cap the
-        // number of highlight calls to keep the background thread
-        // responsive. With no `@lang`, fall through to
-        // `highlight_with_bat_auto`'s extension-based
-        // auto-detection so `.rs` / `.java` / `.py` matches still
-        // get colored previews.
-        let output = if let Some(lang) = highlight_lang {
-            if highlight_count < HIGHLIGHT_MAX {
-                highlight_count += 1;
-                highlight_with_bat(&context, lang).unwrap_or(context)
-            } else {
-                context
-            }
-        } else if highlight_count < HIGHLIGHT_MAX {
-            highlight_count += 1;
-            highlight_with_bat_auto(&context, &abs_path).unwrap_or(context)
-        } else {
-            context
-        };
-
         let basename = std::path::Path::new(file)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| file.to_string());
-
-        let source = if let Some(lang) = highlight_lang {
-            format!("ag:{}", lang)
-        } else {
-            "ag".to_string()
-        };
 
         rows.push(HistoryRow {
             id: next_id,
@@ -378,9 +428,9 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
             exit_code: 0,
             timestamp: mtime,
             comment: basename,
-            output,
+            output: String::new(),
             mode: "ag".to_string(),
-            source,
+            source: String::new(),
             ..Default::default()
         });
         next_id -= 1;
@@ -388,11 +438,57 @@ fn run_ag(pattern: &str) -> Vec<HistoryRow> {
 
     sort_rows_newest_modified_first(&mut rows);
     // Cap results to keep the UI responsive — applied AFTER sorting
-    // (not during accumulation) so a search with more than 1000
-    // total matches still shows the matches from the most-recently-
-    // modified files, not just whichever 1000 lines `ag` happened
-    // to emit first.
+    // (and BEFORE the context/highlight pass below) so a search with
+    // more than 1000 total matches only ever pays the context-read/
+    // highlight cost for the matches in the most-recently-modified
+    // files that will actually be shown, not for every match `ag`
+    // emitted.
     rows.truncate(1000);
+
+    // Second pass: read 5 lines of context around each surviving
+    // match (2 before, the match line, 2 after — same pattern as
+    // tags mode) and, for up to 50, syntax-highlight it. Deferred
+    // until now so this — the actually expensive part of a search —
+    // is bounded by what's shown, not by the raw hit count.
+    // `read_source_context_with_cache` keeps each file's full
+    // contents cached across matches, so a file with several
+    // surviving matches is read from disk once, not once per match.
+    let mut context_cache: HashMap<PathBuf, String> = HashMap::new();
+    let mut highlight_count = 0usize;
+    const HIGHLIGHT_MAX: usize = 50;
+    for row in rows.iter_mut() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let line_number: usize = row.session_id.parse().unwrap_or(0);
+        let context = read_source_context_with_cache(&row.directory, line_number, &mut context_cache);
+
+        // If a language was specified, pipe the context through
+        // `highlight_with_bat` for syntax highlighting. We cap the
+        // number of highlight calls to keep the background thread
+        // responsive. With no `@lang`, fall through to
+        // `highlight_with_bat_auto`'s extension-based
+        // auto-detection so `.rs` / `.java` / `.py` matches still
+        // get colored previews.
+        row.output = if let Some(lang) = highlight_lang {
+            if highlight_count < HIGHLIGHT_MAX {
+                highlight_count += 1;
+                highlight_with_bat(&context, lang).unwrap_or(context)
+            } else {
+                context
+            }
+        } else if highlight_count < HIGHLIGHT_MAX {
+            highlight_count += 1;
+            highlight_with_bat_auto(&context, &row.directory).unwrap_or(context)
+        } else {
+            context
+        };
+        row.source = if let Some(lang) = highlight_lang {
+            format!("ag:{}", lang)
+        } else {
+            "ag".to_string()
+        };
+    }
 
     rows
 }

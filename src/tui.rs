@@ -11695,20 +11695,6 @@ fn resolve_initial_query(
 }
 
 
-/// Read up to 5 lines of source context around
-/// `line_number` (2 before, the line itself, 2
-/// after) from the given file. Returns the
-/// context as a newline-joined string; the
-/// match line is prefixed with `>> ` so the
-/// user can spot it at a glance in the details
-/// pane. Returns the empty string on any error
-/// (file not found, line number out of range,
-/// etc.) — `fetch_tags` treats the context as
-/// best-effort.
-/// Read up to 5 lines of context around `line_number` in `filepath`,
-/// returning a formatted string with line numbers. The target line is
-/// marked with `>>` for visual distinction. Used by both tags mode
-/// and ag mode to populate the details-pane preview.
 /// The number of source-context lines loaded around a selected
 /// symbol (`tags` / `codegraph` modes). 25 before, the match
 /// line, and 24 after — i.e. 50 lines — give the user a full
@@ -11719,39 +11705,17 @@ fn resolve_initial_query(
 /// toward the file boundaries.
 pub const SOURCE_CONTEXT_LINES: usize = 50;
 
-pub fn read_source_context(filepath: &str, line_number: usize) -> String {
-    if line_number == 0 {
-        return String::new();
-    }
-    let contents = match std::fs::read_to_string(filepath) {
-        Ok(s) => s,
-        Err(_) => return String::new(),
-    };
-    let lines: Vec<&str> = contents.lines().collect();
-    // line_number is 1-based; convert to 0-based.
-    let target = line_number.saturating_sub(1);
-    if target >= lines.len() {
-        return String::new();
-    }
-    let half = SOURCE_CONTEXT_LINES / 2;
-    let start = target.saturating_sub(half);
-    let end = (target + half).min(lines.len());
-    let mut out: Vec<String> = Vec::new();
-    for (i, line) in lines[start..end].iter().enumerate() {
-        let absolute = start + i;
-        if absolute == target {
-            out.push(format!(">> {:>5}  {}", line_number, line));
-        } else {
-            out.push(format!("   {:>5}  {}", absolute + 1, line));
-        }
-    }
-    out.join("\n")
-}
-
-/// Like [`read_source_context`], but caches the entire file
-/// contents in `cache` so repeated lookups in the same file
-/// (common for tags mode, where many symbols live in one
-/// source file) only hit the disk once per TUI session.
+/// Read up to 5 lines of source context around `line_number` (2
+/// before, the line itself, 2 after) from the given file, caching
+/// the entire file's contents in `cache` so repeated lookups in the
+/// same file (common for tags mode, where many symbols live in one
+/// source file, and for ag mode, where several matches often land in
+/// the same file) only hit the disk once per search/session. Returns
+/// the context as a newline-joined string; the match line is
+/// prefixed with `>> ` so the user can spot it at a glance in the
+/// details pane. Returns the empty string on any error (file not
+/// found, line number out of range, etc.) — callers treat the
+/// context as best-effort.
 pub fn read_source_context_with_cache(
     filepath: &str,
     line_number: usize,
