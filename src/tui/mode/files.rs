@@ -328,11 +328,12 @@ impl App {
         self.files_touch();
     }
 
-    /// Spawn a background thread that walks the session's files-mode
-    /// root ONCE (see `crate::files::spawn_walk` / the module-level
-    /// doc comment on `crate::files`) and sends the result back over
-    /// an mpsc channel. The run loop polls the receiver and calls
-    /// `process_files_result` when the result arrives.
+    /// Spawn the background thread pool that walks the session's
+    /// files-mode root ONCE (see `crate::files::spawn_walk` / the
+    /// module-level doc comment on `crate::files`) and streams
+    /// results back over an mpsc channel, one directory's rows at a
+    /// time. The run loop polls the receiver and calls
+    /// `App::apply_files_walk_update` as chunks arrive.
     pub(crate) fn spawn_files_walk(&mut self) {
         let ignore = crate::files::IgnoreSet::new(&self.files_ignores);
         // The walk root: `file_picker_lock.base_root` for a locked
@@ -353,19 +354,37 @@ impl App {
         self.set_status_message("Searching files…".to_string());
     }
 
-    /// Process the one-shot files-mode walk result that arrived from
-    /// the background thread. Caches the full (unfiltered) tree in
-    /// `self.files_state.all_rows` and refreshes the list — every
-    /// keystroke after this filters the cached tree in memory (see
-    /// `fetch`) instead of re-walking.
-    pub(crate) fn process_files_result(
-        &mut self,
-        _request: crate::files::FilesRequest,
-        rows: Vec<HistoryRow>,
-    ) {
-        self.files_state.in_flight = false;
-        self.files_state.request = None;
-        self.files_state.all_rows = Some(rows);
-        self.refresh();
+    /// Apply whatever arrived from the background walk's channel
+    /// since the last poll — zero, one, or many directory chunks
+    /// (`chunks`), plus whether the channel has disconnected
+    /// (`done`, meaning every worker thread has exited and the walk
+    /// is fully complete; see `crate::files::spawn_walk`). Extends
+    /// `self.files_state.all_rows` with every chunk (creating it on
+    /// the first one, so the list starts filling in well before the
+    /// walk finishes) and, once `done`, clears `in_flight` /
+    /// `request` and guarantees `all_rows` is at least `Some(vec![])`
+    /// even if the walk found nothing at all — otherwise a
+    /// permanently-`None` `all_rows` would look identical to "walk
+    /// hasn't started" to `files_touch`'s in-flight/cached check.
+    /// Refreshes the list at most once per call regardless of how
+    /// many chunks arrived, rather than once per chunk.
+    pub(crate) fn apply_files_walk_update(&mut self, chunks: Vec<Vec<HistoryRow>>, done: bool) {
+        let mut changed = false;
+        if !chunks.is_empty() {
+            let all = self.files_state.all_rows.get_or_insert_with(Vec::new);
+            for chunk in chunks {
+                all.extend(chunk);
+            }
+            changed = true;
+        }
+        if done {
+            self.files_state.in_flight = false;
+            self.files_state.request = None;
+            self.files_state.all_rows.get_or_insert_with(Vec::new);
+            changed = true;
+        }
+        if changed {
+            self.refresh();
+        }
     }
 }

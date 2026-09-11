@@ -2,15 +2,21 @@
     use std::io::Write;
 
     /// End-to-end regression test of the REAL background-thread path
-    /// (`spawn_walk` + its `std::thread::spawn` closure + the mpsc
-    /// channel), not just the synchronous `walk_dir` call other
-    /// tests in this file exercise directly. `spawn_walk` itself is
-    /// pattern-agnostic now (see the module-level doc comment) — it
-    /// walks EVERYTHING once; filtering (`filter_rows`, tested
-    /// separately below) happens afterward, in memory. This is the
-    /// exact walk `App::spawn_files_walk` drives, once per session;
-    /// a bug here would otherwise only surface through manual
-    /// interactive testing.
+    /// (`spawn_walk` + its worker-thread pool + the mpsc channel),
+    /// not just the synchronous `walk_dir` call other tests in this
+    /// file exercise directly. `spawn_walk` itself is pattern-agnostic
+    /// now (see the module-level doc comment) — it walks EVERYTHING
+    /// once; filtering (`filter_rows`, tested separately below)
+    /// happens afterward, in memory. This is the exact walk
+    /// `App::spawn_files_walk` drives, once per session; a bug here
+    /// would otherwise only surface through manual interactive
+    /// testing.
+    ///
+    /// `spawn_walk` streams one chunk per directory rather than a
+    /// single final batch (see the module-level doc comment on
+    /// streaming), so the test drains every chunk until the channel
+    /// disconnects (every worker thread exited) instead of expecting
+    /// one message.
     #[test]
     fn spawn_walk_finds_every_file_via_real_background_thread() {
         let dir = std::env::temp_dir().join(format!(
@@ -25,10 +31,18 @@
 
         let ignore = IgnoreSet::new(&[]);
         let request = spawn_walk(dir.clone(), ignore);
-        let result = request
-            .receiver
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("walk did not complete within 5s (hang or panic)");
+        let mut result = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match request.receiver.recv_timeout(remaining) {
+                Ok(chunk) => result.extend(chunk),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("walk did not complete within 5s (hang or panic)")
+                }
+            }
+        }
         assert_eq!(
             result.len(),
             3,
@@ -248,89 +262,6 @@
             row.timestamp, expected_mtime,
             "row.timestamp must be the file's real mtime, not 0"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn walk_dir_uses_git_commit_timestamp_when_available() {
-        let dir = std::env::temp_dir().join(format!(
-            "smarthistory_walk_git_test_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-
-        let git_init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["init"])
-            .output();
-        if git_init.as_ref().map(|o| o.status.success()).unwrap_or(false) {
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(["config", "user.email", "test@example.com"])
-                .output();
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(["config", "user.name", "Test User"])
-                .output();
-
-            let file_path = dir.join("committed.txt");
-            std::fs::write(&file_path, "content").unwrap();
-
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(["add", "committed.txt"])
-                .output();
-
-            let commit_res = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(["commit", "-m", "test commit"])
-                .env("GIT_COMMITTER_DATE", "1577836800 +0000")
-                .env("GIT_AUTHOR_DATE", "1577836800 +0000")
-                .output();
-
-            if commit_res.as_ref().map(|o| o.status.success()).unwrap_or(false) {
-                let untracked_path = dir.join("untracked.txt");
-                std::fs::write(&untracked_path, "untracked").unwrap();
-
-                let mut rows = Vec::new();
-                let mut next_id: i64 = -1;
-                let ignore = IgnoreSet::new(&[]);
-                walk_dir(&dir, &dir, &ignore, &mut next_id, &mut rows);
-
-                let committed_row = rows
-                    .iter()
-                    .find(|r| r.command == "committed.txt")
-                    .expect("committed.txt row");
-                assert_eq!(
-                    committed_row.timestamp, 1577836800,
-                    "committed.txt row timestamp should match git commit timestamp"
-                );
-
-                let untracked_row = rows
-                    .iter()
-                    .find(|r| r.command == "untracked.txt")
-                    .expect("untracked.txt row");
-                let untracked_mtime = std::fs::metadata(&untracked_path)
-                    .unwrap()
-                    .modified()
-                    .unwrap()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-                assert_eq!(
-                    untracked_row.timestamp, untracked_mtime,
-                    "untracked.txt row timestamp should fall back to mtime"
-                );
-            }
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

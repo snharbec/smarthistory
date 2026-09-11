@@ -32609,6 +32609,32 @@ fn file_picker_backspace_cannot_delete_locked_prefix() {
     );
 }
 
+/// Drain a real `spawn_files_walk` background walk to completion,
+/// for tests that want the whole tree the way `all_rows` eventually
+/// has it. `crate::files::spawn_walk` streams one chunk per
+/// directory rather than a single final message (see the
+/// module-level doc comment on `crate::files`), so a plain single
+/// `recv_timeout` only captures whichever chunk happened to arrive
+/// first — correct only by accident for a fixture with no
+/// subdirectories. This drains every chunk until the channel
+/// disconnects (every worker thread has exited), which is the real
+/// "walk complete" signal.
+fn drain_files_walk(request: crate::files::FilesRequest) -> Vec<HistoryRow> {
+    let mut rows = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match request.receiver.recv_timeout(remaining) {
+            Ok(chunk) => rows.extend(chunk),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("walk did not complete within 5s (hang or panic)")
+            }
+        }
+    }
+    rows
+}
+
 /// Regression test for a real bug caught in manual testing: the
 /// files-mode walk used to only fire reactively from the
 /// self-insert keystroke hook, so a locked `--glob-complete`
@@ -32662,11 +32688,7 @@ fn file_picker_spawn_files_walk_combines_glob_and_extra_substring_words() {
     app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
-    let rows = request
-        .receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("walk did not complete within 5s (hang or panic)");
-    app.files_state.all_rows = Some(rows);
+    app.files_state.all_rows = Some(drain_files_walk(request));
     let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
     let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(
@@ -32705,11 +32727,7 @@ fn spawn_files_walk_unlocked_glob_first_word_narrows_by_extra_substring() {
     app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
-    let rows = request
-        .receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("walk did not complete within 5s (hang or panic)");
-    app.files_state.all_rows = Some(rows);
+    app.files_state.all_rows = Some(drain_files_walk(request));
     let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
     let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(
@@ -32740,11 +32758,7 @@ fn spawn_files_walk_unlocked_plain_text_still_uses_substring_matcher() {
     app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
-    let rows = request
-        .receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("walk did not complete within 5s (hang or panic)");
-    app.files_state.all_rows = Some(rows);
+    app.files_state.all_rows = Some(drain_files_walk(request));
     let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
     let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(names, vec!["apple.txt"]);
@@ -32874,11 +32888,7 @@ fn file_picker_directories_spawn_files_walk_finds_only_matching_directories() {
     app.spawn_files_walk();
 
     let request = app.files_state.request.take().expect("walk should have been spawned");
-    let all_rows = request
-        .receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("walk did not complete within 5s (hang or panic)");
-    app.files_state.all_rows = Some(all_rows);
+    app.files_state.all_rows = Some(drain_files_walk(request));
     let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
     let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(
