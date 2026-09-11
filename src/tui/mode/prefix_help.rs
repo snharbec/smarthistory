@@ -259,13 +259,13 @@ fn jira_lines() -> Vec<Line<'static>> {
 
 fn ag_lines() -> Vec<Line<'static>> {
     vec![
-        heading(", ag — file content search (the_silver_searcher)"),
+        heading(", ag — file content search (in-process, gitignore-aware)"),
         blank(),
         token_row("word".into(), "every line containing `word` in any text file under cwd"),
-        token_row("*.rs".into(), "shell-style glob restricting which files are searched"),
-        token_row("@lang".into(), "restrict to a file type, e.g. @rust (ag --rust)"),
+        token_row("*.rs".into(), "glob restricting which files are searched"),
+        token_row("@lang".into(), "restrict to a file type, e.g. @rust"),
         blank(),
-        text("  Empty query (bare ,) returns nothing — ag needs at least one term."),
+        text("  Empty query (bare ,) returns nothing — needs at least one search term."),
     ]
 }
 

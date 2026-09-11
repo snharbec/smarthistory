@@ -1,9 +1,10 @@
 //! `,` (ag content search) prefix mode.
 //!
-//! Searches the current directory tree using `ag`
-//! (The Silver Searcher). Tokens containing `*` are
-//! treated as file-pattern globs (`-G`) and restrict
-//! which files are searched. Selecting a row opens
+//! Searches the current directory tree in-process (see the
+//! module-level doc comment on `crate::ag` for the engine). Tokens
+//! containing `*` are treated as file-pattern globs and restrict
+//! which files are searched; `@lang` tokens restrict by file
+//! extension and choose a highlight language. Selecting a row opens
 //! the file in `$EDITOR` at the matching line.
 use crate::tui::mode::CheckReport;
 use crate::tui::state::HistoryRow;
@@ -19,89 +20,58 @@ pub(crate) fn matches(app: &App) -> bool {
     !app.query.is_empty() && app.query.starts_with(p)
 }
 
-/// Health check for the ag (`,`) content-search
-/// mode. The mode shells out to `ag` (The Silver
-/// Searcher) for every search, so the check
-/// verifies:
+/// Health check for the ag (`,`) content-search mode. The mode has
+/// no external dependency anymore (it searches in-process via
+/// `grep-regex`/`grep-searcher`/`ignore`), so the check verifies our
+/// own code path instead of a third-party binary:
 ///
-/// 1. `ag` is on `$PATH` (`which ag` succeeds).
-/// 2. `ag` itself works: a trivial `ag --version`
-///    round-trip succeeds (proves the binary
-///    isn't a corrupt stub, missing libs, etc.).
-/// 3. The runtime `spawn_ag_search` library call
-///    is exercised with a trivial pattern
-///    (proves the IPC handshake works).
+/// 1. CWD sanity (same pattern `files::check` uses).
+/// 2. A trivial `grep_regex::RegexMatcher` compiles (proves the
+///    matcher-construction path works — should never realistically
+///    fail, but costs nothing and gives a concrete diagnostic if a
+///    future change breaks it).
+/// 3. The gitignore-aware walker (`ignore::WalkBuilder`) yields at
+///    least one entry under cwd — `Warning`, not `Error`, on zero
+///    entries, since an empty/heavily-gitignored cwd is a legitimate
+///    non-broken state (mirrors `files::check`'s same precedent).
 pub(crate) fn check(_app: &App) -> CheckReport {
     use crate::tui::mode::ModeKind;
     let mode = ModeKind::Ag;
 
-    // 1. `which ag` (or fall back to a direct
-    //    invocation). We use `which` so the
-    //    error message tells the user which
-    //    path we looked at.
-    let ag_path = which_ag();
-    let Some(ag_path) = ag_path else {
-        return CheckReport::err(
-            mode,
-            "the `ag` (Silver Searcher) binary was not found on $PATH (install it with `brew install the_silver_searcher` on macOS or `apt install silversearcher-ag` on Debian/Ubuntu)",
-        );
+    // 1. CWD sanity.
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            return CheckReport::err(mode, format!("current working directory is unavailable: {e}"));
+        }
     };
+    if !cwd.is_dir() {
+        return CheckReport::err(mode, format!("cwd is not a directory: {}", cwd.display()));
+    }
 
-    // 2. Run `ag --version`. A failure here is
-    //    almost always "the binary is corrupt /
-    //    dynamic-linker can't find libpcre".
-    let version_output = std::process::Command::new(&ag_path)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
-    match version_output {
-        Ok(out) if out.status.success() => {
-            let version = String::from_utf8_lossy(&out.stdout);
-            let first_line = version.lines().next().unwrap_or("").trim();
-            CheckReport::ok(
-                mode,
-                format!("ag available at {} ({})", ag_path.display(), first_line),
-            )
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            CheckReport::err(
-                mode,
-                format!(
-                    "`ag --version` failed (exit {:?}); stderr: {}",
-                    out.status.code(),
-                    stderr.trim()
-                ),
-            )
-        }
-        Err(e) => CheckReport::err(
+    // 2. Matcher construction.
+    if let Err(e) = grep_regex::RegexMatcherBuilder::new().build("a") {
+        return CheckReport::err(mode, format!("failed to build a trivial regex matcher: {e}"));
+    }
+
+    // 3. Walk. Unfiltered, hidden files included, same as the
+    //    runtime's default — just checking the walker itself works.
+    // `ignore::Walk` always yields the root directory itself first
+    // (depth 0), so a plain `.next().is_some()` would never observe
+    // "empty" — look for at least one FILE entry instead, mirroring
+    // `files::check`'s "rows.is_empty()" precedent.
+    let walker = ignore::WalkBuilder::new(&cwd).hidden(false).build();
+    let found_file = walker
+        .filter_map(Result::ok)
+        .any(|e| e.file_type().is_some_and(|t| t.is_file()));
+    if found_file {
+        CheckReport::ok(mode, format!("search engine ready; found at least one file under {}", cwd.display()))
+    } else {
+        CheckReport::warn(
             mode,
-            format!("failed to spawn ag at {}: {e}", ag_path.display()),
-        ),
+            format!("walker found 0 files under {} (the directory is empty or fully gitignored)", cwd.display()),
+        )
     }
-}
-
-/// Resolve the absolute path of the `ag`
-/// binary. Looks at `$PATH` via the standard
-/// `PATH` environment variable. Returns
-/// `None` if `ag` is not found. We don't
-/// shell out to `which` because that would
-/// itself require `which` to be installed;
-/// the manual `$PATH` walk is portable and
-/// short.
-fn which_ag() -> Option<std::path::PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        for ext in &["", ".exe", ".bat"] {
-            let candidate = dir.join(format!("ag{ext}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 /// The ag-search body, i.e. everything after the
@@ -163,13 +133,13 @@ impl App {
         self.spawn_ag_search(pattern);
     }
 
-    /// Spawn a background thread that runs `ag` and
-    /// parses the results.
+    /// Spawn a background thread that searches in-process and
+    /// collects the results.
     pub(crate) fn spawn_ag_search(&mut self, pattern: String) {
         let request = crate::ag::spawn_ag_search(pattern);
         self.ag_state.in_flight = true;
         self.ag_state.request = Some(request);
-        self.set_status_message("Searching with ag…".to_string());
+        self.set_status_message("Searching…".to_string());
     }
 
     /// Process an ag-mode search result from the
