@@ -56,20 +56,36 @@
 //!   4 KiB per file via `read()` (not `read_to_string`), and
 //!   detects binary files (null bytes) to avoid UTF-8 validation
 //!   on megabytes of binary data.
-//! - **No parallelism:** the one-shot walk is still single-threaded.
-//!   A parallel walker (via the `ignore` or `walkdir` crate) would
-//!   shave more time off that one walk on very large trees, but
-//!   isn't needed to fix the "typing is slow" problem, since that
-//!   was dominated by walking repeatedly, not by any one walk being
-//!   slow in isolation.
+//! - **Parallel, streamed walk:** [`spawn_walk`] fans the walk out
+//!   across a small pool of worker threads (see [`parallel_walk`]),
+//!   one directory at a time via a shared work queue — no `ignore`/
+//!   `walkdir` crate dependency needed, just `std::thread::scope` +
+//!   a mutex/condvar queue. Each thread streams the rows for the
+//!   directory it just finished straight to the TUI over the mpsc
+//!   channel as soon as that directory is done, instead of
+//!   collecting the entire tree before sending anything — the list
+//!   fills in progressively as the walk runs rather than staying
+//!   empty until the whole tree (which may be huge) has been
+//!   walked. This is what actually makes files mode feel as
+//!   responsive as `fd`/`fzf`; the single-threaded batch-send design
+//!   this replaced was the main source of "nothing appears for a
+//!   while" on large trees.
+//! - **No Git-commit-timestamp lookup:** an earlier version of this
+//!   walker shelled out to `git log --name-only` over the repo's
+//!   *entire history* to prefer each tracked file's last-commit time
+//!   over its filesystem mtime for sorting. That's O(every commit
+//!   ever made) and ran synchronously before a single row could be
+//!   shown — on any repo with real history it dominated the time to
+//!   first result. Sorting now uses filesystem mtime only.
 
 use crate::tui::state::HistoryRow;
 use crate::util::format_size;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Condvar, Mutex};
 
 /// Default directory basenames to skip during the walk. Hardcoded
 /// because almost every project has them; project-specific
@@ -130,11 +146,17 @@ impl IgnoreSet {
     }
 }
 
-/// The one-shot background walk. The background thread sends the
-/// full (unfiltered) tree over `receiver`; the run loop polls it.
-/// No cancellation handle: unlike the old per-keystroke design, the
-/// walk isn't tied to any particular pattern, so a later keystroke
-/// never makes an in-flight walk stale.
+/// The one-shot background walk. Several worker threads (see
+/// [`parallel_walk`]) each hold a clone of the same `mpsc` sender, so
+/// `receiver` yields many small messages — one per directory
+/// processed, in whatever order the threads happen to finish them —
+/// rather than a single final batch. The run loop polls it every
+/// tick, draining whatever has arrived so far; once every worker
+/// thread has exited, every sender clone is dropped and the
+/// `receiver` starts reporting `Disconnected`, which is the "walk is
+/// fully done" signal. No cancellation handle: unlike the old
+/// per-keystroke design, the walk isn't tied to any particular
+/// pattern, so a later keystroke never makes an in-flight walk stale.
 pub struct FilesRequest {
     pub receiver: mpsc::Receiver<Vec<HistoryRow>>,
 }
@@ -143,14 +165,18 @@ pub struct FilesRequest {
 /// reads it from the run loop's idle tick to decide whether to
 /// spawn the one-shot background walk.
 pub struct FilesState {
-    /// The full, unfiltered directory-tree walk result — every
-    /// file and directory the walk found under the session's
-    /// walk root (`files_root`, or `file_picker_lock.base_root`
-    /// for a locked picker). `None` until the one-shot background
-    /// walk completes (see `App::files_touch`); populated exactly
-    /// once per TUI session. Every keystroke after that filters
-    /// THIS list in memory (`crate::tui::mode::files::fetch` →
-    /// `filter_rows`) instead of re-walking the filesystem.
+    /// The directory-tree walk result accumulated so far — every
+    /// file and directory found under the session's walk root
+    /// (`files_root`, or `file_picker_lock.base_root` for a locked
+    /// picker). `None` until the first streamed chunk arrives (see
+    /// `App::files_touch` / `App::apply_files_walk_update`); grows
+    /// incrementally, one directory's worth of rows at a time, as
+    /// the background walk streams results in — it's NOT waiting for
+    /// the whole tree before the first rows land here. Populated
+    /// exactly once per TUI session. Every keystroke filters
+    /// whatever's in THIS list so far in memory
+    /// (`crate::tui::mode::files::fetch` → `filter_rows`) instead of
+    /// re-walking the filesystem.
     pub all_rows: Option<Vec<HistoryRow>>,
     /// Whether the one-shot walk is currently running. Prevents
     /// `files_touch` from spawning a second one while the first
@@ -191,135 +217,85 @@ impl Default for FilesState {
     }
 }
 
-/// Map of relative file paths to their last Git commit timestamp.
-pub struct GitTimestamps {
-    pub repo_root: PathBuf,
-    pub timestamps: HashMap<PathBuf, i64>,
+/// Shared fan-out queue for [`parallel_walk`]. Directories are pushed
+/// as they're discovered by whichever thread found them, and popped
+/// by whichever worker thread is next free. `pending` counts
+/// directories that have been pushed but not yet fully processed
+/// (its own entries listed and any subdirectories it contains
+/// re-queued) — a plain "is the queue empty" check can't tell "empty
+/// because we're between pops" apart from "empty because the whole
+/// tree is done", but `pending == 0` can, since a directory is only
+/// marked finished (`finish()`) after any subdirectories it found
+/// have already been pushed (and thus already counted).
+struct WalkQueue {
+    queue: Mutex<VecDeque<PathBuf>>,
+    pending: AtomicUsize,
+    cv: Condvar,
 }
 
-impl GitTimestamps {
-    /// Attempt to load Git commit timestamps for tracked files under `root`.
-    /// Returns `None` if `root` is not in a Git repo, `git` isn't available,
-    /// or `git log` fails.
-    pub fn load(root: &Path) -> Option<Self> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
+impl WalkQueue {
+    fn new(start: PathBuf) -> Self {
+        WalkQueue {
+            queue: Mutex::new(VecDeque::from([start])),
+            pending: AtomicUsize::new(1),
+            cv: Condvar::new(),
         }
-
-        let repo_root_str = std::str::from_utf8(&output.stdout).ok()?.trim();
-        if repo_root_str.is_empty() {
-            return None;
-        }
-        let repo_root = PathBuf::from(repo_root_str);
-
-        let log_output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_root)
-            .args(["log", "--name-only", "--no-renames", "--format=COMMIT:%ct"])
-            .output()
-            .ok()?;
-
-        if !log_output.status.success() {
-            return None;
-        }
-
-        let log_str = std::str::from_utf8(&log_output.stdout).ok()?;
-        let mut timestamps: HashMap<PathBuf, i64> = HashMap::new();
-        let mut current_ts: Option<i64> = None;
-
-        for line in log_str.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(ts_str) = line.strip_prefix("COMMIT:") {
-                current_ts = ts_str.parse::<i64>().ok();
-            } else if let Some(ts) = current_ts {
-                let rel_path = PathBuf::from(line);
-                timestamps.entry(rel_path).or_insert(ts);
-            }
-        }
-
-        Some(GitTimestamps {
-            repo_root,
-            timestamps,
-        })
     }
 
-    /// Look up the Git last modified timestamp for a file given its `path`
-    /// (which may be relative to `root`) or `abs_path`.
-    pub fn get(&self, path: &Path, abs_path: &Path) -> Option<i64> {
-        let rel: PathBuf = path
-            .strip_prefix(&self.repo_root)
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| abs_path.strip_prefix(&self.repo_root).ok().map(PathBuf::from))
-            .or_else(|| {
-                // `repo_root` comes from `git rev-parse --show-toplevel`,
-                // which resolves symlinks. `abs_path` doesn't, so on
-                // platforms where the walk root is itself a symlink (e.g.
-                // macOS's `std::env::temp_dir()` returning `/var/folders/...`
-                // instead of its canonical `/private/var/folders/...`), the
-                // two prefix-strips above silently fail. Canonicalize as a
-                // last resort before giving up.
-                fs::canonicalize(abs_path)
-                    .ok()
-                    .and_then(|canon| canon.strip_prefix(&self.repo_root).ok().map(PathBuf::from))
-            })?;
-        self.timestamps.get(&rel).copied()
+    fn push(&self, dir: PathBuf) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        self.queue.lock().unwrap().push_back(dir);
+        self.cv.notify_one();
+    }
+
+    /// Blocks until a directory is available, or returns `None` once
+    /// every pushed directory has been fully processed — the signal
+    /// every worker thread watches for to exit.
+    fn pop(&self) -> Option<PathBuf> {
+        let mut q = self.queue.lock().unwrap();
+        loop {
+            if let Some(dir) = q.pop_front() {
+                return Some(dir);
+            }
+            if self.pending.load(Ordering::SeqCst) == 0 {
+                return None;
+            }
+            q = self.cv.wait(q).unwrap();
+        }
+    }
+
+    /// Mark one previously-popped directory as fully processed
+    /// (including having pushed any of its subdirectories first).
+    fn finish(&self) {
+        if self.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+            // `pending` just reached 0 — wake every thread blocked in
+            // `pop()` so they can observe it and exit.
+            self.cv.notify_all();
+        }
     }
 }
 
-/// Recursively walk a directory, adding every file and directory
-/// entry to `rows`. Hidden entries (names starting with `.`) and
-/// `ignore.contains(...)` matches are skipped at the entry level.
-/// Permission errors are silently swallowed so a single unreadable
-/// subdirectory doesn't abort the whole walk.
-///
-/// `next_id` is a monotonically-decreasing counter used to
-/// generate the synthetic row ids (negative integers so they
-/// can't collide with the SQLite-allocated positive history
-/// ids; same convention as the directories and todo modes).
-///
-/// **No pattern filtering here.** This walks and collects
-/// EVERYTHING (subject only to the hidden-entry / ignore-list
-/// skips above) — the user's typed filter is applied afterward, in
-/// memory, by [`filter_rows`]. Keeping the walk pattern-agnostic is
-/// what lets it run exactly once per session instead of once per
-/// keystroke; see the module-level doc comment.
-pub fn walk_dir(
+/// Walk every entry directly inside `dir` (not recursively — that's
+/// [`parallel_walk`]'s job), skipping hidden entries and
+/// `ignore.contains(...)` matches, and queuing any subdirectories
+/// found onto `queue` for a (possibly different) worker thread to
+/// pick up. Permission errors are silently swallowed so a single
+/// unreadable directory doesn't abort the walk. Returns this
+/// directory's own rows — the caller streams/collects them as its
+/// own chunk rather than this function appending to some shared
+/// list, which is what lets `parallel_walk` report a chunk per
+/// directory as soon as it's ready.
+fn walk_one_dir(
     root: &Path,
     dir: &Path,
     ignore: &IgnoreSet,
-    next_id: &mut i64,
-    rows: &mut Vec<HistoryRow>,
-) {
-    let git_timestamps = if root == dir {
-        GitTimestamps::load(root)
-    } else {
-        None
-    };
-    walk_dir_impl(root, dir, ignore, next_id, rows, git_timestamps.as_ref());
-}
-
-fn walk_dir_impl(
-    root: &Path,
-    dir: &Path,
-    ignore: &IgnoreSet,
-    next_id: &mut i64,
-    rows: &mut Vec<HistoryRow>,
-    git_timestamps: Option<&GitTimestamps>,
-) {
+    next_id: &AtomicI64,
+    queue: &WalkQueue,
+) -> Vec<HistoryRow> {
+    let mut rows = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return rows,
     };
     for entry in entries {
         let entry = match entry {
@@ -350,8 +326,10 @@ fn walk_dir_impl(
         // Compute the display path relative to root.
         let path = entry.path();
         let display = compute_display(root, &path, &name);
-        let id = *next_id;
-        *next_id -= 1;
+        // Shared across every worker thread so ids stay unique
+        // regardless of which thread processes which directory —
+        // see `parallel_walk`.
+        let id = next_id.fetch_sub(1, Ordering::Relaxed);
         let mode = if is_dir { "directory" } else { "file" };
         let comment = if is_dir {
             String::new()
@@ -367,28 +345,19 @@ fn walk_dir_impl(
                 .to_string_lossy()
                 .into_owned()
         };
-        // The row's `timestamp` is the file's modification
-        // time (not "when this row was created" — every row is
-        // created at walk time). This is both the value shown
-        // in the list's age/time column (`render_row` reads
-        // `row.timestamp` uniformly across every mode) and the
-        // sort key `sort_rows_newest_modified_first` uses to
-        // show recently-modified files first.
-        //
-        // If the file is tracked in Git, the last Git commit timestamp
-        // is used; otherwise falls back to filesystem `mtime`
-        // (or `0` on error).
-        let mtime = meta
+        // The row's `timestamp` is the file's modification time (not
+        // "when this row was created" — every row is created at walk
+        // time). This is both the value shown in the list's age/time
+        // column (`render_row` reads `row.timestamp` uniformly across
+        // every mode) and the sort key
+        // `sort_rows_newest_modified_first` uses to show
+        // recently-modified files first.
+        let timestamp = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let timestamp = if let Some(git_ts) = git_timestamps.and_then(|gt| gt.get(&path, Path::new(&abs_path))) {
-            git_ts
-        } else {
-            mtime
-        };
 
         // The preview is left empty here. Loading a 4KB
         // snippet of every file in the walk would dominate
@@ -410,14 +379,86 @@ fn walk_dir_impl(
             source: String::new(),
             ..Default::default()
         });
-        // Always recurse into directories — the walk is
-        // pattern-agnostic now, so there's no "ancestor didn't
-        // match" case to worry about anymore (that concern only
-        // existed when filtering happened during the walk).
+        // Queue subdirectories for a (possibly different) worker
+        // thread instead of recursing in-place — this is what turns
+        // the walk from a single-threaded depth-first recursion into
+        // a fanned-out breadth-of-work queue. The walk is
+        // pattern-agnostic now, so there's no "ancestor didn't match"
+        // case to worry about (that concern only existed when
+        // filtering happened during the walk).
         if is_dir {
-            walk_dir_impl(root, &path, ignore, next_id, rows, git_timestamps);
+            queue.push(path);
         }
     }
+    rows
+}
+
+/// Walk `start` (and everything beneath it, subject to the
+/// hidden-entry / `ignore` skips) using a small pool of worker
+/// threads that fan out across subdirectories via [`WalkQueue`].
+/// `on_chunk` is invoked once per directory processed — with that
+/// directory's own (non-recursive) rows — from whichever worker
+/// thread just finished it; each thread gets its own `Clone` of
+/// `on_chunk` (see [`spawn_walk`], whose callback closes over an
+/// `mpsc::Sender`, itself `Clone`, rather than something shared that
+/// would need to be `Sync`). Blocks until the whole tree has been
+/// walked. Capped at 8 threads: real directory trees have far more
+/// directories than that to keep everyone busy, and capping avoids
+/// oversubscribing on very-many-core machines for no benefit (this
+/// is I/O-bound `read_dir`/`stat` work, not CPU-bound).
+fn parallel_walk<F>(root: &Path, start: PathBuf, ignore: &IgnoreSet, on_chunk: F)
+where
+    F: Fn(Vec<HistoryRow>) + Send + Clone,
+{
+    let queue = WalkQueue::new(start);
+    let next_id = AtomicI64::new(-1);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let queue = &queue;
+            let next_id = &next_id;
+            let on_chunk = on_chunk.clone();
+            scope.spawn(move || {
+                while let Some(dir) = queue.pop() {
+                    let rows = walk_one_dir(root, &dir, ignore, next_id, queue);
+                    if !rows.is_empty() {
+                        on_chunk(rows);
+                    }
+                    queue.finish();
+                }
+            });
+        }
+    });
+}
+
+/// Walk a directory tree synchronously, collecting every row into
+/// `rows`. Thin blocking wrapper over [`parallel_walk`] for callers
+/// that want the whole tree at once (the files-mode health check, and
+/// this module's own tests) — interactive callers that want results
+/// as they arrive should use [`spawn_walk`] instead, which streams
+/// each directory's rows over a channel as soon as it's processed
+/// rather than waiting for everything.
+///
+/// `next_id` is unused: ids are now assigned by an internal counter
+/// shared across the worker threads (a single caller-owned `&mut i64`
+/// can't be threaded safely). Kept as a parameter so every existing
+/// call site keeps working unchanged; nothing reads it back across
+/// calls today.
+pub fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    ignore: &IgnoreSet,
+    _next_id: &mut i64,
+    rows: &mut Vec<HistoryRow>,
+) {
+    let collected = Mutex::new(Vec::new());
+    parallel_walk(root, dir.to_path_buf(), ignore, |chunk| {
+        collected.lock().unwrap().extend(chunk);
+    });
+    rows.extend(collected.into_inner().unwrap());
 }
 
 /// The two filtering strategies [`filter_rows`] supports, applied
@@ -675,27 +716,33 @@ pub enum FilesFilterSpec {
     },
 }
 
-/// Spawn a background thread that walks `root` ONCE, unfiltered,
-/// and sends the raw (unsorted, untruncated) result over `tx`. Used
-/// by `App::spawn_files_walk`, exactly once per TUI session:
+/// Spawn a pool of background threads (see [`parallel_walk`]) that
+/// walks `root` ONCE, unfiltered, streaming each directory's raw
+/// (unsorted, untruncated) rows over `tx` as soon as that directory
+/// is processed — not waiting for the whole tree first. Used by
+/// `App::spawn_files_walk`, exactly once per TUI session:
 /// sorting/truncating/filtering by pattern all happen afterward, per
-/// keystroke, against the cached result (see
+/// keystroke, against the accumulated result (see
 /// `crate::tui::mode::files::fetch`), not here.
 ///
-/// **The walk happens on a worker thread, not the main
-/// thread**, so the TUI never blocks on filesystem I/O.
+/// **The walk happens on worker threads, not the main thread**, so
+/// the TUI never blocks on filesystem I/O. The outer `std::thread::
+/// spawn` here just owns those worker threads via `parallel_walk`'s
+/// internal `thread::scope`; once it returns (the walk is fully
+/// done) every clone of `tx` handed to a worker has been dropped, so
+/// the channel disconnects — that's the "walk complete" signal the
+/// receiver's `try_recv()` reports, no separate "done" message
+/// needed.
 pub fn spawn_walk(root: PathBuf, ignore: IgnoreSet) -> FilesRequest {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut rows: Vec<HistoryRow> = Vec::new();
-        let mut next_id: i64 = -1;
-        walk_dir(&root, &root, &ignore, &mut next_id, &mut rows);
-        // The walker is infallible: permission errors and missing
-        // directories are swallowed at the `read_dir` boundary.
-        // Errors don't need to flow through the channel. A `send`
-        // failure just means the receiver (the TUI) was dropped —
-        // nothing to do about that.
-        let _ = tx.send(rows);
+        parallel_walk(&root, root.clone(), &ignore, move |chunk| {
+            // The walker is infallible: permission errors and
+            // missing directories are swallowed at the `read_dir`
+            // boundary. A `send` failure just means the receiver
+            // (the TUI) was dropped — nothing to do about that.
+            let _ = tx.send(chunk);
+        });
     });
     FilesRequest { receiver: rx }
 }

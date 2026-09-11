@@ -3067,7 +3067,7 @@ impl App {
     // cached-rows clone is one line; the
     // interesting logic is the background walk
     // that `files_maybe_autocall` →
-    // `spawn_files_walk` → `process_files_result`
+    // `spawn_files_walk` → `apply_files_walk_update`
     // manages).
 
     // `fetch_tags` was extracted to
@@ -7011,7 +7011,7 @@ impl App {
 
 
     // `is_files_query`, `files_touch`, `files_maybe_autocall`,
-    // `spawn_files_walk`, and `process_files_result` live in
+    // `spawn_files_walk`, and `apply_files_walk_update` live in
     // `crate::tui::mode::files` (their own `impl App` block),
     // co-located with `files::fetch`.
 
@@ -12712,18 +12712,35 @@ fn run_loop(
             app.process_jira_result(request, result);
         }
 
-        // Check for files-mode walk
-        // result from background
-        // thread. Mirrors the JIRA
-        // search poll above. The result
-        // populates `self.files_rows`
-        // and `process_files_result`
-        // triggers a `refresh()`.
-        if let Some(request) = app.files_state.request.as_ref()
-            && let Ok(result) = request.receiver.try_recv()
-            && let Some(request) = app.files_state.request.take() {
-                app.process_files_result(request, result);
+        // Check for files-mode walk chunks streamed from the
+        // background thread pool (mirrors the JIRA search poll
+        // above, but the walk sends MANY small per-directory chunks
+        // instead of one final result — see `crate::files::spawn_walk`
+        // — so the list fills in as the walk progresses instead of
+        // staying empty until the whole tree is done). Drain
+        // everything currently buffered so a burst of chunks in one
+        // tick doesn't trickle in one-per-frame; a `Disconnected`
+        // receiver means every worker thread has exited, i.e. the
+        // walk is fully complete.
+        if app.files_state.request.is_some() {
+            let mut chunks = Vec::new();
+            let mut done = false;
+            if let Some(request) = app.files_state.request.as_ref() {
+                loop {
+                    match request.receiver.try_recv() {
+                        Ok(chunk) => chunks.push(chunk),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
             }
+            if !chunks.is_empty() || done {
+                app.apply_files_walk_update(chunks, done);
+            }
+        }
 
         // Check for paperless-mode search result from
         // background thread. Mirrors the files-mode poll above.
