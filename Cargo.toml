@@ -70,6 +70,32 @@ ureq = { version = "2", features = ["json"] }
 # no benefit `fancy-regex` doesn't already cover for the small,
 # single-line shell-command strings this highlights.
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# In-process content search for `,` (ag) mode, replacing the external
+# `ag` (The Silver Searcher) binary. These are the same crates ripgrep
+# itself is built from — pure Rust, MIT/Unlicense, actively maintained:
+#   - `grep-regex` / `grep-matcher`: compile the user's search term to
+#     a matcher. Built on `regex-automata`/`regex-syntax`, the SAME
+#     crates already backing the `regex` dependency above — no second
+#     regex engine, just a different front door onto it.
+#   - `grep-searcher`: streams line matches out of a single file
+#     (binary detection, line numbers) without us hand-rolling a
+#     buffered-read/UTF-8-boundary loop.
+#   - `ignore`: the gitignore-aware parallel directory walker ripgrep
+#     itself uses, replacing `ag`'s own built-in `.gitignore`/`.ignore`
+#     handling (there was never any smarthistory-side `ag.*` ignore
+#     config to preserve — ag mode always relied entirely on the
+#     external binary's own VCS-ignore awareness).
+# Deliberately NOT depending on the umbrella `grep` crate or on
+# `grep-cli`/`grep-printer` (ripgrep's CLI-output layer, irrelevant to
+# this in-process TUI) — just the four search/walk crates below.
+# CRITICAL: never enable the `pcre2` feature on any of these (it pulls
+# in a C library, PCRE2, breaking the same "no C-toolchain dependency"
+# policy the `syntect` entry above documents, for the same
+# cross-compile reasons).
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.33"
 # HTTP server for `smarthistory serve` (the time-tracking web
 # dashboard). `axum`/`tokio` are ALSO transitive deps of
 # `note_search` (its own JIRA-import feature uses `reqwest`, which

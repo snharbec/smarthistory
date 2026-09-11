@@ -3300,7 +3300,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         "ag",
         qp.ag.to_string(),
-        "search file contents with ag (The Silver Searcher); `*` tokens restrict file patterns, `@lang` filters by language",
+        "search file contents in-process (gitignore-aware); `*` tokens restrict file patterns, `@lang` filters by language",
     );
     mode_row(
         &mut lines,

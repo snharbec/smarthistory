@@ -4705,7 +4705,7 @@ impl PrefixPicker {
                 prefix: Some(prefixes.ag),
                 name: "ag",
                 label: "ag search",
-                description: "search file contents with `ag` (The Silver Searcher)",
+                description: "search file contents (in-process, gitignore-aware)",
             },
             PrefixOption {
                 prefix: Some(prefixes.segments),
@@ -13119,7 +13119,7 @@ fn run_loop(
                 request.cancelled.store(true, Ordering::Relaxed);
             }
             app.ag_state.in_flight = false;
-            app.set_status_message("ag search cancelled".to_string());
+            app.set_status_message("search cancelled".to_string());
             continue;
         }
 

@@ -1,56 +1,96 @@
 //! AG-mode content search.
 //!
-//! Runs `ag` (The Silver Searcher) in the current directory
-//! on a background thread, parses the results, and returns
-//! rows the TUI can render. The pattern mirrors the files-
-//! mode walker (`src/files.rs`) and the JIRA search path
-//! (`src/jira.rs`): a background thread does the actual work,
-//! an mpsc channel reports results, and an `Arc<AtomicBool>`
+//! Searches the current directory tree in-process, on a background
+//! thread, and returns rows the TUI can render. The pattern mirrors
+//! the files-mode walker (`src/files.rs`) and the JIRA search path
+//! (`src/jira.rs`): a background thread does the actual work, an
+//! mpsc channel reports results, and an `Arc<AtomicBool>`
 //! cancellation flag lets the run loop abort stale searches.
+//!
+//! This used to shell out to the external `ag` (The Silver Searcher)
+//! binary. It now searches in-process using the same libraries
+//! ripgrep itself is built from: `grep-regex`/`grep-matcher` compile
+//! the search term to a matcher, `grep-searcher` streams line
+//! matches out of one file at a time (with binary detection), and
+//! `ignore` provides the gitignore-aware parallel directory walk —
+//! there's no smarthistory-side ignore config of any kind for this
+//! mode, so `ignore`'s own `.gitignore`/`.ignore`/global-exclude
+//! handling is what replaces `ag`'s built-in VCS-ignore awareness.
+//! One behavior note: like `git` itself (and unlike `ag`), a bare
+//! `.gitignore` file only takes effect inside an actual git
+//! repository (i.e. somewhere with a `.git` directory) — a stray
+//! `.gitignore` with no `.git` anywhere above it is not honored. In
+//! practice this is a non-issue (a `.gitignore` file with no git repo
+//! at all is a rare setup), but it's a real, deliberate divergence
+//! from `ag`'s more lenient "any `.gitignore`-looking file, repo or
+//! not" behavior.
 //!
 //! ## Search semantics
 //!
 //! The query body is split on whitespace via the shared
 //! [`crate::highlight::parse_query_tokens`] helper:
 //!
-//! - **Search terms** (no prefix): the first becomes ag's pattern.
-//! - **Glob tokens** (`*`): converted to regex and passed via `-G`.
-//! - **Language tokens** (`@rust`): stripped of `@` and passed as `--rust`.
+//! - **Search terms** (no prefix): the first becomes the search
+//!   pattern; any remaining terms further narrow the matched line
+//!   (case-insensitive AND-substring), same as before.
+//! - **Glob tokens** (`*`): restrict which files are walked, via
+//!   `ignore::overrides::OverrideBuilder` (gitignore-glob syntax,
+//!   the same syntax users already type). Multiple glob tokens are
+//!   OR'd together.
+//! - **Language tokens** (`@rust`): restrict which files are walked
+//!   AND choose the highlight language for the preview — restricting
+//!   the walk (not just cosmetic highlighting) matches how `ag
+//!   --rust` behaved. Implemented via `crate::highlight::
+//!   extensions_for_language` (the same lang→extension table tags
+//!   mode already uses) rather than `ignore`'s own separate file-type
+//!   database, so language names stay consistent across the whole
+//!   app. Multiple language tokens are OR'd; an unrecognized `@lang`
+//!   contributes no constraint at all (safer than silently zeroing
+//!   every result over a typo).
 //!
 //! Examples:
-//!   `,result @rust`     -> `ag ... --rust "result"`
-//!   `,tui *.rs @rust`   -> `ag ... -G '.*\.rs$' --rust "tui"`
+//!   `,result @rust`     -> search for "result", .rs files only
+//!   `,tui *.rs @rust`   -> search for "tui", .rs files only (both filters agree here)
 //!
 //! ## Performance characteristics
 //!
 //! - **Context/highlight only the rows that survive truncation:**
-//!   `run_ag` parses every matched line into a lightweight
+//!   `run_ag` collects every matched line into a lightweight
 //!   `HistoryRow` (file, line, matched text, file mtime) FIRST, sorts
 //!   by mtime, and truncates to 1000 — only THEN does it read each
 //!   surviving row's source context and (for up to 50) syntax-
 //!   highlight it. A broad search term that matches thousands of
-//!   lines used to pay that file-read + highlight cost for every one
-//!   of them before truncating; now it's bounded by what's actually
-//!   shown.
+//!   lines pays that file-read + highlight cost only for the matches
+//!   actually shown, not for every one of them.
+//! - **One mtime stat per file, not per match:** `grep-searcher`
+//!   naturally groups matches by file (one `Searcher::search_path`
+//!   call per file, in the per-entry walk callback), so the file's
+//!   mtime is stat'd once and reused for every match line found in
+//!   it — no separate cross-file mtime cache is needed.
 //! - **One file read per search, not one per match:** the
-//!   context-reading pass uses `read_source_context_with_cache`, so
-//!   a file with many surviving matches is read from disk once and
-//!   reused, instead of a fresh `read_to_string` per match line.
-//! - **A superseded search's `ag` process is killed, not abandoned:**
-//!   `run_ag` polls its child process (rather than blocking on
-//!   `Command::output()`) and checks the same `cancelled` flag the
-//!   run loop sets when a newer keystroke supersedes this search —
-//!   see `crate::debounce::touch`. On cancellation it kills the
-//!   child and bails out immediately, including mid-way through the
-//!   context/highlight pass, instead of letting a stale search's
-//!   real OS process and file I/O keep competing with the next one
-//!   for CPU/disk.
+//!   context-reading pass (after truncation) uses
+//!   `read_source_context_with_cache`, so a file with many surviving
+//!   matches is read from disk once and reused, instead of a fresh
+//!   `read_to_string` per match line.
+//! - **A superseded search stops promptly:** `run_ag` checks the
+//!   same `cancelled` flag the run loop sets when a newer keystroke
+//!   supersedes this search (see `crate::debounce::touch`) at the top
+//!   of every per-file walk callback (returning `ignore::WalkState::
+//!   Quit`, which stops the *entire* parallel walk, not just that one
+//!   worker thread — verified empirically, since no canonical example
+//!   of this exact composition exists), inside the per-line match
+//!   callback (as a backstop for a single very-large file), and
+//!   during the context/highlight pass — so a stale search stops
+//!   doing real work as soon as it's noticed, instead of only having
+//!   its *result* discarded once finished.
 
 use crate::highlight::{highlight_with_bat, highlight_with_bat_auto, parse_query_tokens};
 use crate::tui::read_source_context_with_cache;
 use crate::tui::state::HistoryRow;
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
+use ignore::{WalkBuilder, WalkState};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -140,28 +180,24 @@ impl crate::debounce::Debounced for AgState {
     }
 }
 
-/// Spawn a background thread that runs `ag`, parses the
-/// output, and sends the result rows back.
-///
-/// The `ag` binary must be on PATH. If it is not, or if
-/// it exits non-zero, an empty result set is returned
-/// (the TUI will show an empty list).
+/// Spawn a background thread that searches the current directory
+/// tree in-process and sends the result rows back.
 pub fn spawn_ag_search(pattern: String) -> AgRequest {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_clone = cancelled.clone();
     let pattern_for_thread = pattern.clone();
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     std::thread::spawn(move || {
         // `run_ag` is handed the SAME flag `touch`/`cancel_in_flight`
-        // set when this search gets superseded, so it can kill its
-        // own `ag` child process and stop mid-parse instead of
-        // grinding through a (possibly large) result set that's
-        // just going to be thrown away by the `!cancelled` check
-        // below anyway — see the module-level doc comment on why
-        // that matters here specifically (unlike a plain HTTP call,
-        // an `ag` child process CAN be killed).
-        let rows = run_ag(&pattern_for_thread, &cancelled_clone);
+        // set when this search gets superseded, so it can stop the
+        // walk (and the context/highlight pass) as soon as it's
+        // noticed, instead of grinding through a (possibly large)
+        // result set that's just going to be thrown away by the
+        // `!cancelled` check below anyway — see the module-level doc
+        // comment for how that's wired through the walk.
+        let rows = run_ag(&pattern_for_thread, &root, &cancelled_clone);
         if !cancelled_clone.load(Ordering::Relaxed) {
             let _ = tx.send(rows);
         }
@@ -172,35 +208,6 @@ pub fn spawn_ag_search(pattern: String) -> AgRequest {
         cancelled,
         pattern,
     }
-}
-
-/// Convert a shell-style glob pattern to a PCRE regex for `ag -G`.
-///
-/// `ag -G` expects a regex that matches against the full file path.
-/// The user types shell-style globs (e.g. `*.rs`), so we convert:
-///   - `*`  -> `.*`  (glob wildcard -> regex wildcard)
-///   - `.`  -> `\.`  (literal dot)
-///   - other regex metacharacters are escaped too
-///   - `$` is appended to anchor at end-of-path
-///
-/// Examples:
-///   *.rs      -> .*\.rs$
-///   bla*.txt  -> bla.*\.txt$
-fn glob_to_ag_regex(glob: &str) -> String {
-    let mut regex = String::new();
-    for c in glob.chars() {
-        match c {
-            '*' => regex.push_str(".*"),
-            // Escape regex metacharacters so they are treated literally.
-            '.' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '^' | '$' | '|' | '\\' => {
-                regex.push('\\');
-                regex.push(c);
-            }
-            _ => regex.push(c),
-        }
-    }
-    regex.push('$');
-    regex
 }
 
 /// A file's modification time as Unix epoch seconds, or `0` on any
@@ -220,22 +227,99 @@ fn file_mtime(path: &str) -> i64 {
 /// Sort `rows` newest-modified-file first. Ties (multiple matches in
 /// the same file, or files whose mtime couldn't be read) keep their
 /// relative order — `sort_by` is stable, so same-file matches stay
-/// in the line-number order `ag` emitted them in. Extracted from
+/// in the line-number order they were found in. Extracted from
 /// `run_ag` as a pure function so the ordering can be unit-tested
-/// without spawning the real `ag` binary.
+/// without a real filesystem walk.
 fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
     rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 }
 
-/// Build and run the `ag` command for the given user pattern.
+/// A `grep_searcher::Sink` that turns each matched line in one file
+/// into a (context/highlight-free) `HistoryRow` and sends it over
+/// `tx`. Constructed fresh per file by the per-entry walk callback in
+/// [`run_ag`], so `abs_path`/`mtime`/`basename` are that one file's
+/// values, computed once and reused for every match line — see the
+/// module-level doc comment on why no cross-file mtime cache is
+/// needed anymore.
+struct RowSink<'a> {
+    tx: mpsc::Sender<HistoryRow>,
+    abs_path: String,
+    mtime: i64,
+    basename: String,
+    post_filter: &'a [String],
+    cancelled: &'a AtomicBool,
+}
+
+impl Sink for RowSink<'_> {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        // Backstop for a single very-large file: the per-entry walk
+        // callback already checks `cancelled` before starting this
+        // file (and returns `WalkState::Quit`, which stops the whole
+        // walk — see the module doc comment), but a file already
+        // being scanned won't notice that until it's done. `Ok(false)`
+        // stops just this one `search_path` call early.
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+
+        let content = String::from_utf8_lossy(mat.bytes());
+        let content = content.trim_end_matches(['\n', '\r']);
+
+        // Post-filter: every remaining search term must appear
+        // in the matched line (case-insensitive) — unchanged logic,
+        // just applied here instead of a flat stdout-line loop.
+        if !self.post_filter.is_empty() {
+            let content_lower = content.to_lowercase();
+            if !self
+                .post_filter
+                .iter()
+                .all(|t| content_lower.contains(&t.to_lowercase()))
+            {
+                return Ok(true);
+            }
+        }
+
+        // `mat.line_number()` is a real, structurally-counted line
+        // number from the file itself — unlike the old ag-stdout text
+        // parse, there's no colon-splitting ambiguity to guard
+        // against here. It's still stored as a validated digit
+        // string (never anything else) rather than passed through
+        // as free-form text, since `session_id` is later spliced
+        // unquoted into a `$EDITOR +<line> <file>` shell string (see
+        // `stage_editor_open_at_line` in `tui/actions.rs`).
+        let line_number = mat.line_number().unwrap_or(0);
+
+        let _ = self.tx.send(HistoryRow {
+            id: 0, // assigned by run_ag once every row is collected
+            command: content.trim_start().to_string(),
+            directory: self.abs_path.clone(),
+            session_id: line_number.to_string(),
+            exit_code: 0,
+            timestamp: self.mtime,
+            comment: self.basename.clone(),
+            output: String::new(),
+            mode: "ag".to_string(),
+            source: String::new(),
+            ..Default::default()
+        });
+        Ok(true)
+    }
+}
+
+/// Search `root` for `pattern`, in-process, and return the matching
+/// rows. `root` must be absolute (its caller, `spawn_ag_search`,
+/// always passes `std::env::current_dir()`) — entries from the walk
+/// inherit `root`'s absoluteness, so no separate cwd-joining step is
+/// needed the way the old ag-stdout-relative-path parsing required.
 /// `cancelled` is the same flag the run loop flips when a newer
 /// keystroke supersedes this search (see `crate::debounce::touch`);
-/// this function checks it both while `ag` itself is still running
-/// (killing the child rather than waiting it out) and while doing
-/// the context-read/highlight pass afterward, so a superseded search
-/// stops doing real work as soon as it's noticed, instead of only
-/// having its *result* discarded once finished.
-fn run_ag(pattern: &str, cancelled: &Arc<AtomicBool>) -> Vec<HistoryRow> {
+/// this function checks it at the top of every per-file walk
+/// callback (stopping the whole walk), inside the per-line match
+/// callback (stopping one very-large file early), and while doing
+/// the context-read/highlight pass afterward.
+fn run_ag(pattern: &str, root: &Path, cancelled: &Arc<AtomicBool>) -> Vec<HistoryRow> {
     // If the pattern is empty, return nothing.
     if pattern.is_empty() {
         return Vec::new();
@@ -252,197 +336,146 @@ fn run_ag(pattern: &str, cancelled: &Arc<AtomicBool>) -> Vec<HistoryRow> {
         return Vec::new();
     }
 
-    // First term is the primary pattern given to ag.
+    // First term is the primary search pattern.
     // Remaining terms are post-filtered.
     let primary = tokens.terms[0].clone();
-    let post_filter = &tokens.terms[1..];
+    let post_filter = tokens.terms[1..].to_vec();
 
-    // Build the ag command.
-    let mut cmd = std::process::Command::new("ag");
-    cmd.arg("--nocolor").arg("--nogroup").arg("--hidden");
-
-    // Language flags (@rust -> --rust).
-    for lang in &tokens.languages {
-        cmd.arg(format!("--{}", lang));
-    }
-
-    // File-pattern filters.
-    // Convert shell-style globs to regex patterns for `ag -G`.
-    // `ag -G` takes a PCRE regex that matches against the full
-    // file path. Examples:
-    //   *.rs      -> .*\.rs$
-    //   bla*.txt  -> bla.*\.txt$
-    for g in &tokens.globs {
-        let regex = glob_to_ag_regex(g);
-        cmd.arg("-G").arg(regex);
-    }
-
-    // The search pattern.
-    cmd.arg(primary);
-
-    // Current directory.
-    cmd.arg(".");
-
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::null());
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(), // ag not on PATH, or other error.
-    };
-
-    // Drain stdout on a dedicated thread WHILE we poll for exit
-    // below, instead of reading it only after the process ends.
-    // `ag` can emit far more than the OS pipe buffer holds; without
-    // something reading concurrently, a large result set would make
-    // the child block on a full pipe forever while we're separately
-    // waiting for it to exit — a classic self-deadlock. `Command::
-    // output()`/`wait_with_output()` avoid this internally too, but
-    // block uninterruptibly, giving no chance to check `cancelled`
-    // mid-run.
-    let mut stdout_pipe = child.stdout.take().expect("stdout was piped above");
-    let (out_tx, out_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read as _;
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf);
-        let _ = out_tx.send(buf);
-    });
-
-    let status = loop {
-        if cancelled.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Vec::new();
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return Vec::new(),
-        }
-    };
-
-    if !status.success() {
-        // Exit code 1 means "no matches" —
-        // that's a valid, empty result.
-        // Anything else (e.g. 2 = error) also
-        // yields an empty result.
-        return Vec::new();
-    }
-
-    let stdout_bytes = out_rx.recv().unwrap_or_default();
-    let stdout = match String::from_utf8(stdout_bytes) {
-        Ok(s) => s,
+    // Smart case: case-insensitive unless the pattern itself has an
+    // uppercase character — the same convention `App::is_case_
+    // sensitive` already uses elsewhere in the TUI, and it matches
+    // `ag`'s own documented default.
+    let case_insensitive = !primary.chars().any(|c| c.is_uppercase());
+    let matcher = match grep_regex::RegexMatcherBuilder::new()
+        .case_insensitive(case_insensitive)
+        .build(&primary)
+    {
+        Ok(m) => m,
+        // An invalid pattern (as a regex) yields an empty result,
+        // same "bad invocation -> empty" contract the old ag-process
+        // path had for e.g. `ag` not being on PATH.
         Err(_) => return Vec::new(),
     };
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut rows: Vec<HistoryRow> = Vec::new();
-    let mut next_id: i64 = -1;
-    // Cache each file's mtime by absolute path — a file with many
-    // matches would otherwise `stat` it once per match line.
-    let mut mtime_cache: HashMap<String, i64> = HashMap::new();
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false) // ag mode always behaves as if `--hidden` was passed
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .follow_links(false);
 
-    // Use the first explicit language for syntax highlighting. If
-    // multiple languages were specified we use only the first to
-    // avoid guessing per-file; extension-based auto-detection
-    // kicks in when no language is given, but here we prefer the
-    // user's explicit choice.
-    let highlight_lang = tokens.languages.first().map(String::as_str);
-
-    // First pass: parse every matched line into a `HistoryRow` with
-    // NO context/highlight yet (`output`/`source` filled in below).
-    // This is deliberately cheap — no file reads beyond the mtime
-    // stat — so sorting and truncating to 1000 next doesn't waste
-    // I/O on matches that won't be shown.
-    for line in stdout.lines() {
-        if cancelled.load(Ordering::Relaxed) {
-            return Vec::new();
+    // Glob tokens restrict which files are walked (gitignore-glob
+    // syntax, the same syntax users already type — e.g. `*.rs`).
+    // Multiple glob tokens are OR'd, matching `ignore::Override`'s
+    // native multi-pattern semantics.
+    if !tokens.globs.is_empty() {
+        let mut ob = ignore::overrides::OverrideBuilder::new(root);
+        for g in &tokens.globs {
+            let _ = ob.add(g);
         }
-        // Format: file:line_number:matched_content
-        // (or file:line_number:column:matched_content when --column is used,
-        // but we avoid --column for broader compatibility).
-        let mut parts = line.splitn(3, ':');
-        let file = match parts.next() {
-            Some(f) if !f.is_empty() => f,
-            _ => continue,
-        };
-        let line_num = match parts.next() {
-            Some(n) => n,
-            _ => continue,
-        };
-        let content = match parts.next() {
-            Some(c) => c,
-            _ => continue,
-        };
-
-        // Post-filter: every remaining search term must appear
-        // in the matched line (case-insensitive).
-        if !post_filter.is_empty() {
-            let content_lower = content.to_lowercase();
-            if !post_filter
-                .iter()
-                .all(|t| content_lower.contains(&t.to_lowercase()))
-            {
-                continue;
-            }
+        if let Ok(overrides) = ob.build() {
+            builder.overrides(overrides);
         }
-
-        // Build absolute path.
-        let abs_path = if std::path::Path::new(file).is_absolute() {
-            file.to_string()
-        } else {
-            cwd.join(file).to_string_lossy().into_owned()
-        };
-
-        // The row's `timestamp` is the FILE's modification time
-        // (not "when this row was created" — every row is created
-        // at search time), same convention `files.rs::walk_dir` uses.
-        // This is both what `render_row` shows in the age/time
-        // column and the sort key applied below to show matches in
-        // recently-modified files first.
-        let mtime = *mtime_cache
-            .entry(abs_path.clone())
-            .or_insert_with(|| file_mtime(&abs_path));
-
-        let line_number = line_num.parse::<usize>().unwrap_or(0);
-        let basename = std::path::Path::new(file)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| file.to_string());
-
-        rows.push(HistoryRow {
-            id: next_id,
-            command: content.trim_start().to_string(),
-            directory: abs_path,
-            // Store the *parsed* `line_number` (validated as a
-            // `usize`, falling back to `0` on anything malformed),
-            // not the raw `line_num` field from `ag`'s output. A
-            // filename containing an embedded colon (valid on
-            // macOS/Linux) shifts `splitn(3, ':')`'s fields, and
-            // `session_id` is later spliced unquoted into a staged
-            // `$EDITOR +<line> <file>` shell string (see
-            // `stage_editor_open_at_line` in `tui/actions.rs`) — an
-            // unvalidated raw string here would be a command
-            // injection primitive.
-            session_id: line_number.to_string(),
-            exit_code: 0,
-            timestamp: mtime,
-            comment: basename,
-            output: String::new(),
-            mode: "ag".to_string(),
-            source: String::new(),
-            ..Default::default()
-        });
-        next_id -= 1;
     }
+
+    // Language tokens ALSO restrict which files are walked (matching
+    // `ag --rust`'s behavior of filtering search scope, not just
+    // choosing a highlight language). Reuses the same lang->extension
+    // table tags mode already uses, rather than `ignore`'s own
+    // separate file-type database, so language names stay consistent
+    // across the app. Multiple language tokens are OR'd; an
+    // unrecognized `@lang` contributes no constraint.
+    if !tokens.languages.is_empty() {
+        let langs = tokens.languages.clone();
+        builder.filter_entry(move |entry| {
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
+                return true; // never prune directories
+            }
+            let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) else {
+                return false;
+            };
+            langs.iter().any(|lang| {
+                crate::highlight::extensions_for_language(lang)
+                    .is_some_and(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+            })
+        });
+    }
+
+    let walker = builder.build_parallel();
+    let (tx, rx) = mpsc::channel::<HistoryRow>();
+
+    walker.run(|| {
+        let matcher = matcher.clone();
+        let tx = tx.clone();
+        let cancelled = cancelled.clone();
+        let post_filter = post_filter.clone();
+        Box::new(move |result| {
+            if cancelled.load(Ordering::Relaxed) {
+                // Stops the ENTIRE parallel walk, not just this
+                // worker thread — verified empirically (see the
+                // module-level doc comment), since no canonical
+                // example of this exact composition exists.
+                return WalkState::Quit;
+            }
+            let entry = match result {
+                Ok(e) => e,
+                Err(_) => return WalkState::Continue,
+            };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                return WalkState::Continue;
+            }
+            let path = entry.path();
+            let abs_path = path.to_string_lossy().into_owned();
+            // One stat per FILE, reused for every match line found in
+            // it — see the module-level doc comment.
+            let mtime = file_mtime(&abs_path);
+            let basename = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            let mut searcher = SearcherBuilder::new()
+                .binary_detection(BinaryDetection::quit(b'\x00'))
+                .line_number(true)
+                .build();
+            let sink = RowSink {
+                tx: tx.clone(),
+                abs_path,
+                mtime,
+                basename,
+                post_filter: &post_filter,
+                cancelled: cancelled.as_ref(),
+            };
+            let _ = searcher.search_path(&matcher, path, sink);
+            WalkState::Continue
+        })
+    });
+    drop(tx);
+
+    // Assign the synthetic negative ids during this single-threaded
+    // drain. Their VALUES are no longer deterministic across runs
+    // (different worker threads race), which is fine — `HistoryRow::
+    // id` is already a synthetic, collision-tolerant value elsewhere
+    // in the app; the real sort key below (`timestamp`) is unaffected
+    // by walk-thread scheduling.
+    let mut next_id: i64 = -1;
+    let mut rows: Vec<HistoryRow> = rx
+        .into_iter()
+        .map(|mut row| {
+            row.id = next_id;
+            next_id -= 1;
+            row
+        })
+        .collect();
 
     sort_rows_newest_modified_first(&mut rows);
     // Cap results to keep the UI responsive — applied AFTER sorting
     // (and BEFORE the context/highlight pass below) so a search with
     // more than 1000 total matches only ever pays the context-read/
     // highlight cost for the matches in the most-recently-modified
-    // files that will actually be shown, not for every match `ag`
-    // emitted.
+    // files that will actually be shown, not for every match found.
     rows.truncate(1000);
 
     // Second pass: read 5 lines of context around each surviving
@@ -456,6 +489,7 @@ fn run_ag(pattern: &str, cancelled: &Arc<AtomicBool>) -> Vec<HistoryRow> {
     let mut context_cache: HashMap<PathBuf, String> = HashMap::new();
     let mut highlight_count = 0usize;
     const HIGHLIGHT_MAX: usize = 50;
+    let highlight_lang = tokens.languages.first().map(String::as_str);
     for row in rows.iter_mut() {
         if cancelled.load(Ordering::Relaxed) {
             return Vec::new();
