@@ -17,11 +17,24 @@ export SMART_HISTORY_SESSION="{session_id}"
 # $? still reflects the previous command, so we must NOT read it here).
 _smarthistory_preexec() {
     _smarthistory_cmd="$1"
+    # OSC 133;C ("command output is about to begin") — an exact,
+    # unambiguous replacement for the `find_command_line` text
+    # heuristic `capture-tmux`/`capture-herdr` otherwise fall back to.
+    # BEL-terminated (not ST) to match `strip_ansi`'s own OSC handling
+    # and the existing test suite's worked example. See
+    # `_smarthistory_osc133_enabled` above and `shellintegration.osc133`
+    # in docs/configuration.md.
+    [[ "$_smarthistory_osc133_enabled" = "1" ]] && printf '\033]133;C\a'
 }
 # Capture $? in precmd (after the command has finished, before the next
 # prompt) and record both the command and its real exit code.
 _smarthistory_precmd() {
     local exit_code=$?
+    # OSC 133;D;<exit_code> ("command output just ended") — emitted as
+    # the very first thing in precmd, before anything else below can
+    # run a subshell or otherwise disturb $? or the terminal stream.
+    # Pairs with the OSC 133;C marker in `_smarthistory_preexec` above.
+    [[ "$_smarthistory_osc133_enabled" = "1" ]] && printf '\033]133;D;%d\a' "$exit_code"
     # Defensive: make sure no stale dropdown POSTDISPLAY can possibly
     # bleed into the next prompt (belt-and-suspenders on top of the
     # accept-line/send-break clears below; BUFFER is fresh here anyway,
@@ -333,6 +346,18 @@ fi
 typeset -g _smarthistory_prompt_project_enabled="0"
 [[ "$(smarthistory config get prompt.project 2>/dev/null)" == "on" ]] \
     && _smarthistory_prompt_project_enabled="1"
+# Whether `_smarthistory_preexec`/`_smarthistory_precmd` emit OSC 133
+# shell-integration markers around every command, giving
+# `capture-tmux`/`capture-herdr` an exact output boundary instead of
+# guessing from the command text and prompt shape. On by default — see
+# `shellintegration.osc133` in docs/configuration.md for the off-switch
+# and rationale. Read once here at init time (same convention as
+# `prompt.project` above), not per-command — a per-command
+# `smarthistory config get` round trip just to check a flag would add
+# real subprocess latency to every single command.
+typeset -g _smarthistory_osc133_enabled="1"
+[[ "$(smarthistory config get shellintegration.osc133 2>/dev/null)" == "off" ]] \
+    && _smarthistory_osc133_enabled="0"
 # The most recently resolved project slug (empty string when no
 # project is active/tracking is paused), its accumulated active
 # seconds for TODAY, and an "hh:mm" rendering of those seconds — all

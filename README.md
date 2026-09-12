@@ -97,7 +97,9 @@ of falling through to zsh's native history.
   selection, building with herdr, setup, troubleshooting).
 - **Output capture** for both tmux (`pipe-pane` log) and herdr
   (`herdr pane read`): captured output is searchable via the `+` prefix and
-  viewable via `Ctrl+L`.
+  viewable via `Ctrl+L`. Uses exact OSC 133 shell-integration markers to
+  locate a command's output boundary when available, falling back to a text
+  heuristic otherwise.
 - **Note/todo integration** with
   [note_search](https://github.com/snharbec/note_search): search notes (`@`),
   list open todos (`!`), and create new entries (`@new <text>` / `!@new <text>`)
@@ -533,6 +535,12 @@ capture pipeline works for both multiplexers:
 The `capturelines` config key controls the default number of lines captured
 (default 20). Per-command overrides: `capturelines.ps=ALL` captures every line
 of `ps` output.
+
+Both paths locate the command's output boundary using OSC 133 shell-integration
+markers (`shellintegration.osc133=on`, the default) when present — an exact
+replacement for the previous text/prompt-shape heuristic, which is still the
+fallback when markers aren't available. See
+[docs/multiplexer.md](docs/multiplexer.md#exact-boundaries-via-osc-133).
 
 ### Directory-mode cascade deletion
 

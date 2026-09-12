@@ -190,6 +190,20 @@ just nothing) for per-pane output capture. The `+` mode keeps working because it
 reads from the SQLite table populated by whichever precmd hook ran, not from the
 live multiplexer.
 
+### Exact boundaries via OSC 133
+
+Both capture paths above locate a command's output by scanning the pane's
+scrollback text. When `shellintegration.osc133` is on (the default — see
+[`docs/configuration.md`](configuration.md#shellintegrationosc133)), `init.zsh`
+emits standard [OSC 133](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md)
+shell-integration markers around every command, and both `capture-tmux` and
+`capture-herdr` use them as an **exact** boundary instead of guessing from the
+command text and prompt shape — this applies identically to both multiplexers,
+since the markers are emitted by the shell, not the multiplexer. When markers
+aren't present (an older session that hasn't re-sourced `init.zsh`, a non-zsh
+shell, or the toggle off), capture falls back to the previous text-heuristic
+behavior unchanged.
+
 ## Setup guides
 
 ### tmux hooks (for output capture)
@@ -299,6 +313,11 @@ it's missing everywhere:
 - The output search matches `LIKE` on the captured `output` column. A command
   with no captured output (e.g. a `[ -n "$TMUX" ]` test) has no `history_output`
   row.
+- If captured output ever looks truncated or misaligned in a way that seems
+  new, try `shellintegration.osc133=off` (see
+  [`docs/configuration.md`](configuration.md#shellintegrationosc133)) to rule
+  out an unusual terminal/multiplexer mishandling the OSC 133 marker bytes —
+  capture falls back to the previous text-heuristic behavior with it off.
 
 ### herdr binary missing from PATH
 
