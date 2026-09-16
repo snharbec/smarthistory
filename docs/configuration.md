@@ -51,6 +51,7 @@ value" so you can confirm what the TUI actually sees.
   - [`fileviewcommands`](#fileviewcommands)
   - [`capturelines`](#capturelines)
   - [`capturelines.<cmd>`](#capturelinescmd)
+  - [`shellintegration.osc133`](#shellintegrationosc133)
 - [History list & filtering](#history-list--filtering)
   - [`duplicatefilter`](#duplicatefilter)
   - [`initialmode`](#initialmode)
@@ -204,6 +205,34 @@ capturelines.kubectl_logs=ALL   # one-off: capture all of `kubectl logs`
 Multiple overrides stack; the matching is by **first token**, not substring.
 `capturelines.kubectl=10` matches `kubectl get pods`, `kubectl apply -f …`, and
 any other command that starts with `kubectl`.
+
+### `shellintegration.osc133`
+
+|                  |                                          |
+| ---------------- | ---------------------------------------- |
+| **Type**         | `on` \| `off` (anything else → default)  |
+| **Default**      | `on`                                     |
+| **Env override** | —                                        |
+
+When `on`, `init.zsh`'s `preexec`/`precmd` hooks emit standard [OSC
+133](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md)
+shell-integration markers around every command (`ESC ] 133 ; C` right before
+it runs, `ESC ] 133 ; D ; <exit_code>` right after it finishes). `capture-tmux`
+and `capture-herdr` use these as an **exact** boundary for a command's
+output instead of guessing from the command text and prompt shape — the same
+markers modern terminals (iTerm2, VS Code, kitty, WezTerm) and prompt
+frameworks (Starship) already use for their own shell-integration features,
+so this is additionally useful even outside smarthistory's own capture.
+
+Read once per shell session (not per command — no per-command subprocess
+cost). When `off`, or in any session that hasn't re-sourced `init.zsh` since
+upgrading, output capture silently falls back to the previous text-heuristic
+behavior — nothing else changes.
+
+```ini
+shellintegration.osc133=on    # default
+shellintegration.osc133=off   # if some terminal/multiplexer ever mishandles the sequence
+```
 
 ---
 
@@ -1543,6 +1572,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `fileviewcommands`              | list                              | `less more bat tail head`                                        | [Capture & output](#capture--output)                                      |
 | `capturelines`                  | `ALL` \| int                      | `20`                                                             | [Capture & output](#capture--output)                                      |
 | `capturelines.<cmd>`            | `ALL` \| int                      | —                                                                | [Capture & output](#capture--output)                                      |
+| `shellintegration.osc133`       | `on` \| `off`                     | `on`                                                              | [Capture & output](#capture--output)                                      |
 | `duplicatefilter`               | `on` \| `off`                     | `on`                                                             | [History list & filtering](#history-list--filtering)                      |
 | `initialmode`                   | enum                              | `SESS`                                                           | [History list & filtering](#history-list--filtering)                      |
 | `zsh.mode`                      | `sess` \| `dir` \| `global`       | `sess`                                                           | [History list & filtering](#history-list--filtering)                      |

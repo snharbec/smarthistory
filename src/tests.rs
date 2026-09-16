@@ -1045,6 +1045,156 @@ file2
         assert!(!out.contains("next command"));
     }
 
+    // --- OSC 133 exact-boundary detection ------------------------------
+
+    #[test]
+    fn find_osc133_boundary_none_when_no_markers() {
+        let raw = "$ echo hi\nhi\n$ \n";
+        assert!(find_osc133_boundary(raw).is_none());
+    }
+
+    #[test]
+    fn find_osc133_boundary_finds_simple_pair() {
+        let raw = "$ echo hi\n\x1b]133;C\x07hi\n\x1b]133;D;0\x07$ ";
+        let b = find_osc133_boundary(raw).expect("boundary");
+        assert_eq!(b.command_line_start, 0);
+        assert_eq!(b.exit_code, Some(0));
+        // The slice up to output_end excludes the trailing "$ " that
+        // comes after the D marker.
+        let slice = &raw[b.command_line_start..b.output_end];
+        assert!(slice.starts_with("$ echo hi"), "got: {slice}");
+        assert!(slice.contains("hi"), "got: {slice}");
+        assert!(!slice.ends_with("$ "), "output_end must land before the trailing prompt: {slice}");
+    }
+
+    #[test]
+    fn find_osc133_boundary_uses_last_pair_when_several_present() {
+        let raw = concat!(
+            "$ first\n\x1b]133;C\x07first output\n\x1b]133;D;0\x07",
+            "$ second\n\x1b]133;C\x07second output\n\x1b]133;D;0\x07",
+        );
+        let b = find_osc133_boundary(raw).expect("boundary");
+        let slice = extract_pane_output_via_osc133(raw, None).expect("extract");
+        assert!(slice.contains("second output"), "got: {slice}");
+        assert!(!slice.contains("first output"), "got: {slice}");
+        let _ = b;
+    }
+
+    #[test]
+    fn find_osc133_boundary_none_when_c_has_no_matching_d() {
+        let raw = "$ still running\n\x1b]133;C\x07partial output so far";
+        assert!(find_osc133_boundary(raw).is_none());
+    }
+
+    #[test]
+    fn find_osc133_boundary_handles_no_output_command() {
+        // `C` immediately followed by `D` — the command produced no
+        // output at all.
+        let raw = "$ true\n\x1b]133;C\x07\x1b]133;D;0\x07$ ";
+        let b = find_osc133_boundary(raw).expect("boundary");
+        assert_eq!(b.exit_code, Some(0));
+        let out = extract_pane_output_via_osc133(raw, None).expect("extract");
+        assert!(out.contains("true"), "got: {out}");
+        // No real output line should have leaked in.
+        assert!(!out.contains("$ \n$"), "got: {out}");
+    }
+
+    #[test]
+    fn find_osc133_boundary_resolves_double_emitter_cluster() {
+        // Simulates a second OSC-133 emitter (e.g. the user's own
+        // prompt framework) also firing, producing adjacent C's and
+        // adjacent D's around the same, single real command. The
+        // real output must still be captured correctly and without
+        // panicking; exact inclusion of the command-line prefix isn't
+        // guaranteed in this specific multi-emitter-adjacency case
+        // (not the scenario this feature is primarily designed for —
+        // a single emitter, smarthistory's own, is the normal case).
+        let raw = "$ echo hi\n\x1b]133;C\x07\x1b]133;C\x07hi\n\x1b]133;D;0\x07\x1b]133;D;0\x07$ ";
+        let out = extract_pane_output_via_osc133(raw, None).expect("extract");
+        assert!(out.contains("hi"), "got: {out}");
+    }
+
+    #[test]
+    fn find_osc133_boundary_malformed_exit_code_does_not_panic() {
+        let raw = "$ echo hi\n\x1b]133;C\x07hi\n\x1b]133;D;not-a-number\x07$ ";
+        let b = find_osc133_boundary(raw).expect("boundary");
+        assert_eq!(b.exit_code, None);
+    }
+
+    /// The exact scenario `extract_tmux_output_prefers_prompt_line_over_output`
+    /// guards against for the heuristic path — a command whose own
+    /// output contains the command text as a substring (`echo ls`
+    /// printing `ls`) — but with OSC 133 markers present, so there's
+    /// no ambiguity to resolve at all: the boundary is exact by
+    /// construction.
+    #[test]
+    fn extract_pane_output_via_osc133_handles_self_referential_output() {
+        let raw = "$ echo ls\n\x1b]133;C\x07ls\n\x1b]133;D;0\x07$ echo next\n";
+        let out = extract_pane_output_via_osc133(raw, None).expect("extract");
+        assert!(out.starts_with("$ echo ls"), "got: {out}");
+        assert!(out.contains("ls"), "got: {out}");
+        assert!(!out.contains("echo next"), "got: {out}");
+    }
+
+    #[test]
+    fn extract_pane_output_via_osc133_caps_at_max_lines() {
+        let mut raw = String::from("$ many\n\x1b]133;C\x07");
+        for i in 0..30 {
+            raw.push_str(&format!("line {}\n", i));
+        }
+        raw.push_str("\x1b]133;D;0\x07$ ");
+        let out = extract_pane_output_via_osc133(&raw, Some(5)).expect("extract");
+        // Command line + 5 following lines.
+        assert_eq!(out.lines().count(), 6, "got: {out}");
+    }
+
+    #[test]
+    fn extract_pane_output_via_osc133_unlimited_returns_full_exact_span() {
+        let raw = "$ many\n\x1b]133;C\x07a\nb\nc\n\x1b]133;D;0\x07$ ";
+        let out = extract_pane_output_via_osc133(raw, None).expect("extract");
+        assert!(out.contains("a") && out.contains("b") && out.contains("c"), "got: {out}");
+    }
+
+    #[test]
+    fn extract_pane_output_via_osc133_strips_internal_ansi_from_output() {
+        let raw = "$ ls --color\n\x1b]133;C\x07\x1b[32mfile1\x1b[0m\n\x1b]133;D;0\x07$ ";
+        let out = extract_pane_output_via_osc133(raw, None).expect("extract");
+        assert!(out.contains("file1"), "got: {out}");
+        assert!(!out.contains("\x1b["), "ANSI should be stripped: {out}");
+    }
+
+    #[test]
+    fn extract_pane_output_via_osc133_none_when_no_markers() {
+        let raw = "$ echo hi\nhi\n$ \n";
+        assert!(extract_pane_output_via_osc133(raw, None).is_none());
+    }
+
+    // --- extract_tmux_output: OSC-133 preferred, heuristic still the
+    // fallback for logs without markers -------------------------------
+
+    #[test]
+    fn extract_tmux_output_prefers_osc133_boundary_when_present() {
+        let log = "$ echo ls\n\x1b]133;C\x07ls\n\x1b]133;D;0\x07$ echo next\nnext output\n";
+        let path = write_temp_log(log);
+        let out = extract_tmux_output("echo ls", &path, None).expect("extract");
+        assert!(out.starts_with("$ echo ls"), "got: {out}");
+        assert!(!out.contains("next output"), "got: {out}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Regression safety net: a log with NO OSC 133 bytes at all must
+    /// produce byte-identical results to before this feature existed
+    /// — proves the new "try exact first" step never misfires on
+    /// ordinary, marker-free content.
+    #[test]
+    fn extract_tmux_output_falls_back_unchanged_without_markers() {
+        let log = "$ echo ls\nls\n$ echo next\nnext output\n";
+        let path = write_temp_log(log);
+        let out = extract_tmux_output("echo ls", &path, Some(MAX_OUTPUT_LINES)).expect("extract");
+        assert!(out.starts_with("$ echo ls"), "got: {out}");
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn strip_ansi_removes_csi_and_osc() {
         let input = "before\x1b[32mgreen\x1b[0m after\x1b]0;title\x07end";

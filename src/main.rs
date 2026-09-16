@@ -2226,6 +2226,20 @@ pub struct Config {
     /// `prompt.project=on|off`. See docs/configuration.md's
     /// "Published environment variables" section.
     prompt_project_enabled: bool,
+    /// Whether `init.zsh`'s `preexec`/`precmd` hooks emit OSC 133
+    /// shell-integration markers (`ESC ] 133 ; C BEL` before a command
+    /// runs, `ESC ] 133 ; D ; <exit_code> BEL` right after) around
+    /// every command. `capture-tmux`/`capture-herdr` use these as an
+    /// exact replacement for the `find_command_line`/
+    /// `next_prompt_boundary` text heuristics when present, falling
+    /// back to those heuristics unchanged when absent (an
+    /// un-resourced older session, a non-zsh shell, or this toggle
+    /// off). Default `true`: unlike most opt-in toggles here, this
+    /// writes new (invisible-when-supported) bytes to every prompt in
+    /// every session, so it's on by default for the accuracy win, with
+    /// an off-switch available in case some terminal/multiplexer ever
+    /// mishandles the sequence. Set via `shellintegration.osc133=on|off`.
+    shellintegration_osc133_enabled: bool,
     /// Whether the TUI's history list syntax-highlights each
     /// command's text (via `syntect`, in-process — no external
     /// binary, unlike `dropdown.highlight`'s zsh-side `bat` call)
@@ -2698,6 +2712,7 @@ impl Config {
             dropdown_matchmode: "prefix".to_string(),
             dropdown_predict: false,
             prompt_project_enabled: false,
+            shellintegration_osc133_enabled: true,
             tui_highlight: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
@@ -2986,6 +3001,9 @@ impl Config {
                 }
                 "prompt.project" => {
                     self.prompt_project_enabled = crate::util::parse_bool(value, false);
+                }
+                "shellintegration.osc133" => {
+                    self.shellintegration_osc133_enabled = crate::util::parse_bool(value, true);
                 }
                 "tui.highlight" => {
                     self.tui_highlight = crate::util::parse_bool(value, false);
@@ -4781,6 +4799,15 @@ fn extract_tmux_output(
 
     for attempt in 1..=MAX_ATTEMPTS {
         if let Ok(contents) = fs::read_to_string(file) {
+            // Try the exact OSC-133 boundary FIRST, on the RAW
+            // (pre-strip) content — stripping ANSI first would
+            // already have destroyed the markers, since `strip_ansi`
+            // discards every OSC sequence unconditionally. Re-tried
+            // on every attempt for the same reason the heuristic
+            // path below is: the pipe-pane write can lag either way.
+            if let Some(output) = extract_pane_output_via_osc133(&contents, max_lines) {
+                return Ok(output);
+            }
             // Strip ANSI and C0 control characters from each line
             // individually so that newline characters (which are
             // valid line separators) survive the cleaning step.
@@ -4853,6 +4880,179 @@ fn next_prompt_boundary(lines: &[String], from: usize) -> usize {
         }
     }
     lines.len()
+}
+
+/// One OSC 133 shell-integration marker found while scanning raw pane
+/// content — either `C` (command output is about to begin) or
+/// `D;<exit_code>` (command output just ended). See
+/// `_smarthistory_preexec`/`_smarthistory_precmd` in `init.zsh` for
+/// where these are emitted.
+enum Osc133Marker {
+    CommandStart,
+    CommandEnd(Option<i32>),
+}
+
+/// Scan `raw` for every OSC 133 marker, returning `(byte offset of the
+/// marker's ESC byte, the marker, byte offset just past its
+/// terminator)` for each one found, in the order they appear.
+///
+/// Recognizes both BEL (`\x07`) and ST (`ESC \`) terminators — our own
+/// emission always uses BEL (see `init.zsh`), but a third-party
+/// emitter (e.g. the user's own prompt framework, if it also does
+/// OSC-133 shell integration) might use ST instead, and we want to
+/// recognize its markers too rather than let them corrupt the scan.
+///
+/// Byte-level, not char-level: ESC (0x1b) and BEL (0x07) can never be
+/// a continuation byte of a multi-byte UTF-8 sequence, so scanning for
+/// them is safe regardless of what non-ASCII content appears elsewhere
+/// in `raw`. The one place this could still slice mid-character (a
+/// malformed/binary-ish OSC payload) uses `str::get` rather than
+/// direct indexing, so it degrades to "skip this one" rather than a
+/// panic.
+fn scan_osc133_markers(raw: &str) -> Vec<(usize, Osc133Marker, usize)> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b || bytes.get(i + 1) != Some(&b']') {
+            i += 1;
+            continue;
+        }
+        let payload_start = i + 2;
+        let mut j = payload_start;
+        let terminator = loop {
+            match bytes.get(j) {
+                Some(0x07) => break Some((j, j + 1)),
+                Some(0x1b) if bytes.get(j + 1) == Some(&b'\\') => break Some((j, j + 2)),
+                Some(_) => j += 1,
+                None => break None,
+            }
+        };
+        let Some((payload_end, term_end)) = terminator else {
+            break; // unterminated OSC at end of buffer
+        };
+        if let Some(payload) = raw.get(payload_start..payload_end) {
+            if payload == "133;C" {
+                out.push((i, Osc133Marker::CommandStart, term_end));
+            } else if payload == "133;D" {
+                out.push((i, Osc133Marker::CommandEnd(None), term_end));
+            } else if let Some(code) = payload.strip_prefix("133;D;") {
+                out.push((i, Osc133Marker::CommandEnd(code.parse().ok()), term_end));
+            }
+        }
+        i = term_end;
+    }
+    out
+}
+
+/// Byte offsets into RAW (pre-`strip_ansi`) pane content bounding the
+/// most recently completed command, as delimited by the OSC 133
+/// markers `init.zsh` emits.
+struct Osc133Boundary {
+    /// Start of the already-echoed "$ command" line that precedes the
+    /// `C` marker — NOT the marker's own byte offset. Zsh's line
+    /// editor has already rendered and newline-terminated that line
+    /// by the time `preexec` runs and prints `C` right after it, so
+    /// the marker starts its own (otherwise empty) line; finding the
+    /// start of the REAL command line one step further back matches
+    /// `extract_pane_output`'s existing contract of returning the
+    /// command line as the first line of the captured output. The
+    /// marker's own escape bytes end up inside the returned range
+    /// too, but `strip_ansi` (applied to the whole slice afterward,
+    /// same as any other OSC sequence) removes them along with
+    /// everything else — no special-casing needed.
+    command_line_start: usize,
+    /// Byte offset of the first byte of the `D` marker's escape
+    /// sequence. The command's output ends exactly here.
+    output_end: usize,
+    /// Exit code parsed from `D;<code>`, for diagnostic use only —
+    /// this NEVER overrides the `--exit-code` value `capture-tmux`/
+    /// `capture-herdr` already receive directly from the shell's own
+    /// `$?` (the authoritative source).
+    #[allow(dead_code)]
+    exit_code: Option<i32>,
+}
+
+/// Find the boundary of the most recently completed command: the
+/// LAST `C` marker in `raw`, paired with the first `D` marker after
+/// it. Mirrors `find_command_line`'s "search backward, most recent
+/// occurrence wins" convention — the tmux pipe-pane log accumulates
+/// the whole pane's command history in one ever-growing file, so many
+/// older `C`/`D` pairs may already be present ahead of the one we
+/// want.
+///
+/// Returns `None` when: no `C` marker exists at all (a session that
+/// hasn't re-sourced `init.zsh` since this feature shipped, a
+/// non-zsh/non-hooked pane, or the `shellintegration.osc133` toggle
+/// off); or the last `C` has no `D` after it (the command is still
+/// "open" — shouldn't normally happen, since `capture-tmux`/
+/// `capture-herdr` only run after `precmd` has already written `D`,
+/// but defended against e.g. a pane killed mid-command). Both cases
+/// mean the caller should fall back to `extract_pane_output`'s
+/// existing text heuristic, unchanged.
+fn find_osc133_boundary(raw: &str) -> Option<Osc133Boundary> {
+    let markers = scan_osc133_markers(raw);
+    let start_i = markers.iter().rposition(|(_, m, _)| matches!(m, Osc133Marker::CommandStart))?;
+    let (start_pos, _, _) = markers[start_i];
+    let (end_pos, end_marker, _) = markers[start_i + 1..]
+        .iter()
+        .find(|(_, m, _)| matches!(m, Osc133Marker::CommandEnd(_)))?;
+    let exit_code = match end_marker {
+        Osc133Marker::CommandEnd(code) => *code,
+        Osc133Marker::CommandStart => None,
+    };
+    // `raw[..start_pos]` typically ENDS in the newline that already
+    // terminated "$ command" before preexec ran and printed `C` right
+    // after it — so the marker starts its OWN (otherwise-empty) line.
+    // Trim that one trailing newline first so the search below lands
+    // on the START of the "$ command" line, not back at the marker
+    // itself (which `rfind` would otherwise immediately re-find, since
+    // it's the same newline).
+    let command_line_start = raw[..start_pos]
+        .trim_end_matches('\n')
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    Some(Osc133Boundary {
+        command_line_start,
+        output_end: *end_pos,
+        exit_code,
+    })
+}
+
+/// Cap already-exact `s` at `max_lines` lines, matching
+/// `extract_pane_output`'s `Some(n) => start + 1 + n` semantics (the
+/// command line itself, plus up to `n` following lines). `None`
+/// (the config's `ALL`) returns `s` unchanged — an OSC-133 end
+/// boundary is already exact and needs no further capping.
+fn cap_osc133_lines(s: &str, max_lines: Option<usize>) -> String {
+    match max_lines {
+        Some(n) => s.lines().take(n + 1).collect::<Vec<_>>().join("\n"),
+        None => s.to_string(),
+    }
+}
+
+/// Try exact OSC-133 boundary extraction on RAW (pre-`strip_ansi`)
+/// pane content — an unambiguous replacement for `extract_pane_output`
+/// plus `find_command_line`/`next_prompt_boundary`'s text heuristics
+/// when the marker pair is present. `strip_ansi` is applied to the
+/// EXTRACTED SLICE ONLY (cleaning up the command's own internal color
+/// codes, and incidentally the marker bytes themselves — see
+/// `Osc133Boundary::command_line_start`'s doc comment), never to the
+/// full `raw` content and never touching `strip_ansi` itself. Returns
+/// `None` when `find_osc133_boundary` finds no marker pair; callers
+/// must fall back to `extract_pane_output` in that case.
+fn extract_pane_output_via_osc133(raw: &str, max_lines: Option<usize>) -> Option<String> {
+    let boundary = find_osc133_boundary(raw)?;
+    let slice = raw.get(boundary.command_line_start..boundary.output_end)?;
+    // `strip_ansi` treats ALL C0 control characters (0x00-0x1f) as
+    // noise to discard — including `\n` (0x0a) itself. Cleaning
+    // line-by-line and rejoining (same convention `extract_tmux_output`
+    // already uses via `contents.lines().map(strip_ansi)`) keeps the
+    // real line breaks while still stripping color codes/marker bytes
+    // within each line.
+    let cleaned: String = slice.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+    Some(cap_osc133_lines(&cleaned, max_lines))
 }
 
 /// Strip ANSI escape sequences and control characters from a
@@ -9090,40 +9290,49 @@ fn main() -> anyhow::Result<()> {
                 match pane_output {
                     Ok(o) if !o.stdout.is_empty() => {
                         let text = String::from_utf8_lossy(&o.stdout);
-                        let lines: Vec<String> = text.lines().map(strip_ansi).collect();
-                        extract_pane_output(&command, &lines, max).unwrap_or_else(|_| {
-                            // Command line scrolled off the
-                            // top of the pane buffer (common
-                            // for high-output commands like
-                            // `ps -ef`). Capture whatever IS
-                            // in the buffer as the best
-                            // available approximation.
-                            let end = lines.len();
-                            let effective_end = if end > 0 {
-                                let last = lines[end - 1].trim_end();
-                                if last.ends_with("$ ")
-                                    || last.ends_with("# ")
-                                    || last.ends_with("% ")
-                                    || last.ends_with("> ")
-                                    || last.is_empty()
-                                {
-                                    end.saturating_sub(1)
+                        // Try the exact OSC-133 boundary first, on the
+                        // RAW (pre-strip) text — same rationale as
+                        // `extract_tmux_output`. `herdr pane read
+                        // --ansi` returns raw, uncleaned bytes, so the
+                        // markers (if any) are still present here.
+                        if let Some(output) = extract_pane_output_via_osc133(&text, max) {
+                            output
+                        } else {
+                            let lines: Vec<String> = text.lines().map(strip_ansi).collect();
+                            extract_pane_output(&command, &lines, max).unwrap_or_else(|_| {
+                                // Command line scrolled off the
+                                // top of the pane buffer (common
+                                // for high-output commands like
+                                // `ps -ef`). Capture whatever IS
+                                // in the buffer as the best
+                                // available approximation.
+                                let end = lines.len();
+                                let effective_end = if end > 0 {
+                                    let last = lines[end - 1].trim_end();
+                                    if last.ends_with("$ ")
+                                        || last.ends_with("# ")
+                                        || last.ends_with("% ")
+                                        || last.ends_with("> ")
+                                        || last.is_empty()
+                                    {
+                                        end.saturating_sub(1)
+                                    } else {
+                                        end
+                                    }
                                 } else {
                                     end
+                                };
+                                let capped = match max {
+                                    Some(n) => effective_end.min(n),
+                                    None => effective_end,
+                                };
+                                if capped > 0 {
+                                    lines[..capped].join("\n")
+                                } else {
+                                    String::new()
                                 }
-                            } else {
-                                end
-                            };
-                            let capped = match max {
-                                Some(n) => effective_end.min(n),
-                                None => effective_end,
-                            };
-                            if capped > 0 {
-                                lines[..capped].join("\n")
-                            } else {
-                                String::new()
-                            }
-                        })
+                            })
+                        }
                     }
                     _ => String::new(),
                 }
@@ -9415,6 +9624,12 @@ fn main() -> anyhow::Result<()> {
                     }
                     "prompt.project" => {
                         println!("{}", if cfg.prompt_project_enabled { "on" } else { "off" })
+                    }
+                    "shellintegration.osc133" => {
+                        println!(
+                            "{}",
+                            if cfg.shellintegration_osc133_enabled { "on" } else { "off" }
+                        )
                     }
                     "tui.highlight" => {
                         println!("{}", if cfg.tui_highlight { "on" } else { "off" })
