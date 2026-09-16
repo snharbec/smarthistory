@@ -313,6 +313,23 @@ typeset -g _smarthistory_dropdown_minchars=1
 # in ~/.config/smarthistory/config (defaults to "prefix"); this only
 # picks what a new shell starts on — Ctrl-t still toggles regardless.
 typeset -g _smarthistory_matchmode="prefix"
+# The dropdown box's border glyph set — "ascii" (default) or
+# "unicode" (the rounded `╭─╮` / `╰─╯` corners). Set via
+# `dropdown.boxchars=ascii|unicode` in ~/.config/smarthistory/config,
+# read once here at init time like `dropdown.matchmode` above (needs
+# a new shell to take effect).
+#
+# Defaults to "ascii" on purpose: the Unicode box-drawing glyphs
+# (`╭ ╮ ╰ ╯ ─ │ ┃`) have East-Asian Width = Ambiguous. Some terminals
+# — CJK locales, iTerm2's "ambiguous characters are double-width"
+# setting, some fonts — render them TWO columns wide, while zsh counts
+# each as one column when laying out POSTDISPLAY. Every box line then
+# comes out twice as wide as zsh believes and wraps. ASCII has no
+# ambiguous width: one column in every terminal, always. Users whose
+# terminal renders the glyphs one column wide (verified with
+# `printf '─%.0s' {1..10}` against `printf -- '-%.0s' {1..10}`) can
+# turn the rounded corners on.
+typeset -g _smarthistory_boxchars="ascii"
 # Whether the dropdown shows predicted next commands (from the same
 # successor-frequency data Ctrl-S/`smarthistory next` uses) when the
 # command line is empty, instead of showing nothing. Opt-in, off by
@@ -330,6 +347,10 @@ if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     case "$(smarthistory config get dropdown.matchmode 2>/dev/null)" in
         substring) _smarthistory_matchmode="substring" ;;
         *) _smarthistory_matchmode="prefix" ;;
+    esac
+    case "$(smarthistory config get dropdown.boxchars 2>/dev/null)" in
+        unicode) _smarthistory_boxchars="unicode" ;;
+        *) _smarthistory_boxchars="ascii" ;;
     esac
     [[ "$(smarthistory config get dropdown.predict 2>/dev/null)" == "on" ]] \
         && _smarthistory_dropdown_predict_enabled="1"
@@ -587,7 +608,7 @@ typeset -ga _smarthistory_dropdown_meta
 # string (e.g. "0", "1", "127") for `_smarthistory_dropdown_candidates[i]`
 # — same lockstep-array contract as `_smarthistory_dropdown_meta`
 # above, built by the same loop in `_smarthistory_dropdown_render`.
-# `_smarthistory_dropdown_paint` draws it as a `✓`/`✗` marker (green/
+# `_smarthistory_dropdown_paint` draws it as a `+`/`x` marker (green/
 # red via `_smarthistory_dropdown_hl_success`/`_hl_error`, the same
 # specs the optional `dropdown.highlight` first-word validity check
 # already uses) right after the row's selection marker. An empty
@@ -759,7 +780,7 @@ _smarthistory_color_to_hlspec() {
 # actually occupies on screen). Used by the width math in
 # `_smarthistory_dropdown_paint` so embedded SGR codes (once the CLI
 # starts emitting them — see the `search --ansi=full` flag) don't
-# desync the box's `─` border, the row right-pad, and the
+# desync the box's `-` border, the row right-pad, and the
 # `interior_max` truncation. The implementation recognises the common
 # SGR form (`ESC [ … m`) and skips the parameter + final byte; other
 # CSI families (cursor movement, erase-in-line, …) are ignored too
@@ -1167,11 +1188,30 @@ _smarthistory_dropdown_paint() {
     fi
     local -a rows
     local raw c marker exit_char row i=0
-    # The box is one column narrower than the terminal: `╭─` + hr +
-    # `─╮` is `width + 4` display columns (2 border chars + 1 padding
-    # column each side), so `width = COLUMNS - 5` leaves the last
-    # terminal column free — the box's right border never sits on the
-    # edge column, where some terminals drop/clipped glyphs.
+    # Border/gutter glyph set, chosen once per paint from
+    # `_smarthistory_boxchars` (see its declaration for why ASCII is
+    # the default). The two sets are deliberately the same WIDTH
+    # assumption — one column per glyph — so every piece of geometry
+    # below (`hr`, the borders, the row pad) is identical either way;
+    # only the characters differ. On a terminal that renders the
+    # Unicode set two columns wide, the unicode mode's lines wrap —
+    # that's why it's opt-in, not the default.
+    #
+    #   ascii   : + - | !   (selection marker `> `, exit `+`/`x`)
+    #   unicode : ╭ ╮ ╰ ╯ ─ │ ┃   (rounded corners)
+    local corner_tl corner_tr corner_bl corner_br
+    local gutter_plain gutter_sel hr_fill
+    if [[ "$_smarthistory_boxchars" == "unicode" ]]; then
+        corner_tl="╭"; corner_tr="╮"; corner_bl="╰"; corner_br="╯"
+        gutter_plain="│"; gutter_sel="┃"; hr_fill="─"
+    else
+        corner_tl="+"; corner_tr="+"; corner_bl="+"; corner_br="+"
+        gutter_plain="|"; gutter_sel="!"; hr_fill="-"
+    fi
+    # The box is one column narrower than the terminal: the two corner
+    # glyphs plus the two `hr`-adjacent glyphs are `width + 4` display
+    # columns (4 frame glyphs + 1 padding column each side), so
+    # `width = COLUMNS - 5` leaves the last terminal column free.
     # The same budget is the command-text truncation cap — the padding
     # columns are part of the interior, not slack outside it.
     local interior_max=$(( COLUMNS > 12 ? COLUMNS - 5 : 4 ))
@@ -1211,25 +1251,28 @@ _smarthistory_dropdown_paint() {
         (( i >= max_rows )) && break
         c=$(_smarthistory_unescape "$raw")
         # A multiline command would otherwise break the one-row-per-
-        # candidate layout; show the visible-newline marker instead,
-        # same convention the Rust TUI list uses for the same reason.
-        c=${c//$'\n'/↵}
+        # candidate layout; show a visible marker instead, same
+        # convention the Rust TUI list uses for the same reason.
+        # ASCII (`; `) rather than the Unicode `↵` for the same
+        # double-width reason as the box borders below.
+        c=${c//$'\n'/'; '}
         c=${c//$'\r'/}
         if (( _smarthistory_dropdown_chosen == 1 && i == _smarthistory_dropdown_selected )); then
-            marker="❯ "
+            marker="> "
         else
             marker="  "
         fi
-        # Exit-status marker: `✓` for a clean exit, `✗` for anything
+        # Exit-status marker: `+` for a clean exit, `x` for anything
         # else, a blank column (not a missing column — `marker_len`
         # below assumes every row has one) when the `exit_code` field
         # couldn't be parsed for this row. Color is applied in the
         # second (drawing) pass below, via a `region_highlight` span
         # at this fixed offset — this pass only decides the glyph.
+        # ASCII rather than the double-width-capable `✓`/`✗` Unicode.
         case "${_smarthistory_dropdown_exit[$((i+1))]:-}" in
-            0)  exit_char="✓" ;;
+            0)  exit_char="+" ;;
             "") exit_char=" " ;;
-            *)  exit_char="✗" ;;
+            *)  exit_char="x" ;;
         esac
         row="${marker}${exit_char} ${c}"
         # `smarthistory search` is called with `--ansi=off` (see the
@@ -1241,7 +1284,12 @@ _smarthistory_dropdown_paint() {
         _smarthistory_strip_ansi "$row"
         local row_visible=$REPLY
         if (( row_visible > interior_cmd_max )); then
-            row="${row[1,$((interior_cmd_max-1))]}…"
+            # `...` is three columns, and it has to fit INSIDE the
+            # budget, not extend past it: keep `interior_cmd_max - 3`
+            # characters and spend the last three columns on the
+            # ellipsis. (`interior_cmd_max` is clamped to >= 4 above,
+            # so this index is always at least 1.)
+            row="${row[1,$((interior_cmd_max-3))]}..."
         fi
         rows+=("$row")
         i=$((i+1))
@@ -1252,16 +1300,24 @@ _smarthistory_dropdown_paint() {
         return
     fi
     # Box width = full terminal width, always — not the widest row.
-    # `interior_max` is `COLUMNS - 4`, which makes `╭─<hr>─╮` (width+4
+    # `interior_max` is `COLUMNS - 5`, which makes `+-<hr>-+` (width+4
     # display columns) span the terminal edge-to-edge. Rows pad to the
     # command budget (`interior_cmd_max`) and the age column, when
     # drawn, lands at the far right edge, so the box is edge-to-edge
     # regardless of how short the candidates are.
     local width=$interior_max
-    # `${(l:width::─:)}` pads an empty string to `width` columns using
-    # `─` as the fill character — i.e. `width` dashes, built by zsh's
-    # own padding expansion rather than a manual loop.
-    local hr="${(l:width::─:)}"
+    # `hr` is `width` copies of the fill glyph, built by zsh's own
+    # padding expansion rather than a manual loop. Two literal call
+    # sites rather than one parameterized by `$hr_fill`: zsh's
+    # `${(l:width::FILL:)}` fill is a literal in the expansion, not a
+    # variable reference (`${(l:w::${f}:)}` pads with the characters
+    # of the string `${f}` literally, braces and all).
+    local hr
+    if [[ "$_smarthistory_boxchars" == "unicode" ]]; then
+        hr="${(l:width::─:)}"
+    else
+        hr="${(l:width::-:)}"
+    fi
     # Build `out` as PLAIN TEXT — no embedded escape codes. POSTDISPLAY
     # is inert buffer text as far as zle's redisplay engine is
     # concerned; it does not interpret escape sequences spliced into
@@ -1288,7 +1344,7 @@ _smarthistory_dropdown_paint() {
     #   selected gutter     → `_smarthistory_dropdown_hl_select`
     #   right-side border   → always `_smarthistory_dropdown_hl_accent`,
     #                          regardless of row selection — only the
-    #                          left gutter's glyph (`┃` vs `│`) and
+    #                          left gutter's glyph (`!` vs `|`) and
     #                          color signal the selected row.
     #   selected row's text → `bold` (unconditional — bold isn't a
     #                          color, so it isn't gated by
@@ -1317,8 +1373,8 @@ _smarthistory_dropdown_paint() {
     # `$LBUFFER` — that's the span this widget bolds to recreate the
     # "matched prefix" emphasis `--ansi=full` used to (unreliably)
     # provide. `marker_len` is the fixed width of the selection
-    # marker (`"❯ "` / `"  "`) PLUS the exit-status marker (the
-    # `✓`/`✗`/` ` glyph plus its trailing space) prepended to every
+    # marker (`"> "` / `"  "`) PLUS the exit-status marker (the
+    # `+`/`x`/` ` glyph plus its trailing space) prepended to every
     # row in the candidate-building loop above — the bold span starts
     # right after both.
     local matchlen=$#LBUFFER
@@ -1333,15 +1389,15 @@ _smarthistory_dropdown_paint() {
     # produce (Right-arrow / Ctrl-E / Enter already commit exactly
     # this text via `_smarthistory_dropdown_commit`, unchanged by
     # this feature — it's purely an additional rendering, not a new
-    # accept path). `\n`/`\r` are visible-marker-substituted the same
-    # way candidate rows already are, so a multi-line candidate's
-    # ghost text can't desync the box's own newline-counted layout
-    # that follows it in `out`.
+    # accept path). `\n`/`\r` are marker-substituted the same
+    # way candidate rows already are (`; `), so a multi-line
+    # candidate's ghost text can't desync the box's own
+    # newline-counted layout that follows it in `out`.
     local out=""
     if (( _smarthistory_dropdown_chosen == 1 )); then
         local _sm_ghost_raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         local _sm_ghost_full=$(_smarthistory_unescape "$_sm_ghost_raw")
-        _sm_ghost_full=${_sm_ghost_full//$'\n'/↵}
+        _sm_ghost_full=${_sm_ghost_full//$'\n'/'; '}
         _sm_ghost_full=${_sm_ghost_full//$'\r'/}
         if [[ "$_sm_ghost_full" == "$BUFFER"* ]]; then
             local _sm_ghost_text=${_sm_ghost_full#$BUFFER}
@@ -1360,10 +1416,10 @@ _smarthistory_dropdown_paint() {
     out+=$'\n'
     if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
         _hl_start=$#out
-        out+="╭─${hr}─╮"
+        out+="${corner_tl}${hr_fill}${hr}${hr_fill}${corner_tr}"
         _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_accent")
     else
-        out+="╭─${hr}─╮"
+        out+="${corner_tl}${hr_fill}${hr}${hr_fill}${corner_tr}"
     fi
     # The per-row pad must be computed against the *visible* width,
     # not the byte length. `row` doesn't carry embedded SGR codes
@@ -1378,12 +1434,12 @@ _smarthistory_dropdown_paint() {
     for (( i = 0; i < ${#rows}; i++ )); do
         (( is_selected = _smarthistory_dropdown_chosen == 1 && i == _smarthistory_dropdown_selected ))
         if (( is_selected )); then
-            side="┃"
-            gutter_text="┃ "
+            side="$gutter_sel"
+            gutter_text="${gutter_sel} "
             gutter_spec=$_smarthistory_dropdown_hl_select
         else
-            side="│"
-            gutter_text="│ "
+            side="$gutter_plain"
+            gutter_text="${gutter_plain} "
             gutter_spec=$_smarthistory_dropdown_hl_accent
         fi
         row=${rows[$((i+1))]}
@@ -1394,7 +1450,7 @@ _smarthistory_dropdown_paint() {
         # candidate text the spans were computed against, byte for
         # byte — a single check that covers both ways the drawn text
         # can diverge from that raw text: `_smarthistory_unescape`
-        # (multi-line commands) and truncation (the "…" ellipsis).
+        # (multi-line commands) and truncation (the "..." ellipsis).
         # Either one invalidates the spans' offsets, so highlighting
         # is skipped for this row rather than risk drawing colors
         # against text they don't describe.
@@ -1522,7 +1578,7 @@ _smarthistory_dropdown_paint() {
         # space) — both sides need exactly one padding column between
         # the border and the content for the box to be exactly
         # `width + 4` wide (2 border chars + 1 padding column each
-        # side), matching the top/bottom border's `╭─<hr>─╮` math.
+        # side), matching the top/bottom border's `+-<hr>-+` math.
         # The previous `"${side} "` (bar THEN space, with nothing
         # padding the left side of the bar) put the padding column
         # *outside* the box instead of inside it, making every
@@ -1545,10 +1601,10 @@ _smarthistory_dropdown_paint() {
     out+=$'\n'
     if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
         _hl_start=$#out
-        out+="╰─${hr}─╯"
+        out+="${corner_bl}${hr_fill}${hr}${hr_fill}${corner_br}"
         _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_accent")
     else
-        out+="╰─${hr}─╯"
+        out+="${corner_bl}${hr_fill}${hr}${hr_fill}${corner_br}"
     fi
     # Splice the collected spans into `region_highlight`, shifted by
     # `$#BUFFER` (POSTDISPLAY starts right after BUFFER — see
@@ -1716,7 +1772,7 @@ _smarthistory_dropdown_render() {
         # color the box chrome and bold the selected row.
         #
         # `--fields diff,exit_code,command`: `diff` (the "last called" age
-        # column, e.g. "5m"/"2h"/"3d") and `exit_code` (drawn as a `✓`/`✗`
+        # column, e.g. "5m"/"2h"/"3d") and `exit_code` (drawn as a `+`/`x`
         # marker) are both consumed by `_smarthistory_dropdown_paint`.
         # `diff` and `exit_code` MUST come first, in this order — the CLI
         # joins fields with exactly two spaces and left-pads `diff` for

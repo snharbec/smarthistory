@@ -64,6 +64,7 @@ value" so you can confirm what the TUI actually sees.
   - [`dropdown.minchars`](#dropdownminchars)
   - [`dropdown.highlight`](#dropdownhighlight)
   - [`dropdown.matchmode`](#dropdownmatchmode)
+  - [`dropdown.boxchars`](#dropdownboxchars)
   - [`dropdown.predict`](#dropdownpredict)
 - [Comment expansion](#comment-expansion)
   - [`commentexpand.enabled`](#commentexpandenabled)
@@ -501,6 +502,41 @@ match set to substring"), regardless of whether the dropdown is currently on.
 ```ini
 dropdown.enabled=on
 dropdown.matchmode=substring
+```
+
+### `dropdown.boxchars`
+
+|                  |                     |
+| ---------------- | ------------------- |
+| **Type**         | `ascii` \| `unicode` |
+| **Default**      | `ascii`             |
+| **Env override** | —                   |
+
+The glyph set the dropdown box draws its frame with. `ascii` (the default) uses
+`+ - | !`; `unicode` uses the rounded `╭ ─ ╮` / `╰ ─ ╯` set with `│` / `┃`
+gutters, which is what the box looked like before this key existed.
+
+`ascii` is the default because the Unicode box-drawing glyphs have East-Asian
+Width = **Ambiguous**: some terminals — CJK locales, iTerm2's "ambiguous
+characters are double-width" setting, certain fonts — render them **two columns
+wide**, while zsh counts each as one column when laying out `POSTDISPLAY`. Every
+box line then comes out twice as wide as zsh believes and wraps onto a second
+physical line, which breaks the whole layout. ASCII has no ambiguous width: one
+column in every terminal, always.
+
+Check your terminal before switching:
+
+```bash
+# If the ─ line is about twice as long as the - line, keep the default.
+printf '%s\n' "$(printf '─%.0s' {1..10})" "$(printf -- '-%.0s' {1..10})"
+```
+
+Read once at shell-init time; it takes a new shell (or re-running
+`eval "$(smarthistory init zsh)"`) to take effect.
+
+```ini
+dropdown.enabled=on
+dropdown.boxchars=unicode
 ```
 
 ### `dropdown.predict`
@@ -1583,6 +1619,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `dropdown.minchars`             | non-negative int                  | `1`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.highlight`            | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.matchmode`            | `prefix` \| `substring`           | `prefix`                                                         | [Live dropdown completion](#live-dropdown-completion)                     |
+| `dropdown.boxchars`             | `ascii` \| `unicode`              | `ascii`                                                          | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.predict`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `commentexpand.enabled`         | `on` \| `off`                     | `off`                                                            | [Comment expansion](#comment-expansion)                                   |
 | `globcomplete.enabled`          | `on` \| `off`                     | `off`                                                            | [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion) |
