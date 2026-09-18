@@ -29832,6 +29832,42 @@ fn panes_select_initial_row_handles_empty_list() {
     );
 }
 
+/// Regression test: `render.rs`'s selection write-back used to flip
+/// `data_idx` (`real_count - 1 - real`) unconditionally, mirroring the
+/// bottom-up flip normal modes need for their newest-first display.
+/// Panes mode renders top-to-bottom (no flip on read), so an
+/// unguarded flip on write-back re-selected the opposite end of the
+/// list every draw — with the redraw loop firing on its own timer,
+/// this made the highlighted row appear to oscillate/"travel" from
+/// the top to the bottom of the pane list with no user input. Drawing
+/// panes mode repeatedly must leave the selection where it was.
+#[test]
+fn panes_mode_selection_survives_repeated_draws() {
+    let mut app = panes_select_test_app(
+        vec![
+            ("NoteSearch", "w34:p1", "/tmp/notes", "claude"),
+            ("NoteSearch", "w34:p2", "/tmp/notes", "zsh"),
+        ],
+        "*",
+    );
+    app.rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    app.merged_rows = app.rows.clone();
+    app.list_state.select(Some(0));
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    for _ in 0..3 {
+        terminal
+            .draw(|f| crate::tui::render::ui(f, &mut app))
+            .expect("draw");
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "panes-mode selection must not flip to the other end of the list across redraws"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Output preview scroll hint
 // ---------------------------------------------------------------------------
