@@ -5296,7 +5296,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             None
         } else {
             let real = ri - pad;
-            Some(real_count.saturating_sub(1) - real)
+            if is_panes {
+                Some(real)
+            } else {
+                Some(real_count.saturating_sub(1) - real)
+            }
         }
     });
 
