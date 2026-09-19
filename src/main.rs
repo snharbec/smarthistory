@@ -711,6 +711,15 @@ enum Commands {
         #[arg(short, long)]
         exit_code: i32,
     },
+    /// herdr socket-API helpers.
+    ///
+    /// Small wrappers the TUI stages into the user's shell when a
+    /// herdr action has no CLI equivalent. Not normally invoked by
+    /// hand.
+    Herdr {
+        #[command(subcommand)]
+        action: HerdrAction,
+    },
     /// Export all history and time-tracking data to a JSON file.
     ///
     /// The file contains every history entry with its captured
@@ -810,6 +819,29 @@ enum Commands {
         /// loopback if you understand there's no authentication.
         #[arg(long)]
         host: Option<String>,
+    },
+}
+
+/// Sub-commands of `smarthistory herdr`, the socket-API helpers the
+/// TUI stages when a herdr action has no CLI equivalent.
+#[derive(clap::Subcommand, Debug)]
+enum HerdrAction {
+    /// Focus a specific herdr pane by id.
+    ///
+    /// Wraps the socket API's `pane.focus` method. This exists
+    /// because herdr 0.9.x has no CLI for "switch to this exact pane
+    /// id": `herdr pane focus` is directional (`--direction` is
+    /// required), `herdr tab focus` is tab-scoped, and `herdr agent
+    /// focus` only accepts agent rows. The `*` (panes) view stages
+    /// this so selecting a pane row lands on that pane.
+    ///
+    /// The socket path comes from `$HERDR_SOCKET_PATH` (injected by
+    /// herdr into every managed pane, which is where this runs),
+    /// falling back to the default or named-session socket under the
+    /// herdr config directory.
+    FocusPane {
+        /// The pane to focus, e.g. `w3S:p2`.
+        pane_id: String,
     },
 }
 
@@ -9360,6 +9392,14 @@ fn main() -> anyhow::Result<()> {
             let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
         }
+        Commands::Herdr { action } => match action {
+            HerdrAction::FocusPane { pane_id } => {
+                if let Err(e) = crate::multiplexer::herdr_focus_pane(&pane_id) {
+                    eprintln!("smarthistory: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Project { action } => match action {
             ProjectAction::Report {
                 day,

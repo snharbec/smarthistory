@@ -749,54 +749,215 @@
 
     #[cfg(feature = "herdr")]
     #[test]
-    fn herdr_focus_pane_uses_pane_zoom() {
-        // Selecting a pane row stages
-        // `herdr pane zoom <pane_id> && herdr pane zoom <pane_id> --off`.
-        // The first `pane zoom` call focuses the EXACT pane
-        // (across workspaces and tabs) and zooms it to fill
-        // the tab. The second call (`--off`) un-zooms while
-        // keeping the focus on that pane, so the user lands
-        // on the right pane without a zoomed view.
+    fn herdr_focus_pane_uses_socket_pane_focus() {
+        // Selecting a pane row stages a call to smarthistory's own
+        // `herdr focus-pane` helper, which wraps the socket API's
+        // `pane.focus` method.
         //
-        // This replaces the old `workspace focus + tab focus`
-        // approach, which only switched the workspace and tab
-        // but left the pane-focus to whatever was last focused
-        // in that tab.
+        // This replaces a previous implementation that staged
+        // `herdr pane zoom <pane_id> && herdr pane zoom <pane_id>
+        // --off`. That used a zoom toggle as a focus primitive, and
+        // it silently did nothing whenever the target pane was the
+        // only pane in its tab: `pane.zoom` then reports
+        // `reason: "single_pane"` and leaves focus where it was, so
+        // the user stayed in the pane they started from. There is no
+        // CLI replacement either — `herdr pane focus` is directional
+        // (`--direction` required), `herdr tab focus` is tab-scoped,
+        // and `herdr agent focus` takes only agent rows — so the
+        // socket method is the only way to hit a specific pane id.
         let b = HerdrBackend;
         let cmd = b.focus_pane("wA:p3", "wA:t2").expect("non-empty ids");
-        assert_eq!(
-            cmd,
-            "herdr pane zoom wA:p3 2>/dev/null && herdr pane zoom wA:p3 --off 2>/dev/null"
-        );
-        // An empty `tab_id`
-        // doesn't change the
-        // behavior — `pane zoom`
-        // resolves the workspace
-        // and tab from the
-        // pane_id itself.
+        assert_eq!(cmd, "smarthistory herdr focus-pane wA:p3");
+        // The `tab_id` is unused (`pane.focus` derives the workspace
+        // and tab from the pane id), so an empty one changes nothing.
         let cmd = b.focus_pane("wA:p3", "").expect("non-empty pane id");
-        assert_eq!(
-            cmd,
-            "herdr pane zoom wA:p3 2>/dev/null && herdr pane zoom wA:p3 --off 2>/dev/null"
-        );
-        // An empty `pane_id`
-        // is rejected.
+        assert_eq!(cmd, "smarthistory herdr focus-pane wA:p3");
+        // An empty `pane_id` is rejected — there's nothing to focus,
+        // and `pane.focus` would error on it anyway.
         assert!(b.focus_pane("", "").is_none());
-        // A bare workspace
-        // id (no `:pN`)
-        // still produces a
-        // valid command —
-        // `pane zoom` accepts
-        // workspace ids too
-        // (it will focus the
-        // workspace's
-        // focused-pane-by-
-        // default).
-        let cmd = b.focus_pane("wA", "wA:t1").expect("bare ws id");
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_socket_path_prefers_env_then_named_session_then_default() {
+        // The staged `smarthistory herdr focus-pane` call resolves
+        // its socket in the user's shell, where `HERDR_SOCKET_PATH`
+        // is set by herdr for every managed pane. This pins the
+        // documented fallback order for the cases where it isn't:
+        // named session socket, then the default under the herdr
+        // config dir (honouring `XDG_CONFIG_HOME`).
+        //
+        // The resolution is exercised through the pure helper so the
+        // test never mutates the process environment — several other
+        // tests spawn real `herdr`/`tmux` subprocesses, which would
+        // inherit any temporary `HERDR_SOCKET_PATH` set here.
+        let resolve = |socket: Option<&str>, session: Option<&str>| {
+            resolve_herdr_socket_path(socket, session, Some("/tmp/xdg"), Some("/tmp/home"))
+        };
+        // 1. An explicit path always wins.
         assert_eq!(
-            cmd,
-            "herdr pane zoom wA 2>/dev/null && herdr pane zoom wA --off 2>/dev/null"
+            resolve(Some("/tmp/explicit.sock"), Some("named")).unwrap(),
+            std::path::PathBuf::from("/tmp/explicit.sock")
         );
+        // 2. Without it, a named session gets its own socket.
+        assert_eq!(
+            resolve(None, Some("named")).unwrap(),
+            std::path::PathBuf::from("/tmp/xdg/herdr/sessions/named/herdr.sock")
+        );
+        // 3. Without a session name, the default session socket.
+        assert_eq!(
+            resolve(None, None).unwrap(),
+            std::path::PathBuf::from("/tmp/xdg/herdr/herdr.sock")
+        );
+        // 4. With no `XDG_CONFIG_HOME`, fall back to `$HOME/.config`.
+        assert_eq!(
+            resolve_herdr_socket_path(None, None, None, Some("/tmp/home")).unwrap(),
+            std::path::PathBuf::from("/tmp/home/.config/herdr/herdr.sock")
+        );
+        // Empty values are treated as unset rather than producing
+        // nonsense paths like `/herdr/sessions//herdr.sock`.
+        assert_eq!(
+            resolve_herdr_socket_path(Some(""), Some(""), Some(""), Some("/tmp/home")).unwrap(),
+            std::path::PathBuf::from("/tmp/home/.config/herdr/herdr.sock")
+        );
+        // With neither a socket path nor any way to find a config
+        // dir, there is nothing to connect to.
+        assert!(resolve_herdr_socket_path(None, None, None, None).is_none());
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_focus_pane_rejects_empty_and_unusable_socket() {
+        // An empty pane id is rejected before any I/O — there is
+        // nothing to focus.
+        assert!(herdr_focus_pane("").is_err());
+        // No resolvable socket path is an error, not a silent no-op.
+        let err = herdr_focus_pane_at("wA:p1", None).expect_err("no socket path must fail");
+        assert!(
+            err.contains("could not resolve"),
+            "expected a 'could not resolve' diagnostic, got: {err}"
+        );
+        // A socket path that doesn't exist must produce an error (so
+        // the staged command exits non-zero and the user sees a
+        // message) rather than silently appearing to succeed. The
+        // path is injected rather than set through the environment,
+        // so this can't race with other tests that spawn real
+        // `herdr`/`tmux` subprocesses.
+        let missing = std::path::PathBuf::from("/tmp/definitely-not-a-real-herdr.sock");
+        assert!(!missing.exists(), "test fixture path must not exist");
+        let err = herdr_focus_pane_at("wA:p1", Some(missing)).expect_err("missing socket must fail");
+        assert!(
+            err.contains("does not exist"),
+            "expected a 'does not exist' diagnostic, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_focus_pane_succeeds_against_a_live_socket() {
+        // End-to-end proof of the transport, not just its error
+        // paths: stand up a real Unix socket that answers
+        // `pane.focus` the way herdr does, and confirm the helper
+        // reports success — and that the request actually reached
+        // the server with the right method and pane id.
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory_herdr_sock_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            // Reply in herdr's documented `pane_info` shape.
+            let pane_id = req["params"]["pane_id"].as_str().unwrap().to_string();
+            let reply = serde_json::json!({
+                "id": req["id"],
+                "result": {
+                    "type": "pane_info",
+                    "pane": { "pane_id": pane_id, "focused": true }
+                }
+            });
+            stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
+            stream.flush().unwrap();
+            // Hand the raw request back so the test can assert on it.
+            line
+        });
+
+        herdr_focus_pane_at("wA:p1", Some(sock.clone())).expect("live socket must succeed");
+
+        let raw_request = handle.join().unwrap();
+        let req: serde_json::Value = serde_json::from_str(&raw_request).unwrap();
+        assert_eq!(
+            req["method"], "pane.focus",
+            "must call the pane.focus method, got request {raw_request}"
+        );
+        assert_eq!(
+            req["params"]["pane_id"], "wA:p1",
+            "must ask for the pane the user selected, got request {raw_request}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
+    fn herdr_focus_pane_reports_error_envelope_as_failure() {
+        // herdr answers an unknown pane with an `error` envelope
+        // (`pane_not_found`) rather than a `result`. That must NOT
+        // be treated as a successful focus.
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory_herdr_err_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let reply = serde_json::json!({
+                "id": "smarthistory",
+                "error": {
+                    "code": "pane_not_found",
+                    "message": "pane wZZ:p9 not found"
+                }
+            });
+            stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let err = herdr_focus_pane_at("wZZ:p9", Some(sock.clone()))
+            .expect_err("an error envelope must not count as success");
+        assert!(
+            err.contains("wZZ:p9"),
+            "diagnostic should name the pane, got: {err}"
+        );
+        handle.join().unwrap();
+
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

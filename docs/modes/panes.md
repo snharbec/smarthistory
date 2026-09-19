@@ -86,9 +86,13 @@ before this feature existed. Only the three top-level group headers toggle.
 
 - `Enter` on a **pane** row stages `tmux select-pane -t <pane-id>` /
   `tmux switch-client -t <pane-id>` (tmux) or
-  `herdr workspace focus <ws> && herdr tab focus <tab-id>` (herdr). The TUI
-  exits and the parent shell runs the command — your terminal flips to the
-  target pane.
+  `smarthistory herdr focus-pane <pane-id>` (herdr). The herdr side wraps the
+  socket API's `pane.focus` method, because herdr 0.9.x has no CLI that can
+  target a specific pane id — `herdr pane focus` is directional (`--direction`
+  is required), `herdr tab focus` is tab-scoped (it restores whichever pane was
+  last focused in that tab, so it cannot pick between two panes sharing a tab),
+  and `herdr agent focus` accepts only agent rows. The TUI exits and the parent
+  shell runs the command — your terminal flips to the target pane.
 - `Enter` on a **workspace** sub-heading (`## <label>`) stages the
   workspace-focus command (no specific pane). Useful when the workspace is in
   another window / tab and you just want to land in it.

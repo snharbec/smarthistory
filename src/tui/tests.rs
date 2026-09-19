@@ -3822,10 +3822,7 @@ fn session_row_in_panes_mode_focuses_existing_herdr_workspace() {
                 if pane_id.is_empty() {
                     return None;
                 }
-                Some(format!(
-                    "herdr pane zoom {} 2>/dev/null && herdr pane zoom {} --off 2>/dev/null",
-                    pane_id, pane_id,
-                ))
+                Some(format!("smarthistory herdr focus-pane {}", pane_id))
             }
             fn create_command(&self, dir: &std::path::Path, label: &str) -> Option<String> {
                 Some(format!(
