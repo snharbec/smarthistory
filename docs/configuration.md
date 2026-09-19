@@ -796,7 +796,7 @@ darkgray selection, etc.).
 | Key                   | Slot         | Notes                                                                                                                                                     |
 | --------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tuicolor.bg`         | `bg`         | Main app background.                                                                                                                                      |
-| `tuicolor.fg`         | `fg`         | Primary text.                                                                                                                                             |
+| `tuicolor.fg`         | `fg`         | Primary text. Also the text colour drawn on the live dropdown's highlighted row (see [`dropdown.enabled`](#dropdownenabled)).                             |
 | `tuicolor.accent`     | `accent`     | Borders, focused input, mode tint.                                                                                                                        |
 | `tuicolor.success`    | `success`    | Success / exit-0 indicators.                                                                                                                              |
 | `tuicolor.error`      | `error`      | Error / exit-nonzero indicators.                                                                                                                          |
@@ -804,7 +804,7 @@ darkgray selection, etc.).
 | `tuicolor.dim`        | `dim`        | Secondary text (timestamps, secondary metadata).                                                                                                          |
 | `tuicolor.highlight`  | `highlight`  | Selected row's left-edge bar (the `▌` glyph) and the `highlight` slot for picked cells. Falls back to `accent` when unset.                                |
 | `tuicolor.info`       | `info`       | Foreground tint for the `+` (output search) mode badge.                                                                                                   |
-| `tuicolor.selection`  | `selection`  | Background of the currently-selected row in the history list.                                                                                             |
+| `tuicolor.selection`  | `selection`  | Background of the currently-selected row in the history list — and of the live dropdown's highlighted row, which draws that row as a full-width band.     |
 | `tuicolor.badge_fg`   | `badge_fg`   | Foreground for badge text (the `SESS`, `DEDUP`, `+` chips in the header). Falls back to `bg` so the chip text contrasts with the bright badge background. |
 | `tuicolor.list_bg`    | `list_bg`    | Background of the history list pane.                                                                                                                      |
 | `tuicolor.details_bg` | `details_bg` | Background of the details pane.                                                                                                                           |

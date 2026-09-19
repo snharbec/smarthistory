@@ -681,11 +681,22 @@ _smarthistory_dropdown_hl_prune() {
 }
 
 # Convert a CSS color name, 16-color terminal name, or `#rrggbb` /
-# `0xrrggbb` hex string into a zle `region_highlight` foreground
-# spec (`fg=<index>` or `fg=#rrggbb`). Used by the palette-init
+# `0xrrggbb` hex string into a zle `region_highlight` colour spec
+# (`<attr>=<index>` or `<attr>=#rrggbb`). Used by the palette-init
 # block above to turn `smarthistory config get palette`'s
 # `key=value` lines into specs the box-drawing paint appends to
 # `region_highlight`.
+#
+# `$1` is the colour; optional `$2` names the cell half to paint —
+# `fg` (the default, so every plain-colour call site is unchanged)
+# or `bg`. The `bg` form exists for the selected-row band, whose
+# fill comes from the palette's `selection` slot: that slot is a
+# BACKGROUND colour everywhere else in the app (see
+# docs/configuration.md's `tuicolor.selection` row and the TUI's
+# `Theme::selection_color()`), so painting it as a foreground — what
+# this widget did before the band existed — renders an almost
+# invisible gutter glyph on any theme whose selection colour is
+# close to its background.
 #
 # IMPORTANT: this deliberately does NOT return raw ANSI SGR bytes
 # (`\x1b[36m` etc). `POSTDISPLAY` is plain buffer text as far as
@@ -712,41 +723,47 @@ _smarthistory_dropdown_hl_prune() {
 # default — a fail-soft policy that matches the rest of init.zsh
 # (a bad palette must not break the dropdown).
 #
-# Truecolor output is `fg=#rrggbb`, zle's truecolor extension to
-# the `region_highlight` / `zle_highlight` spec syntax (zsh
-# 5.8+), supported by every modern terminal (kitty, alacritty,
+# Truecolor output is `fg=#rrggbb` / `bg=#rrggbb`, zle's truecolor
+# extension to the `region_highlight` / `zle_highlight` spec syntax
+# (zsh 5.8+), supported by every modern terminal (kitty, alacritty,
 # wezterm, iTerm2, gnome-terminal, …). 256-color fallback is
 # intentionally not emitted — a terminal that can read `#rrggbb`
 # from the user via the config file can also read it back as
 # truecolor.
 _smarthistory_color_to_hlspec() {
     local raw=${1:l}  # lowercase, mirrors the Rust resolve_color behavior
+    # Which half of the cell this colour paints. Any value other
+    # than the literal `bg` keeps the historical foreground
+    # behavior, so a future caller passing a typo can't silently
+    # turn a foreground colour into a background one.
+    local attr=fg
+    [[ "$2" == "bg" ]] && attr=bg
     # Strip leading whitespace.
     raw=${raw## }
     raw=${raw%% }
     case "$raw" in
         # Standard ANSI foreground indices (0-7), matching SGR 30-37.
-        black)   print -n -- "fg=0" ;;
-        red)     print -n -- "fg=1" ;;
-        green)   print -n -- "fg=2" ;;
-        yellow)  print -n -- "fg=3" ;;
-        blue)    print -n -- "fg=4" ;;
-        magenta) print -n -- "fg=5" ;;
-        cyan)    print -n -- "fg=6" ;;
-        white)   print -n -- "fg=7" ;;
+        black)   print -n -- "${attr}=0" ;;
+        red)     print -n -- "${attr}=1" ;;
+        green)   print -n -- "${attr}=2" ;;
+        yellow)  print -n -- "${attr}=3" ;;
+        blue)    print -n -- "${attr}=4" ;;
+        magenta) print -n -- "${attr}=5" ;;
+        cyan)    print -n -- "${attr}=6" ;;
+        white)   print -n -- "${attr}=7" ;;
         # Bright variants (indices 8-15, matching SGR 90-97;
         # `gray` is the alias for the default "no bold" gray,
         # `darkgray` is the explicit version — same index, kept
         # as separate names so a user reading the source can map
         # `tuicolor.dim=gray` to the palette index without
         # surprise).
-        gray|darkgray|darkgrey) print -n -- "fg=8" ;;
-        lightred)     print -n -- "fg=9" ;;
-        lightgreen)   print -n -- "fg=10" ;;
-        lightyellow)  print -n -- "fg=11" ;;
-        lightblue)    print -n -- "fg=12" ;;
-        lightmagenta) print -n -- "fg=13" ;;
-        lightcyan)    print -n -- "fg=14" ;;
+        gray|darkgray|darkgrey) print -n -- "${attr}=8" ;;
+        lightred)     print -n -- "${attr}=9" ;;
+        lightgreen)   print -n -- "${attr}=10" ;;
+        lightyellow)  print -n -- "${attr}=11" ;;
+        lightblue)    print -n -- "${attr}=12" ;;
+        lightmagenta) print -n -- "${attr}=13" ;;
+        lightcyan)    print -n -- "${attr}=14" ;;
         # `reset` needs no spec of its own under region_highlight
         # (kept here for symmetry with the Rust `color_to_css`
         # round-trip — not currently emitted by the widget).
@@ -764,7 +781,7 @@ _smarthistory_color_to_hlspec() {
             # 6-char hex exactly — anything else is malformed
             # and we fall through to the empty string.
             if [[ "$hex" == [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] ]]; then
-                print -n -- "fg=#${hex}"
+                print -n -- "${attr}=#${hex}"
             else
                 # Malformed hex — fail soft.
                 print -n -- ""
@@ -933,20 +950,31 @@ _smarthistory_command_validity_hlspec() {
 # a subprocess to every typed character when the dropdown is
 # visible — not worth it.
 #
-# The values land in three `region_highlight` spec strings:
+# The values land in these `region_highlight` spec strings:
 #   _smarthistory_dropdown_hl_accent   — box corners, top/bottom border, unselected-row gutter
-#   _smarthistory_dropdown_hl_select   — selected-row gutter
+#   _smarthistory_dropdown_hl_sel_bg   — selected-row band BACKGROUND (the `selection` slot)
+#   _smarthistory_dropdown_hl_sel_fg   — selected-row band FOREGROUND (the `fg` slot)
 #   _smarthistory_dropdown_hl_warning  — same slots as `_hl_accent`, used instead of it for
 #                                         the prediction box specifically (see
 #                                         `_smarthistory_dropdown_active_kind`)
 # (no trailing "reset" string is needed — region_highlight entries
 # are scoped by explicit start/end offsets, so there's nothing to
 # bleed into the next region the way a raw SGR code can.)
-# Defaults (accent=cyan, selection=blue) match the TUI's
-# built-in palette, so a first-run install (no config file) gets
-# a colored dropdown out of the box. Any unparseable value from
-# the CLI is silently replaced with the default — same
-# fail-soft policy the rest of this file uses.
+#
+# The selected-row band is a *pair* because `tuicolor.selection` is a
+# background colour (docs/configuration.md; the TUI paints it via
+# `Theme::selection_color()` as a row background) and the text drawn
+# on top of it needs an explicit foreground to stay readable. The two
+# are emitted as one combined `fg=…,bg=…` entry per painted span —
+# see `band_spec` in `_smarthistory_dropdown_paint` for why they
+# can't simply be two overlapping entries.
+#
+# Defaults (accent=cyan, selection=blue, fg=white) match the TUI's
+# built-in palette and `resolved_palette`'s own fallbacks, so a
+# first-run install (no config file) gets a colored dropdown out of
+# the box. Any unparseable value from the CLI is silently replaced
+# with the default — same fail-soft policy the rest of this file
+# uses.
 #
 # This block runs at init.zsh *source* time (after the
 # dropdown-enabled gating block above and after both helpers,
@@ -956,7 +984,8 @@ _smarthistory_command_validity_hlspec() {
 # call (the dropdown widget is registered in the `if` block
 # above).
 typeset -g _smarthistory_dropdown_hl_accent="fg=6"  # cyan fallback
-typeset -g _smarthistory_dropdown_hl_select="fg=4"  # blue fallback
+typeset -g _smarthistory_dropdown_hl_sel_bg="bg=4"  # blue fallback
+typeset -g _smarthistory_dropdown_hl_sel_fg="fg=7"  # white fallback
 # Border/corner/gutter color for the prediction box specifically
 # (`_smarthistory_dropdown_active_kind == "predict"`) — swapped in for
 # `_smarthistory_dropdown_hl_accent` by `_smarthistory_dropdown_paint`
@@ -1044,7 +1073,8 @@ fi
 # Unicode box chars are still drawn, just without color).
 if (( _smarthistory_dropdown_color_ok == 0 )); then
     _smarthistory_dropdown_hl_accent=""
-    _smarthistory_dropdown_hl_select=""
+    _smarthistory_dropdown_hl_sel_bg=""
+    _smarthistory_dropdown_hl_sel_fg=""
     _smarthistory_dropdown_hl_success=""
     _smarthistory_dropdown_hl_error=""
     _smarthistory_dropdown_hl_dim=""
@@ -1084,8 +1114,12 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                     unset _hlspec
                     ;;
                 selection)
-                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
-                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_select=$_hlspec
+                    # `selection` is the band's BACKGROUND; `fg` is
+                    # the text colour drawn on top of it. See the
+                    # `_smarthistory_dropdown_hl_sel_bg` declaration
+                    # for why the pair is needed.
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value" bg)
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_sel_bg=$_hlspec
                     unset _hlspec
                     ;;
                 success)
@@ -1106,6 +1140,16 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                 dim)
                     local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
                     [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_dim=$_hlspec
+                    unset _hlspec
+                    ;;
+                fg)
+                    # Text colour for the selected-row band. Comes
+                    # from the theme's own `fg` so the band stays
+                    # readable on light themes too (a hardcoded white
+                    # foreground would vanish against a light
+                    # `selection` background).
+                    local _hlspec=$(_smarthistory_color_to_hlspec "$_smarthistory_dropdown_palette_value")
+                    [[ -n "$_hlspec" ]] && _smarthistory_dropdown_hl_sel_fg=$_hlspec
                     unset _hlspec
                     ;;
                 bg)
@@ -1139,11 +1183,11 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
                             ;;
                     esac
                     ;;
-                # All other slots (fg, warning, …) are currently
-                # unused by the dropdown widget. Reading them anyway
-                # keeps the call site identical to the TUI's palette
-                # resolution; a future widget addition just needs a
-                # new case arm.
+                # All other slots (highlight, info, badgefg, listbg,
+                # …) are currently unused by the dropdown widget.
+                # Reading them anyway keeps the call site identical
+                # to the TUI's palette resolution; a future widget
+                # addition just needs a new case arm.
                 *) ;;
             esac
         done <<< "$_smarthistory_dropdown_palette_raw"
@@ -1341,11 +1385,18 @@ _smarthistory_dropdown_paint() {
     #   top border         → `_smarthistory_dropdown_hl_accent`
     #   bottom border      → `_smarthistory_dropdown_hl_accent`
     #   unselected gutter   → `_smarthistory_dropdown_hl_accent`
-    #   selected gutter     → `_smarthistory_dropdown_hl_select`
-    #   right-side border   → always `_smarthistory_dropdown_hl_accent`,
-    #                          regardless of row selection — only the
-    #                          left gutter's glyph (`!` vs `|`) and
-    #                          color signal the selected row.
+    #   selected row        → `band_spec` (one combined
+    #                          `fg=…,bg=…` entry) painted across the
+    #                          ENTIRE line — left gutter, text, pad,
+    #                          age column and right border — so the
+    #                          row the cursor is on reads as a solid,
+    #                          full-width bar. See `band_spec` below.
+    #   right-side border   → `_smarthistory_dropdown_hl_accent` for
+    #                          unselected rows; on the selected row it
+    #                          keeps the accent foreground but inherits
+    #                          the band's background, so the bar isn't
+    #                          broken by a two-column notch at the
+    #                          right edge.
     #   selected row's text → `bold` (unconditional — bold isn't a
     #                          color, so it isn't gated by
     #                          `_smarthistory_dropdown_color_ok`),
@@ -1367,7 +1418,41 @@ _smarthistory_dropdown_paint() {
     local _sm_word _sm_hl_entry _sm_hl_parts hl_base
     local _hl_start _entry gutter_spec gutter_text
     local row_start bold_start bold_end row_end
+    local band_start band_end band_border_start
     local age_text age_field age_start is_selected exit_spec
+    # The selected-row band, as ONE pre-joined `region_highlight`
+    # spec (e.g. `fg=#e4e4e8,bg=#384048`). It has to be a single
+    # entry rather than two overlapping ones because of how zle
+    # merges `region_highlight` (`Src/Zle/zle_refresh.c`, the loop
+    # over `region_highlights`): when a later entry sets ANY colour
+    # it REPLACES the whole colour pair so far
+    # (`base_atr_on = (base_atr_on & ~TXT_ATTR_ON_VALUES_MASK) |
+    # rhp->atr`), so a separate `bg=…` entry emitted after a
+    # `fg=…` one silently discards the foreground instead of
+    # combining with it. One comma-joined spec sets both halves
+    # atomically. Empty when color is unavailable.
+    local band_spec=""
+    if [[ -n "$_smarthistory_dropdown_hl_sel_bg" ]]; then
+        band_spec=$_smarthistory_dropdown_hl_sel_bg
+        [[ -n "$_smarthistory_dropdown_hl_sel_fg" ]] && band_spec="${band_spec},${_smarthistory_dropdown_hl_sel_fg}"
+    elif [[ -n "$_smarthistory_dropdown_hl_sel_fg" ]]; then
+        band_spec=$_smarthistory_dropdown_hl_sel_fg
+    fi
+    # Border/gutter spec for the selected row's own right-hand
+    # border column: the accent foreground (so the frame still reads
+    # as a frame) over the band's background (so the bar runs
+    # unbroken to the right edge). Built by appending the band's
+    # `bg=` half to the accent spec; falls back to the plain band
+    # spec when the accent has no colour to contribute, and to the
+    # accent alone when there's no band.
+    local band_border_spec="$band_spec"
+    if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
+        if [[ -n "$_smarthistory_dropdown_hl_sel_bg" ]]; then
+            band_border_spec="${_smarthistory_dropdown_hl_accent},${_smarthistory_dropdown_hl_sel_bg}"
+        else
+            band_border_spec="$_smarthistory_dropdown_hl_accent"
+        fi
+    fi
     # `--prefix` search (see the args comment above) guarantees every
     # candidate's command text starts with the exact bytes of
     # `$LBUFFER` — that's the span this widget bolds to recreate the
@@ -1436,7 +1521,7 @@ _smarthistory_dropdown_paint() {
         if (( is_selected )); then
             side="$gutter_sel"
             gutter_text="${gutter_sel} "
-            gutter_spec=$_smarthistory_dropdown_hl_select
+            gutter_spec=$band_spec
         else
             side="$gutter_plain"
             gutter_text="${gutter_plain} "
@@ -1454,8 +1539,19 @@ _smarthistory_dropdown_paint() {
         # Either one invalidates the spans' offsets, so highlighting
         # is skipped for this row rather than risk drawing colors
         # against text they don't describe.
+        #
+        # Only unselected rows get these token colors: on the selected
+        # row the band's own `fg=…,bg=…` is a single region_highlight
+        # entry covering the whole row, and since a later
+        # colour-bearing entry REPLACES the entire colour pair
+        # (Src/Zle/zle_refresh.c — see `band_spec`), splicing token
+        # colours inside the band would either be overwritten by it
+        # or overwrite the band's background for those bytes,
+        # punching holes in the bar. The band's own foreground plus
+        # bold is the emphasis there instead.
         _sm_row_hl_entries=()
-        if [[ "$_smarthistory_dropdown_highlight_enabled" = "1" \
+        if (( ! is_selected )) \
+            && [[ "$_smarthistory_dropdown_highlight_enabled" = "1" \
             && "${row[$((marker_len+1)),-1]}" == "${_smarthistory_dropdown_candidates[$((i+1))]}" ]]; then
             [[ -n "${_smarthistory_dropdown_hl_spans[$((i+1))]:-}" ]] \
                 && _sm_row_hl_entries=("${(f)_smarthistory_dropdown_hl_spans[$((i+1))]}")
@@ -1509,7 +1605,14 @@ _smarthistory_dropdown_paint() {
         # already truncated to `interior_cmd_max - 1` cols) is harmless.
         (( pad < 0 )) && pad=0
         out+=$'\n'
-        if [[ -n "$gutter_spec" ]]; then
+        if (( is_selected )); then
+            # No per-piece color entry for the selected row: the
+            # band appended at the end of this row covers the gutter
+            # text too, and a second colour entry here would just be
+            # replaced by it. `band_start` marks where the band opens.
+            band_start=$#out
+            out+="$gutter_text"
+        elif [[ -n "$gutter_spec" ]]; then
             _hl_start=$#out
             out+="$gutter_text"
             _hl+=("$_hl_start $#out $gutter_spec")
@@ -1517,10 +1620,10 @@ _smarthistory_dropdown_paint() {
             out+="$gutter_text"
         fi
         if (( is_selected )); then
-            # Bold span opens here; closes AFTER the age column below
-            # so the whole selected row — command AND age — reads as
-            # highlighted, not just the command part.
-            _hl_start=$#out
+            # The band (appended after this row's age column and
+            # right border, below) supplies the colours; `bold` is
+            # applied separately at the very end so it ORs in on top
+            # of the band instead of racing it.
             row_start=$#out
             out+="$row"
         else
@@ -1539,13 +1642,21 @@ _smarthistory_dropdown_paint() {
         # of `is_selected`, both branches above set `row_start` to the
         # same "start of `row` within `out`" meaning. Length 1: just
         # the glyph itself, not its trailing space.
-        [[ -n "$exit_spec" ]] && _hl+=("$((row_start + 2)) $((row_start + 3)) $exit_spec")
+        #
+        # On the SELECTED row this is deferred to the end of the row
+        # (see below) and emitted with the band's `bg=` half appended:
+        # a bare `fg=…` entry landing inside the band would replace
+        # the band's colours wholesale for that one byte, punching a
+        # background-coloured hole in the bar.
+        if (( ! is_selected )); then
+            [[ -n "$exit_spec" ]] && _hl+=("$((row_start + 2)) $((row_start + 3)) $exit_spec")
+        fi
         # Splice in this row's `dropdown.highlight` spans (token
         # colors + the first-word validity span, see above) — offset
-        # past the marker, same for selected and unselected rows.
-        # Independent `region_highlight` attribute from the `bold`
-        # spans above (color vs. weight), so they combine rather than
-        # conflict, on both the matched-prefix and the selected row.
+        # past the marker. These are unselected rows only (the
+        # precompute above skips the selected row entirely), so
+        # there's no band for them to conflict with; each span is a
+        # lone foreground colour over the terminal's own background.
         if (( ${#_sm_row_hl_entries} > 0 )); then
             hl_base=$(( row_start + marker_len ))
             for _sm_hl_entry in "${_sm_row_hl_entries[@]}"; do
@@ -1567,12 +1678,6 @@ _smarthistory_dropdown_paint() {
                 [[ -n "$_smarthistory_dropdown_hl_accent" ]] && _hl+=("$age_start $#out $_smarthistory_dropdown_hl_accent")
             fi
         fi
-        # Close the selected-row bold span (opened above, right
-        # before the command text) now that the age column — if any
-        # — has been appended too. A no-op duplicate-avoidance: this
-        # is the ONLY bold span selected rows get, unlike unselected
-        # rows' separate matched-prefix span above.
-        (( is_selected )) && _hl+=("$_hl_start $#out bold")
         # The right border is `" ${side}"` (space THEN the bar) to
         # mirror the left gutter's `"${gutter_text}"` (bar THEN
         # space) — both sides need exactly one padding column between
@@ -1587,15 +1692,44 @@ _smarthistory_dropdown_paint() {
         # a cell) but visible as soon as trailing whitespace is
         # trimmed (e.g. copy-pasting the box out of the terminal).
         #
-        # The right-side border always carries the accent spec
-        # (never the selection spec) — matches the pre-region_highlight
-        # behavior, where only the left gutter differed by selection.
-        if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
+        # Unselected rows always carry the accent spec. Selected rows
+        # are painted by the band below, with an accent-over-band
+        # override just for this border pair, so the bar reaches the
+        # right edge while the frame still reads as a frame.
+        if (( is_selected )); then
+            band_border_start=$#out
+            out+=" ${side}"
+        elif [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
             _hl_start=$#out
             out+=" ${side}"
             _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_accent")
         else
             out+=" ${side}"
+        fi
+        if (( is_selected )); then
+            band_end=$#out
+            # Order matters here: zle applies overlapping entries in
+            # array order and a later colour-bearing entry REPLACES
+            # the colours set so far (Src/Zle/zle_refresh.c), so the
+            # whole-row band goes FIRST and the narrower overrides
+            # that must sit on top of it are appended after.
+            [[ -n "$band_spec" ]] && _hl+=("$band_start $band_end $band_spec")
+            # Exit-status glyph: its own foreground (green/red) over
+            # the band's background, so the marker stays legible on
+            # the bar instead of being replaced by it.
+            if [[ -n "$exit_spec" ]]; then
+                if [[ -n "$_smarthistory_dropdown_hl_sel_bg" ]]; then
+                    _hl+=("$((row_start + 2)) $((row_start + 3)) ${exit_spec},${_smarthistory_dropdown_hl_sel_bg}")
+                else
+                    _hl+=("$((row_start + 2)) $((row_start + 3)) $exit_spec")
+                fi
+            fi
+            [[ -n "$band_border_spec" ]] \
+                && _hl+=("$band_border_start $band_end $band_border_spec")
+            # Bold last: an attribute-only spec ORs into whatever
+            # colours are already set for these bytes rather than
+            # replacing them, so it can safely cover the whole band.
+            _hl+=("$band_start $band_end bold")
         fi
     done
     out+=$'\n'

@@ -149,6 +149,18 @@ All notable changes to this project will be documented in this file.
   of characters — so a multi-word query against a large note turned every
   redraw into a multi-second (or worse) stall. Now precomputes both char
   buffers once and slice-compares per position instead of re-scanning.
+- The live dropdown's highlighted row was nearly invisible on most themes.
+  `tuicolor.selection` (the only palette slot the widget consulted for it) is
+  a *background* colour everywhere else in the app, but the widget painted it
+  as a foreground on the left gutter's glyph — so on a dark theme the row
+  marker was a dark grey-blue on an almost-black background. The highlighted
+  row is now drawn as a full-width band across the entire line (gutter, text,
+  padding, age column and right border), painted with `tuicolor.selection` as
+  the background and `tuicolor.fg` as the text colour, bold — the same
+  treatment the TUI's own list gives its selected row, so the two now agree.
+  The exit-status glyph and the right-hand border keep their own colours on
+  top of the band instead of being replaced by it. Purely presentational; no
+  new config keys.
 
 ### Fixed
 
