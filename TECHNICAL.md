@@ -804,10 +804,14 @@ smarthistory comments list|add|delete
   are CSS color names (`red`, `cyan`, `lightblue`, …) or `#rrggbb` hex strings,
   in the same format the user writes in the config file under
   `tuicolor.<field>=`. Used internally by the zsh dropdown widget at init time
-  so the box borders and selection gutter match the user's TUI theme (a
+  so the box borders and selected-row band match the user's TUI theme (a
   `theme.dark=gruvbox` user sees orange borders, a `theme.dark=doom-one` user
-  sees doom-one coral). Read once per shell startup; re-`exec zsh` (or restart
-  the terminal) to pick up TUI theme changes.
+  sees doom-one coral). The `selection` slot is consumed as the band's
+  background and the `fg` slot as the text colour painted on top of it — the
+  same pairing the TUI itself uses for its selected list row — because
+  `selection` is a background colour everywhere else in the app and rendering
+  it as a foreground produces an almost invisible row. Read once per shell
+  startup; re-`exec zsh` (or restart the terminal) to pick up TUI theme changes.
 - `clean` is destructive: it builds the same `WHERE` clause as `search` and runs
   a `DELETE`. By default it prompts `Delete N entries? [y/N]`. Pass `--force` to
   skip the prompt. With no matches the prompt is skipped entirely.
