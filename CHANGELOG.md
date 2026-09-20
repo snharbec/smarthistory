@@ -85,6 +85,24 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Selecting a pane row in `*` (panes) mode under herdr could land you on the
+  wrong pane — or on no change at all. The staged command was
+  `herdr pane zoom <id> && herdr pane zoom <id> --off`, i.e. a *zoom toggle*
+  used as a focus primitive: it only moves focus as a side effect of zooming,
+  so it did nothing when the target pane was the only pane in its tab
+  (`pane.zoom` reports `reason: "single_pane"` and leaves focus untouched — a
+  very common layout), and it could never distinguish two panes sharing a tab,
+  leaving the target tab zoomed if the un-zoom half failed. herdr 0.9.x has no
+  CLI that targets a specific pane id (`herdr pane focus` is directional and
+  requires `--direction`; `herdr tab focus` restores whichever pane was last
+  focused in that tab; `herdr agent focus` takes only agent rows), so the row
+  now stages a new `smarthistory herdr focus-pane <id>` subcommand, which calls
+  the socket API's `pane.focus` method directly. That method is the only
+  pane-id-scoped focus herdr exposes; it lands on the exact pane across
+  workspaces and tabs, and never touches zoom state. The socket path comes from
+  `$HERDR_SOCKET_PATH` (which herdr sets in the pane the command runs in), with
+  the documented fallback to a named session's socket or the default one under
+  the herdr config dir.
 - Real-history `Up`/`Down` walking (an empty line, recalling past commands):
   every press after the very first one could get misrouted into the
   typed-search dropdown's generic candidate-cycling instead of continuing

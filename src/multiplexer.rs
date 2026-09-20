@@ -44,7 +44,12 @@
 //!   compact positional integers
 //!   (`1`, `2`, …) so we always
 //!   reference workspaces by id, never
-//!   by name.
+//!   by name. Jumping to a *specific
+//!   pane* has no CLI: it goes through
+//!   the socket API's `pane.focus`
+//!   method, wrapped by
+//!   `smarthistory herdr focus-pane`
+//!   (see [`herdr_focus_pane`]).
 //!
 //! The two backends share the same
 //! "shape" (id, path), so the TUI sees
@@ -450,11 +455,13 @@ pub trait MultiplexerBackend: Send + Sync {
     ///   window for you so
     ///   `tab_id` is ignored).
     /// - herdr:
-    ///   `herdr pane zoom <pane_id> && herdr pane zoom <pane_id> --off`
-    ///   (the first `pane zoom` focuses the exact pane across
-    ///   workspaces and tabs and zooms it; the second call
-    ///   un-zooms while keeping focus on that pane, so the
-    ///   user lands on the right pane without a zoomed view).
+    ///   `smarthistory herdr focus-pane <pane_id>`
+    ///   — a thin wrapper around the socket API's `pane.focus`
+    ///   method, which is the only way to target a specific pane
+    ///   id in herdr 0.9.x. (herdr's CLI has no equivalent:
+    ///   `herdr pane focus` is *neighbour* focus and requires
+    ///   `--direction`, `tab focus` is tab-scoped, and
+    ///   `agent focus` takes only agent rows.)
     fn focus_pane(&self, pane_id: &str, tab_id: &str) -> Option<String>;
 
     /// Stage a command that, when
@@ -1478,6 +1485,193 @@ pub fn herdr_pane_cmdline(_pane_id: &str) -> Option<String> {
     None
 }
 
+/// Pure resolution logic behind [`herdr_socket_path`], taking the
+/// four environment values it consults so it can be tested without
+/// mutating the process environment (which would race with other
+/// tests, several of which spawn real `herdr`/`tmux` subprocesses
+/// that inherit this process's env).
+///
+/// Order follows herdr's documented socket resolution: an explicit
+/// `HERDR_SOCKET_PATH` wins, then a named session's own socket, then
+/// the default session socket under the herdr config dir. The config
+/// dir honours `XDG_CONFIG_HOME` before `$HOME/.config`.
+#[cfg(feature = "herdr")]
+fn resolve_herdr_socket_path(
+    socket_path: Option<&str>,
+    session: Option<&str>,
+    xdg_config_home: Option<&str>,
+    home: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    // Treat empty values as unset, so a stray `HERDR_SESSION=` can't
+    // produce a nonsense path like `<cfg>/herdr/sessions//herdr.sock`.
+    if let Some(p) = socket_path.filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let config_home = if let Some(x) = xdg_config_home.filter(|v| !v.is_empty()) {
+        std::path::PathBuf::from(x)
+    } else if let Some(h) = home.filter(|v| !v.is_empty()) {
+        std::path::PathBuf::from(h).join(".config")
+    } else {
+        return None;
+    };
+    let base = config_home.join("herdr");
+    Some(match session.filter(|v| !v.is_empty()) {
+        Some(name) => base.join("sessions").join(name).join("herdr.sock"),
+        None => base.join("herdr.sock"),
+    })
+}
+
+/// Resolve the herdr server's local socket path.
+///
+/// Herdr injects `HERDR_SOCKET_PATH` into every managed pane
+/// process, and that is where a staged focus command runs — so in
+/// the normal case this is a plain env lookup. The documented
+/// resolution order (`herdr`'s socket-api docs) continues with
+/// `HERDR_SESSION=<name>` for named sessions and then the default
+/// socket under the herdr config dir, so both are mirrored here for
+/// the case where the TUI is driven from outside a managed pane
+/// (e.g. `smarthistory tui` launched from a keybinding or a plain
+/// terminal).
+///
+/// The config dir honours `XDG_CONFIG_HOME`, falling back to
+/// `$HOME/.config`, matching herdr's own default. The decision logic
+/// lives in [`resolve_herdr_socket_path`].
+#[cfg(feature = "herdr")]
+pub fn herdr_socket_path() -> Option<std::path::PathBuf> {
+    resolve_herdr_socket_path(
+        std::env::var("HERDR_SOCKET_PATH").ok().as_deref(),
+        std::env::var("HERDR_SESSION").ok().as_deref(),
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+/// Send one request to the herdr socket API and return the decoded
+/// JSON `result`.
+///
+/// This is a direct Unix-socket client rather than a shelled-out
+/// `nc -U` pipeline for three reasons: `netcat-traditional` (the
+/// default `nc` on many Linux distros) has no `-U` at all, `nc`
+/// exits non-zero on its own read timeout even when the request
+/// succeeded, and its stdout would otherwise leak the JSON reply
+/// into the user's terminal. A native client gives an unambiguous
+/// success signal and keeps the reply off stdout entirely.
+///
+/// Bounded by `HERDR_SOCKET_TIMEOUT_MS` (default 1500ms, matching
+/// `herdr_pane_read`'s budget) so a stalled daemon can't block the
+/// caller. Returns `None` on any failure — connect error, timeout,
+/// or a malformed reply — and also on a well-formed error envelope
+/// (`{"error": {...}}`), so callers only ever see a successful
+/// `result`.
+///
+/// The socket path is supplied by the caller rather than resolved
+/// here, so the transport can be exercised against a chosen path
+/// without depending on the process environment (other tests spawn
+/// real `herdr`/`tmux` subprocesses that would inherit a
+/// temporarily-set `HERDR_SOCKET_PATH`).
+#[cfg(feature = "herdr")]
+fn herdr_socket_request_at(
+    method: &str,
+    params: serde_json::Value,
+    path: &std::path::Path,
+) -> Option<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let timeout_ms: u64 = std::env::var("HERDR_SOCKET_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    // One request per connection, newline-terminated, per the
+    // socket-API contract.
+    let request = serde_json::json!({
+        "id": "smarthistory",
+        "method": method,
+        "params": params,
+    });
+    let mut payload = serde_json::to_vec(&request).ok()?;
+    payload.push(b'\n');
+    stream.write_all(&payload).ok()?;
+    stream.flush().ok()?;
+
+    // One reply line, then we're done — no subscription here, so the
+    // server closes (or we simply stop reading) after this.
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    if line.trim().is_empty() {
+        return None;
+    }
+    let reply: serde_json::Value = serde_json::from_str(&line).ok()?;
+    if reply.get("error").is_some() {
+        herdr_snapshot_debug_log(&format!(
+            "herdr_socket_request {} -> error envelope: {}",
+            method,
+            line.trim()
+        ));
+        return None;
+    }
+    reply.get("result").cloned()
+}
+
+/// Focus a specific herdr pane by id via the socket API's
+/// `pane.focus` method. Backs the `smarthistory herdr focus-pane`
+/// subcommand, which is what `HerdrBackend::focus_pane` stages for
+/// the `*` (panes) view.
+///
+/// Returns `Ok(())` once the server acknowledges the focus, or an
+/// `Err` with a human-readable reason (no socket path, connect
+/// failure, timeout, `pane_not_found`, …) for the caller to print.
+#[cfg(feature = "herdr")]
+pub fn herdr_focus_pane(pane_id: &str) -> Result<(), String> {
+    herdr_focus_pane_at(pane_id, herdr_socket_path())
+}
+
+/// [`herdr_focus_pane`] with the socket path supplied explicitly, so
+/// the validation and error paths can be tested without touching the
+/// process environment (other tests spawn real `herdr`/`tmux`
+/// subprocesses that would inherit a temporarily-set
+/// `HERDR_SOCKET_PATH`).
+#[cfg(feature = "herdr")]
+fn herdr_focus_pane_at(pane_id: &str, path: Option<std::path::PathBuf>) -> Result<(), String> {
+    if pane_id.is_empty() {
+        return Err("no pane id given".to_string());
+    }
+    let path = path
+        .ok_or_else(|| "could not resolve the herdr socket path (is herdr running?)".to_string())?;
+    if !path.exists() {
+        return Err(format!(
+            "herdr socket {} does not exist (is herdr running?)",
+            path.display()
+        ));
+    }
+    let reply =
+        herdr_socket_request_at("pane.focus", serde_json::json!({ "pane_id": pane_id }), &path)
+            .ok_or_else(|| format!("herdr refused to focus pane {pane_id}"))?;
+    // A `pane_info` reply is the documented success shape; verify the
+    // server reports the pane we asked for as focused, so a
+    // silently-ignored request can't look like success.
+    let focused = reply
+        .get("pane")
+        .and_then(|p| p.get("focused"))
+        .and_then(|f| f.as_bool())
+        .unwrap_or(false);
+    if focused {
+        Ok(())
+    } else {
+        Err(format!("herdr did not report pane {pane_id} as focused"))
+    }
+}
+
+#[cfg(not(feature = "herdr"))]
+pub fn herdr_focus_pane(_pane_id: &str) -> Result<(), String> {
+    Err("this build has no herdr support (rebuild without `--no-default-features`)".to_string())
+}
+
 /// Read the last `lines` visible lines of a herdr pane
 /// (the agent / shell currently displayed in that pane).
 /// Backed by `herdr pane read <pane_id> --lines N --ansi`.
@@ -2349,29 +2543,43 @@ impl MultiplexerBackend for HerdrBackend {
     }
 
     fn focus_pane(&self, pane_id: &str, _tab_id: &str) -> Option<String> {
-        // Use `pane zoom` (which delegates to the socket API's
-        // `pane.zoom` method) to focus the specific pane. Unlike
-        // `workspace focus` + `tab focus`, which only switches the
-        // workspace and tab (leaving the pane focus to whatever was
-        // last focused in that tab), `pane zoom <pane_id>` focuses
-        // the EXACT pane the user selected — across workspaces and
-        // tabs — and zooms it to fill the tab. The second call
-        // (`pane zoom <pane_id> --off`) un-zooms while keeping the
-        // focus on that pane, so the pane is focused but NOT
-        // zoomed.
+        // Focus the EXACT pane the user selected via the socket
+        // API's `pane.focus` method — the only mechanism herdr 0.9.x
+        // exposes for "go to this specific pane id".
         //
-        // `tab_id` is no longer needed (pane.zoom resolves the
-        // workspace+tab from the pane_id itself), but kept as a
-        // parameter so the trait contract is uniform across
-        // backends.
+        // The previous implementation staged `herdr pane zoom
+        // <pane_id>` followed by `pane zoom <pane_id> --off`: a
+        // zoom toggle used as a focus primitive, on the theory that
+        // the toggle moves focus and the second call undoes the
+        // zoom. That is unreliable, because `pane.zoom` reports
+        // `reason: "single_pane"` and does NOT move focus when the
+        // target pane is the only pane in its tab — a very common
+        // layout — so the user ends up still sitting in the pane
+        // they started from. It also cannot distinguish two panes
+        // that share a tab at all, and it leaves the target tab
+        // zoomed if the second call fails. There is no CLI
+        // equivalent: `herdr pane focus` is *neighbour* focus
+        // (`--direction` is required), `tab focus` is tab-scoped and
+        // restores whichever pane was last focused in that tab, and
+        // `agent focus` only accepts agent-target rows.
+        //
+        // `tab_id` was already unused by the zoom version and stays
+        // unused here (`pane.focus` resolves the workspace and tab
+        // from the pane id itself), but it remains a parameter so
+        // the trait contract stays uniform across backends.
         if pane_id.is_empty() {
             return None;
         }
-        let quoted = crate::util::shell_quote(pane_id);
+        // Routed through smarthistory's own binary so the socket
+        // call (and its timeout/error handling) lives in one place
+        // instead of being re-implemented in shell. `smarthistory
+        // herdr focus-pane` is a small, purpose-built subcommand:
+        // staging a raw `nc -U` pipeline here would break on
+        // netcat-traditional (no `-U`) and would leak the JSON
+        // reply onto the user's terminal.
         Some(format!(
-            "herdr pane zoom {} 2>/dev/null && \
-             herdr pane zoom {} --off 2>/dev/null",
-            quoted, quoted,
+            "smarthistory herdr focus-pane {}",
+            crate::util::shell_quote(pane_id)
         ))
     }
 

@@ -123,9 +123,11 @@ The `*` view lists every pane across every session / workspace as a tree
 
 - a **pane** row stages the per-pane focus command:
   `tmux select-pane -t <id> && tmux switch-client -t <id>` /
-  `herdr pane zoom <id> && herdr pane zoom <id> --off` (the second un-zooms
-  while keeping focus on the right pane, so the user lands without a zoomed
-  view).
+  `smarthistory herdr focus-pane <id>`. The herdr side goes through
+  smarthistory's own helper because it wraps the socket API's `pane.focus`
+  method — herdr 0.9.x has no CLI that can target a specific pane id
+  (`herdr pane focus` is directional and requires `--direction`,
+  `herdr tab focus` is tab-scoped, `herdr agent focus` takes only agent rows).
 - a **workspace** header row stages the workspace focus command:
   `tmux switch-client -t <session>` / `herdr workspace focus <ws>`.
 
@@ -298,8 +300,10 @@ it's missing everywhere:
   per-pane focus — the `pane_id`'s `:pN` suffix is stripped because
   `workspace focus` accepts a workspace id, not a pane id. So a `T`-marked row
   in herdr jumps to the workspace the directory lives in, not the specific pane.
-  This is deliberate: herdr's "pane focus" (`pane zoom`) is a zoom toggle, not a
-  permanent focus; the workspace-level focus is what users typically want.
+  This is deliberate: for a directory row the workspace-level jump is what users
+  typically want. (The `*` panes view *does* target a specific pane — it stages
+  `smarthistory herdr focus-pane <id>`, which wraps the socket API's
+  `pane.focus`.)
 
 ### `+` (output) mode returns nothing
 
