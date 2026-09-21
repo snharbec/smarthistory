@@ -469,11 +469,20 @@ using whichever scheme (light/dark) your last TUI session actually had active
 `theme.dark`/`theme.light` both configured, toggling in the TUI and opening a
 new shell changes the dropdown's colors too.
 
-Off by default: it adds one `bat` subprocess call per dropdown render (all
-candidates batched into a single call, not one per row), on top of the
-`smarthistory search` call every keystroke already makes. Silently stays off —
-no error, no startup warning — when `bat` isn't on `$PATH`, even if this is
-`on`.
+Off by default: it adds a `bat` subprocess call on top of the
+`smarthistory search` call every keystroke already makes. That `bat` call is
+made only for candidates the session hasn't styled yet — all not-yet-cached
+candidates are batched into a single call (never one per row), and the result
+is cached for the rest of the shell session, keyed by the candidate's exact
+text. Since a command's syntax colors depend only on its text and the resolved
+theme, this is stable for the session's lifetime, and the same command shows up
+across many different searches as a prefix is typed out (`git status` matches
+`g`, `gi`, `git`, `git s`, …) — so after the first time a command appears,
+retyping it costs **zero** `bat` calls. Measured on a real history, this drops
+a `highlight=on` keystroke from ~21ms to ~5ms (steady state, matching the
+`highlight=off` floor); the ~6ms first time a given command is seen is the one
+remaining `bat` call it needs. Silently stays off — no error, no startup
+warning — when `bat` isn't on `$PATH`, even if this is `on`.
 
 ```ini
 dropdown.enabled=on
