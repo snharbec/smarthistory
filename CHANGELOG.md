@@ -85,6 +85,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Typing in the shell was slow when `dropdown.highlight=on`: every keystroke
+  spawned `bat` (~16ms of a ~21ms keystroke) and re-styled every candidate from
+  scratch, even though the same commands had already been styled by earlier
+  keystrokes. Syntax spans are now cached for the shell session, keyed by the
+  candidate's exact text — a command's colors depend only on its text and the
+  resolved theme, both fixed once the palette is resolved at init, so a
+  cache hit is always byte-identical to a fresh `bat` run. Only candidates the
+  session hasn't styled yet are sent to `bat`. Retyping an already-seen command
+  now makes **zero** `bat` calls: on a real history, a `highlight=on` keystroke
+  went from ~21ms to ~5ms, matching the `highlight=off` floor (measured with a
+  PATH shim counting actual spawns; cached output verified identical to
+  uncached across `g`/`gi`/`git`/`git `/`git s`/`git st`/`git status`).
+  `dropdown.enabled=off` and `highlight=off` are unaffected — the search call
+  every keystroke already makes dominates there. See
+  [docs/configuration.md](docs/configuration.md#dropdownhighlight).
 - Selecting a pane row in `*` (panes) mode under herdr could land you on the
   wrong pane — or on no change at all. The staged command was
   `herdr pane zoom <id> && herdr pane zoom <id> --off`, i.e. a *zoom toggle*

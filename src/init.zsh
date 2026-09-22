@@ -624,6 +624,37 @@ typeset -ga _smarthistory_dropdown_exit
 # with the two arrays above by `_smarthistory_dropdown_render`, read
 # only by `_smarthistory_dropdown_paint`.
 typeset -ga _smarthistory_dropdown_hl_spans
+# Session-wide cache of `bat` syntax-span output, keyed by the exact
+# candidate command text. `bat`'s spawn + run is ~16ms of a ~21ms
+# keystroke (the single largest cost in
+# `_smarthistory_dropdown_render`), and a candidate's styling never
+# changes within one shell session: the only inputs are the command
+# text and `_smarthistory_dropdown_bat_theme`, both fixed by the time
+# the palette is resolved at init. Caching across prompts — not just
+# within one — is what makes this pay: the same command shows up in
+# many different searches ("git status" matches "g", "gi", "git",
+# "git s", …), so a per-keystroke cache missed most of the time while
+# a session-wide one hits ~90% of bat calls.
+#
+# The value is the newline-joined span string for that candidate
+# (same shape `_smarthistory_dropdown_hl_spans` holds), or the empty
+# string when `bat` didn't round-trip the text byte-for-byte —
+# caching that negative result too, since it's equally fixed for the
+# session and re-running `bat` for it every keystroke is exactly the
+# cost this cache exists to avoid.
+typeset -gA _smarthistory_dropdown_hl_cache
+# Reset on every source of this file. `typeset -gA` on an existing
+# map leaves its contents untouched, and re-sourcing re-runs the
+# palette block further down — which may resolve a different
+# `_smarthistory_dropdown_bat_theme` (e.g. after toggling the TUI's
+# color scheme and re-sourcing). Styled spans cached under the old
+# theme must not survive into the new one, so drop them here, before
+# that resolution runs. In a fresh shell this is a no-op.
+_smarthistory_dropdown_hl_cache=()
+# Bound on the map above. Dropping the whole map on overflow is an
+# O(1) reset costing at most one extra `bat` call for the visible
+# rows, versus the per-keystroke bookkeeping a real LRU would need.
+typeset -gi _smarthistory_dropdown_hl_cache_max=4096
 
 # Larger look-ahead pool for the "what usually comes next" predictions
 # reached via Down once real history is exhausted (see
@@ -1974,35 +2005,61 @@ _smarthistory_dropdown_render() {
         return
     fi
     # Optional per-candidate syntax highlighting (`dropdown.highlight=on`):
-    # ALL candidates go through a single `bat` call (one line per
-    # candidate on stdin) rather than one call per row — keeps this
-    # to one extra subprocess per keystroke, matching the cost of the
-    # `smarthistory search` call above, instead of scaling with
-    # `dropdown.limit`.
+    # all candidates that aren't already cached go through a single
+    # `bat` call (one line per candidate on stdin) rather than one
+    # call per row, so the cost is one subprocess PER KEYSTROKE THAT
+    # NEEDS IT, not one per row.
+    #
+    # `_smarthistory_dropdown_hl_cache` (session-wide, keyed by
+    # candidate text) usually makes that zero: as a prefix is typed
+    # out, each keystroke's candidate set is mostly commands already
+    # styled by an earlier keystroke or an earlier prompt, so only
+    # genuinely new rows are sent to `bat`. A complete miss (empty
+    # cache, or every row new) falls back to the original
+    # "send them all in one call" behavior unchanged.
     _smarthistory_dropdown_hl_spans=()
     if [[ "$_smarthistory_dropdown_highlight_enabled" = "1" ]]; then
         local _sm_hl_raw _sm_hl_line _sm_hl_i
-        local -a _sm_hl_lines _sm_hl_row_spans
-        _sm_hl_raw=$(printf '%s\n' "${_smarthistory_dropdown_candidates[@]}" \
-            | bat --language=bash --color=always --plain --theme "$_smarthistory_dropdown_bat_theme" \
-                  --paging=never --tabs=0 2>/dev/null)
-        _sm_hl_lines=("${(f)_sm_hl_raw}")
+        local -a _sm_hl_lines _sm_hl_row_spans _sm_hl_missing
+        _sm_hl_missing=()
         for (( _sm_hl_i = 1; _sm_hl_i <= ${#_smarthistory_dropdown_candidates}; _sm_hl_i++ )); do
-            _sm_hl_line=${_sm_hl_lines[$_sm_hl_i]:-}
-            _sm_hl_row_spans=()
-            if [[ -n "$_sm_hl_line" ]]; then
-                _smarthistory_ansi_to_spans "$_sm_hl_line" _sm_hl_row_spans
-                # `bat` must not have altered the text (reflowed,
-                # trimmed, ...) — if it doesn't match byte-for-byte,
-                # skip highlighting this row rather than risk
-                # splicing spans against text they don't describe.
-                if [[ "$REPLY" != "${_smarthistory_dropdown_candidates[$_sm_hl_i]}" ]]; then
-                    _sm_hl_row_spans=()
-                fi
-            fi
-            _smarthistory_dropdown_hl_spans+=("${(F)_sm_hl_row_spans}")
+            # `(( ${+map[$k]} ))` rather than `[[ -n "${map[$k]}" ]]`:
+            # a cached EMPTY span string (the "bat couldn't round-trip
+            # this row" negative result) is a real cache hit and must
+            # not be retried on every subsequent keystroke.
+            (( ${+_smarthistory_dropdown_hl_cache[${_smarthistory_dropdown_candidates[$_sm_hl_i]}]} )) && continue
+            _sm_hl_missing+=("${_smarthistory_dropdown_candidates[$_sm_hl_i]}")
         done
-        unset _sm_hl_raw _sm_hl_line _sm_hl_i _sm_hl_lines _sm_hl_row_spans
+        if (( ${#_sm_hl_missing} > 0 )); then
+            # Bound the cache before growing it: on overflow drop the
+            # whole map (see `_smarthistory_dropdown_hl_cache_max`).
+            if (( ${#_smarthistory_dropdown_hl_cache} + ${#_sm_hl_missing} > _smarthistory_dropdown_hl_cache_max )); then
+                _smarthistory_dropdown_hl_cache=()
+            fi
+            _sm_hl_raw=$(printf '%s\n' "${_sm_hl_missing[@]}" \
+                | bat --language=bash --color=always --plain --theme "$_smarthistory_dropdown_bat_theme" \
+                      --paging=never --tabs=0 2>/dev/null)
+            _sm_hl_lines=("${(f)_sm_hl_raw}")
+            for _sm_hl_i in {1..${#_sm_hl_missing}}; do
+                _sm_hl_line=${_sm_hl_lines[$_sm_hl_i]:-}
+                _sm_hl_row_spans=()
+                if [[ -n "$_sm_hl_line" ]]; then
+                    _smarthistory_ansi_to_spans "$_sm_hl_line" _sm_hl_row_spans
+                    # `bat` must not have altered the text (reflowed,
+                    # trimmed, ...) — if it doesn't match byte-for-byte,
+                    # skip highlighting this row rather than risk
+                    # splicing spans against text they don't describe.
+                    if [[ "$REPLY" != "${_sm_hl_missing[$_sm_hl_i]}" ]]; then
+                        _sm_hl_row_spans=()
+                    fi
+                fi
+                _smarthistory_dropdown_hl_cache[${_sm_hl_missing[$_sm_hl_i]}]="${(F)_sm_hl_row_spans}"
+            done
+        fi
+        for (( _sm_hl_i = 1; _sm_hl_i <= ${#_smarthistory_dropdown_candidates}; _sm_hl_i++ )); do
+            _smarthistory_dropdown_hl_spans+=("${_smarthistory_dropdown_hl_cache[${_smarthistory_dropdown_candidates[$_sm_hl_i]}]}")
+        done
+        unset _sm_hl_raw _sm_hl_line _sm_hl_i _sm_hl_lines _sm_hl_row_spans _sm_hl_missing
     fi
     _smarthistory_dropdown_visible=1
     # This render (typed-search results, or the passive predict glance
