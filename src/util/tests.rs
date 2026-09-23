@@ -765,3 +765,12 @@
     fn escape_field_carriage_return() {
         assert_eq!(escape_field_for_output("a\rb"), "a\\rb");
     }
+
+    /// An empty (or whitespace-only) target is never reachable — bails
+    /// out before shelling to `ping` at all, rather than letting `ping`
+    /// itself decide what an empty argument means.
+    #[test]
+    fn ping_reachable_empty_target_is_false() {
+        assert!(!ping_reachable(""));
+        assert!(!ping_reachable("   "));
+    }

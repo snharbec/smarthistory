@@ -743,15 +743,29 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
             ..Default::default()
         });
         let mut next_host_id: i64 = -25_000;
-        for h in &app.hosts {
+        for (idx, h) in app.hosts.iter().enumerate() {
             next_host_id -= 1;
+            // Show when this host was last actually connected to,
+            // rather than the row's own timestamp (which has nothing
+            // to be — this row is synthesized from config, not a real
+            // `history` entry). `App::host_defs` is index-aligned with
+            // `app.hosts` (both built from `Config::hosts`/
+            // `Config::host_defs` in the same iteration order), so
+            // `idx` recovers the full `HostDef` needed to reconstruct
+            // the exact `ssh` command line the TUI stages for this
+            // host.
+            let timestamp = app
+                .host_defs
+                .get(idx)
+                .map(|def| last_ssh_connection_timestamp(app, &def.ssh_command()))
+                .unwrap_or(0);
             out.push(HistoryRow {
                 id: next_host_id,
                 command: h.command.clone(),
                 directory: h.directory.clone(),
                 session_id: String::new(),
                 exit_code: 0,
-                timestamp: 0,
+                timestamp,
                 comment: h.comment.clone(),
                 output: String::new(),
                 mode: "host".to_string(),
@@ -760,6 +774,39 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
             });
         }
     }
+}
+
+/// Most recent time `ssh_command` (the exact string `HostDef::
+/// ssh_command` builds, and the one `stage_pane_selection` stages into
+/// the pane for the user to run) appears as a `history.command` value.
+/// The shell integration logs every command the user actually runs
+/// there, so this is "when did I last connect to this host", not "when
+/// was the config loaded" (which is what the row's own `timestamp`
+/// would otherwise be — always the zero/epoch sentinel, since a host
+/// row is synthesized from config, not a real history entry).
+///
+/// Matches on the full command string (flags, user, target, and all) —
+/// an exact match, not a prefix/substring search — so a config change
+/// (different port, identity, or user) correctly stops matching old
+/// connections rather than crediting the host with a "last connected"
+/// time under a since-changed identity. Filters via `history`'s
+/// existing `idx_history_dedup` index (leading column `command`), so
+/// this is an index seek, not a full table scan, even on a large
+/// history.
+///
+/// Returns `0` (the existing "never" sentinel `render_row` already
+/// handles) when there's no matching history — never connected yet, or
+/// the config changed since the last connection.
+fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
+    app.conn
+        .query_row(
+            "SELECT MAX(timestamp) FROM history WHERE command = ?1",
+            [ssh_command],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 

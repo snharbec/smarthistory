@@ -1553,6 +1553,18 @@ pub(crate) struct App {
     /// doesn't carry. Index-aligned
     /// with `hosts`.
     host_defs: Vec<HostDef>,
+    /// Latest ICMP reachability result for each configured host, keyed
+    /// by `HostDef::name` (== the `command` field of that host's row in
+    /// `hosts`/`host_defs`). `Some(true)`/`Some(false)` once the
+    /// background monitor (`spawn_host_reachability_monitor`) has
+    /// completed at least one ping; a name absent from the map means
+    /// "not checked yet" (rendered dim, neither red nor green).
+    /// Refreshed continuously while any hosts are configured — see
+    /// `process_host_reachability`.
+    host_reachable: std::collections::HashMap<String, bool>,
+    /// The in-flight background reachability monitor, if one is
+    /// running. See `HostReachabilityRequest`.
+    host_reachability_request: Option<HostReachabilityRequest>,
     /// The "add session / host"
     /// dialog state. `None`
     /// when the dialog is
@@ -2990,6 +3002,109 @@ impl App {
         }
     }
 
+    /// How long the background reachability monitor sleeps between full
+    /// rounds of pinging every configured host. Short enough that a host
+    /// coming back up (or going down) is reflected within a reasonable
+    /// wait; long enough that idling in `*` mode doesn't keep spawning a
+    /// `ping` subprocess per host every render tick.
+    const HOST_REACHABILITY_REFRESH_SECS: u64 = 20;
+
+    /// (Re-)spawn the background host-reachability monitor. Cancels any
+    /// previous monitor first (its results would belong to a stale host
+    /// list). Does nothing if there are no configured hosts — a `# hosts`
+    /// section with nothing to ping needs no background work.
+    ///
+    /// The spawned thread loops forever: ping every host in `host_defs`
+    /// order, send each `(name, reachable)` result as soon as it's known,
+    /// then sleep `HOST_REACHABILITY_REFRESH_SECS` before the next round.
+    /// It only stops when `cancelled` is set or the receiver is dropped
+    /// (the `App` itself is dropped, e.g. on exit).
+    fn spawn_host_reachability_monitor(&mut self) {
+        if let Some(prev) = self.host_reachability_request.take() {
+            prev.cancelled.store(true, Ordering::Relaxed);
+        }
+        if self.host_defs.is_empty() {
+            return;
+        }
+        let targets: Vec<(String, String)> = self
+            .host_defs
+            .iter()
+            .map(|h| {
+                let target = if !h.hostname.is_empty() {
+                    h.hostname.clone()
+                } else {
+                    h.host.clone()
+                };
+                (h.name.clone(), target)
+            })
+            .collect();
+        let names: Vec<String> = targets.iter().map(|(name, _)| name.clone()).collect();
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+        std::thread::spawn(move || {
+            loop {
+                for (name, target) in &targets {
+                    if cancelled_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let reachable = crate::util::ping_reachable(target);
+                    if tx.send((name.clone(), reachable)).is_err() {
+                        // Receiver dropped — the App is gone.
+                        return;
+                    }
+                }
+                for _ in 0..Self::HOST_REACHABILITY_REFRESH_SECS {
+                    if cancelled_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        });
+        self.host_reachability_request = Some(HostReachabilityRequest {
+            receiver: rx,
+            cancelled,
+            names,
+        });
+    }
+
+    /// Drain the background reachability channel and (re-)start the
+    /// monitor if the live `host_defs` list has changed since it was
+    /// spawned (a host was added/removed via the "add entry" dialog, or a
+    /// config reload changed the set). Called from the run loop every
+    /// tick, same as `process_pane_cmdlines` — unconditional, not gated
+    /// on being in `*` mode, so a host that goes down while the user is
+    /// elsewhere is still reflected the moment they come back.
+    fn process_host_reachability(&mut self) {
+        let current_names: Vec<String> = self.host_defs.iter().map(|h| h.name.clone()).collect();
+        let stale = match &self.host_reachability_request {
+            None => !current_names.is_empty(),
+            Some(req) => req.names != current_names,
+        };
+        if stale {
+            self.spawn_host_reachability_monitor();
+        }
+        let Some(request) = self.host_reachability_request.as_ref() else {
+            return;
+        };
+        loop {
+            match request.receiver.try_recv() {
+                Ok((name, reachable)) => {
+                    self.host_reachable.insert(name, reachable);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread exited unexpectedly (it should loop
+                    // forever otherwise) — drop the request so the
+                    // next poll's staleness check respawns it.
+                    self.host_reachability_request = None;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Patch a single `(pane_id, cmdline)`
     /// update from the herdr background
     /// thread into the matching pane row in
@@ -4342,6 +4457,26 @@ struct PaneCmdlineRequest {
     snapshot_id: u64,
 }
 
+/// The background ICMP reachability monitor for configured hosts. Spawned
+/// by `App::spawn_host_reachability_monitor` and polled by the run loop
+/// in `process_host_reachability`.
+///
+/// Unlike `PaneCmdlineRequest` (a one-shot lookup per snapshot), this
+/// thread loops forever: it pings every host in `names`' order, sends
+/// each `(name, reachable)` result over the channel as soon as it's
+/// known, then sleeps before starting the next round. `process_host_
+/// reachability` restarts the monitor (cancelling this one) whenever the
+/// live `host_defs` list no longer matches `names` — e.g. after the user
+/// adds a host via the "add entry" dialog.
+struct HostReachabilityRequest {
+    receiver: mpsc::Receiver<(String, bool)>,
+    cancelled: Arc<AtomicBool>,
+    /// The host names (`HostDef::name`) this monitor is covering, in
+    /// ping order. Compared against the live `host_defs` list on each
+    /// poll to detect a stale monitor.
+    names: Vec<String>,
+}
+
 
 
 /// State for the help overlay. Just a scroll offset; the help text
@@ -5181,6 +5316,8 @@ impl App {
             sessions: Vec::new(),
             hosts: Vec::new(),
             host_defs: Vec::new(),
+            host_reachable: std::collections::HashMap::new(),
+            host_reachability_request: None,
             add_entry_dialog: None,
             zoxide_save_prompt: None,
             project_since_prompt: None,
@@ -12875,6 +13012,17 @@ fn run_loop(
         // anything that doesn't match the
         // current snapshot.
         app.process_pane_cmdlines();
+
+        // Drain the background host-reachability
+        // monitor and (re-)spawn it if the
+        // configured host list has changed. Also
+        // unconditional — the monitor keeps
+        // pinging (and `render_row` keeps showing
+        // the last-known red/green status) even
+        // while the user isn't looking at `*`
+        // mode, so the indicator is already
+        // up to date the moment they switch to it.
+        app.process_host_reachability();
 
         // Drive the various debounce timers (LLM / JIRA / files / ag
         // auto-calls) on the no-input path.

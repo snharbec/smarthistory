@@ -5729,6 +5729,22 @@ pub(crate) fn render_row<'a>(
         ));
     }
 
+    // For `host` rows in the `*`-mode tree, show a small background
+    // ICMP-reachability dot before the host name: green (`app.
+    // host_reachable` has `true`) when the last ping succeeded, red for
+    // `false`, dim while the background monitor (`App::
+    // spawn_host_reachability_monitor`) hasn't completed a first ping
+    // yet. Keyed by `row.command`, which for a host row is the
+    // configured display name (`HostDef::name`) — see `Config::hosts`.
+    if row.mode == "host" {
+        let (glyph, style) = match app.host_reachable.get(&row.command) {
+            Some(true) => ("● ", Theme::success()),
+            Some(false) => ("● ", Theme::error()),
+            None => ("○ ", Theme::dim()),
+        };
+        spans.push(Span::styled(glyph, style));
+    }
+
     // For `pane` rows in the
     // `*`-mode tree, show the
     // parent workspace /
