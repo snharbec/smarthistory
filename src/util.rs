@@ -1065,6 +1065,32 @@ pub fn find_command_file(start: &std::path::Path) -> Option<std::path::PathBuf> 
     None
 }
 
+/// Best-effort ICMP reachability check for `target` (a hostname or IP),
+/// used by the `*`-mode panes view's `# hosts` section to color each
+/// configured host green (reachable) or red (unreachable). Shells out to
+/// the system `ping` binary rather than opening a raw ICMP socket — a raw
+/// socket needs root/`CAP_NET_RAW` on Linux and a codesigned entitlement
+/// on macOS, neither of which this binary should require just to render a
+/// status dot. A single packet with a short timeout keeps one stalled host
+/// from blocking the background monitor loop for long.
+pub fn ping_reachable(target: &str) -> bool {
+    if target.trim().is_empty() {
+        return false;
+    }
+    let mut cmd = std::process::Command::new("ping");
+    if cfg!(target_os = "macos") {
+        // BSD ping: `-t` is a total timeout in seconds (not a TTL).
+        cmd.args(["-c", "1", "-t", "1"]);
+    } else {
+        // GNU ping: `-W` is the per-reply timeout in seconds.
+        cmd.args(["-c", "1", "-W", "1"]);
+    }
+    cmd.arg(target);
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    matches!(cmd.status(), Ok(status) if status.success())
+}
+
 /// Test helpers for the
 /// `walk_subdirectories` /
 /// `find_command_file` /

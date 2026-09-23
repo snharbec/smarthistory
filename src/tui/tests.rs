@@ -19010,6 +19010,103 @@ fn fetch_panes_hosts_filter_keeps_only_hosts() {
     assert_eq!(rows[0].command, "Proxmox");
 }
 
+/// A host row's `timestamp` comes from the most recent matching
+/// `history` entry (the exact `ssh` command line `HostDef::ssh_command`
+/// builds), not the row's own synthesized `0` — see
+/// `last_ssh_connection_timestamp` in `mode/panes.rs`.
+#[test]
+fn host_row_timestamp_reflects_last_matching_ssh_history_entry() {
+    use crate::tui::state::{HistoryRow, HostDef};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // "ssh root@pve-1" is exactly what `HostDef::ssh_command` below
+    // builds (no port/identity set) — run 500s ago. A decoy entry for
+    // an unrelated command must not affect the match.
+    let mut app = directories_test_app(&[
+        ("ssh root@pve-1", "/tmp", 500),
+        ("vim notes.md", "/tmp", 10),
+    ]);
+    app.hosts = vec![HistoryRow {
+        id: -25_001,
+        command: String::from("Proxmox"),
+        directory: String::from("root@pve-1"),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: String::from("host"),
+        source: String::from("hosts"),
+
+        ..Default::default()
+    }];
+    app.host_defs = vec![HostDef {
+        name: String::from("Proxmox"),
+        host: String::from("pve-1"),
+        hostname: String::new(),
+        user: String::from("root"),
+        port: 0,
+        identity: String::new(),
+        dir: String::new(),
+        exec: String::new(),
+    }];
+    app.query = String::from("*");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let host_row = rows
+        .iter()
+        .find(|r| r.mode == "host" && r.command == "Proxmox")
+        .expect("host row present");
+    assert!(
+        (now - 505..=now - 495).contains(&host_row.timestamp),
+        "expected ~{}s ago, got timestamp {}",
+        500,
+        host_row.timestamp
+    );
+}
+
+/// No `history` entry matches this host's `ssh` command (never
+/// connected, or the config's user/host/port/identity changed since the
+/// last connection) — the row falls back to the `0` "never" sentinel,
+/// same as before the last-connection lookup existed.
+#[test]
+fn host_row_with_no_matching_history_keeps_zero_timestamp() {
+    use crate::tui::state::{HistoryRow, HostDef};
+    let mut app = directories_test_app(&[("ssh someone-else@other-host", "/tmp", 5)]);
+    app.hosts = vec![HistoryRow {
+        id: -25_001,
+        command: String::from("Proxmox"),
+        directory: String::from("root@pve-1"),
+        session_id: String::new(),
+        exit_code: 0,
+        timestamp: 0,
+        comment: String::new(),
+        output: String::new(),
+        mode: String::from("host"),
+        source: String::from("hosts"),
+
+        ..Default::default()
+    }];
+    app.host_defs = vec![HostDef {
+        name: String::from("Proxmox"),
+        host: String::from("pve-1"),
+        hostname: String::new(),
+        user: String::from("root"),
+        port: 0,
+        identity: String::new(),
+        dir: String::new(),
+        exec: String::new(),
+    }];
+    app.query = String::from("*");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let host_row = rows
+        .iter()
+        .find(|r| r.mode == "host" && r.command == "Proxmox")
+        .expect("host row present");
+    assert_eq!(host_row.timestamp, 0);
+}
+
 /// The `FilterPanesSessions` filter keeps
 /// only the `# sessions` block.
 #[test]
