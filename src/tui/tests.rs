@@ -15328,6 +15328,67 @@ fn ag_row_renders_shortened_path_before_match_content() {
     );
 }
 
+/// `run_ag`'s walk is always rooted at the process's cwd (see
+/// `crate::ag::spawn_ag_search`), so a match's path is shown relative
+/// to cwd (then abbreviated the same way as before) — not as an
+/// absolute path — matching what the user actually typed/expects for a
+/// file inside the project they're searching from.
+#[test]
+fn ag_row_renders_path_relative_to_cwd_not_absolute() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let scratch = std::env::temp_dir().join(format!(
+        "smarthistory_ag_reltest_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&scratch).expect("create test cwd");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&scratch).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        // Re-derive cwd post-chdir (not the pre-chdir `scratch` value)
+        // so this matches exactly what `render_row`'s own
+        // `std::env::current_dir()` call sees, even if the OS resolves
+        // a symlink (e.g. macOS's `/tmp` -> `/private/tmp`) along the
+        // way.
+        let cwd = std::env::current_dir().expect("cwd after chdir");
+        let match_path = cwd.join("src").join("main.rs");
+        let mut app = directories_test_app(&[]);
+        app.ag_state.rows = vec![ag_row(&match_path.to_string_lossy(), "fn main() {")];
+        app.query = ",main".to_string();
+        app.refresh();
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::tui::render::ui(f, &mut app))
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains("s/main.rs:"),
+            "expected the cwd-relative, abbreviated path onscreen, got: {text:?}"
+        );
+        assert!(
+            !text.contains(&cwd.to_string_lossy().into_owned()),
+            "the absolute cwd prefix must not appear onscreen, got: {text:?}"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 // --- Mode-scoped indicator columns (capture / tmux-pane) ----
 //
 // The `o`/`.` output-capture column and the `T`/`.` tmux-pane column

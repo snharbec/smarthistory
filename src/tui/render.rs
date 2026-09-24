@@ -5870,17 +5870,29 @@ pub(crate) fn render_row<'a>(
     // `,` (ag) mode: put the matched file's path up front, as
     // compactly as possible, before the match content itself —
     // `fetch`/`src/ag.rs` stores the absolute path in `row.directory`
-    // and the matched line's content in `row.command`. Every
-    // intermediate directory component is abbreviated to its first
-    // character (`shorten_path_dirs`); the filename itself is always
-    // shown in full, since that's what the user actually needs to
-    // recognize which file a match is in. Not query-highlighted —
+    // and the matched line's content in `row.command`. `run_ag`'s walk
+    // is always rooted at the process's cwd (see
+    // `crate::ag::spawn_ag_search`), so every match is under it —
+    // shown relative to cwd, not as an absolute (or `~`-relative) path,
+    // since that's the form the user actually typed/expects for a file
+    // in the project they're searching. Every intermediate directory
+    // component of that relative path is further abbreviated to its
+    // first character (`shorten_path_dirs`); the filename itself is
+    // always shown in full, since that's what the user actually needs
+    // to recognize which file a match is in. Not query-highlighted —
     // ag's search terms match CONTENT, not the path — so this is a
     // plain styled span, not routed through `highlight_matches`/
     // `highlight_regex_matches` below (those apply to `cmd_display`,
     // the match content, same as for every other mode).
     if row.mode == "ag" && !row.directory.is_empty() {
-        let short_path = crate::util::shorten_path_dirs(&row.directory, &app.home_list);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        // Falls back to the raw (absolute) path on the should-never-
+        // happen case that a match isn't actually under cwd.
+        let relative_path = std::path::Path::new(&row.directory)
+            .strip_prefix(&cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| row.directory.clone());
+        let short_path = crate::util::shorten_path_dirs(&relative_path, &app.home_list);
         spans.push(Span::styled(
             format!("{}: ", short_path),
             Style::default()
