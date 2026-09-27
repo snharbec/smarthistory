@@ -14849,6 +14849,14 @@ fn handle_confirm_signal_key(app: &mut App, key: KeyEvent) -> bool {
                         e
                     )),
                 }
+                // Re-snapshot the process list so the row the user just
+                // signalled disappears (or, on a failed send, a row for
+                // a process that had already exited does). Nothing else
+                // on the idle run-loop path re-fetches `%` rows, so
+                // without this the list only catches up the next time
+                // the query text changes. Run for both outcomes — see
+                // `refresh_processes_after_signal`.
+                app.refresh_processes_after_signal();
             }
             false
         }
