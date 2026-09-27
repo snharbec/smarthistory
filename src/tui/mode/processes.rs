@@ -230,4 +230,48 @@ impl App {
             None => Err(format!("signal {signal} is not supported on this platform")),
         }
     }
+
+    /// Re-run the `sysinfo` snapshot after a signal was sent
+    /// (`App::send_signal`), so a process that just died drops out of
+    /// the list immediately instead of lingering until the next
+    /// query edit happens to re-run `fetch`. Called from
+    /// `handle_confirm_signal_key`'s `y` arm for BOTH outcomes: a
+    /// failed send is most often "the process already exited between
+    /// the dialog opening and now", which the refresh also cleans up.
+    ///
+    /// `last_fetch_key` is cleared first. Only the SQL history fetch
+    /// primes that cache, so in `%` mode it normally holds a mismatch
+    /// (or `None`) and the clear is a no-op — it's here so this helper
+    /// can't start serving a stale cached row if a per-mode fetch ever
+    /// does start priming the key, matching what `App::new` does to
+    /// guarantee its first fetch actually runs.
+    ///
+    /// `refresh()` also lands the selection on index 0 (its normal
+    /// "newest row" behavior). In processes mode row 0 is an
+    /// arbitrary process, so killing several rows in a row would jolt
+    /// the cursor back to the top after each one. Keep the previous
+    /// index instead, clamped to the now-shorter list — which also
+    /// leaves the cursor on the neighbour a kill just shifted into
+    /// that slot. `ensure_selected_context` then re-loads that row's
+    /// lazy env preview, since the one `refresh()` primed belongs to
+    /// the index it selected, not the one we restored.
+    ///
+    /// Only meaningful while `%` mode is active — the caller
+    /// (`handle_confirm_signal_key`) can only run with a process row's
+    /// confirmation dialog open, and that dialog blocks every key that
+    /// could switch prefixes.
+    pub(crate) fn refresh_processes_after_signal(&mut self) {
+        let prev_idx = self.list_state.selected();
+        self.last_fetch_key = None;
+        self.refresh();
+        let n = self.merged_rows.len();
+        if n == 0 {
+            self.list_state.select(None);
+            return;
+        }
+        if let Some(idx) = prev_idx {
+            self.list_state.select(Some(idx.min(n - 1)));
+            ensure_selected_context(self);
+        }
+    }
 }

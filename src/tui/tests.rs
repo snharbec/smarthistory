@@ -15244,6 +15244,197 @@ fn processes_send_signal_actually_terminates_a_real_process() {
     }
 }
 
+/// Confirming with `y` must re-run the process snapshot, not just send
+/// the signal — otherwise the row for the process the user just killed
+/// lingers until some later query edit happens to re-fetch. The
+/// observable test: plant a fake row that only a real `sysinfo`
+/// snapshot could produce, confirm a signal, and assert the fake row is
+/// gone while the real process list has replaced it — i.e.
+/// `processes::fetch` actually ran.
+///
+/// The send targets a nonexistent PID on purpose: the assertion then
+/// doesn't depend on which real process happened to be first, and the
+/// failed-send path is covered too (a failed send is also most often
+/// "the process already exited" — the refresh cleans that up as well).
+#[test]
+fn processes_confirm_signal_refresh_reruns_fetch_instead_of_keeping_stale_rows() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = directories_test_app(&[]);
+    app.query = "%".to_string();
+    app.refresh();
+
+    // Plant a row that only a real `sysinfo` snapshot would remove.
+    let fake = crate::tui::state::HistoryRow {
+        id: 999_999,
+        command: "not-a-real-process".to_string(),
+        mode: "process".to_string(),
+        ..Default::default()
+    };
+    app.rows = vec![fake.clone()];
+    app.merged_rows = vec![fake];
+
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999_999,
+        name: "not-a-real-process".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    assert!(
+        app.rows.iter().all(|r| r.command != "not-a-real-process"),
+        "confirming a signal must re-run `processes::fetch` and drop the stale row"
+    );
+    assert!(
+        !app.merged_rows.is_empty(),
+        "the refresh must repopulate the list from the real process snapshot"
+    );
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .expect("a failed send still reports through the status line");
+    assert!(msg.contains("Failed to send"), "unexpected status message: {msg}");
+}
+
+/// The refresh after a signal must not yank the cursor back to row 0.
+/// `App::refresh()`'s normal "land on the newest row" behavior means
+/// index 0 — in processes mode that's an arbitrary process, so killing
+/// several rows in a row would jump the selection to the top after
+/// every one. The previous index is kept instead.
+#[test]
+fn processes_confirm_signal_refresh_keeps_the_selected_index() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = directories_test_app(&[]);
+    app.query = "%".to_string();
+    app.refresh();
+    let n = app.merged_rows.len();
+    assert!(n >= 2, "expected at least two real processes, got {n}");
+    app.list_state.select(Some(1));
+
+    // A nonexistent PID keeps the list length unchanged, so index 1 stays
+    // valid and its preservation is asserted directly (a reset-to-0 bug
+    // would be visible as `Some(0)` here).
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999_999,
+        name: "not-a-real-process".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    assert!(
+        app.merged_rows.len() >= 2,
+        "environment precondition: the refresh must still have at least two rows"
+    );
+    assert_eq!(
+        app.list_state.selected(),
+        Some(1),
+        "the post-signal refresh must keep the cursor where it was, not snap back to row 0"
+    );
+}
+
+/// A previous index that no longer exists after the refresh clamps to
+/// the last row instead of pointing past the end. The requested index is
+/// far out of range and the expectation is read from the length *after*
+/// the refresh — the live process list grows and shrinks between
+/// snapshots, so comparing against a count captured beforehand would be
+/// racy.
+#[test]
+fn processes_confirm_signal_refresh_clamps_a_stale_index() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = directories_test_app(&[]);
+    app.query = "%".to_string();
+    app.refresh();
+    assert!(!app.merged_rows.is_empty(), "expected a non-empty process list");
+    app.list_state.select(Some(usize::MAX));
+
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid: 999_999,
+        name: "not-a-real-process".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    let n = app.merged_rows.len();
+    assert!(n > 0, "the refresh must repopulate the list");
+    assert_eq!(
+        app.list_state.selected(),
+        Some(n - 1),
+        "a stale out-of-range index must clamp to the new last row"
+    );
+}
+
+/// End-to-end: after a real process is signalled through the dialog and
+/// has actually exited, its row is gone from the list with no query
+/// edit in between — the user-visible behavior this feature exists for.
+///
+/// The second `y` is deliberate: the process must be *reaped* before the
+/// row is guaranteed gone on every platform (Linux keeps a zombie's
+/// `/proc` entry, macOS does not), and reaping only happens when the
+/// test waits on the child. By then the first send has already
+/// succeeded, so the second one fails with "no longer exists" — which
+/// refreshes just the same, letting the test assert the row's absence
+/// without depending on platform-specific zombie visibility or on the
+/// timing of the first refresh.
+#[test]
+fn processes_killed_row_disappears_without_a_query_edit() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut child = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn disposable sleep process");
+    let pid = child.id() as i64;
+
+    let mut app = directories_test_app(&[]);
+    app.query = "%".to_string();
+    app.refresh();
+    assert!(
+        app.merged_rows.iter().any(|r| r.id == pid),
+        "the disposable child must be visible in the list before the kill"
+    );
+
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid,
+        name: "sleep 300".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .expect("the send must report through the status line");
+    assert!(msg.contains("Sent SIGTERM"), "unexpected status message: {msg}");
+
+    // Wait for the signal to take effect, then reap so the process is
+    // gone on every platform.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => panic!("child process did not exit within 5s of receiving SIGTERM"),
+        }
+    }
+
+    app.confirm_signal = Some(crate::tui::SignalConfirm {
+        pid,
+        name: "sleep 300".to_string(),
+        signal: crate::tui::ProcessSignal::Term,
+    });
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    assert!(
+        app.merged_rows.iter().all(|r| r.id != pid),
+        "the killed process's row must be gone from the list without a query edit"
+    );
+}
+
 // --- ag mode row rendering (`,` prefix) ----
 //
 // `src/ag.rs` builds each row with the matched line's content in

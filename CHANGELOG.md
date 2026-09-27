@@ -197,6 +197,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `%` (processes) mode: sending a signal to a process did not update the list,
+  so a process you had just killed kept its row on screen until the next
+  keystroke re-ran the fetch — the list looked stale exactly when you were
+  hunting a stubborn process. Confirming with `y` now re-reads the process list
+  immediately, for both a successful send and a failed one (a failed send is
+  usually "the process already exited" — the same refresh cleans that up). The
+  cursor also stays on the row you were on instead of snapping back to the top,
+  so several processes can be killed in a row.
 - Six `KeyBindingsEditor` integration tests ran with no `$HOME` sandbox, so
   every `cargo test` silently rebound/unbound real actions in the
   *developer's own* `~/.config/smarthistory/config` — confirmed live

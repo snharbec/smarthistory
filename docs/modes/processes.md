@@ -35,7 +35,12 @@ confirmation dialog:
 > Send SIGTERM to pid 1234 (nginx: worker process)?
 
 - `y` / `Y` sends the currently-selected signal and reports success or failure
-  in the status line.
+  in the status line, then re-reads the process list so the row updates
+  immediately — a process that just died (or one that had already exited, which
+  is what most failed sends mean) drops out of the list on the spot, with no
+  need to edit the query to make the view catch up. The cursor stays on the
+  same row rather than jumping back to the top, so you can kill several
+  processes in a row.
 - `n` / `N` or the configured Cancel key dismisses the dialog without sending
   anything.
 - `Tab` / `Shift-Tab` cycle the signal to send: **SIGTERM** (default) → SIGKILL
