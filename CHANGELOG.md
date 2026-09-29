@@ -85,6 +85,48 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The `dropdown.predict` window showed its suggestions in **reverse** rank order
+  and pinned the highlight to the bottom edge. Suggestions are ranked
+  most-probable-first, but the window appended them furthest-rank-first, so the
+  single most likely next command sat at the BOTTOM row and the least likely at
+  the top; activating the list highlighted that bottom row, and `Down` then
+  scrolled ranks *upward* past the most probable one. The window now shows rank
+  increasing downward — most probable at the top, next most probable in the
+  middle, next after that at the bottom — and `Down` enters on the top row and
+  moves the highlight one row at a time (top → middle → bottom → the top row of
+  the next page of three), with `Up` the exact inverse. `Up` from the top row
+  (rank 1, the most probable suggestion) leaves no higher rank to reach, so it
+  now exits into the real history box with the youngest entry recalled at the
+  bottom of its list, replacing the previous behavior where `Up` first jumped
+  *down* the list before exiting. See
+  [docs/configuration.md#dropdownpredict](docs/configuration.md#dropdownpredict).
+- Live-dropdown cursor keys felt non-monotonic: `Up` on a typed line wrapped to
+  the **oldest** candidate on its first press (`selected - 1` under wraparound
+  took 0 → `n-1`), so one press jumped across the whole list and a subsequent
+  press only stepped back one — the exact opposite of `Down`, whose first press
+  anchors on the top row and then steps down one at a time. `Up` and `Down` are
+  now mirror images: each anchors on the row at the end it heads toward (`Down`
+  → newest, `Up` → oldest) and then moves a single row per press, wrapping only
+  at that end. See
+  [docs/configuration.md](docs/configuration.md#dropdownenabled).
+- `Ctrl-A`/`Ctrl-E`/`Right`/`Left` could rewrite the command line to a candidate
+  that was no longer highlighted. A re-render (any keystroke) correctly resets
+  the "navigated" flag but left the selected row index pointing at the old row,
+  and those four bindings committed that index unconditionally — so typing one
+  more character after navigating and then pressing `Right` replaced the line
+  with a row the box wasn't even showing as selected. A re-render now resets the
+  index too, and `_smarthistory_dropdown_commit` refuses unless a row is actually
+  highlighted (`chosen == 1`, the same navigate-first rule `Tab`/`Enter`
+  already used) — the four bindings fall through to their plain zsh behavior
+  (`beginning-of-line`/`end-of-line`/`forward-char`/`backward-char`) instead, so
+  cursor movement is no longer hijacked on an un-navigated box.
+- The `dropdown.predict` docs claimed `Tab`/`Enter` accept the top prediction
+  directly on the passive empty-line glance; in practice both are (correctly)
+  gated on a row being highlighted, so nothing was accepted until `Down`
+  activated the list. Docs corrected to describe the real navigate-first
+  behavior. See
+  [docs/configuration.md#dropdownpredict](docs/configuration.md#dropdownpredict).
+
 - Typing in the shell was slow when `dropdown.highlight=on`: every keystroke
   spawned `bat` (~16ms of a ~21ms keystroke) and re-styled every candidate from
   scratch, even though the same commands had already been styled by earlier
