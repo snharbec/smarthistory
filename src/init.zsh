@@ -666,8 +666,10 @@ typeset -gi _smarthistory_dropdown_hl_cache_max=4096
 # holds the currently-VISIBLE 3-item window, shared with the generic
 # dropdown paint) so continuing past that window reveals further,
 # already-fetched predictions instead of wrapping back to the first
-# one. `_smarthistory_prediction_index` is a 1-based index into this
-# array, same convention as `_smarthistory_index` for real history.
+# one. `_smarthistory_prediction_index` is a 1-based RANK into this
+# array (rank 1 = most probable) — the rank of the row the highlight
+# currently sits on, not a window offset, since the box shows ranks
+# in order top-to-bottom and the highlight moves row by row.
 typeset -ga _smarthistory_prediction_lines
 typeset -g _smarthistory_prediction_index=0
 
@@ -2070,10 +2072,17 @@ _smarthistory_dropdown_render() {
     # A fresh candidate set from a new keystroke always starts
     # unchosen — the user must re-navigate (Up / Down) to pick a
     # row again, even if they had one highlighted before this render.
+    # `_selected` is reset alongside `chosen`, not just clamped to the
+    # new (possibly shorter) list: leaving it pointing at the old row
+    # meant the next Up/Down press — whose "first press selects the
+    # top row" rule keys off `chosen == 0` — would skip straight past
+    # row 1 to the stale row, and (before `_smarthistory_dropdown_commit`
+    # grew its own `chosen` guard) let Ctrl-A/Ctrl-E/Right/Left commit
+    # a row that was no longer highlighted. A fresh render is a fresh
+    # navigation start; `_selected == 0` is what every navigation
+    # widget assumes when `chosen == 0`.
     _smarthistory_dropdown_chosen=0
-    if (( _smarthistory_dropdown_selected >= ${#_smarthistory_dropdown_candidates} )); then
-        _smarthistory_dropdown_selected=0
-    fi
+    _smarthistory_dropdown_selected=0
     _smarthistory_dropdown_paint
     [[ "$_sm_dropdown_xtrace_was" == "on" ]] && setopt XTRACE
     unset _sm_dropdown_xtrace_was
@@ -2207,6 +2216,23 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # exclusively a cursor-key action now (Tab used to double as a
     # forward-cycle key too — see `_smarthistory_dropdown_accept`
     # below for why that changed).
+    #
+    # The two are exact mirror images. Each anchors on the row at the
+    # end it is heading toward on its first press (`chosen == 0`) and
+    # then steps a single row per press, wrapping only when it runs off
+    # that end:
+    #
+    #   Down: top row (1)      -> 2 -> 3 -> ... -> n -> 1
+    #   Up:   bottom row (n)   -> n-1 -> n-2 -> ... -> 1 -> n
+    #
+    # `navigate_prev` used to decrement unconditionally, so from a
+    # fresh box its first press wrapped 0 -> `n-1`: the highlight
+    # jumped straight to the OLDEST candidate, and since the row it
+    # then left was the one it had just shown, the walk read as
+    # non-monotonic next to `Down`'s — the "cursor keys feel
+    # unintuitive" report. Anchoring on the bottom row instead means
+    # the highlight travels smoothly up the box on successive presses,
+    # the same way `Down` travels smoothly down it.
     _smarthistory_dropdown_navigate_next() {
         if (( _smarthistory_dropdown_chosen == 1 )); then
             _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected + 1) % ${#_smarthistory_dropdown_candidates} ))
@@ -2217,6 +2243,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     _smarthistory_dropdown_navigate_prev() {
         if (( _smarthistory_dropdown_chosen == 1 )); then
             _smarthistory_dropdown_selected=$(( (_smarthistory_dropdown_selected - 1 + ${#_smarthistory_dropdown_candidates}) % ${#_smarthistory_dropdown_candidates} ))
+        else
+            _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
         fi
         _smarthistory_dropdown_chosen=1
         _smarthistory_dropdown_paint
@@ -2252,8 +2280,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # never rewrite the buffer to something the user didn't
     # deliberately navigate to first.
     _smarthistory_dropdown_accept() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 && $_smarthistory_dropdown_chosen -eq 1 ]]; then
-            _smarthistory_dropdown_commit end
+        if [[ $_smarthistory_dropdown_visible -eq 1 && $_smarthistory_dropdown_chosen -eq 1 ]] \
+            && _smarthistory_dropdown_commit end; then
             return
         fi
         # `_smarthistory_globcomplete_accept` itself falls through to
@@ -2293,16 +2321,24 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # leave CURSOR at whatever value it already had (used by the
     # Right/Left arrow widgets below, which commit without repositioning
     # the cursor at all). Shared by Tab/Ctrl-A/Ctrl-E/Right/Left, and
-    # by Enter (`_smarthistory_reset_and_accept`) when a candidate is
-    # already selected — Enter's own gate on `_smarthistory_dropdown_chosen
-    # == 1` is what keeps that fast path from reintroducing the "runs
-    # a candidate the user never actually selected" bug Tab's
-    # redesign fixed; this helper itself doesn't check `chosen`
-    # (Ctrl-A/Ctrl-E/Right/Left have always committed the current
-    # `_selected` row unconditionally, selected or not — that's
-    # their own established contract, unrelated to Tab/Enter's
-    # navigate-first rule).
+    # by Enter (`_smarthistory_reset_and_accept`).
+    #
+    # Refuses (returns 1, leaving BUFFER untouched) unless a row is
+    # actually highlighted — the same `chosen == 1` navigate-first
+    # rule Tab and Enter already gate on. Without that check here,
+    # Ctrl-A/Ctrl-E/Right/Left committed whatever `_selected` happened
+    # to hold, and a re-render resets `chosen` to 0 but deliberately
+    # leaves `_selected` alone (see `_smarthistory_dropdown_render`),
+    # so typing another character after navigating and then pressing
+    # Right silently rewrote the buffer to a row that was no longer
+    # highlighted. The four callers fall through to their plain zsh
+    # behavior (end-of-line / beginning-of-line / forward-char /
+    # backward-char) on a refusal, so an unnavigated box no longer
+    # hijacks ordinary cursor movement either.
     _smarthistory_dropdown_commit() {
+        [[ $_smarthistory_dropdown_visible -eq 1 \
+            && $_smarthistory_dropdown_chosen -eq 1 \
+            && ${#_smarthistory_dropdown_candidates} -gt 0 ]] || return 1
         local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         BUFFER=$(_smarthistory_unescape "$raw")
         case "$1" in
@@ -2319,10 +2355,12 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # Ctrl-E: select the highlighted candidate, cursor at the end.
     # Falls through to zsh's default `end-of-line` when no menu is
     # showing (we're taking over `^E`, so preserve its prior meaning
-    # explicitly).
+    # explicitly) — and likewise when the menu IS showing but nothing
+    # is highlighted yet (`_smarthistory_dropdown_commit` refuses),
+    # so `^E` still means "jump to end of line" on an unnavigated box.
     _smarthistory_dropdown_select_end() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_commit end
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]] \
+            && _smarthistory_dropdown_commit end; then
             return
         fi
         zle end-of-line
@@ -2332,8 +2370,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # Ctrl-A: select the highlighted candidate, cursor at the start.
     # Falls through to `beginning-of-line` otherwise, same reasoning.
     _smarthistory_dropdown_select_start() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_commit start
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]] \
+            && _smarthistory_dropdown_commit start; then
             return
         fi
         zle beginning-of-line
@@ -2371,8 +2409,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # different escape sequence) are registered further down, next
     # to the Up/Down bindings — see the comment there.
     _smarthistory_dropdown_select_end_arrow() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_commit
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]] \
+            && _smarthistory_dropdown_commit; then
             return
         fi
         zle forward-char
@@ -2383,8 +2421,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # they only differ in their non-visible-menu fallback). Falls
     # through to normal cursor-left (`backward-char`) otherwise.
     _smarthistory_dropdown_select_start_arrow() {
-        if [[ $_smarthistory_dropdown_visible -eq 1 ]]; then
-            _smarthistory_dropdown_commit
+        if [[ $_smarthistory_dropdown_visible -eq 1 ]] \
+            && _smarthistory_dropdown_commit; then
             return
         fi
         zle backward-char
@@ -2657,8 +2695,9 @@ _smarthistory_unescape() {
 # `_smarthistory_dropdown_render`'s `$#LBUFFER == 0` branch computes,
 # normally triggered automatically via `zle-line-init` on a fresh
 # prompt) and, if it found at least one candidate, immediately
-# highlight the first one — as if the user had explicitly navigated
-# there with Up/Down already. Called by `_smarthistory_down_history`
+# highlight the most probable one — the box's TOP row, as if the user
+# had explicitly navigated there with Down already. Called by
+# `_smarthistory_down_history`
 # when it's about to hit "nothing more to show" walking real history
 # forward: rather than just clearing the line, Down continues past
 # the newest real command into "what usually comes after it," a
@@ -2683,14 +2722,15 @@ _smarthistory_try_activate_predictions() {
 
 # Fetch a deeper "what usually comes next" pool than the 3-row passive
 # glance `_smarthistory_dropdown_render` shows on a fresh empty prompt
-# — populates `_smarthistory_prediction_lines` so Down can keep paging
-# 3-at-a-time through further candidates (`_smarthistory_prediction_next`)
-# instead of wrapping back to the first one once the initial 3 are
-# exhausted. 15 is a generous but bounded look-ahead: `smarthistory
-# next` ranks by frequency, so candidates past the first dozen or so
-# are rarely worth scrolling to, and an unbounded fetch would turn a
-# quick "what usually comes next" glance into a full history browse —
-# that's already what plain Up/Down real-history walking is for.
+# — populates `_smarthistory_prediction_lines` so Down can keep moving
+# one rank at a time through further candidates
+# (`_smarthistory_prediction_next`) instead of stopping once the
+# initial 3 are exhausted. 15 is a generous but bounded look-ahead:
+# `smarthistory next` ranks by frequency, so candidates past the first
+# dozen or so are rarely worth scrolling to, and an unbounded fetch
+# would turn a quick "what usually comes next" glance into a full
+# history browse — that's already what plain Up/Down real-history
+# walking is for.
 _smarthistory_fetch_prediction_pool() {
     _smarthistory_predict_raw 15
     _smarthistory_prediction_lines=("${(f)REPLY}")
@@ -2703,25 +2743,51 @@ _smarthistory_fetch_prediction_pool() {
     _smarthistory_prediction_index=0
 }
 
-# Build the 3-item look-ahead window around the current position in
+# Build the 3-item window containing the currently selected rank in
 # `_smarthistory_prediction_lines` and paint it through the same box
 # `_smarthistory_history_walk_paint` draws for real history, reusing
-# its module-level state instead of a second rendering path. Candidates
-# are appended furthest-ahead-first so the current selection (always
-# `off == 0`, appended last) lands at the bottom of the box, exactly
-# mirroring the real-history box's layout.
+# its module-level state instead of a second rendering path.
+#
+# The pool is ranked most-probable-first, and the box shows rank
+# increasing DOWNWARD: the most probable suggestion is the TOP row,
+# the next most probable the middle, the next the bottom. Ranks are
+# grouped into 3-row pages, and `_smarthistory_prediction_index` is
+# the 1-based rank of the SELECTED row — so the highlight moves down
+# one visible row per Down press (top -> middle -> bottom -> first row
+# of the next page) and back up per Up press, rather than staying
+# pinned to one edge of a sliding window.
+#
+# A short tail is left-aligned (the window's last row clamped to the
+# final rank) so the last page still shows a full 3 rows when it can,
+# with the selected rank always present and its row derived from the
+# same window base. The previous layout appended the window
+# furthest-rank-first, which put the MOST probable suggestion at the
+# BOTTOM and the selected row permanently at the bottom edge — both
+# the opposite of the rank order above and of how the highlight is
+# expected to move.
 _smarthistory_prediction_walk_paint() {
     _smarthistory_dropdown_candidates=()
     _smarthistory_dropdown_meta=()
     _smarthistory_dropdown_exit=()
     _smarthistory_dropdown_hl_spans=()
     local n=${#_smarthistory_prediction_lines}
+    # Rank shown at the TOP row of the box: the selected rank rounded
+    # down to its 3-rank page boundary...
+    local base=$(( _smarthistory_prediction_index - (_smarthistory_prediction_index - 1) % 3 ))
+    # ...then clamped so the window ends exactly at the last rank when
+    # fewer than three ranks remain (a partial tail page), which both
+    # keeps `selected` in range and avoids showing two rows where the
+    # selected one would otherwise fall off the end.
+    if (( base + 2 > n )); then
+        base=$(( n - 2 ))
+        (( base < 1 )) && base=1
+    fi
     local off idx
-    for off in 2 1 0; do
-        idx=$((_smarthistory_prediction_index + off))
+    for off in 0 1 2; do
+        idx=$(( base + off ))
         (( idx <= n )) && _smarthistory_dropdown_candidates+=("${_smarthistory_prediction_lines[$idx]}")
     done
-    _smarthistory_dropdown_selected=$(( ${#_smarthistory_dropdown_candidates} - 1 ))
+    _smarthistory_dropdown_selected=$(( _smarthistory_prediction_index - base ))
     _smarthistory_dropdown_chosen=1
     _smarthistory_dropdown_visible=1
     # Predictions now own the shared paint state, not real-history
@@ -2731,14 +2797,13 @@ _smarthistory_prediction_walk_paint() {
     _smarthistory_dropdown_paint
 }
 
-# Page forward through the prediction pool one at a time. Unlike the
-# generic `_smarthistory_dropdown_navigate_next` the typed-search
-# dropdown uses, this never wraps: the pool can hold up to 15
-# candidates, far more than the 3 visible at once, so wrapping back to
-# the first prediction after scrolling past a dozen of them would read
-# as far more broken than simply stopping. At the end of the pool,
-# stays put and warns — same convention as `_smarthistory_up_history`'s
-# oldest-real-history-entry boundary.
+# Move the highlight one rank down the prediction pool (Down). Never
+# wraps: the pool holds up to 15 ranks, far more than the 3 visible at
+# once, so wrapping back to the most probable suggestion after
+# stepping past the least probable one would read as far more broken
+# than simply stopping. At the end of the pool, stays put and warns —
+# same convention as `_smarthistory_up_history`'s oldest-real-history
+# entry boundary.
 _smarthistory_prediction_next() {
     local n=${#_smarthistory_prediction_lines}
     if (( _smarthistory_prediction_index >= n )); then
@@ -2750,8 +2815,8 @@ _smarthistory_prediction_next() {
     _smarthistory_prediction_walk_paint
 }
 
-# Page backward through the prediction pool one at a time. The very
-# top (index 1, most likely) is handled by the caller
+# Move the highlight one rank up the prediction pool (Up). The very
+# top (rank 1, most probable) is handled by the caller
 # (`_smarthistory_up_history`), which exits predictions entirely
 # instead of calling this — the `> 1` guard here is defensive only.
 _smarthistory_prediction_prev() {
@@ -2840,15 +2905,21 @@ _smarthistory_up_history() {
     # shell keybinding there is — the instant `dropdown.predict`
     # happened to have a suggestion for it. An empty line with
     # nothing explicitly selected always means "walk real history."
+    #
     # `chosen == 1` means the user (or `_smarthistory_down_history`'s
-    # own fallthrough-into-predictions, below) already explicitly
-    # entered the prediction list — Up continues cycling it backward,
-    # same as it would for a normal typed-search dropdown, EXCEPT at
-    # the very top of the (up to 3-candidate) list: from there, one
-    # more Up exits predictions back into real history — the mirror
-    # image of Down's own "exhaust real history, fall into
-    # predictions" transition — instead of wrapping around to the
-    # bottom of the prediction list forever.
+    # own fallthrough-into-predictions, below) has explicitly entered
+    # the prediction list. There, Up is the exact inverse of Down:
+    # the box ranks suggestions most-probable-first top-to-bottom and
+    # Up moves the highlight one rank UP the list (bottom row -> middle
+    # -> top, then the bottom row of the previous page), so pressing
+    # Down then Up returns to the row you came from. At rank 1 — the
+    # most probable suggestion, the box's top row — there is no higher
+    # rank to move to, so one more Up EXITS predictions into the real
+    # history box (the mirror image of Down's own "exhaust real
+    # history, fall into predictions" transition): the youngest history
+    # entry is recalled, shown at the bottom of its list exactly like
+    # every other real-history walk, instead of wrapping around to the
+    # least probable suggestion forever.
     if [[ "$_smarthistory_dropdown_enabled" = "1" && $_smarthistory_dropdown_visible -eq 1 \
         && $_smarthistory_walking_history -eq 0 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
@@ -2864,16 +2935,16 @@ _smarthistory_up_history() {
             # still whatever real-history position triggered the
             # transition into predictions (or 0, if Down was pressed
             # first with nothing navigated at all, in which case
-            # there's nothing to "resume" and this just falls through
-            # to a normal first Up).
+            # there's nothing to "resume" and the increment below just
+            # lands on the youngest entry).
             (( _smarthistory_index > 0 )) && _smarthistory_index=$((_smarthistory_index - 1))
-            _smarthistory_debug_log "up: exiting predictions at top, resuming real history"
+            _smarthistory_debug_log "up: exiting predictions at rank 1, resuming real history"
             # Falls through to the shared real-history logic below —
             # no `return` here.
         elif [[ -z "$LBUFFER" ]]; then
-            # Mid-pool (not yet at the very top prediction): page
-            # backward within `_smarthistory_prediction_lines` instead
-            # of the generic wraparound cycle — see
+            # Mid-list (not at rank 1): move the highlight one rank up
+            # within `_smarthistory_prediction_lines` instead of the
+            # generic wraparound cycle — see
             # `_smarthistory_prediction_prev`.
             _smarthistory_prediction_prev
             return
@@ -2965,9 +3036,11 @@ _smarthistory_down_history() {
         && $_smarthistory_walking_history -eq 0 \
         && ( -n "$LBUFFER" || $_smarthistory_dropdown_chosen -eq 1 ) ]]; then
         if [[ -z "$LBUFFER" ]]; then
-            # Already inside the prediction list: page forward within
-            # `_smarthistory_prediction_lines` instead of the generic
-            # wraparound cycle — see `_smarthistory_prediction_next`.
+            # Down is the exact inverse of Up inside the prediction
+            # list: it moves the highlight one rank DOWN
+            # (top row -> middle -> bottom, then the bottom row of the
+            # next page) toward less probable suggestions, never
+            # wrapping — see `_smarthistory_prediction_next`.
             _smarthistory_prediction_next
         else
             _smarthistory_dropdown_navigate_next
@@ -3230,7 +3303,12 @@ _smarthistory_reset_and_accept() {
     if [[ "$_smarthistory_dropdown_enabled" = "1" \
         && $_smarthistory_dropdown_visible -eq 1 \
         && $_smarthistory_dropdown_chosen -eq 1 ]]; then
-        _smarthistory_dropdown_commit end
+        # `|| true`: `_smarthistory_dropdown_commit` signals its
+        # navigate-first refusal with a nonzero return, but the gate
+        # above already guarantees success here and the widget's own
+        # return status must stay 0 so `zle .accept-line` below always
+        # runs.
+        _smarthistory_dropdown_commit end || true
     fi
     _smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
     _smarthistory_reset_state

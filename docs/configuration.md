@@ -386,21 +386,31 @@ dropdown.enabled=on
 ```
 
 **Keys**: `Up`/`Down` (or `Ctrl-N`/`Ctrl-P`) navigate (highlight) a candidate —
-this is the only way to select one. Once a candidate is highlighted, `Enter`
-commits it into the command line and runs it immediately (one key), and `Tab`
-commits it into the command line WITHOUT running it, if you want to review or
-edit before pressing `Enter` separately. With nothing highlighted yet, `Tab`
-falls straight through to zsh's normal completion (exactly as if the dropdown
-weren't showing) and `Enter` just runs whatever you've typed — so a fresh
-dropdown (including the single-candidate case) never gets substituted in by an
-unmodified `Tab` or `Enter` press; only an explicit `Up`/`Down` selection
-unlocks that. `Ctrl-A`/`Ctrl-E`/`Right`/`Left` also commit the highlighted
-candidate (cursor at start/end/unmoved respectively), and `Esc` dismisses the
-menu for the rest of the line. This keeps history completion from ever rewriting
-the buffer to something you didn't deliberately select — typing a new argument
-that happens to be a prefix of exactly one old history entry (e.g.
-`less /tmp/test2` with `less /tmp/test1` in history) doesn't risk the whole line
-jumping to the old entry unless you actually navigate to it first.
+this is the only way to select one. The two keys are mirror images: the first
+press of either anchors the highlight on the row at the end it is heading
+toward (`Down` → the top, newest candidate; `Up` → the bottom, oldest one), and
+each further press moves a single row, wrapping when it runs off that end
+(`Down`: 1→2→…→n→1; `Up`: n→n-1→…→1→n). So the highlight always travels one row
+per press instead of jumping across the list.
+
+Once a candidate is highlighted, `Enter` commits it into the command line and
+runs it immediately (one key), and `Tab` commits it into the command line
+WITHOUT running it, if you want to review or edit before pressing `Enter`
+separately. With nothing highlighted yet, `Tab` falls straight through to zsh's
+normal completion, `Enter` just runs whatever you've typed, and
+`Ctrl-A`/`Ctrl-E`/`Right`/`Left` keep their plain zsh meanings
+(`beginning-of-line`/`end-of-line`/`forward-char`/`backward-char`) — exactly as
+if the dropdown weren't showing — so a fresh dropdown (including the
+single-candidate case) never gets substituted in by an unmodified keypress, and
+ordinary cursor movement is never hijacked; only an explicit `Up`/`Down`
+selection unlocks committing via any of them. (Once a candidate IS highlighted,
+`Ctrl-A`/`Ctrl-E`/`Right`/`Left` commit it, cursor at start/end/unmoved
+respectively.) `Esc` dismisses the menu for the rest of the line. This keeps
+history completion from ever rewriting the buffer to something you didn't
+deliberately select — typing a new argument that happens to be a prefix of
+exactly one old history entry (e.g. `less /tmp/test2` with `less /tmp/test1` in
+history) doesn't risk the whole line jumping to the old entry unless you
+actually navigate to it first.
 
 **Exit status**: each row also shows a `✓`/`✗` marker (green/red) for the
 candidate's last exit code, so you can spot a previously-failed command without
@@ -559,11 +569,14 @@ dropdown.boxchars=unicode
 When the command line is empty, show predicted next commands instead of showing
 nothing. Predictions come from the same successor-frequency data
 `Ctrl+S`/`smarthistory next` already uses — the commands that most often
-followed the last command actually run in this shell — the passive glance shown
-on a fresh prompt is capped at 3 candidates regardless of
+followed the last command actually run in this shell — ranked most probable
+first, so the top row of the passive glance is the single most likely next
+command and the rows below it are progressively less likely. The glance is
+capped at 3 candidates regardless of
 [`dropdown.limit`](#dropdownlimit): a "what's next" hint at the very start of a
-line is meant to be a quick glance, not a long list to scan. Explicitly paging
-through it with `Up`/`Down` (see below) draws from a deeper pool of up to 15.
+line is meant to be a quick glance, not a long list to scan. Stepping into it
+with `Up`/`Down` (see below) draws from a deeper pool of up to 15, also
+most-probable-first.
 With nothing run yet in the session — a brand-new shell, before any command has
 executed — there's no last command to predict a successor from, so the dropdown
 falls back to the most frequent commands among the last 100 history rows instead
@@ -579,8 +592,13 @@ here); GLOBAL is unscoped either way. With `dropdown.predict` off (the default),
 an empty line shows no dropdown, same as before this existed. The prediction
 appears on the very first empty prompt after a command finishes — not only after
 some other action (like `Ctrl+G`) happens to redraw the dropdown — via zsh's
-`zle-line-init` hook. `Tab`/`Enter` accept the top (most probable) prediction
-directly, same as a normal search result.
+`zle-line-init` hook. The passive prediction glance is informational only, like
+every other un-navigated dropdown: `Tab` still falls through to normal
+completion and `Enter` still just runs the (empty) line, so nothing is ever
+auto-substituted. To accept a prediction, navigate to it first — `Down`
+activates the prediction list and highlights the top candidate (see below) —
+then `Tab` commits that candidate into the line and `Enter` commits and runs
+it, same as a normal search result.
 
 **`Up`/`Down` treat predictions as one more step past the newest real history
 entry, not a competing menu.** On an empty line, a plain `Up` press always
@@ -592,20 +610,34 @@ opposite direction, and once it runs out of more-recent real history to show —
 either because you pressed `Down` first, with nothing navigated yet, or because
 you `Up`'d several times and `Down`'d all the way back — the next `Down`
 continues past "the most recent thing that happened" into "what usually happens
-next": it activates the prediction list and highlights its first (most likely)
-candidate, exactly as if you'd navigated there with the arrow keys. From there,
-`Up`/`Down` page through a deeper pool of up to 15 candidates 3 at a time — the
-box always shows the current pick plus the next couple of runners-up, the same
-sliding-window preview real history walking uses — rather than wrapping back to
-the first candidate once you've stepped past the initial 3. Reaching either end
-of the pool stops there with a status hint instead of wrapping: pressing `Up`
-again at the very top (most likely) candidate exits predictions and resumes
-real history right where `Down` left off, the mirror image of how you got
-there; pressing `Down` past the last (least likely) candidate in the pool just
-stays put with a "no more suggestions" hint. Typing, running a command, or
-cancelling (`Ctrl+C`/`Esc`) resets everything back to a fresh empty line.
-`Tab`/`Enter` accept whichever candidate is currently highlighted at any point
-along the way, same as a normal search result.
+next": it activates the prediction list and highlights the most probable
+suggestion, exactly as if you'd navigated there with the arrow keys.
+
+Inside the prediction list the box is **ranked most-probable-first
+top-to-bottom** — the top row is the single most likely next command, the middle
+row the next most likely, the bottom row the next after that — and the highlight
+moves one row per press, exactly like a normal menu:
+
+| Press            | Highlight lands on                                    |
+| ---------------- | ----------------------------------------------------- |
+| `Down` (enters)  | top row — rank 1, most probable                       |
+| `Down`           | middle row — rank 2                                   |
+| `Down`           | bottom row — rank 3, then the top row of the next page |
+| `Up`             | one row back up (bottom → middle → top)               |
+| `Up` at rank 1   | exits predictions back into the real history box      |
+
+So `Down` followed by `Up` returns to the row you came from, rather than
+skipping past it. The pool holds up to 15 ranks, shown 3 per page: stepping one
+row past a page's bottom row brings up the next three (rank 4 becomes the new
+top row, and so on), never wrapping around to rank 1. `Up` at rank 1 — the most
+probable suggestion, the box's top row — has no higher rank to move to, so it
+exits predictions into real history: the youngest entry is recalled and shown at
+the bottom of its list, exactly as in every other real-history walk. At the other
+end, pressing `Down` past the least probable rank in the pool just stays put with
+a "no more suggestions" hint. Typing, running a command, or cancelling
+(`Ctrl+C`/`Esc`) resets everything back to a fresh empty line. `Tab`/`Enter`
+accept whichever candidate is currently highlighted at any point along the way,
+same as a normal search result.
 
 The prediction box's border draws in `tuicolor.warning` instead of the
 `tuicolor.accent` every other box (real history, typed search) uses, so a guess
