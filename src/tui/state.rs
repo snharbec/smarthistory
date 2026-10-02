@@ -1035,9 +1035,9 @@ impl Default for KeyBindingsEditor {
 }
 
 /// The step `WorktreeCreateFlow` is currently on. `PickBranch` is
-/// always first; `PickBaseBranch` and `ConfirmCarryOver` are each
-/// conditionally skipped (see the flow's own doc comment), so a given
-/// run of the dialog may never visit them.
+/// always first; `PickBaseBranch`, `ConfirmCarryOver` and
+/// `PickLocation` are each conditionally skipped (see the flow's own
+/// doc comment), so a given run of the dialog may never visit them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorktreeCreateStep {
     /// Pick an existing branch (creates the worktree on it directly),
@@ -1050,6 +1050,12 @@ pub enum WorktreeCreateStep {
     /// non-empty: `y` stashes the current checkout's uncommitted
     /// changes and applies them in the new worktree, `n` leaves them.
     ConfirmCarryOver,
+    /// Only reached when `worktree.basedir` isn't configured: type the
+    /// directory to create the worktree's per-project parent under
+    /// (`<typed>/<repo-name>`), or submit blank to accept the sibling
+    /// default `<repo-parent>/<repo-name>-worktrees`. With a configured
+    /// `worktree.basedir` the base is known, so this step is skipped.
+    PickLocation,
     /// Pick an existing `project.<slug>.dir=` slug, type a new one, or
     /// submit blank to skip assignment entirely. The last step —
     /// `Enter` here creates the worktree and closes the dialog.
@@ -1097,6 +1103,14 @@ pub struct WorktreeCreateFlow {
     /// The `project.<slug>` to bind the new worktree's directory to,
     /// or `None` to skip assignment (a blank `Enter` on `PickProject`).
     pub project_slug: Option<String>,
+    /// The directory the new worktree is created in, once known:
+    /// `<base>/<repo-name>` for a configured `worktree.basedir`, or the
+    /// directory resolved on `PickLocation` — which is either
+    /// `<typed>/<repo-name>` or the sibling default
+    /// (`<repo-parent>/<repo-name>-worktrees`), already per-repo.
+    /// `None` while `PickLocation` is still showing. The `branch` is
+    /// joined onto it at creation time.
+    pub location_dir: Option<std::path::PathBuf>,
     /// Candidate list for whichever list-driven step is active
     /// (branches for `PickBranch`/`PickBaseBranch`, project slugs for
     /// `PickProject`), repopulated on every step transition.

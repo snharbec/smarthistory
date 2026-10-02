@@ -97,6 +97,69 @@ pub(crate) fn find_repo_root(dir: &std::path::Path) -> Option<std::path::PathBuf
     Some(std::path::PathBuf::from(root))
 }
 
+/// The directory name identifying the repo rooted at `repo_root`, used
+/// as the per-project level in [`default_worktree_base`] and
+/// [`repo_worktree_parent`] so two different repos never share a
+/// worktree namespace. Falls back to `"repo"` for the degenerate cases
+/// that have no usable final component (`/`, a path ending in `..`);
+/// callers only ever join it onto a base directory, so any non-empty
+/// name is safe.
+pub(crate) fn repo_dir_name(repo_root: &std::path::Path) -> String {
+    repo_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("repo")
+        .to_string()
+}
+
+/// The default base directory new worktrees go under when
+/// `worktree.basedir` isn't configured: sibling to the repo
+/// (`<repo-parent>/<repo-name>-worktrees`). Named by the repo, so it
+/// needs no extra per-project level — it already only ever holds one
+/// repo's worktrees.
+pub(crate) fn default_worktree_base(repo_root: &std::path::Path) -> std::path::PathBuf {
+    let parent = repo_root
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    parent.join(format!("{}-worktrees", repo_dir_name(repo_root)))
+}
+
+/// The directory a configured `worktree.basedir` worktree for
+/// `repo_root` goes under: `<basedir>/<repo-name>`. One level so
+/// unrelated projects sharing a base directory don't mix — see
+/// `docs/configuration.md`'s `worktree.basedir` entry.
+pub(crate) fn repo_worktree_parent(
+    basedir: &std::path::Path,
+    repo_root: &std::path::Path,
+) -> std::path::PathBuf {
+    basedir.join(repo_dir_name(repo_root))
+}
+
+/// The directory a new worktree for `repo_root` goes under, from the
+/// location step's typed input: `<base>/<repo-name>` for a typed base
+/// directory, or the sibling default
+/// (`<repo-parent>/<repo-name>-worktrees`) when `typed` is blank —
+/// which is already per-repo, so it takes no extra level and must not
+/// get one (that would nest the repo name twice).
+///
+/// The single source of truth for this decision: the dialog's preview
+/// and the `Enter` that actually creates the worktree both call it, so
+/// what the user sees is what they get. A leading `~` expands like a
+/// config path.
+pub(crate) fn resolve_worktree_location(
+    typed: &str,
+    repo_root: &std::path::Path,
+) -> std::path::PathBuf {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return default_worktree_base(repo_root);
+    }
+    repo_worktree_parent(&crate::expand_tilde(typed), repo_root)
+}
+
 /// List every worktree for the repo containing the current directory,
 /// filtered by the typed query (space-separated AND-filter over the
 /// branch name and path, same contract as every other mode). Returns

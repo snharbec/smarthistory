@@ -1228,7 +1228,11 @@ pub fn sessions_path() -> Option<std::path::PathBuf> {
 
 /// Expand a leading `~` or `~/<rest>` in a path to the user's home
 /// directory. Other occurrences of `~` are left untouched.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
+///
+/// `pub(crate)` so the `Action::CreateWorktree` dialog's location step
+/// (`tui::mode::worktree::resolve_worktree_location`) expands a typed
+/// directory exactly the way a config-file path is expanded.
+pub(crate) fn expand_tilde(path: &str) -> std::path::PathBuf {
     if path == "~" {
         if let Ok(home) = env::var("HOME") {
             return std::path::PathBuf::from(home);

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- `Action::CreateWorktree` now groups worktrees per project under a configured
+  `worktree.basedir`: `<basedir>/<repo-name>/<branch>`, instead of the flat
+  `<basedir>/<branch>`. Pointing one base directory at several repos no longer
+  mixes their checkouts. With no `worktree.basedir` set, the dialog now asks
+  where to create the worktree (a new step between the branch/base-branch
+  questions and the project assignment) and previews the resolved target as
+  you type; a blank answer keeps the previous sibling default
+  (`<repo-parent>/<repo-name>-worktrees/<branch>`), which is already per-repo.
+  See [docs/configuration.md#worktree--mode](docs/configuration.md#worktree--mode).
+
 ### Added
 
 - The Details and Output Preview panes now hide automatically below 20

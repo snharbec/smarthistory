@@ -1517,14 +1517,20 @@ output): **[docs/modes/project.md](modes/project.md)**.
 
 ### Worktree (`;` mode)
 
-Both keys are optional and only affect `Action::CreateWorktree` (the `;`-mode
-"create a new worktree" dialog); listing/selecting existing worktrees needs no
-config.
+`worktree.defaultbranch` is optional and only affects `Action::CreateWorktree`
+(the `;`-mode "create a new worktree" dialog); listing/selecting existing
+worktrees needs no config.
 
 | Key                       | Meaning                                                                                                                                          |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `worktree.basedir`         | Base directory new worktrees are created under (`<basedir>/<branch>`). Default: sibling to the repo (`<repo-parent>/<repo-name>-worktrees/<branch>`). |
+| `worktree.basedir`         | Base directory new worktrees are created under, grouped per project: `<basedir>/<repo-name>/<branch>`. Leaving it unset makes the dialog ask where to create each worktree (a blank answer accepts the sibling default `<repo-parent>/<repo-name>-worktrees/<branch>`). |
 | `worktree.defaultbranch`   | Branch to preselect as the base for a brand-new worktree branch, overriding the dialog's own auto-detection (remote `HEAD`, then local `main`/`master`, then the current branch). |
+
+The per-project `<repo-name>` level means one `worktree.basedir` can hold every
+project's worktrees without mixing them — repo `/work/acme` and repo
+`/srv/acme` still get distinct `acme/…` directories only if their directory
+names differ, so point `basedir` at a project-specific path if you track two
+same-named checkouts.
 
 ```ini
 worktree.basedir=~/worktrees

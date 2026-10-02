@@ -47,11 +47,15 @@ The `CreateWorktree` action (unbound by default — open it via the command
 palette, or bind `key.create-worktree=<spec>`) opens a step-through dialog:
 pick or create a branch, optionally pick a base branch for a new branch,
 optionally carry over the current checkout's uncommitted changes (`git
-stash`), and optionally assign the new worktree to a time-tracking project
-(`project.<slug>.dir=`). On confirm it runs `git worktree add`, then stages a
-`cd` into the new worktree the same way selecting a row above does. See
-[docs/actions.md#createworktree](../actions.md#createworktree) for the full
-step-by-step and [docs/configuration.md](../configuration.md) for
+stash`), choose where the worktree is created (only when `worktree.basedir`
+isn't configured — a blank answer accepts the sibling default), and
+optionally assign the new worktree to a time-tracking project
+(`project.<slug>.dir=`). A configured `worktree.basedir` groups worktrees per
+project as `<basedir>/<repo-name>/<branch>`. On confirm it runs `git worktree
+add`, then stages a `cd` into the new worktree the same way selecting a row
+above does. See [docs/actions.md#createworktree](../actions.md#createworktree)
+for the full step-by-step and
+[docs/configuration.md](../configuration.md) for
 `worktree.basedir`/`worktree.defaultbranch`.
 
 Opened with a JIRA row selected (`-` mode), the branch-name step starts
