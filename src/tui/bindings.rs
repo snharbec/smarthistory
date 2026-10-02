@@ -403,6 +403,24 @@ pub enum Action {
     /// no-op semantics as
     /// `AddSession`.
     AddHost,
+    /// Save the multiplexer session the TUI is running inside as a new
+    /// persistent `session.<id>` entry, so it can be re-created later
+    /// from a `*` panes row instead of only existing in the live
+    /// multiplexer. Opens the same add-entry dialog as `AddSession`,
+    /// pre-filled with the current directory as `Dir` and the current
+    /// session/workspace name (tmux `#{session_name}` / herdr workspace
+    /// label) as `Name` — so the name can be overwritten before the
+    /// entry is written.
+    ///
+    /// Unlike `AddSession`, which acts on the *selected row*, this acts
+    /// on the session the TUI itself is in, so it neither needs nor uses
+    /// a row selection and is available in every mode (including an
+    /// empty result list). A no-op with a status message when not inside
+    /// a tmux session / herdr workspace, when the current directory is
+    /// unavailable, or when the config file can't be located.
+    ///
+    /// Default key: unbound.
+    CreatePersistentSession,
     /// Open the multi-line note/todo compose overlay. Available
     /// in `@` (Notes) mode (creates a note) and `!` (Todo) mode
     /// (creates a todo); a no-op with a status message
@@ -753,6 +771,7 @@ impl Action {
             Action::CycleDirectorySource => "cycle-directory-source",
             Action::AddSession => "add-session",
             Action::AddHost => "add-host",
+            Action::CreatePersistentSession => "create-persistent-session",
             Action::ComposeNoteEntry => "compose-note-entry",
             Action::CreateNote => "create-note",
             Action::CreateJiraIssue => "create-jira-issue",
@@ -825,6 +844,7 @@ impl Action {
             Action::CycleDirectorySource => "Cycle directory source",
             Action::AddSession => "Add selected directory as a session",
             Action::AddHost => "Add selected directory as a host",
+            Action::CreatePersistentSession => "Create persistent session from current session",
             Action::ComposeNoteEntry => "Compose a new note/todo entry",
             Action::CreateNote => "Create a new note (Title + Content)",
             Action::CreateJiraIssue => "Create JIRA issue",
@@ -935,6 +955,7 @@ impl Action {
             // machine lives in `tui.rs`; these
             // actions just open it.
             Action::AddSession | Action::AddHost => "config",
+            Action::CreatePersistentSession => "config",
             Action::ComposeNoteEntry => "tools",
             Action::CreateNote => "tools",
             Action::CreateJiraIssue => "tools",
@@ -1071,6 +1092,7 @@ impl Action {
             Action::MarkTodoDone => "none",
             Action::AddSession => "F5",
             Action::AddHost => "F6",
+            Action::CreatePersistentSession => "none",
             Action::ComposeNoteEntry => "F2",
             // Unbound by default — discoverable via the
             // command palette (Ctrl-Q → "create note") or
@@ -1607,6 +1629,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::MarkTodoDone,
     Action::AddSession,
     Action::AddHost,
+    Action::CreatePersistentSession,
     Action::ComposeNoteEntry,
     Action::CreateNote,
     Action::CreateJiraIssue,

@@ -9167,30 +9167,10 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::PaneExec => {
             // Herdr first, then tmux — same precedence
-            // `_smarthistory_precmd` uses for capture.
-            let current_name: Option<String> = {
-                #[cfg(feature = "herdr")]
-                {
-                    crate::multiplexer::herdr_current_workspace_label()
-                }
-                #[cfg(not(feature = "herdr"))]
-                {
-                    None
-                }
-            }
-            .or_else(|| {
-                if env::var("TMUX").is_err() {
-                    return None;
-                }
-                std::process::Command::new("tmux")
-                    .args(["display-message", "-p", "#S"])
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-            })
-            .filter(|s| !s.is_empty());
+            // `_smarthistory_precmd` uses for capture. Shared with the
+            // TUI's "create a persistent session from the current one"
+            // action so both resolve "<current>" identically.
+            let current_name = crate::multiplexer::current_session_name();
 
             let Some(current_name) = current_name else {
                 eprintln!("smarthistory: not inside a tmux session or herdr workspace");

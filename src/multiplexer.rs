@@ -867,6 +867,48 @@ fn tmux_list_panes_parse(stdout: &[u8], current_pane: &str) -> Vec<CurrentPaneIn
 /// `#[allow(dead_code)]`
 /// for the full
 /// rationale.
+/// The name of the multiplexer session the TUI is running inside:
+/// tmux's `#{session_name}` (`tmux display-message -p '#S'`) or the
+/// herdr workspace label — the same "<current>" resolution
+/// `smarthistory pane-exec` uses to find its `session.<id>`/`host.<id>`
+/// entry, and the same string `# hosts` rows show in their badge.
+///
+/// Returns `None` when not inside a multiplexer session (neither
+/// `$TMUX` nor `$HERDR_PANE_ID` set), when the probe fails, or when
+/// it comes back empty. `pub(crate)` (rather than private to
+/// `main.rs`'s `pane-exec` arm) so the TUI's "create a persistent
+/// session from the current one" action resolves the name exactly the
+/// same way.
+pub(crate) fn current_session_name() -> Option<String> {
+    #[cfg(feature = "herdr")]
+    let herdr_label = herdr_current_workspace_label();
+    #[cfg(not(feature = "herdr"))]
+    let herdr_label: Option<String> = None;
+
+    herdr_label
+        .or_else(|| {
+            if std::env::var("TMUX").is_err() {
+                return None;
+            }
+            // Target THIS pane explicitly, so the answer never depends
+            // on tmux's notion of which client/session is "current" —
+            // that resolution involves the attached-client state and
+            // is not what the caller means by "the session I'm in".
+            // When `$TMUX_PANE` is somehow absent, fall back to the
+            // untargeted form rather than failing outright.
+            let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+            let mut args: Vec<&str> = vec!["display-message", "-p"];
+            if !pane.is_empty() {
+                args.push("-t");
+                args.push(pane.as_str());
+            }
+            args.push("#S");
+            let bytes = tmux_run(&args)?;
+            Some(String::from_utf8_lossy(&bytes).trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+}
+
 #[allow(dead_code)]
 fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
     use std::io::Read;

@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- New `Action::CreatePersistentSession` (unbound by default) — save the
+  multiplexer session you are *in* as a persistent `session.<id>` entry. It
+  opens the same dialog as `Action::AddSession`, pre-filled with the current
+  directory as `Dir` and the current session/workspace name as `Name` so the
+  name can be overwritten before saving. Unlike `AddSession` it acts on the
+  running session rather than the selected row, so it needs no row selection —
+  it works with an empty result list, in every mode. See
+  [docs/actions.md#createpersistentsession](docs/actions.md#createpersistentsession).
+
 ### Changed
 
 - `Action::CreateWorktree` now groups worktrees per project under a configured

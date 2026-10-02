@@ -11128,6 +11128,85 @@ impl App {
         });
     }
 
+    /// Open the "create a persistent session from the current one"
+    /// dialog (`Action::CreatePersistentSession`): the same
+    /// `AddEntryDialog` / `write_new_entry_to_config` machinery
+    /// `AddSession` uses, but sourced from the environment rather than
+    /// a selected row — `Dir` is the current directory and `Name` is
+    /// the multiplexer session the TUI is running inside (tmux
+    /// `#{session_name}` / herdr workspace label), so the name can be
+    /// overwritten before committing.
+    ///
+    /// Deliberately does NOT go through `open_add_entry_dialog`, whose
+    /// whole job is resolving a *selected row*'s directory and command
+    /// and which bails out with "no row selected" — this action works
+    /// with an empty result list. A status message (no dialog) when
+    /// not inside a multiplexer session, when the current directory
+    /// can't be read, or when the sessions file can't be located.
+    fn open_create_persistent_session_dialog(&mut self) {
+        let Some(current_session) = crate::multiplexer::current_session_name() else {
+            self.set_status_message(
+                "not inside a tmux session or herdr workspace — nothing to save".to_string(),
+            );
+            return;
+        };
+        self.open_persistent_session_dialog_for(current_session);
+    }
+
+    /// The body of `open_create_persistent_session_dialog`, with the
+    /// current session's name already resolved. Split out so the
+    /// pre-fill / locatability logic is reachable in tests without a
+    /// live tmux or herdr (see `open_create_persistent_session_dialog`
+    /// for the environment-dependent half).
+    fn open_persistent_session_dialog_for(&mut self, current_session: String) {
+        // Already-open dialog: keep the existing one (re-entering
+        // would surprise the user by resetting their typing), same
+        // rule `open_add_entry_dialog` follows.
+        if self.add_entry_dialog.is_some() {
+            return;
+        }
+        let directory = std::env::current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        if directory.is_empty() {
+            self.set_status_message("current directory unavailable — nothing to save".to_string());
+            return;
+        }
+        // Same locatability check `open_add_entry_dialog` runs for a
+        // session entry (both resolve to `None` under the exact same
+        // condition as `crate::config_path()` — HOME unset).
+        if crate::sessions_path().is_none() {
+            self.set_status_message(
+                "no config directory found — set $HOME so \
+                 ~/.config/smarthistory/ can be resolved"
+                    .to_string(),
+            );
+            return;
+        }
+        let mut dialog = AddEntryDialog::new(
+            AddEntryKind::Session,
+            directory,
+            String::new(),
+        );
+        // Same `AddEntryKind::Session` entry (same fields, same
+        // sessions file), but pre-filled from the live multiplexer
+        // session rather than a selected row — retitle it so the user
+        // can tell which entry they're confirming.
+        dialog.dialog_title = Some(" Save current session ");
+        // `AddEntryDialog::new` leaves the required `Name` field blank
+        // (normally typed by hand) — seed it with the current
+        // session's name so the dialog itself is the "overwrite the
+        // name" step, and the cursor lands ready to edit it.
+        if let Some(name_field) = dialog.fields.first_mut() {
+            name_field.value = current_session;
+            name_field.cursor = name_field.value.chars().count();
+        }
+        self.add_entry_dialog = Some(dialog);
+        self.set_status_message(
+            "create persistent session: edit the name, then Enter to save".to_string(),
+        );
+    }
+
     /// Commit the add-entry
     /// dialog: validate the
     /// fields, write the new
@@ -14168,6 +14247,13 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // row's directory
             // basename.
             app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Host);
+            false
+        }
+        Action::CreatePersistentSession => {
+            // Save the session the TUI is running inside as a
+            // persistent `session.<id>` entry — no row selection
+            // involved, unlike AddSession/AddHost above.
+            app.open_create_persistent_session_dialog();
             false
         }
         Action::ComposeNoteEntry => {

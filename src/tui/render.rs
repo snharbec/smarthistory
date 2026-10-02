@@ -1447,10 +1447,12 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
     let area = centered_rect(70, pct, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
-    let title = match dialog.kind {
-        AddEntryKind::Session => " Add session ",
-        AddEntryKind::Host => " Add host ",
-    };
+    let title = dialog
+        .dialog_title
+        .unwrap_or(match dialog.kind {
+            AddEntryKind::Session => " Add session ",
+            AddEntryKind::Host => " Add host ",
+        });
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -3113,6 +3115,11 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         &mut lines,
         binding_for(Action::AddHost),
         "add the selected directory as a new host (SSH connection)",
+    );
+    row(
+        &mut lines,
+        binding_for(Action::CreatePersistentSession),
+        "save the session you're in as a persistent named session",
     );
 
     lines.push(Line::from(""));
