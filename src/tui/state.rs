@@ -1302,6 +1302,20 @@ pub struct AddEntryDialog {
     /// `None` when there's no
     /// error to display.
     pub error: Option<String>,
+    /// Overrides the dialog's
+    /// title. `None` (the
+    /// `AddSession`/`AddHost`
+    /// default) derives it from
+    /// `kind`; `Some` lets a
+    /// caller that reuses
+    /// `AddEntryKind::Session`
+    /// for a differently-named
+    /// entry — e.g.
+    /// `Action::CreatePersistentSession`
+    /// — label the dialog for
+    /// what the user is actually
+    /// confirming.
+    pub dialog_title: Option<&'static str>,
 }
 
 impl AddEntryDialog {
@@ -1396,6 +1410,7 @@ impl AddEntryDialog {
             source_directory,
             source_command,
             error: None,
+            dialog_title: None,
         }
     }
 

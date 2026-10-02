@@ -12848,9 +12848,219 @@ fn directories_test_app_with_sessions(
     app
 }
 
-/// `fetch_directories`
-/// returns one row per
-/// unique directory, sorted
+/// `Action::CreatePersistentSession` saves the multiplexer session the
+/// TUI is running inside as a `session.<id>` entry: the dialog's `Dir`
+/// is the current directory, its `Name` is pre-filled with the current
+/// session's name (so the user can overwrite it), and committing writes
+/// the entry through the same `write_new_entry_to_config` path
+/// `AddSession` uses.
+#[test]
+fn create_persistent_session_dialog_prefills_dir_and_name_then_commits() {
+    use crate::tui::state::AddEntryKind;
+    let sandbox = HomeSandbox::new("persistent_session");
+    // Mutates the process-wide cwd, so it must hold the same lock the
+    // repo's other cwd-mutating tests use.
+    let _cwd = lock_or_recover(&CWD_LOCK);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    let repo = sandbox.scratch.clone();
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_persistent_session_dialog_for("mysess".to_string());
+
+        let dialog = app.add_entry_dialog.as_ref().expect("dialog must open");
+        assert_eq!(dialog.kind, AddEntryKind::Session);
+        assert_eq!(dialog.fields[0].name, "Name");
+        assert_eq!(dialog.fields[0].value, "mysess", "Name is pre-filled with the current session");
+        assert_eq!(
+            dialog.fields[0].cursor,
+            "mysess".chars().count(),
+            "cursor lands at the end of the prefilled name, ready to edit"
+        );
+        assert_eq!(dialog.fields[1].name, "Dir");
+        // `current_dir()` resolves symlinks (macOS `/var` is really
+        // `/private/var`), while the sandbox path is built from
+        // `temp_dir()` unresolved — compare canonically so the
+        // assertion is about the directory, not its spelling.
+        assert_eq!(
+            std::fs::canonicalize(&dialog.fields[1].value).expect("dialog dir resolves"),
+            std::fs::canonicalize(&repo).expect("sandbox dir resolves"),
+            "Dir is the directory the TUI is running in"
+        );
+        assert_eq!(dialog.dialog_title, Some(" Save current session "));
+
+        // Overwrite the name, as the user would, then commit.
+        app.add_entry_dialog.as_mut().unwrap().fields[0].value = "renamed".to_string();
+        app.commit_add_entry_dialog();
+        assert!(app.add_entry_dialog.is_none(), "a successful commit closes the dialog");
+
+        let written = std::fs::read_to_string(repo.join(".config/smarthistory/sessions"))
+            .expect("sessions file written");
+        assert!(
+            written.contains("session.") && written.contains("\"renamed\""),
+            "the overwritten name must be what gets written, got: {written:?}"
+        );
+        assert!(
+            !written.contains("\"mysess\""),
+            "the prefilled name must not survive the overwrite, got: {written:?}"
+        );
+        assert!(
+            written.contains(repo.to_str().unwrap()),
+            "the entry must carry the current directory as .dir, got: {written:?}"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// The persistent-session dialog does not depend on a row selection —
+/// unlike `AddSession`, which bails out with "no row selected" on an
+/// empty list. Same setup as its sibling above but with zero history
+/// rows, so a regression to the `AddSession` gate would fail here.
+#[test]
+fn create_persistent_session_works_with_no_rows_selected() {
+    let _sandbox = HomeSandbox::new("persistent_session_no_rows");
+    let _cwd = lock_or_recover(&CWD_LOCK);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(_sandbox.scratch.clone()).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.list_state.select(None);
+        assert!(app.selected_row().is_none(), "precondition: nothing is selected");
+        app.open_persistent_session_dialog_for("work".to_string());
+        assert!(
+            app.add_entry_dialog.is_some(),
+            "the current-session action must not require a selected row"
+        );
+        // Contrast: the row-driven action still refuses.
+        app.add_entry_dialog = None;
+        app.open_add_entry_dialog(crate::tui::state::AddEntryKind::Session);
+        assert!(app.add_entry_dialog.is_none(), "AddSession keeps its row requirement");
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// A second invocation must not clobber an open dialog (same rule
+/// `open_add_entry_dialog` follows) — otherwise pressing the action
+/// again mid-edit would silently discard the user's typing.
+#[test]
+fn create_persistent_session_keeps_existing_open_dialog() {
+    let _sandbox = HomeSandbox::new("persistent_session_reentry");
+    let _cwd = lock_or_recover(&CWD_LOCK);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(_sandbox.scratch.clone()).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_persistent_session_dialog_for("first".to_string());
+        app.add_entry_dialog.as_mut().unwrap().fields[0].value = "edited".to_string();
+        app.open_persistent_session_dialog_for("second".to_string());
+        let dialog = app.add_entry_dialog.as_ref().expect("dialog still open");
+        assert_eq!(
+            dialog.fields[0].value, "edited",
+            "re-invoking must not reset the user's in-progress edit"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// The action is registered like every other action: a stable config
+/// key, a display name for the palette, and unbound by default (the
+/// repo's convention for actions discovered via the palette).
+#[test]
+fn create_persistent_session_action_is_registered() {
+    use crate::tui::bindings::{Action, ALL_ACTIONS};
+    assert_eq!(
+        Action::CreatePersistentSession.config_key(),
+        "create-persistent-session"
+    );
+    assert_eq!(
+        Action::CreatePersistentSession.display_name(),
+        "Create persistent session from current session"
+    );
+    assert_eq!(
+        Action::CreatePersistentSession.default_keys(),
+        &[] as &[&str],
+        "the \"none\" sentinel means unbound, i.e. no default keys"
+    );
+    assert!(
+        ALL_ACTIONS.contains(&Action::CreatePersistentSession),
+        "the action must be in ALL_ACTIONS or the palette can't reach it"
+    );
+    // Its key must round-trip through the config-file spelling.
+    assert_eq!(
+        crate::tui::bindings::action_from_config_key("create-persistent-session"),
+        Some(Action::CreatePersistentSession)
+    );
+}
+
+/// The retitle is opt-in: the row-driven `AddSession` dialog must keep
+/// the plain " Add session " title the renderer derives from `kind`.
+/// Pure construction test — no App, no env, no cwd, so the
+/// "does not leak" property can't be confused by dialog-open
+/// preconditions.
+#[test]
+fn add_session_dialog_keeps_its_own_title() {
+    use crate::tui::state::{AddEntryDialog, AddEntryKind};
+    let d = AddEntryDialog::new(AddEntryKind::Session, "/tmp/x".to_string(), String::new());
+    assert_eq!(
+        d.dialog_title, None,
+        "only the persistent-session action retitles; AddSession keeps the kind-derived title"
+    );
+    assert_eq!(d.fields[0].value, "", "AddSession keeps its blank Name field");
+}
+
+/// When no multiplexer session is present the action reports that and
+/// opens no dialog at all — a blank Name field would otherwise look
+/// like a normal "add a session" and write a meaningless entry.
+#[test]
+fn persistent_session_without_a_live_session_opens_nothing() {
+    let _sandbox = HomeSandbox::new("persistent_session_no_multiplexer");
+    // Ensure neither multiplexer env var is set, so the action's own
+    // environment probe (`current_session_name`) finds nothing.
+    let prev_tmux = std::env::var("TMUX").ok();
+    let prev_herdr = std::env::var("HERDR_PANE_ID").ok();
+    // SAFETY: serialised by the ENV_LOCK held via `HomeSandbox`.
+    unsafe {
+        std::env::remove_var("TMUX");
+        std::env::remove_var("HERDR_PANE_ID");
+    }
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.open_create_persistent_session_dialog();
+        assert!(
+            app.add_entry_dialog.is_none(),
+            "no multiplexer session means nothing to save, not a blank dialog"
+        );
+        let status = app.status_message.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+        assert!(
+            status.contains("not inside a tmux session"),
+            "expected the not-in-a-session message, got: {status:?}"
+        );
+    });
+    // SAFETY: serialised by the ENV_LOCK held via `HomeSandbox`.
+    unsafe {
+        match prev_tmux {
+            Some(v) => std::env::set_var("TMUX", v),
+            None => std::env::remove_var("TMUX"),
+        }
+        match prev_herdr {
+            Some(v) => std::env::set_var("HERDR_PANE_ID", v),
+            None => std::env::remove_var("HERDR_PANE_ID"),
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 /// by each directory's
 /// most-recent history
 /// timestamp DESC. The

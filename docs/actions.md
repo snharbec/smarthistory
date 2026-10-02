@@ -1008,6 +1008,36 @@ directory-basename default instead. `ssh root@122.1.1.40` and `ssh pve-1.local`
 flags or otherwise — only a bare, undotted single-label host needs this
 one-target check.
 
+### `CreatePersistentSession`
+
+| Field        | Value                                                |
+| ------------ | ---------------------------------------------------- |
+| Config key   | `create-persistent-session`                          |
+| Display name | Create persistent session from current session       |
+| Default key  | none (open it via the command palette, or bind `key.create-persistent-session=<spec>`) |
+| Category     | config                                               |
+
+Save the multiplexer session the TUI is *running inside* as a new persistent
+`session.<key>` entry, so it can be re-created later from a `*` panes row
+instead of existing only in the live multiplexer.
+
+Unlike [`AddSession`](#addsession), which acts on the selected row, this acts on
+the session you are in — so it needs no row selection and works with an empty
+result list, in every mode. It opens the same multi-field dialog as
+[`AddSession`](#addsession) (Name, Dir, Exec), pre-filled from the environment:
+
+- **Name** — the current session's name (tmux `#{session_name}`, or the herdr
+  workspace label), with the cursor at the end so it can be **overwritten**
+  before saving. This is the dialog's purpose here: name the persistent entry
+  after the session it captures.
+- **Dir** — the directory the TUI is running in.
+- **Exec** — left blank.
+
+`Enter` writes the entry to `~/.config/smarthistory/sessions` through the exact
+same commit path `AddSession` uses. A no-op with a status message when not
+inside a tmux session / herdr workspace, when the current directory can't be
+read, or when the config file can't be located.
+
 ### `ComposeNoteEntry`
 
 | Field        | Value                         |
