@@ -13712,9 +13712,11 @@ fn worktree_create_worktree_new_branch_creates_it_off_base() {
 
 /// Selecting an existing branch on a clean repo skips both
 /// `PickBaseBranch` (no new branch to base) and `ConfirmCarryOver` (no
-/// dirty state to ask about), landing directly on `PickProject`.
+/// dirty state to ask about). With no `worktree.basedir` configured it
+/// lands on `PickLocation` — the destination is still unsettled, which
+/// is exactly what that step is for.
 #[test]
-fn worktree_create_flow_existing_branch_on_clean_repo_skips_to_pick_project() {
+fn worktree_create_flow_existing_branch_on_clean_repo_skips_to_pick_location() {
     use crate::tui::state::WorktreeCreateStep;
     let _g = lock_or_recover(&CWD_LOCK);
     let Some(repo) = worktree_scratch_repo("flow_existing_clean", "trunk") else {
@@ -13730,7 +13732,7 @@ fn worktree_create_flow_existing_branch_on_clean_repo_skips_to_pick_project() {
         flow.filter = "feature".to_string();
         assert!(!app.advance_worktree_create_flow());
         let flow = app.worktree_create_flow.as_ref().expect("flow still open");
-        assert_eq!(flow.step, WorktreeCreateStep::PickProject);
+        assert_eq!(flow.step, WorktreeCreateStep::PickLocation);
         assert_eq!(flow.branch, "feature");
         assert!(!flow.is_new_branch);
     });
@@ -13834,6 +13836,90 @@ fn sanitize_new_branch_name_preserves_slash_and_case() {
 fn sanitize_new_branch_name_no_whitespace_is_unchanged() {
     use crate::tui::mode::worktree::sanitize_new_branch_name;
     assert_eq!(sanitize_new_branch_name("brand-new-branch"), "brand-new-branch");
+}
+
+/// `repo_worktree_parent` / `default_worktree_base` unit tests — pure
+/// path arithmetic, no fixture. The per-project level is what keeps two
+/// repos pointing at one `worktree.basedir` from landing in one flat
+/// directory.
+#[test]
+fn repo_worktree_parent_nests_under_the_repo_name() {
+    use crate::tui::mode::worktree::repo_worktree_parent;
+    assert_eq!(
+        repo_worktree_parent(
+            std::path::Path::new("/home/u/worktrees"),
+            std::path::Path::new("/home/u/proj/acme"),
+        ),
+        std::path::Path::new("/home/u/worktrees/acme")
+    );
+}
+
+#[test]
+fn default_worktree_base_is_sibling_to_the_repo() {
+    use crate::tui::mode::worktree::default_worktree_base;
+    assert_eq!(
+        default_worktree_base(std::path::Path::new("/home/u/proj/acme")),
+        std::path::Path::new("/home/u/proj/acme-worktrees")
+    );
+}
+
+/// A trailing-slash path (`/` itself, or one ending in `..`) has no
+/// usable final component. The name is only ever joined onto a base
+/// directory, so the non-empty fallback is the whole requirement.
+#[test]
+fn repo_dir_name_falls_back_when_there_is_no_final_component() {
+    use crate::tui::mode::worktree::repo_dir_name;
+    assert_eq!(repo_dir_name(std::path::Path::new("/home/u/proj/acme")).as_str(), "acme");
+    assert_eq!(repo_dir_name(std::path::Path::new("/")).as_str(), "repo");
+    assert_eq!(repo_dir_name(std::path::Path::new("/home/u/proj/..")).as_str(), "repo");
+}
+
+/// `resolve_worktree_location` is the single decision point behind both
+/// the location step's preview and the worktree that step creates.
+/// Blank must mean the sibling default (already per-repo, so the repo
+/// name is NOT appended a second time); anything typed gets the repo
+/// name appended, and `~` expands.
+#[test]
+fn resolve_worktree_location_blank_uses_sibling_default() {
+    use crate::tui::mode::worktree::resolve_worktree_location;
+    let repo = std::path::Path::new("/home/u/proj/acme");
+    assert_eq!(
+        resolve_worktree_location("", repo),
+        std::path::Path::new("/home/u/proj/acme-worktrees")
+    );
+    assert_eq!(
+        resolve_worktree_location("   ", repo),
+        std::path::Path::new("/home/u/proj/acme-worktrees")
+    );
+}
+
+#[test]
+fn resolve_worktree_location_typed_base_gets_the_repo_name_appended() {
+    use crate::tui::mode::worktree::resolve_worktree_location;
+    let repo = std::path::Path::new("/home/u/proj/acme");
+    assert_eq!(
+        resolve_worktree_location("/tmp/wt", repo),
+        std::path::Path::new("/tmp/wt/acme")
+    );
+    assert_eq!(
+        resolve_worktree_location("  /tmp/wt  ", repo),
+        std::path::Path::new("/tmp/wt/acme"),
+        "surrounding whitespace must not become part of the path"
+    );
+}
+
+#[test]
+fn resolve_worktree_location_expands_leading_tilde() {
+    use crate::tui::mode::worktree::resolve_worktree_location;
+    let Some(home) = std::env::var("HOME").ok().map(std::path::PathBuf::from) else {
+        return;
+    };
+    let repo = std::path::Path::new("/home/u/proj/acme");
+    assert_eq!(
+        resolve_worktree_location("~/worktrees", repo),
+        home.join("worktrees").join("acme")
+    );
+    assert_eq!(resolve_worktree_location("~", repo), home.join("acme"));
 }
 
 /// Helper: a `directories_test_app` with one JIRA issue selected via
@@ -14034,14 +14120,18 @@ fn worktree_create_flow_carry_over_captures_untracked_file() {
     let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
     // Untracked-only dirty state: a brand-new file, never `git add`-ed.
     std::fs::write(repo.join("untracked.txt"), "new work\n").expect("write untracked file");
-    let base_dir = std::env::temp_dir()
+    let repo_name = repo.file_name().expect("repo name").to_string_lossy().into_owned();
+    let configured_basedir = std::env::temp_dir()
         .join(format!("smarthistory_worktree_carry_over_target_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    // The per-project level keeps two repos sharing one
+    // `worktree.basedir` from mixing.
+    let base_dir = configured_basedir.join(&repo_name);
     let prev_cwd = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&repo).expect("chdir");
     let result = std::panic::catch_unwind(|| {
         let mut app = directories_test_app(&[]);
-        app.worktree_basedir = Some(base_dir.clone());
+        app.worktree_basedir = Some(configured_basedir.clone());
         app.open_worktree_create_flow();
         let flow = app.worktree_create_flow.as_mut().expect("flow open");
         flow.filter = "feature".to_string();
@@ -14077,7 +14167,7 @@ fn worktree_create_flow_carry_over_captures_untracked_file() {
         .arg(base_dir.join("feature"))
         .output();
     let _ = std::fs::remove_dir_all(&repo);
-    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = std::fs::remove_dir_all(&configured_basedir);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
@@ -14094,14 +14184,16 @@ fn worktree_create_flow_blank_pick_project_skips_assignment_but_creates_worktree
         return;
     };
     let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
-    let base_dir = std::env::temp_dir()
+    let repo_name = repo.file_name().expect("repo name").to_string_lossy().into_owned();
+    let configured_basedir = std::env::temp_dir()
         .join(format!("smarthistory_worktree_create_target_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    let base_dir = configured_basedir.join(&repo_name);
     let prev_cwd = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&repo).expect("chdir");
     let result = std::panic::catch_unwind(|| {
         let mut app = directories_test_app(&[]);
-        app.worktree_basedir = Some(base_dir.clone());
+        app.worktree_basedir = Some(configured_basedir.clone());
         app.open_worktree_create_flow();
         let flow = app.worktree_create_flow.as_mut().expect("flow open");
         flow.filter = "feature".to_string();
@@ -14129,7 +14221,126 @@ fn worktree_create_flow_blank_pick_project_skips_assignment_but_creates_worktree
         .arg(base_dir.join("feature"))
         .output();
     let _ = std::fs::remove_dir_all(&repo);
-    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// With no `worktree.basedir` configured the flow must ask where to
+/// create the worktree (`PickLocation`) rather than silently picking a
+/// default — the whole point of the step. A typed directory then wins
+/// over the sibling default, and the worktree lands under
+/// `<typed>/<repo-name>/<branch>`.
+#[test]
+fn worktree_create_flow_prompts_for_location_and_honours_the_answer() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_pick_location", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let repo_name = repo.file_name().expect("repo name").to_string_lossy().into_owned();
+    let configured_basedir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_pick_location_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    let base_dir = configured_basedir.join(&repo_name);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        use crate::tui::state::WorktreeCreateStep;
+        let mut app = directories_test_app(&[]);
+        assert!(app.worktree_basedir.is_none(), "this test is about the unconfigured path");
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> PickLocation
+        assert_eq!(
+            app.worktree_create_flow.as_ref().map(|f| f.step),
+            Some(WorktreeCreateStep::PickLocation),
+            "an unconfigured basedir must ask where to create the worktree"
+        );
+        // The typed directory is the base; the repo name and branch are
+        // appended below it.
+        app.worktree_create_flow.as_mut().unwrap().filter =
+            configured_basedir.display().to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> PickProject
+        assert_eq!(
+            app.worktree_create_flow.as_ref().map(|f| f.step),
+            Some(WorktreeCreateStep::PickProject)
+        );
+        // Blank filter: skip assignment and execute.
+        let ret = app.advance_worktree_create_flow();
+        assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
+        assert!(ret || app.selection.is_some(), "a cd command must be staged on success");
+        assert!(
+            base_dir.join("feature").is_dir(),
+            "the worktree must land under <typed>/<repo-name>/<branch>"
+        );
+        let staged = app.selection.as_deref().unwrap_or("");
+        assert!(
+            staged.contains(&repo_name),
+            "the staged command must cd into the per-project directory, got: {staged:?}"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(base_dir.join("feature"))
+        .output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// A blank `Enter` on `PickLocation` accepts the sibling default
+/// (`<repo-parent>/<repo-name>-worktrees/<branch>`), which is already
+/// per-repo by construction — it sits next to that one repo.
+#[test]
+fn worktree_create_flow_blank_location_uses_sibling_default() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_blank_location", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let repo_name = repo.file_name().expect("repo name").to_string_lossy().into_owned();
+    let sibling_base = repo.parent().expect("repo parent").join(format!("{repo_name}-worktrees"));
+    let _ = std::fs::remove_dir_all(&sibling_base);
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        use crate::tui::state::WorktreeCreateStep;
+        let mut app = directories_test_app(&[]);
+        app.open_worktree_create_flow();
+        let flow = app.worktree_create_flow.as_mut().expect("flow open");
+        flow.filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> PickLocation
+        assert_eq!(
+            app.worktree_create_flow.as_ref().map(|f| f.step),
+            Some(WorktreeCreateStep::PickLocation)
+        );
+        // Blank Enter on PickLocation, then blank Enter on PickProject.
+        assert!(!app.advance_worktree_create_flow());
+        let ret = app.advance_worktree_create_flow();
+        assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
+        assert!(ret || app.selection.is_some(), "a cd command must be staged on success");
+        assert!(
+            sibling_base.join("feature").is_dir(),
+            "a blank location must fall back to the sibling {sibling_base:?}"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(sibling_base.join("feature"))
+        .output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&sibling_base);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
@@ -14874,6 +15085,53 @@ fn zoxide_save_prompt_renders_label_and_hint() {
     assert!(
         text.contains("Save"),
         "expected the save prompt title/text onscreen, got: {text:?}"
+    );
+}
+
+/// The `PickLocation` step of the create-worktree dialog has no
+/// candidate list — the filter line is the whole input — so its list
+/// area is replaced by a preview of the resolved destination. A
+/// `TestBackend` check (not just the state/path helpers) that the
+/// preview really reaches the screen: both the step's title and the
+/// resolved `<typed>/<repo-name>/<branch>` path.
+#[test]
+fn worktree_create_pick_location_step_renders_resolved_path_preview() {
+    let mut app = directories_test_app(&[]);
+    app.worktree_create_flow = Some(crate::tui::state::WorktreeCreateFlow {
+        repo_root: std::path::PathBuf::from("/home/u/proj/acme"),
+        step: crate::tui::state::WorktreeCreateStep::PickLocation,
+        branch: "feature/login".to_string(),
+        is_new_branch: true,
+        base_branch: "main".to_string(),
+        carry_over: false,
+        project_slug: None,
+        location_dir: None,
+        options: Vec::new(),
+        filter: "/home/u/worktrees".to_string(),
+        cursor: 0,
+        selected: 0,
+        error: None,
+    });
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(
+        text.contains("where?"),
+        "expected the PickLocation step title onscreen, got: {text:?}"
+    );
+    assert!(
+        text.contains("/home/u/worktrees/acme/feature/login"),
+        "expected the resolved target path preview onscreen, got: {text:?}"
     );
 }
 

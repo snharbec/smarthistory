@@ -1760,6 +1760,7 @@ fn draw_worktree_create_flow(f: &mut Frame, flow: &crate::tui::state::WorktreeCr
         WorktreeCreateStep::PickBranch => " Create worktree — pick or create a branch ",
         WorktreeCreateStep::PickBaseBranch => " Create worktree — pick a base branch ",
         WorktreeCreateStep::ConfirmCarryOver => " Create worktree — carry over uncommitted changes? ",
+        WorktreeCreateStep::PickLocation => " Create worktree — where? ",
         WorktreeCreateStep::PickProject => " Create worktree — assign to a project (optional) ",
     };
     let inner = overlay(f, title, 60, 60);
@@ -1834,20 +1835,57 @@ fn draw_worktree_create_flow(f: &mut Frame, flow: &crate::tui::state::WorktreeCr
         next_idx += 1;
     }
 
-    let filtered = crate::tui::state::worktree_create_filtered_options(flow);
-    let items: Vec<ListItem> = filtered.iter().map(|o| ListItem::new(o.as_str())).collect();
-    let highlight_style = Style::default().bg(Theme::selection_color()).add_modifier(Modifier::BOLD);
-    let selected = if filtered.is_empty() { None } else { Some(flow.selected.min(filtered.len() - 1)) };
-    let mut list_state = ratatui::widgets::ListState::default().with_selected(selected);
-    let list = List::new(items).highlight_style(highlight_style).highlight_symbol("▌");
-    f.render_stateful_widget(list, chunks[next_idx], &mut list_state);
-    next_idx += 1;
+    // `PickLocation` is the one step with no candidate list to browse —
+    // the filter line above is the whole input — so the list area shows
+    // the resolved destination instead: where a blank submission would
+    // put the worktree, and where the branch actually lands. Both update
+    // as the typed directory changes.
+    if flow.step == WorktreeCreateStep::PickLocation {
+        // Same resolver `Enter` uses, so the previewed path is exactly
+        // the one that gets created.
+        let dir = crate::tui::mode::worktree::resolve_worktree_location(&flow.filter, &flow.repo_root);
+        let text = vec![
+            Line::from(Span::styled(
+                "Directory to group this project's worktrees under.",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("branch   ", Theme::dim()),
+                Span::raw(flow.branch.clone()),
+            ]),
+            Line::from(vec![
+                Span::styled("worktree ", Theme::dim()),
+                Span::raw(dir.join(&flow.branch).display().to_string()),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Blank accepts the sibling default next to the repo.",
+                Theme::dim(),
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: true }),
+            chunks[next_idx],
+        );
+        next_idx += 1;
+    } else {
+        let filtered = crate::tui::state::worktree_create_filtered_options(flow);
+        let items: Vec<ListItem> = filtered.iter().map(|o| ListItem::new(o.as_str())).collect();
+        let highlight_style = Style::default().bg(Theme::selection_color()).add_modifier(Modifier::BOLD);
+        let selected = if filtered.is_empty() { None } else { Some(flow.selected.min(filtered.len() - 1)) };
+        let mut list_state = ratatui::widgets::ListState::default().with_selected(selected);
+        let list = List::new(items).highlight_style(highlight_style).highlight_symbol("▌");
+        f.render_stateful_widget(list, chunks[next_idx], &mut list_state);
+        next_idx += 1;
+    }
 
     let footer = match flow.step {
         WorktreeCreateStep::PickBranch => {
             "↑/↓ select · Enter pick/create · Esc cancel"
         }
         WorktreeCreateStep::PickBaseBranch => "↑/↓ select · Enter pick · Esc cancel",
+        WorktreeCreateStep::PickLocation => "Enter confirm (blank = default) · Esc cancel",
         WorktreeCreateStep::PickProject => {
             "↑/↓ select · Enter pick/create/skip (blank) · Esc cancel"
         }

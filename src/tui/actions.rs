@@ -404,6 +404,15 @@ impl App {
             })
             .unwrap_or_default();
         let cursor = filter.chars().count();
+        // Configured `worktree.basedir` fixes the directory up front
+        // (`<basedir>/<repo-name>`), so `PickLocation` is skipped
+        // entirely; without one it stays unknown until the user
+        // confirms/types it there. Computed before `repo_root` is moved
+        // into the flow below.
+        let location_dir = self
+            .worktree_basedir
+            .as_ref()
+            .map(|base| crate::tui::mode::worktree::repo_worktree_parent(base, &repo_root));
         self.worktree_create_flow = Some(crate::tui::state::WorktreeCreateFlow {
             repo_root,
             step: crate::tui::state::WorktreeCreateStep::PickBranch,
@@ -412,6 +421,7 @@ impl App {
             base_branch: String::new(),
             carry_over: false,
             project_slug: None,
+            location_dir,
             options,
             filter,
             cursor,
@@ -521,6 +531,22 @@ impl App {
             // `worktree_create_confirm_carry_over`, called directly
             // from `handle_worktree_create_flow_key`.
             WorktreeCreateStep::ConfirmCarryOver => false,
+            WorktreeCreateStep::PickLocation => {
+                // Blank `Enter` accepts the sibling default, which is
+                // already per-repo; anything else is a base directory
+                // the repo's name is added under. `resolve_worktree_location`
+                // makes both decisions in one place, shared with the
+                // step's preview — so what's shown is what gets created.
+                let dir = crate::tui::mode::worktree::resolve_worktree_location(
+                    &typed,
+                    &repo_root,
+                );
+                if let Some(f) = self.worktree_create_flow.as_mut() {
+                    f.location_dir = Some(dir);
+                }
+                self.worktree_create_open_pick_project();
+                false
+            }
             WorktreeCreateStep::PickProject => {
                 // A blank filter always means "skip assignment",
                 // regardless of whether the (untouched) candidate list
@@ -544,10 +570,10 @@ impl App {
 
     /// The dirty-check that runs right after `branch`/`base_branch`
     /// are settled (from either `PickBranch` choosing an existing
-    /// branch, or `PickBaseBranch` completing a new one): clean →
-    /// skip straight to `PickProject`; dirty → open `ConfirmCarryOver`
-    /// first so the user can choose whether to bring their
-    /// uncommitted changes along.
+    /// branch, or `PickBaseBranch` completing a new one): dirty → open
+    /// `ConfirmCarryOver` first so the user can choose whether to bring
+    /// their uncommitted changes along, then `worktree_create_after_carry_over`;
+    /// clean → `worktree_create_after_carry_over` directly.
     fn worktree_create_after_branch_chosen(&mut self, repo_root: &std::path::Path) {
         use crate::tui::state::WorktreeCreateStep;
         let dirty = crate::tui::mode::worktree::repo_is_dirty(repo_root);
@@ -561,31 +587,42 @@ impl App {
                 f.error = None;
             }
         } else {
-            let projects = crate::tui::mode::worktree::list_project_slugs(self);
+            self.worktree_create_after_carry_over();
+        }
+    }
+
+    /// Routes to the step after the carry-over question is settled:
+    /// `PickLocation` when the destination is still unknown (no
+    /// `worktree.basedir` configured — the whole point of that step),
+    /// otherwise straight to `PickProject`.
+    fn worktree_create_after_carry_over(&mut self) {
+        use crate::tui::state::WorktreeCreateStep;
+        let need_location = self
+            .worktree_create_flow
+            .as_ref()
+            .is_some_and(|f| f.location_dir.is_none());
+        if need_location {
             if let Some(f) = self.worktree_create_flow.as_mut() {
-                f.step = WorktreeCreateStep::PickProject;
-                f.options = projects;
+                f.step = WorktreeCreateStep::PickLocation;
+                f.options.clear();
                 f.filter.clear();
                 f.cursor = 0;
                 f.selected = 0;
                 f.error = None;
             }
+        } else {
+            self.worktree_create_open_pick_project();
         }
     }
 
-    /// `y`/`n` pressed on the `ConfirmCarryOver` step: records the
-    /// choice and advances to `PickProject`, the same as the dirty-check
-    /// branch in `worktree_create_after_branch_chosen` above (a clean
-    /// repo skips straight past this step, so both paths converge on
-    /// the same `PickProject` setup).
-    pub(crate) fn worktree_create_confirm_carry_over(&mut self, carry_over: bool) {
+    /// Populate and show the `PickProject` step — the shared tail of
+    /// `worktree_create_after_carry_over` (configured base, and the
+    /// blank `Enter` on `PickLocation`) and
+    /// `worktree_create_confirm_carry_over`.
+    fn worktree_create_open_pick_project(&mut self) {
         use crate::tui::state::WorktreeCreateStep;
-        if self.worktree_create_flow.is_none() {
-            return;
-        }
         let projects = crate::tui::mode::worktree::list_project_slugs(self);
         if let Some(f) = self.worktree_create_flow.as_mut() {
-            f.carry_over = carry_over;
             f.step = WorktreeCreateStep::PickProject;
             f.options = projects;
             f.filter.clear();
@@ -593,6 +630,21 @@ impl App {
             f.selected = 0;
             f.error = None;
         }
+    }
+
+    /// `y`/`n` pressed on the `ConfirmCarryOver` step: records the
+    /// choice and continues through the same tail the dirty-check
+    /// branch in `worktree_create_after_branch_chosen` uses (a clean
+    /// repo skips this step entirely, so both paths converge on
+    /// `worktree_create_after_carry_over`).
+    pub(crate) fn worktree_create_confirm_carry_over(&mut self, carry_over: bool) {
+        if self.worktree_create_flow.is_none() {
+            return;
+        }
+        if let Some(f) = self.worktree_create_flow.as_mut() {
+            f.carry_over = carry_over;
+        }
+        self.worktree_create_after_carry_over();
     }
 
     /// The final step: create the worktree, optionally carry over
@@ -605,6 +657,16 @@ impl App {
         let Some(flow) = self.worktree_create_flow.clone() else {
             return false;
         };
+        // `PickProject` is only ever reached after the location has
+        // been settled (typed/confirmed on `PickLocation`, or seeded by
+        // a configured `worktree.basedir`), so a missing directory means
+        // the step order was violated — re-ask rather than silently
+        // creating the worktree in a default location the user never
+        // agreed to.
+        if flow.location_dir.is_none() {
+            self.worktree_create_after_carry_over();
+            return false;
+        }
         let path = self.worktree_create_target_path(&flow.repo_root, &flow.branch);
         match crate::tui::mode::worktree::create_worktree(
             &flow.repo_root,
@@ -688,21 +750,25 @@ impl App {
         }
     }
 
-    /// Where a new worktree for `branch` is created: under the
-    /// configured `worktree.basedir` when set, otherwise sibling to
-    /// the repo (`<repo-parent>/<repo-name>-worktrees/<branch>`).
-    fn worktree_create_target_path(
+    /// Where a new worktree for `branch` is created:
+    /// `<location_dir>/<branch>`. `location_dir` is already the
+    /// per-project directory — `<basedir>/<repo-name>` for a configured
+    /// `worktree.basedir`, the typed `<base>/<repo-name>`, or the
+    /// sibling default — so it is never combined with the repo name
+    /// again here. Falls back to the sibling default for `None` (a
+    /// configured base always seeds it, so that is only reachable if
+    /// the flow was driven out of order).
+    pub(crate) fn worktree_create_target_path(
         &self,
         repo_root: &std::path::Path,
         branch: &str,
     ) -> std::path::PathBuf {
-        if let Some(base) = self.worktree_basedir.as_ref() {
-            base.join(branch)
-        } else {
-            let parent = repo_root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| repo_root.to_path_buf());
-            let repo_name = repo_root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
-            parent.join(format!("{}-worktrees", repo_name)).join(branch)
-        }
+        let dir = self
+            .worktree_create_flow
+            .as_ref()
+            .and_then(|f| f.location_dir.clone())
+            .unwrap_or_else(|| crate::tui::mode::worktree::default_worktree_base(repo_root));
+        dir.join(branch)
     }
 
     /// Stage the todo (`!`) mode selection.

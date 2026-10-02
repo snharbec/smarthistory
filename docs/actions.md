@@ -1324,14 +1324,20 @@ worktree` checkout for the repo containing the current directory:
 3. **Carry over uncommitted changes?** (`y`/`n`, only asked when the current
    checkout is dirty) — `y` runs `git stash push` in the source checkout and
    `git stash apply` in the new worktree.
-4. **Assign to a project** (optional) — pick an existing `project.<slug>`
+4. **Where?** (only asked when `worktree.basedir` is *not* configured —
+   otherwise the configured base already answers it) — type the directory to
+   group this project's worktrees under; the step previews the resolved
+   `git worktree add` target as you type, and a blank `Enter` accepts the
+   sibling default next to the repo. The worktree ends up at
+   `<typed>/<repo-name>/<branch>` so unrelated projects never share a flat
+   worktree directory.
+5. **Assign to a project** (optional) — pick an existing `project.<slug>`
    from a filtered list, type a new one, or submit blank to skip. On
-   confirm, this final step creates the worktree (`git worktree add`), under
-   `worktree.basedir` if configured or sibling to the repo otherwise
-   (`<repo-parent>/<repo-name>-worktrees/<branch>`), applies the carried-over
-   stash if requested, writes `project.<slug>.dir=<path>` to the config file
-   if a project was assigned, then stages a `cd` into the new worktree the
-   same way selecting a Phase-1 worktree row does.
+   confirm, this final step creates the worktree (`git worktree add`),
+   applies the carried-over stash if requested, writes
+   `project.<slug>.dir=<path>` to the config file if a project was assigned,
+   then stages a `cd` into the new worktree the same way selecting a Phase-1
+   worktree row does.
 
 `Esc`/`Ctrl-C` cancel the dialog from any step without creating anything. A
 `git` failure at any point (an existing branch collision, a bad base branch,

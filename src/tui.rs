@@ -14643,13 +14643,13 @@ fn handle_template_name_prompt_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 /// Key handler for the `Action::CreateWorktree` dialog
-/// (`WorktreeCreateFlow`). Three of its four steps
-/// (`PickBranch`/`PickBaseBranch`/`PickProject`) are "pick from a
-/// filtered list or type something new" pickers — `Up`/`Down` move the
-/// highlight, printable characters edit the filter, `Enter` advances
-/// via `App::advance_worktree_create_flow`. The fourth
-/// (`ConfirmCarryOver`) is a plain `y`/`n` prompt, handled directly
-/// here rather than through the list machinery.
+/// (`WorktreeCreateFlow`). Most of its steps
+/// (`PickBranch`/`PickBaseBranch`/`PickLocation`/`PickProject`) are
+/// "pick from a filtered list or type something new" pickers — `Up`/`Down`
+/// move the highlight, printable characters edit the filter, `Enter`
+/// advances via `App::advance_worktree_create_flow`. `ConfirmCarryOver`
+/// is a plain `y`/`n` prompt, handled directly here rather than through
+/// the list machinery.
 fn handle_worktree_create_flow_key(app: &mut App, key: KeyEvent) -> bool {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.worktree_create_flow = None;
