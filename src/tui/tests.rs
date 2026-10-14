@@ -3133,6 +3133,27 @@ fn cycle_search_mode_preserves_query_body() {
     assert!(app.query.contains("git commit"));
 }
 
+/// The session file's persisted form of the `C-f` match algorithm
+/// must round-trip through `as_str`/`parse`, and `parse` must reject
+/// garbage (so a hand-edited session file falls back to the default
+/// rather than wedging startup) while accepting the canonical values
+/// plus the documented friendly aliases.
+#[test]
+fn match_algorithm_as_str_parse_round_trips() {
+    for algo in [
+        MatchAlgorithm::Substring,
+        MatchAlgorithm::Fuzzy,
+        MatchAlgorithm::Regex,
+    ] {
+        assert_eq!(MatchAlgorithm::parse(algo.as_str()), Some(algo));
+    }
+    assert_eq!(MatchAlgorithm::parse("FUZZY"), Some(MatchAlgorithm::Fuzzy));
+    assert_eq!(MatchAlgorithm::parse("sub"), Some(MatchAlgorithm::Substring));
+    assert_eq!(MatchAlgorithm::parse("re"), Some(MatchAlgorithm::Regex));
+    assert_eq!(MatchAlgorithm::parse("nonsense"), None);
+    assert_eq!(MatchAlgorithm::parse(""), None);
+}
+
 // --- App::edit_referenced_file end-to-end ------------------------------
 
 #[test]
@@ -6581,6 +6602,7 @@ fn session_round_trips_sort_order() {
         duplicate_filter: None,
         exit_filter: None,
         sort_order: Some("frequency".to_string()),
+        match_algorithm: None,
         theme: None,
         directory_source: None,
         pane_visibility: None,

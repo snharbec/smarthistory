@@ -2432,6 +2432,32 @@ impl MatchAlgorithm {
         }
     }
 
+    /// Lowercase identifier for the session file: `substring`,
+    /// `fuzzy`, or `regex`. Short and stable so it doesn't churn on
+    /// display-name tweaks. Used to persist the `C-f` toggle across
+    /// TUI invocations.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatchAlgorithm::Substring => "substring",
+            MatchAlgorithm::Fuzzy => "fuzzy",
+            MatchAlgorithm::Regex => "regex",
+        }
+    }
+
+    /// Parse the persisted form. Accepts the canonical `as_str()`
+    /// value plus a few friendly aliases (`sub`/`plain`/`text`,
+    /// `fzf`/`subseq`, `re`) for hand-edited session files. Returns
+    /// `None` for anything else so the caller can fall back to the
+    /// default (`Substring`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "substring" | "sub" | "plain" | "text" => Some(MatchAlgorithm::Substring),
+            "fuzzy" | "fzf" | "subseq" => Some(MatchAlgorithm::Fuzzy),
+            "regex" | "re" => Some(MatchAlgorithm::Regex),
+            _ => None,
+        }
+    }
+
     /// Short display label for the mode-strip chip.
     #[allow(dead_code)]
     pub fn label(self) -> &'static str {

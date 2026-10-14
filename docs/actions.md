@@ -504,6 +504,12 @@ panes, notes, etc.) except JIRA — JIRA's server-side JQL parsing is its own
 thing. The active algorithm is shown as a `· algoname` suffix in the input
 border title.
 
+The chosen algorithm is persisted in the session file and restored on the next
+TUI launch (the same `~/.cache/smarthistory/session` file `sortorder=`/`theme=`
+live in). Only a non-default choice is written (`matchalgorithm=fuzzy` /
+`matchalgorithm=regex`); the default (`Substring`) is implicit, so deleting the
+session file resets the algorithm to `Substring`.
+
 ### `PickPrefix`
 
 | Field        | Value            |
