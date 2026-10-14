@@ -566,6 +566,18 @@ pub enum Action {
     /// `key.toggle-pane-layout=<spec>` or open it from the command
     /// palette. Works in any mode.
     TogglePaneLayout,
+    /// Toggle the compact display: a single bundle of space-saving
+    /// behaviours — a one-line query prompt (no border box),
+    /// auto-collapsing an empty Output Preview pane, a width-aware
+    /// mode strip (redundant text dropped, low-priority chips dropped
+    /// instead of clipped), and the relaxed pane-visibility cutoff.
+    /// One switch to reclaim rows for the list and revert instantly.
+    /// Persisted in the session file; seeded by `tui.compact=`.
+    ///
+    /// Default key: unbind — ships unbound; opt in with
+    /// `key.toggle-compact-display=<spec>` or open it from the command
+    /// palette. Works in any mode.
+    ToggleCompactDisplay,
     /// Open the prefix picker. The
     /// picker is a centred
     /// overlay (modelled on
@@ -819,6 +831,7 @@ impl Action {
             Action::IncreasePaneHeight => "increase-pane-height",
             Action::DecreasePaneHeight => "decrease-pane-height",
             Action::TogglePaneLayout => "toggle-pane-layout",
+            Action::ToggleCompactDisplay => "toggle-compact-display",
             Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
             Action::CodegraphRelations => "codegraph-relations",
@@ -893,6 +906,7 @@ impl Action {
             Action::IncreasePaneHeight => "Increase pane height",
             Action::DecreasePaneHeight => "Decrease pane height",
             Action::TogglePaneLayout => "Toggle pane layout",
+            Action::ToggleCompactDisplay => "Toggle compact display",
             Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
             Action::CodegraphRelations => "Browse callers / callees",
@@ -982,7 +996,8 @@ impl Action {
             Action::TogglePaneVisibility => "layout",
             Action::IncreasePaneHeight
             | Action::DecreasePaneHeight
-            | Action::TogglePaneLayout => "layout",
+            | Action::TogglePaneLayout
+            | Action::ToggleCompactDisplay => "layout",
         }
     }
 
@@ -1132,6 +1147,7 @@ impl Action {
             // forget preference for most users; discoverable via the
             // command palette or `key.toggle-pane-layout=<spec>`.
             Action::TogglePaneLayout => "none",
+            Action::ToggleCompactDisplay => "none",
             Action::JiraFieldComplete => "Tab",
             Action::PickPrefix => "F1",
             Action::CodegraphRelations => "C-r",
@@ -1663,6 +1679,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::IncreasePaneHeight,
     Action::DecreasePaneHeight,
     Action::TogglePaneLayout,
+    Action::ToggleCompactDisplay,
     Action::JiraFieldComplete,
     Action::PickPrefix,
     Action::CodegraphRelations,

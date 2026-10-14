@@ -6620,6 +6620,7 @@ fn session_round_trips_sort_order() {
         pane_height: None,
         pane_layout: None,
         pane_width: None,
+        compact: None,
         scheme: None,
         pane_last_touched: std::collections::HashMap::new(),
         command_menu_recent: Vec::new(),
@@ -7421,6 +7422,18 @@ fn pane_size_keys_resize_height_in_bottom_and_width_in_right() {
     // Sanity: the resize helpers exist and behave on the type itself.
     assert_eq!(PaneWidth::default().decrease(), PaneWidth::parse("35").unwrap());
     assert_ne!(PaneHeight::default(), PaneHeight::default().decrease());
+}
+
+/// `Action::ToggleCompactDisplay` flips the single compact-display flag
+/// that gates the space saving bundle.
+#[test]
+fn toggle_compact_display_flips_the_flag() {
+    let mut app = global_test_app(&[("a", 1)]);
+    assert!(!app.compact, "compact defaults off");
+    assert!(!dispatch_action(&mut app, Action::ToggleCompactDisplay));
+    assert!(app.compact);
+    assert!(!dispatch_action(&mut app, Action::ToggleCompactDisplay));
+    assert!(!app.compact);
 }
 
 /// Actions the user has
@@ -15635,6 +15648,70 @@ fn hidden_visibility_hides_both_panes_on_a_tall_terminal() {
     assert!(
         !text.contains("Output Preview"),
         "Output Preview pane must be hidden in the Hidden state, got: {text:?}"
+    );
+}
+
+/// The compact display bundles several space-saving behaviours behind
+/// one flag. This checks three of them at the render level:
+/// (a) an empty Output pane is collapsed, (b) panes appear on a
+/// terminal shorter than the default 20-line cutoff, and (c) the
+/// redundant trailing scope · duplicate text is dropped.
+#[test]
+fn compact_display_bundles_the_space_saving_behaviours() {
+    use crate::tui::state::PaneVisibility;
+
+    // (a) empty Output collapse.
+    let mut app = directories_test_app(&[]);
+    app.pane_visibility = PaneVisibility::Both;
+    app.compact = false;
+    let default_text = render_rows(&mut app, 120, 40).join("\n");
+    assert!(
+        default_text.contains("Output Preview"),
+        "default keeps the (empty) Output pane; got: {default_text:?}"
+    );
+    app.compact = true;
+    let compact_text = render_rows(&mut app, 120, 40).join("\n");
+    assert!(
+        !compact_text.contains("Output Preview"),
+        "compact must collapse the empty Output pane; got: {compact_text:?}"
+    );
+    assert!(
+        compact_text.contains("Details"),
+        "compact still shows the Details pane; got: {compact_text:?}"
+    );
+
+    // (b) relaxed cutoff: at 12 rows the default hides the panes, the
+    // compact bundle shows them (chrome 3 + list 3 + pane line).
+    let mut app = directories_test_app(&[]);
+    app.compact = false;
+    let hidden_text = render_rows(&mut app, 100, 12).join("\n");
+    assert!(
+        !hidden_text.contains("Details"),
+        "default hides panes below 20 lines; got: {hidden_text:?}"
+    );
+    app.compact = true;
+    let shown_text = render_rows(&mut app, 100, 12).join("\n");
+    assert!(
+        shown_text.contains("Details"),
+        "compact shows panes as soon as there's room; got: {shown_text:?}"
+    );
+
+    // (c) redundant trailing scope · duplicate text dropped. The test
+    // app is in GLOBAL scope, whose trailing text reads "all history ·
+    // all entries"; only the trailing text spells out the scope this
+    // way (the chip is just "GLOBAL").
+    let mut app = directories_test_app(&[]);
+    app.compact = false;
+    let default_text = render_rows(&mut app, 140, 20).join("\n");
+    assert!(
+        default_text.contains("all history"),
+        "default shows the trailing scope text; got: {default_text:?}"
+    );
+    app.compact = true;
+    let compact_text = render_rows(&mut app, 140, 20).join("\n");
+    assert!(
+        !compact_text.contains("all history"),
+        "compact drops the redundant trailing text; got: {compact_text:?}"
     );
 }
 

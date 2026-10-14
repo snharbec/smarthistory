@@ -707,6 +707,28 @@ impl PaneHeight {
     /// list to nothing.
     const MIN_LIST_ROWS: u16 = 3;
 
+    /// Fixed chrome rows that surround the list + detail area: the
+    /// mode strip (1) + the input box (3, its tallest form) + the
+    /// status bar (1). The input can be compacted to 1 line
+    /// (`tui.inputbox=off`), but `max_for` keeps using the *tallest*
+    /// chrome so a persisted preference sized for a boxed input stays
+    /// valid either way; the rows reclaimed by a compact input go to
+    /// the list (which is the priority).
+    const CHROME_ROWS: u16 = 5;
+
+    /// Minimum terminal height (rows) at which the `Bottom` layout's
+    /// detail row can be shown: the chrome, `MIN_LIST_ROWS` for the
+    /// list, and a single visible pane line. Mirrors `max_for`'s own
+    /// arithmetic — panes are shown exactly when there's room for even
+    /// the smallest one, rather than at a fixed cutoff.
+    pub const MIN_PAGE_SIZE_BOTTOM: u16 =
+        Self::CHROME_ROWS + Self::MIN_LIST_ROWS + Self::FLOOR;
+
+    /// Minimum terminal height for the `Right` layout: the right
+    /// column costs no extra *vertical* space, so only the chrome and
+    /// the reserved list rows must fit.
+    pub const MIN_PAGE_SIZE_RIGHT: u16 = Self::CHROME_ROWS + Self::MIN_LIST_ROWS;
+
     /// One line taller, clamped to `max_for(page_size)`. Never
     /// shrinks: on a terminal whose derived max is at or below the
     /// current value this is a no-op, so pressing `F11` on a tiny
@@ -728,13 +750,13 @@ impl PaneHeight {
     }
 
     /// The tallest the details row may grow to for a given
-    /// terminal size: total height minus the fixed chrome (mode
-    /// strip, input, status — 5 lines) minus `MIN_LIST_ROWS` for
-    /// the history list. Never below `FLOOR`, so there's always a
-    /// well-defined (if tiny) height even on a very short terminal.
+    /// terminal size: total height minus the fixed chrome
+    /// (`CHROME_ROWS`) minus `MIN_LIST_ROWS` for the history list.
+    /// Never below `FLOOR`, so there's always a well-defined (if tiny)
+    /// height even on a very short terminal.
     fn max_for(page_size: usize) -> u16 {
         (page_size as u16)
-            .saturating_sub(5)
+            .saturating_sub(Self::CHROME_ROWS)
             .saturating_sub(Self::MIN_LIST_ROWS)
             .max(Self::FLOOR)
     }
