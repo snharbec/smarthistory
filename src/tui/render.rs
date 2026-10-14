@@ -47,15 +47,37 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // Below 20 lines there isn't room for a details row without
-    // squeezing the list itself down to nothing — hide
-    // Details/Output Preview entirely and give that space back to
-    // the list, rather than showing a barely-readable sliver of
-    // both. The user can also hide both panes explicitly on any
-    // terminal size via `F10` (`PaneVisibility::Hidden`); in that
-    // case the detail row's height is reclaimed by the list too.
-    let show_panes = f.area().height >= 20
+    // Show the panes whenever the current layout's own arithmetic says
+    // there's room for the smallest possible one — the chrome plus the
+    // list rows `PaneHeight` always reserves, plus one pane line for
+    // the `Bottom` layout (the `Right` column costs no extra height).
+    // That replaces the old fixed 20-line cutoff: now that a pane can
+    // be a single line, a shorter terminal can still show one without
+    // starving the list. The user can also hide both panes explicitly
+    // on any terminal size via `F10` (`PaneVisibility::Hidden`); in
+    // that case the space is reclaimed by the list too.
+    let min_page_size = if app.compact {
+        match app.pane_layout {
+            crate::tui::state::PaneLayout::Right => {
+                crate::tui::state::PaneHeight::MIN_PAGE_SIZE_RIGHT
+            }
+            crate::tui::state::PaneLayout::Bottom => {
+                crate::tui::state::PaneHeight::MIN_PAGE_SIZE_BOTTOM
+            }
+        }
+    } else {
+        // Default display keeps the historical fixed cutoff.
+        20
+    };
+    let show_panes = f.area().height >= min_page_size
         && app.pane_visibility != crate::tui::state::PaneVisibility::Hidden;
+    // Whether the selected row actually has captured output to
+    // preview. In the `Both` layout an empty Output pane is pure
+    // waste (it just shows "No output captured"), so it is collapsed
+    // and the space handed to Details — see the `Both` arms below.
+    let selected_has_output = app
+        .selected_row()
+        .is_some_and(|r| !r.output.is_empty());
     // `BOTTOM` layout only: the details row height adapts to the
     // user's `pane_height` setting (default 8 lines). `page_size` is
     // the total terminal height; `detail_row_height` clamps to what
@@ -79,7 +101,9 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
             [
                 Constraint::Length(1), // mode strip
                 Constraint::Fill(1),   // list (+ panes)
-                Constraint::Length(3), // input
+                // Compact display uses a single-line prompt (no border
+                // box), reclaiming two rows for the list.
+                Constraint::Length(if app.compact { 1 } else { 3 }), // input
                 Constraint::Length(1), // status
             ]
             .as_ref(),
@@ -113,18 +137,26 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         list_elapsed = list_start.elapsed();
         match app.pane_visibility {
             crate::tui::state::PaneVisibility::Both => {
-                let rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(
-                        [Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
-                    )
-                    .split(cols[1]);
                 let details_start = std::time::Instant::now();
-                draw_details(f, app, rows[0]);
-                details_elapsed = details_start.elapsed();
-                let output_preview_start = std::time::Instant::now();
-                draw_output_preview(f, app, rows[1]);
-                output_preview_elapsed = output_preview_start.elapsed();
+                if app.compact && !selected_has_output {
+                    // Compact display, no captured output: give the
+                    // whole column to Details instead of reserving half
+                    // for an empty "No output captured" pane.
+                    draw_details(f, app, cols[1]);
+                    details_elapsed = details_start.elapsed();
+                } else {
+                    let rows = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints(
+                            [Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
+                        )
+                        .split(cols[1]);
+                    draw_details(f, app, rows[0]);
+                    details_elapsed = details_start.elapsed();
+                    let output_preview_start = std::time::Instant::now();
+                    draw_output_preview(f, app, rows[1]);
+                    output_preview_elapsed = output_preview_start.elapsed();
+                }
             }
             crate::tui::state::PaneVisibility::Details => {
                 let details_start = std::time::Instant::now();
@@ -152,18 +184,26 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         if show_panes {
             match app.pane_visibility {
                 crate::tui::state::PaneVisibility::Both => {
-                    let detail_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints(
-                            [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
-                        )
-                        .split(rows[1]);
                     let details_start = std::time::Instant::now();
-                    draw_details(f, app, detail_chunks[0]);
-                    details_elapsed = details_start.elapsed();
-                    let output_preview_start = std::time::Instant::now();
-                    draw_output_preview(f, app, detail_chunks[1]);
-                    output_preview_elapsed = output_preview_start.elapsed();
+                    if app.compact && !selected_has_output {
+                        // Compact display, no captured output: Details
+                        // takes the full detail-row width instead of
+                        // leaving half of it for an empty Output pane.
+                        draw_details(f, app, rows[1]);
+                        details_elapsed = details_start.elapsed();
+                    } else {
+                        let detail_chunks = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints(
+                                [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
+                            )
+                            .split(rows[1]);
+                        draw_details(f, app, detail_chunks[0]);
+                        details_elapsed = details_start.elapsed();
+                        let output_preview_start = std::time::Instant::now();
+                        draw_output_preview(f, app, detail_chunks[1]);
+                        output_preview_elapsed = output_preview_start.elapsed();
+                    }
                 }
                 crate::tui::state::PaneVisibility::Details => {
                     let details_start = std::time::Instant::now();
@@ -4719,6 +4759,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Prefix + mandatory badges.
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -4727,68 +4768,62 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("  ", Theme::default()),
         duplicate_filter_badge(app.duplicate_filter),
     ];
-    if let Some(chip) = exit_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
+    // The optional chips, in priority order: exit / LLM / output / sort /
+    // notes-date / directory-source / panes-filter / ag / pane-visibility
+    // / pane-layout, then the match algorithm.
+    let optional_chips: [Option<Span<'static>>; 11] = [
+        exit_chip,
+        llm_chip,
+        output_chip,
+        sort_chip,
+        notes_date_chip,
+        dirsrc_chip,
+        panes_filter_chip,
+        ag_chip,
+        pane_vis_chip,
+        pane_layout_chip,
+        match_algorithm_badge(app.match_algorithm),
+    ];
+    if app.compact {
+        // Compact display: append chips only while they fit the strip.
+        // Each chip and its 2-space separator is atomic, so a narrow
+        // terminal drops the lowest-priority chips entirely rather than
+        // clipping one mid-glyph (what a plain `Paragraph` truncation
+        // would do). The trailing "current session only · last only"
+        // text — redundant with the scope / duplicate badges above — is
+        // omitted, freeing the right edge.
+        let width = area.width as usize;
+        let mut used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        for chip in optional_chips.into_iter().flatten() {
+            let w = chip.content.chars().count();
+            if used + 2 + w <= width {
+                spans.push(Span::styled("  ", Theme::default()));
+                spans.push(chip);
+                used += 2 + w;
+            }
+        }
+    } else {
+        // Default display: append every chip, then the trailing
+        // scope · duplicate text (the historical layout; `Paragraph`
+        // clips whatever overflows).
+        for chip in optional_chips.into_iter().flatten() {
+            spans.push(Span::styled("  ", Theme::default()));
+            spans.push(chip);
+        }
+        spans.push(Span::styled(
+            format!(
+                "  {} · {} ",
+                match app.mode {
+                    Mode::Sess => "current session only",
+                    Mode::Dir => "current directory only",
+                    Mode::Global => "all history",
+                    Mode::Stats => "predicted next + newest",
+                },
+                dup_label,
+            ),
+            Theme::dim(),
+        ));
     }
-    if let Some(chip) = llm_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = output_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = sort_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = notes_date_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = dirsrc_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = panes_filter_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = ag_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = pane_vis_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    if let Some(chip) = pane_layout_chip {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    // Match-algorithm chip. Shown only when the
-    // algorithm is NOT the default Substring.
-    // Reminds the user which algorithm
-    // (FUZZY / REGEX) is currently applied to
-    // their search.
-    if let Some(chip) = match_algorithm_badge(app.match_algorithm) {
-        spans.push(Span::styled("  ", Theme::default()));
-        spans.push(chip);
-    }
-    spans.push(Span::styled(
-        format!(
-            "  {} · {} ",
-            match app.mode {
-                Mode::Sess => "current session only",
-                Mode::Dir => "current directory only",
-                Mode::Global => "all history",
-                Mode::Stats => "predicted next + newest",
-            },
-            dup_label,
-        ),
-        Theme::dim(),
-    ));
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(bg));
     f.render_widget(paragraph, area);
@@ -7958,6 +7993,38 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             (prompt_str, title_str, app.query.as_str())
         }
     };
+    let prompt_width = prompt.chars().count() as u16;
+    // When the comment-edit buffer is active, the cursor should follow
+    // the comment buffer (which is always at the end since push_char
+    // appends and backspace pops). Using `query_cursor` here would
+    // track the search query's cursor instead — a bug the user reported
+    // as "the cursor stays at the same position while I type in the
+    // comment field".
+    let cursor_offset = if app.comment_edit.is_some() {
+        content.chars().count() as u16
+    } else {
+        app.query_cursor as u16
+    };
+    if app.compact {
+        // Compact display: a single-line prompt with no border box (the
+        // mode is already announced by the mode-strip badge and the
+        // prefix character). The border's title/style are dropped, but
+        // the prompt keeps the accent colour so the input still reads as
+        // the input.
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled(prompt.clone(), Theme::accent()),
+            Span::raw(content),
+        ]))
+        .style(Style::default().bg(PALETTE.with(|p| p.borrow().input_bg)))
+        .wrap(Wrap { trim: false });
+        f.render_widget(input, area);
+        let cursor_x = area.x + prompt_width + cursor_offset;
+        f.set_cursor_position((
+            cursor_x.min(area.x.saturating_add(area.width).saturating_sub(1)),
+            area.y,
+        ));
+        return;
+    }
     let input = Paragraph::new(Line::from(vec![
         Span::styled(prompt.clone(), Theme::accent()),
         Span::raw(content),
@@ -8041,19 +8108,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     // the left border). The prompt string includes its own
     // trailing space, so the cursor lands one cell after
     // the prompt and `query_cursor` cells into the buffer.
-    let prompt_width = prompt.chars().count() as u16;
-    // When the comment-edit buffer is active, the cursor
-    // should follow the comment buffer (which is always at
-    // the end since push_char appends and backspace pops).
-    // Using `query_cursor` here would track the search
-    // query's cursor instead — a bug the user reported as
-    // "the cursor stays at the same position while I
-    // type in the comment field".
-    let cursor_offset = if app.comment_edit.is_some() {
-        content.chars().count() as u16
-    } else {
-        app.query_cursor as u16
-    };
+    // `prompt_width` / `cursor_offset` are computed once above
+    // (shared with the compact, border-less path).
     let cursor_x = area.x + 1 + prompt_width + cursor_offset;
     let cursor_y = area.y + 1;
     f.set_cursor_position((

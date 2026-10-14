@@ -1770,6 +1770,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(
         f,
+        "  tui.compact = {}",
+        if cfg.compact { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        f,
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
@@ -2298,6 +2303,14 @@ pub struct Config {
     /// the more useful signal while actively searching. Set via
     /// `tui.highlight=on|off`.
     tui_highlight: bool,
+    /// Compact display bundle, from `tui.compact=on|off` (default
+    /// `off`). When on: a one-line query prompt (no border box),
+    /// auto-collapsing an empty Output Preview pane, a width-aware mode
+    /// strip, and the relaxed pane-visibility cutoff — all reclaiming
+    /// rows for the list. Toggled at runtime by
+    /// `Action::ToggleCompactDisplay`; the session file remembers the
+    /// last choice (session overrides this config default).
+    compact: bool,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -2770,6 +2783,7 @@ impl Config {
             prompt_project_enabled: false,
             shellintegration_osc133_enabled: true,
             tui_highlight: false,
+            compact: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -3071,6 +3085,9 @@ impl Config {
                 }
                 "tui.highlight" => {
                     self.tui_highlight = crate::util::parse_bool(value, false);
+                }
+                "tui.compact" => {
+                    self.compact = crate::util::parse_bool(value, false);
                 }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
@@ -4255,6 +4272,13 @@ impl Config {
     /// comment. Default `false`.
     pub fn tui_highlight(&self) -> bool {
         self.tui_highlight
+    }
+
+    /// Whether the compact display bundle is enabled by default — see
+    /// `tui.compact` / the `compact` field doc comment. Default
+    /// `false`. The session file's last in-TUI toggle overrides this.
+    pub fn compact(&self) -> bool {
+        self.compact
     }
 
     /// The user-defined JQL fragments loaded from
@@ -9703,6 +9727,9 @@ fn main() -> anyhow::Result<()> {
                     }
                     "tui.highlight" => {
                         println!("{}", if cfg.tui_highlight { "on" } else { "off" })
+                    }
+                    "tui.compact" => {
+                        println!("{}", if cfg.compact { "on" } else { "off" })
                     }
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })

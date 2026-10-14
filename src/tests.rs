@@ -1454,6 +1454,18 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(cfg.pane_layout(), PaneLayout::Bottom);
     }
 
+    /// `tui.compact=on|off` selects the initial state of the compact
+    /// display bundle. Default `off`.
+    #[test]
+    fn config_parses_tui_compact_key() {
+        let mut cfg = Config::default();
+        assert!(!cfg.compact());
+        cfg.parse("tui.compact=on\n");
+        assert!(cfg.compact());
+        cfg.parse("tui.compact=off\n");
+        assert!(!cfg.compact());
+    }
+
     /// Regression test for
     /// the "I have
     /// `sessiondirs=~/foo`

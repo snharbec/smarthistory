@@ -60,6 +60,8 @@ value" so you can confirm what the TUI actually sees.
   - [`tui.highlight`](#tuihighlight)
 - [Detail panes](#detail-panes)
   - [`panes.layout`](#paneslayout)
+- [Compact display](#compact-display)
+  - [`tui.compact`](#tuicompact)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -402,7 +404,8 @@ panes.layout=bottom  # historical: detail row below the list (default)
 (`Action::TogglePaneVisibility`): `BOTH` fills the docked area with both,
 `Details` / `Output` put just one pane there, and `Hidden` removes the panes
 entirely (the list reclaims the space). Below 20 terminal lines both panes are
-hidden automatically regardless.
+hidden automatically regardless — unless [`tui.compact`](#tuicompact) is on,
+which lowers that cutoff to "as soon as a one-line pane fits".
 
 The placement can also be flipped at runtime with `Action::TogglePaneLayout`,
 which ships **unbound**; set `key.toggle-pane-layout=<spec>` to bind it (or open
@@ -410,6 +413,43 @@ it from the command palette, `Ctrl-Q`). The last choice is remembered in the
 session file (`panelayout=right` / `panelayout=bottom`) and takes precedence
 over `panes.layout` on the next launch, exactly like the other layout settings —
 so the config key sets the *initial* default before any in-TUI toggle.
+
+---
+
+## Compact display
+
+### `tui.compact`
+
+|                     |               |
+| ------------------- | ------------- |
+| **Type**            | `on` \| `off` |
+| **Default**         | `off`         |
+| **Session key**     | `compact=`    |
+| **Toggle action**   | `toggle-compact-display` (unbound) |
+
+A single switch for a bundle of space-saving behaviours that give rows and
+columns back to the history list:
+
+- the query prompt collapses to **one line** (no border box), freeing two rows;
+- an **empty Output Preview** pane is collapsed in the `BOTH` layout, handing
+  the space to Details;
+- the **mode strip** drops the redundant trailing `scope · duplicate` text and,
+  on narrow terminals, drops the lowest-priority chips instead of clipping one
+  mid-glyph;
+- the detail panes appear **as soon as there is room** for a one-line pane
+  (chrome + minimum list rows + one line) instead of at the fixed 20-line
+  cutoff.
+
+```ini
+tui.compact=on    # reclaim rows/columns for the list
+tui.compact=off   # historical spacious layout (default)
+```
+
+The bundle can be flipped at runtime with `Action::ToggleCompactDisplay`, which
+ships **unbound**; set `key.toggle-compact-display=<spec>` (or open it from the
+command palette, `Ctrl-Q`). The last choice is remembered in the session file
+(`compact=on` / `compact=off`) and takes precedence over `tui.compact` on the
+next launch.
 
 ---
 
@@ -1710,6 +1750,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `segments.minwords`             | non-negative int                  | `5`                                                              | [History list & filtering](#history-list--filtering)                      |
 | `tui.highlight`                 | `on` \| `off`                     | `off`                                                            | [History list & filtering](#history-list--filtering)                      |
 | `panes.layout`                  | `bottom` \| `right`               | `bottom`                                                         | [Detail panes](#detail-panes)                                             |
+| `tui.compact`                   | `on` \| `off`                     | `off`                                                            | [Compact display](#compact-display)                                       |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.limit`                | positive int                      | `6`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.minchars`             | non-negative int                  | `1`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
