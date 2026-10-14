@@ -129,10 +129,23 @@ The status bar surfaces a "directory too large" message instead of hanging.
 The walk is debounced: 300ms after the last keystroke. The walk runs in a
 background thread; the result populates the list when it lands.
 
+## Match algorithm
+
+`/` mode honors the global `C-f` match-algorithm toggle, like directories (`#`)
+and panes (`*`) mode:
+
+- **SUBSTRING** (default) — every whitespace-separated word must appear as a
+  case-insensitive substring of the path. This is the only mode in which the
+  glob syntax below applies.
+- **FUZZY** — fzf-style subsequence match, so `multirs` matches
+  `multiplexer.rs` without a literal `multirs` substring.
+- **REGEX** — the body is compiled as a Rust regex.
+
 ## Special tokens
 
 - `*<glob>` segments (anywhere in the path) restrict the walk to matching paths.
-  Examples: `/*.rs`, `/work/**/*.toml`, `/**/Cargo.toml`.
+  Examples: `/*.rs`, `/work/**/*.toml`, `/**/Cargo.toml`. Only active in
+  SUBSTRING mode (see above).
 - Pure `/` (no body) returns everything.
 
 ## Cross-references

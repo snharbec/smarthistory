@@ -33615,6 +33615,52 @@ fn spawn_files_walk_unlocked_plain_text_still_uses_substring_matcher() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// In Fuzzy (or Regex) mode, `files::fetch` must NOT pre-filter by
+/// substring — otherwise a fuzzy subsequence like `multirs` would be
+/// dropped while still looking for a literal `multirs` substring,
+/// before `App::refresh`'s algorithm-aware post-filter ever runs.
+/// This is the counterpart of `directories::fetch`'s `use_sql_like`
+/// gate: fetch returns the full candidate set, and the fuzzy/regex
+/// predicate (`query_matches_text`, exercised below) narrows it.
+#[test]
+fn files_fetch_skips_substring_prefilter_in_fuzzy_mode() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_files_fuzzy_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("multiplexer.rs"), "x").unwrap();
+    std::fs::write(dir.join("banana.txt"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.files_root = dir.clone();
+    app.query = format!("{}multirs", app.query_prefixes.files);
+    app.match_algorithm = MatchAlgorithm::Fuzzy;
+    app.spawn_files_walk();
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    app.files_state.all_rows = Some(drain_files_walk(request));
+    let candidates = crate::tui::mode::files::fetch(&mut app).unwrap();
+    let mut names: Vec<&str> = candidates.iter().map(|r| r.command.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["banana.txt", "multiplexer.rs"],
+        "fuzzy fetch must return every candidate, not just the substring matches"
+    );
+
+    // What `App::refresh`'s post-filter does with that candidate set:
+    // only the fuzzy subsequence match survives.
+    let matched: Vec<&str> = candidates
+        .iter()
+        .filter(|r| app.query_matches_text(&r.command))
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(matched, vec!["multiplexer.rs"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- Directory picker (`--glob-complete-dir`, `cd proj*<TAB>`) ----
 
 /// Build a locked DIRECTORY-picker `App` (mirrors
