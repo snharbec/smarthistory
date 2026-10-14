@@ -621,6 +621,14 @@ pub enum PaneVisibility {
     /// preview pane; details
     /// is hidden.
     OutputPreview,
+    /// Hide both the details
+    /// and output preview
+    /// panes; the whole
+    /// detail row's height
+    /// goes back to the
+    /// history list, which
+    /// always keeps priority.
+    Hidden,
 }
 
 impl PaneVisibility {
@@ -628,7 +636,8 @@ impl PaneVisibility {
         match self {
             PaneVisibility::Both => PaneVisibility::Details,
             PaneVisibility::Details => PaneVisibility::OutputPreview,
-            PaneVisibility::OutputPreview => PaneVisibility::Both,
+            PaneVisibility::OutputPreview => PaneVisibility::Hidden,
+            PaneVisibility::Hidden => PaneVisibility::Both,
         }
     }
 
@@ -638,6 +647,7 @@ impl PaneVisibility {
             PaneVisibility::Both => "both",
             PaneVisibility::Details => "details",
             PaneVisibility::OutputPreview => "output",
+            PaneVisibility::Hidden => "hidden",
         }
     }
 
@@ -647,16 +657,19 @@ impl PaneVisibility {
             PaneVisibility::Both => "both",
             PaneVisibility::Details => "details",
             PaneVisibility::OutputPreview => "output",
+            PaneVisibility::Hidden => "hidden",
         }
     }
 
-    /// Parse a string like "both", "details", "output"
-    /// (case-insensitive). Returns `None` for anything else.
+    /// Parse a string like "both", "details", "output",
+    /// "hidden" (case-insensitive). `none` / `off` are accepted
+    /// as aliases for `hidden`. Returns `None` for anything else.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "both" => Some(PaneVisibility::Both),
             "details" => Some(PaneVisibility::Details),
             "output" => Some(PaneVisibility::OutputPreview),
+            "hidden" | "none" | "off" => Some(PaneVisibility::Hidden),
             _ => None,
         }
     }
@@ -673,41 +686,57 @@ pub struct PaneHeight(u16);
 
 impl Default for PaneHeight {
     fn default() -> Self {
-        PaneHeight(Self::MIN)
+        PaneHeight(Self::DEFAULT)
     }
 }
 
 impl PaneHeight {
-    /// The historical fixed details-row height, and the floor
-    /// `decrease` never goes below.
-    pub const MIN: u16 = 8;
+    /// The out-of-box details-row height (the historical 8 lines).
+    /// Not a floor: `decrease` can shrink below it, down to `FLOOR`.
+    pub const DEFAULT: u16 = 8;
+
+    /// The smallest the details / output-preview row may shrink to,
+    /// in lines. `decrease` never goes below this — a single visible
+    /// line (the pane's top border + title). Fully hiding the panes is
+    /// expressed with [`PaneVisibility::Hidden`], not with a height of
+    /// zero, so the list always keeps priority when the panes are gone.
+    pub const FLOOR: u16 = 1;
 
     /// Rows reserved for the history list itself, even at the
     /// tallest details pane, so `increase` can never shrink the
     /// list to nothing.
     const MIN_LIST_ROWS: u16 = 3;
 
-    /// One line taller, clamped to `max_for(page_size)`.
+    /// One line taller, clamped to `max_for(page_size)`. Never
+    /// shrinks: on a terminal whose derived max is at or below the
+    /// current value this is a no-op, so pressing `F11` on a tiny
+    /// terminal can't unexpectedly collapse the pane (the rendered
+    /// height is separately clamped to `max_for` in
+    /// `detail_row_height`).
     pub fn increase(self, page_size: usize) -> Self {
-        PaneHeight(self.0.saturating_add(1).min(Self::max_for(page_size)))
+        let max = Self::max_for(page_size);
+        if self.0 >= max {
+            self
+        } else {
+            PaneHeight(self.0 + 1)
+        }
     }
 
-    /// One line shorter, never below `MIN`.
+    /// One line shorter, never below `FLOOR` (a single line).
     pub fn decrease(self) -> Self {
-        PaneHeight(self.0.saturating_sub(1).max(Self::MIN))
+        PaneHeight(self.0.saturating_sub(1).max(Self::FLOOR))
     }
 
     /// The tallest the details row may grow to for a given
     /// terminal size: total height minus the fixed chrome (mode
     /// strip, input, status — 5 lines) minus `MIN_LIST_ROWS` for
-    /// the history list. Never below `MIN`, so a very short
-    /// terminal still gets the historical default rather than
-    /// something smaller.
+    /// the history list. Never below `FLOOR`, so there's always a
+    /// well-defined (if tiny) height even on a very short terminal.
     fn max_for(page_size: usize) -> u16 {
         (page_size as u16)
             .saturating_sub(5)
             .saturating_sub(Self::MIN_LIST_ROWS)
-            .max(Self::MIN)
+            .max(Self::FLOOR)
     }
 
     /// The row height (in terminal lines) for the details row and
@@ -731,16 +760,16 @@ impl PaneHeight {
     }
 
     /// Parse a persisted/CLI value: a plain non-negative integer
-    /// number of lines. Values below `MIN` are clamped up to `MIN`
-    /// (rather than rejected) so a hand-edited config/session file
-    /// with e.g. `paneheight=3` can't wedge the details row below
-    /// the historical floor. Returns `None` for anything that
-    /// isn't a valid integer.
+    /// number of lines. Values below `FLOOR` are clamped up to
+    /// `FLOOR` (rather than rejected) so a hand-edited config/session
+    /// file with e.g. `paneheight=0` can't wedge the details row at
+    /// zero height. Returns `None` for anything that isn't a valid
+    /// integer.
     pub fn parse(s: &str) -> Option<Self> {
         s.trim()
             .parse::<u16>()
             .ok()
-            .map(|n| PaneHeight(n.max(Self::MIN)))
+            .map(|n| PaneHeight(n.max(Self::FLOOR)))
     }
 }
 

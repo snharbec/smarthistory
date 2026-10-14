@@ -1470,9 +1470,14 @@ Pressing the key again resets to `All`.
 | Category     | layout                   |
 
 Toggle detail pane visibility. Cycles through: `BOTH` (details + output preview
-side-by-side) → `Details` only → `Output Preview` only → `BOTH`. When only one
-pane is visible, the remaining pane uses the full detail-row height — useful on
+side-by-side) → `Details` only → `Output Preview` only → `Hidden` → `BOTH`.
+When only one pane is visible, it uses the full detail-row height — useful on
 narrow terminals where the side-by-side layout would be cramped.
+
+`Hidden` hides **both** panes: the entire detail-row height (whatever it was
+set to) goes back to the history list, which always keeps priority. This is
+the explicit, terminal-size-independent way to see as many rows as possible;
+the layout chip shows `HIDDEN` so the state is visible.
 
 Below 20 terminal lines, both panes are hidden automatically regardless of this
 setting — there isn't room for a details row without squeezing the history list
@@ -1505,8 +1510,12 @@ the pane exactly as far as needed, one line at a time.
 | Default key  | `S-F11`                |
 | Category     | layout                 |
 
-Shrink the detail / output-preview row height by one line, down to the
-historical 8-line floor. The mirror image of `IncreasePaneHeight`.
+Shrink the detail / output-preview row height by one line, down to a floor of a
+single visible line. The out-of-box default is 8 lines, but that is not a floor
+— keep pressing `S-F11` to collapse the row to one line (the pane's top border
+and title). To remove the panes entirely, use `F10`'s `Hidden` state instead
+(this action's floor stays at one line so a pane is always at least minimally
+visible). The mirror image of `IncreasePaneHeight`.
 
 ---
 

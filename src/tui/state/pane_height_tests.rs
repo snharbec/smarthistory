@@ -17,15 +17,22 @@
         assert_eq!(h, PaneHeight::parse("9").unwrap());
     }
 
-    /// `decrease` must never go below the historical 8-line floor,
-    /// no matter how many times it's called.
+    /// `decrease` must never go below the one-line floor, no matter
+    /// how many times it's called (the out-of-box default of 8 is not
+    /// a floor — a 1-line pane is legitimate).
     #[test]
-    fn decrease_never_goes_below_min() {
+    fn decrease_shrinks_to_the_one_line_floor() {
         let mut h = PaneHeight::default();
         for _ in 0..20 {
             h = h.decrease();
         }
-        assert_eq!(h, PaneHeight::parse("8").unwrap());
+        assert_eq!(h, PaneHeight::parse("1").unwrap());
+        // Seven decreases land exactly on the floor (8 → 1).
+        let mut seven = PaneHeight::default();
+        for _ in 0..7 {
+            seven = seven.decrease();
+        }
+        assert_eq!(seven, PaneHeight::parse("1").unwrap());
     }
 
     /// `increase` must clamp to `max_for(page_size)` rather than
@@ -78,9 +85,14 @@
     }
 
     #[test]
-    fn parse_clamps_a_too_small_value_up_to_min() {
-        assert_eq!(PaneHeight::parse("0"), Some(PaneHeight::default()));
-        assert_eq!(PaneHeight::parse("3"), Some(PaneHeight::default()));
+    fn parse_clamps_a_zero_value_up_to_the_floor() {
+        // 0 would make the pane invisible; clamp up to the 1-line
+        // floor. Heights between the floor and the default (e.g. 3)
+        // are honoured as-is now that the floor is 1, not 8.
+        assert_eq!(PaneHeight::parse("0"), Some(PaneHeight::parse("1").unwrap()));
+        assert_eq!(PaneHeight::parse("1"), Some(PaneHeight::parse("1").unwrap()));
+        assert_eq!(PaneHeight::parse("3"), Some(PaneHeight::parse("3").unwrap()));
+        assert_eq!(PaneHeight::parse("3").unwrap().detail_row_height(1000), 3);
     }
 
     #[test]

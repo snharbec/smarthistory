@@ -1328,17 +1328,28 @@ fn dispatch_action_increase_pane_height_grows_by_one_line() {
     assert_eq!(app.pane_height, before.increase(page_size));
 }
 
-/// `Action::DecreasePaneHeight` shrinks by one line and floors at
-/// the historical 8-line minimum rather than going negative or
-/// wrapping.
+/// `Action::DecreasePaneHeight` shrinks by one line and floors at a
+/// single visible line (`PaneHeight::FLOOR`) rather than going
+/// negative or wrapping. The out-of-box default of 8 is not a floor.
 #[test]
-fn dispatch_action_decrease_pane_height_floors_at_min() {
+fn dispatch_action_decrease_pane_height_floors_at_one_line() {
     let mut app = global_test_app(&[("a", 1)]);
     assert_eq!(app.pane_height, crate::tui::state::PaneHeight::default());
+    // One press shrinks by exactly one line (8 → 7).
     let quit = dispatch_action(&mut app, Action::DecreasePaneHeight);
     assert!(!quit);
-    // Already at the floor — decreasing further is a no-op.
-    assert_eq!(app.pane_height, crate::tui::state::PaneHeight::default());
+    assert_eq!(
+        app.pane_height,
+        crate::tui::state::PaneHeight::default().decrease()
+    );
+    // Repeated presses floor at a single line, never below.
+    for _ in 0..20 {
+        dispatch_action(&mut app, Action::DecreasePaneHeight);
+    }
+    assert_eq!(
+        app.pane_height,
+        crate::tui::state::PaneHeight::parse("1").unwrap()
+    );
 }
 
 /// The destructive-confirm
@@ -7319,6 +7330,36 @@ fn project_config_defaults_are_shipped() {
         format_key_specs(bindings.specs(Action::TogglePaneVisibility)),
         "F10"
     );
+}
+
+/// `F10` cycles the pane layout BOTH → DETAILS → OUTPUT → HIDDEN →
+/// BOTH. `HIDDEN` must round-trip through the session file's
+/// `panevisibility=` form (plus the `none` / `off` aliases), the same
+/// way the other three states already do.
+#[test]
+fn pane_visibility_cycle_includes_hidden_and_round_trips() {
+    use crate::tui::state::PaneVisibility;
+    let mut v = PaneVisibility::Both;
+    v = v.next();
+    assert_eq!(v, PaneVisibility::Details);
+    v = v.next();
+    assert_eq!(v, PaneVisibility::OutputPreview);
+    v = v.next();
+    assert_eq!(v, PaneVisibility::Hidden);
+    v = v.next();
+    assert_eq!(v, PaneVisibility::Both);
+    for vis in [
+        PaneVisibility::Both,
+        PaneVisibility::Details,
+        PaneVisibility::OutputPreview,
+        PaneVisibility::Hidden,
+    ] {
+        assert_eq!(PaneVisibility::parse(vis.as_str()), Some(vis));
+    }
+    assert_eq!(PaneVisibility::parse("none"), Some(PaneVisibility::Hidden));
+    assert_eq!(PaneVisibility::parse("OFF"), Some(PaneVisibility::Hidden));
+    assert_eq!(PaneVisibility::parse("bogus"), None);
+    assert_eq!(PaneVisibility::Hidden.label(), "hidden");
 }
 
 /// Actions the user has

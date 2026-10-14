@@ -114,7 +114,7 @@ pub(crate) struct TuiSession {
     /// end of the last session. `None`
     /// means "no preference" and falls
     /// back to `PaneHeight::default()`
-    /// (the 8-line historical floor).
+    /// (8 lines).
     pane_height: Option<String>,
     /// The active color scheme (`"light"` /
     /// `"dark"`) at the end of the last
@@ -1382,11 +1382,12 @@ pub(crate) struct App {
     match_algorithm: MatchAlgorithm,
     /// Which detail panes are visible. Cycled
     /// between BOTH → Details → Output
-    /// Preview → BOTH with `F6`
-    /// (configurable).
+    /// Preview → Hidden → BOTH with `F10`
+    /// (configurable). `Hidden` reclaims the
+    /// whole detail-row height for the list.
     pane_visibility: crate::tui::state::PaneVisibility,
     /// The active details/output-preview row height,
-    /// in terminal lines (8-line historical floor).
+    /// in terminal lines (default 8, floor of 1).
     /// Adjusted one line at a time by
     /// `Action::IncreasePaneHeight` /
     /// `Action::DecreasePaneHeight` and persisted in
@@ -14335,7 +14336,7 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::TogglePaneVisibility => {
-            // Cycle through: BOTH → Details → OutputPreview → BOTH.
+            // Cycle through: BOTH → Details → OutputPreview → Hidden → BOTH.
             app.pane_visibility = app.pane_visibility.next();
             app.set_status_message(format!("Pane layout: {}", app.pane_visibility.label()));
             false
@@ -14358,8 +14359,8 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::DecreasePaneHeight => {
-            // Shrink by one line, never below the historical
-            // 8-line floor.
+            // Shrink by one line, never below a single visible
+            // line (`PaneHeight::FLOOR`).
             app.pane_height = app.pane_height.decrease();
             app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
             false
