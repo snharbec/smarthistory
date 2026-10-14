@@ -10582,11 +10582,16 @@ fn todo_restriction_shows_only_matching_type() {
 /// helper existed.
 #[test]
 fn fetch_todos_populates_real_timestamps() {
-    let (dir, db_path) = setup_todo_db();
+    // Capture the window's lower bound BEFORE creating the fixture: the
+    // row timestamps come from the note files' mtimes, which `setup_todo_db`
+    // sets while writing them. Taking `before` afterwards left the window
+    // not covering the writes, so a slow (e.g. loaded CI) run where the
+    // setup took over a second made every mtime look "too old" — a flake.
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let (dir, db_path) = setup_todo_db();
     let mut app = global_test_app(&[("a", 1)]);
     app.notes_dir = Some(dir.clone());
     app.notes_database = Some(db_path.clone());
@@ -16340,21 +16345,30 @@ fn ag_row_renders_path_relative_to_cwd_not_absolute() {
         terminal
             .draw(|f| crate::tui::render::ui(f, &mut app))
             .expect("draw");
-        let text = terminal
-            .backend()
-            .buffer()
+        let buf = terminal.backend().buffer();
+        let width = buf.area.width as usize;
+        // One `String` per screen row, so the assertion can target the
+        // LIST row specifically. The Details pane's `Dir` field shows
+        // the full directory (with `~` expansion) by design — that is a
+        // different feature, not the list row this test is about, so it
+        // is deliberately out of scope here. (Asserting on the whole
+        // screen, as this test used to, spuriously failed on that pane.)
+        let rows: Vec<String> = buf
             .content
+            .chunks(width)
+            .map(|r| r.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let list_row = rows
             .iter()
-            .map(|c| c.symbol())
-            .collect::<String>();
-
+            .find(|r| r.contains("s/main.rs:"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected the cwd-relative, abbreviated path on a list row, got rows: {rows:?}"
+                )
+            });
         assert!(
-            text.contains("s/main.rs:"),
-            "expected the cwd-relative, abbreviated path onscreen, got: {text:?}"
-        );
-        assert!(
-            !text.contains(&cwd.to_string_lossy().into_owned()),
-            "the absolute cwd prefix must not appear onscreen, got: {text:?}"
+            !list_row.contains(&cwd.to_string_lossy().into_owned()),
+            "the list row must show the cwd-relative path, not the absolute one, got: {list_row:?}"
         );
     });
     std::env::set_current_dir(&prev_cwd).expect("restore cwd");
