@@ -6619,6 +6619,7 @@ fn session_round_trips_sort_order() {
         pane_visibility: None,
         pane_height: None,
         pane_layout: None,
+        pane_width: None,
         scheme: None,
         pane_last_touched: std::collections::HashMap::new(),
         command_menu_recent: Vec::new(),
@@ -7386,6 +7387,40 @@ fn pane_layout_cycle_round_trips_and_dispatches() {
     assert_eq!(app.pane_layout, PaneLayout::Right);
     assert!(!dispatch_action(&mut app, Action::TogglePaneLayout));
     assert_eq!(app.pane_layout, PaneLayout::Bottom);
+}
+
+/// The `F11` / `S-F11` keys (`IncreasePaneHeight` / `DecreasePaneHeight`)
+/// resize the detail panes in whichever orientation the active layout
+/// uses: the bottom row's HEIGHT in `Bottom`, the right column's WIDTH
+/// in `Right`. Neither key must touch the other axis's setting.
+#[test]
+fn pane_size_keys_resize_height_in_bottom_and_width_in_right() {
+    use crate::tui::state::{PaneHeight, PaneLayout, PaneWidth};
+    let mut app = global_test_app(&[("a", 1)]);
+
+    // BOTTOM (default): F11 / S-F11 change height, not width.
+    app.pane_layout = PaneLayout::Bottom;
+    let (h0, w0) = (app.pane_height, app.pane_width);
+    dispatch_action(&mut app, Action::IncreasePaneHeight);
+    assert_eq!(app.pane_width, w0, "width must be untouched in Bottom layout");
+    assert_ne!(app.pane_height, h0, "height must grow in Bottom layout");
+    dispatch_action(&mut app, Action::DecreasePaneHeight);
+    assert_eq!(app.pane_height, h0);
+    assert_eq!(app.pane_width, w0, "width must stay untouched in Bottom layout");
+
+    // RIGHT: F11 / S-F11 change the column width, not the height.
+    app.pane_layout = PaneLayout::Right;
+    let (h0, w0) = (app.pane_height, app.pane_width);
+    dispatch_action(&mut app, Action::IncreasePaneHeight);
+    assert_eq!(app.pane_height, h0, "height must be untouched in Right layout");
+    assert_eq!(app.pane_width, w0.increase(), "width must grow in Right layout");
+    dispatch_action(&mut app, Action::DecreasePaneHeight);
+    assert_eq!(app.pane_width, w0, "width must shrink back in Right layout");
+    assert_eq!(app.pane_height, h0, "height must stay untouched in Right layout");
+
+    // Sanity: the resize helpers exist and behave on the type itself.
+    assert_eq!(PaneWidth::default().decrease(), PaneWidth::parse("35").unwrap());
+    assert_ne!(PaneHeight::default(), PaneHeight::default().decrease());
 }
 
 /// Actions the user has

@@ -1091,12 +1091,13 @@ The full set:
 Other session fields (`theme`, `sort_order`, `match_algorithm` (the `C-f`
 algorithm, persisted as `matchalgorithm=substring|fuzzy|regex`, only when
 non-default), `exit_filter`, `duplicate_filter`, `directory_source`,
-`pane_height` when changed via F11 inside the TUI, `pane_visibility` when
-changed inside the TUI, `pane_layout` (the `toggle-pane-layout` placement,
-persisted as `panelayout=bottom|right` only when non-default) **are** persisted
-— those state changes are only reachable through interactive use of the TUI,
-and the persisted session is the natural place to remember them across
-launches.
+`pane_height` when changed via F11 inside the TUI, `pane_width` (the `Right`
+layout's column width, also F11 / S-F11, persisted as `panewidth=<percent>`),
+`pane_visibility` when changed inside the TUI, `pane_layout` (the
+`toggle-pane-layout` placement, persisted as `panelayout=bottom|right` only when
+non-default) **are** persisted — those state changes are only reachable through
+interactive use of the TUI, and the persisted session is the natural place to
+remember them across launches.
 
 1. `--mode` flag (or `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE`)
 2. `initialmode=` from `~/.config/smarthistory/config`

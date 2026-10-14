@@ -122,6 +122,11 @@ pub(crate) struct TuiSession {
     /// `PaneLayout::default()`). Unrecognised values are silently
     /// dropped on load.
     pane_layout: Option<String>,
+    /// Last right-column width (percent), persisted as a plain
+    /// integer string. `None` means "no preference" and falls back to
+    /// `PaneWidth::default()` (40). Values outside `PaneWidth`'s
+    /// `MIN..=MAX` range are clamped on load.
+    pane_width: Option<String>,
     /// The active color scheme (`"light"` /
     /// `"dark"`) at the end of the last
     /// session, toggled via
@@ -431,6 +436,18 @@ impl TuiSession {
                         s.pane_layout =
                             Some(value.to_string());
                     }
+                // Same pattern as `paneheight`: only accept a plain
+                // integer that `PaneWidth::parse` recognises (it
+                // clamps out-of-range values into `MIN..=MAX`).
+                "panewidth"
+                    if crate::tui::state::PaneWidth::parse(
+                        value,
+                    )
+                    .is_some()
+                    => {
+                        s.pane_width =
+                            Some(value.to_string());
+                    }
                 // Same pattern as the other session
                 // fields: only accept values that
                 // `ColorScheme::parse` recognises
@@ -547,6 +564,9 @@ impl TuiSession {
         }
         if let Some(ref pl) = self.pane_layout {
             out.push_str(&format!("panelayout={}\n", pl));
+        }
+        if let Some(ref pw) = self.pane_width {
+            out.push_str(&format!("panewidth={}\n", pw));
         }
         if let Some(ref sc) = self.scheme {
             out.push_str(&format!("colorscheme={}\n", sc));
@@ -1423,6 +1443,12 @@ pub(crate) struct App {
     /// Toggled with `Action::TogglePaneLayout`, seeded
     /// from `panes.layout=` / the session file.
     pane_layout: crate::tui::state::PaneLayout,
+    /// Width (percent of terminal width) of the right-hand
+    /// Details/Output column in the `Right` layout. Nudged by
+    /// `Action::IncreasePaneHeight` / `Action::DecreasePaneHeight`
+    /// when the layout is `Right` (they resize the bottom row's
+    /// height in `Bottom`), and persisted in the session file.
+    pane_width: crate::tui::state::PaneWidth,
     /// The currently-selected TUI palette. Defaults to
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
@@ -5340,6 +5366,9 @@ impl App {
             // "constructor sets a safe default, the real entry point
             // overwrites it" pattern as `session_dirs_roots`).
             pane_layout: crate::tui::state::PaneLayout::default(),
+            // Seeded from the session file by `run_tui_to_stdout`
+            // right after construction, like `pane_layout` above.
+            pane_width: crate::tui::state::PaneWidth::default(),
             theme,
             detected_scheme,
             bindings,
@@ -12450,6 +12479,13 @@ pub fn run_tui_to_stdout(
         .as_deref()
         .and_then(crate::tui::state::PaneLayout::parse)
         .unwrap_or_else(|| app_cfg.pane_layout());
+    // Right-column width. Session-only (no config key), like
+    // `pane_height`; `None` falls back to `PaneWidth::default()`.
+    let initial_pane_width = session
+        .pane_width
+        .as_deref()
+        .and_then(crate::tui::state::PaneWidth::parse)
+        .unwrap_or_default();
     let home_list = build_home_list(&app_cfg);
     // The `sessiondirs=...` walk is deliberately NOT computed here
     // (unlike `home_list` above). It used to run unconditionally on
@@ -12511,6 +12547,7 @@ pub fn run_tui_to_stdout(
     // default). `App::new` starts at the default; this is the
     // entry-point override, mirroring `directory_source` etc.
     app.pane_layout = initial_pane_layout;
+    app.pane_width = initial_pane_width;
     app.segments_min_words = app_cfg.segments_min_words();
     app.tui_highlight_enabled = app_cfg.tui_highlight();
     // `--root <DIR>` overrides the base directory both plain `/`
@@ -12898,6 +12935,14 @@ pub fn run_tui_to_stdout(
             None
         } else {
             Some(app.pane_layout.as_str().to_string())
+        },
+        // Persist only when the right-column width differs from the
+        // default — same persist-only-if-non-default policy as
+        // `pane_height`. Session-only (no config/CLI key).
+        pane_width: if app.pane_width == crate::tui::state::PaneWidth::default() {
+            None
+        } else {
+            Some(app.pane_width.as_str())
         },
         // Persist only when the user has toggled away
         // from the default (`Dark`) — same
@@ -14399,27 +14444,41 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::IncreasePaneHeight => {
-            // Grow by one line, clamped so the history list
-            // keeps a few lines of its own. `crossterm`'s
-            // current terminal size is queried directly
-            // (mirrors the `page_size` fallback pattern used
-            // at the top of `run_loop`) since `dispatch_action`
-            // doesn't otherwise have the render area's height
-            // in scope. Persisted in the session file so the
-            // user's chosen height carries over to the next
-            // TUI startup.
-            let page_size = crossterm::terminal::size()
-                .map(|(_, rows)| rows as usize)
-                .unwrap_or(20);
-            app.pane_height = app.pane_height.increase(page_size);
-            app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
+            // "Grow the detail panes" — the same keys drive both
+            // layouts: the bottom row's HEIGHT in `Bottom`, the right
+            // column's WIDTH (percentage) in `Right`.
+            if app.pane_layout == crate::tui::state::PaneLayout::Right {
+                app.pane_width = app.pane_width.increase();
+                app.set_status_message(format!("Pane width: {}", app.pane_width.label()));
+            } else {
+                // Grow by one line, clamped so the history list
+                // keeps a few lines of its own. `crossterm`'s
+                // current terminal size is queried directly
+                // (mirrors the `page_size` fallback pattern used
+                // at the top of `run_loop`) since `dispatch_action`
+                // doesn't otherwise have the render area's height
+                // in scope. Persisted in the session file so the
+                // user's chosen height carries over to the next
+                // TUI startup.
+                let page_size = crossterm::terminal::size()
+                    .map(|(_, rows)| rows as usize)
+                    .unwrap_or(20);
+                app.pane_height = app.pane_height.increase(page_size);
+                app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
+            }
             false
         }
         Action::DecreasePaneHeight => {
-            // Shrink by one line, never below a single visible
-            // line (`PaneHeight::FLOOR`).
-            app.pane_height = app.pane_height.decrease();
-            app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
+            // Mirror of the increase arm: shrink the right column's
+            // width in `Right`, else the bottom row's height (never
+            // below a single visible line, `PaneHeight::FLOOR`).
+            if app.pane_layout == crate::tui::state::PaneLayout::Right {
+                app.pane_width = app.pane_width.decrease();
+                app.set_status_message(format!("Pane width: {}", app.pane_width.label()));
+            } else {
+                app.pane_height = app.pane_height.decrease();
+                app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
+            }
             false
         }
         Action::TogglePaneLayout => {
@@ -18008,6 +18067,7 @@ mod tui_session_tests {
             pane_visibility: Some("output".to_string()),
             pane_height: Some("20".to_string()),
             pane_layout: Some("right".to_string()),
+            pane_width: Some("55".to_string()),
             scheme: Some("light".to_string()),
             pane_last_touched: {
                 let mut m = std::collections::HashMap::new();
@@ -18034,6 +18094,7 @@ mod tui_session_tests {
         assert_eq!(loaded.pane_visibility.as_deref(), Some("output"));
         assert_eq!(loaded.pane_height.as_deref(), Some("20"));
         assert_eq!(loaded.pane_layout.as_deref(), Some("right"));
+        assert_eq!(loaded.pane_width.as_deref(), Some("55"));
         assert_eq!(loaded.scheme.as_deref(), Some("light"));
         assert_eq!(
             loaded.pane_last_touched.get("wB:p1").copied(),
@@ -18380,6 +18441,7 @@ mod tui_session_tests {
             // is always persisted (only when non-default) — mirror
             // that here with the default (`None`).
             pane_layout: None,
+            pane_width: None,
             scheme: None,
             pane_last_touched: std::collections::HashMap::new(),
             command_menu_recent: Vec::new(),
