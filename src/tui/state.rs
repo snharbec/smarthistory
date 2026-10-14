@@ -773,6 +773,67 @@ impl PaneHeight {
     }
 }
 
+/// Where the details / output-preview panes dock, relative to the
+/// history list.
+///
+/// - `Bottom` (default) — the historical layout: the list spans the
+///   full width and the detail row sits *below* it, with Details and
+///   Output Preview split left/right.
+/// - `Right` — the list takes the left portion of the width and a
+///   right-hand column stacks Details on top and Output Preview below
+///   it.
+///
+/// Orthogonal to [`PaneVisibility`] (which panes are shown) and
+/// [`PaneHeight`] (how tall the bottom row is — `Right` mode uses a
+/// fixed 50/50 split of the column instead). Toggled at runtime by
+/// `Action::TogglePaneLayout` (unbound by default; set
+/// `key.toggle-pane-layout=<spec>`), configured via
+/// `panes.layout=bottom|right`, and remembered in the session file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneLayout {
+    /// Panes dock below the list (the historical default).
+    #[default]
+    Bottom,
+    /// Panes dock to the right of the list (Details over Output
+    /// Preview).
+    Right,
+}
+
+impl PaneLayout {
+    /// Flip between the two layouts. `Bottom` ↔ `Right`.
+    pub fn next(self) -> Self {
+        match self {
+            PaneLayout::Bottom => PaneLayout::Right,
+            PaneLayout::Right => PaneLayout::Bottom,
+        }
+    }
+
+    /// Human-readable label for the status bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            PaneLayout::Bottom => "bottom",
+            PaneLayout::Right => "right",
+        }
+    }
+
+    /// Canonical string for the config file / session file.
+    pub fn as_str(self) -> &'static str {
+        self.label()
+    }
+
+    /// Parse a persisted/config value (`bottom` / `right`,
+    /// case-insensitive). `below` / `down` alias `bottom`; `side`
+    /// aliases `right`. Returns `None` for anything else so the
+    /// caller can fall back to the default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bottom" | "below" | "down" => Some(PaneLayout::Bottom),
+            "right" | "side" => Some(PaneLayout::Right),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod pane_height_tests;
 

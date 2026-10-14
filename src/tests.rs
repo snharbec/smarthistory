@@ -1436,6 +1436,24 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(cfg.multiplexer(), crate::multiplexer::MultiplexerKind::Tmux);
     }
 
+    /// `panes.layout=bottom|right` selects the detail-pane placement.
+    /// The loader is case-insensitive; unrecognised values are dropped
+    /// (previous value preserved) so a typo can't wedge the layout; the
+    /// default is `bottom`.
+    #[test]
+    fn config_parses_panes_layout_key() {
+        use crate::tui::state::PaneLayout;
+        let mut cfg = Config::default();
+        assert_eq!(cfg.pane_layout(), PaneLayout::Bottom);
+        cfg.parse("panes.layout=right\n");
+        assert_eq!(cfg.pane_layout(), PaneLayout::Right);
+        cfg.parse("panes.layout=BOTTOM\n");
+        assert_eq!(cfg.pane_layout(), PaneLayout::Bottom);
+        // Unrecognised value: the previous value is preserved.
+        cfg.parse("panes.layout=diagonal\n");
+        assert_eq!(cfg.pane_layout(), PaneLayout::Bottom);
+    }
+
     /// Regression test for
     /// the "I have
     /// `sessiondirs=~/foo`

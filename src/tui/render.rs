@@ -56,24 +56,28 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // case the detail row's height is reclaimed by the list too.
     let show_panes = f.area().height >= 20
         && app.pane_visibility != crate::tui::state::PaneVisibility::Hidden;
-    // The details row height adapts to the user's
-    // `pane_height` setting (Default: 8 lines,
-    // Tall: ~70% of the list area). `page_size`
-    // is the total terminal height minus the
-    // fixed chrome; `detail_row_height` returns
-    // the right value for each variant.
-    let detail_h = if show_panes {
+    // `BOTTOM` layout only: the details row height adapts to the
+    // user's `pane_height` setting (default 8 lines). `page_size` is
+    // the total terminal height; `detail_row_height` clamps to what
+    // the current terminal can afford. The `RIGHT` layout ignores
+    // this and splits its column 50/50 instead.
+    let detail_h = if show_panes
+        && app.pane_layout == crate::tui::state::PaneLayout::Bottom
+    {
         app.pane_height.detail_row_height(f.area().height as usize)
     } else {
         0
     };
+    // Top-level chrome: mode strip / middle / input / status. The
+    // middle band (`chunks[1]`) holds the history list and — when
+    // visible — the detail panes; its internal split depends on the
+    // active `pane_layout`.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
             [
                 Constraint::Length(1), // mode strip
-                Constraint::Fill(1),   // list
-                Constraint::Length(detail_h), // details row
+                Constraint::Fill(1),   // list (+ panes)
                 Constraint::Length(3), // input
                 Constraint::Length(1), // status
             ]
@@ -85,49 +89,97 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     draw_mode_strip(f, app, chunks[0]);
     let mode_strip_elapsed = mode_strip_start.elapsed();
 
-    let list_start = std::time::Instant::now();
-    draw_list(f, app, chunks[1]);
-    let list_elapsed = list_start.elapsed();
-
     let mut details_elapsed = std::time::Duration::ZERO;
     let mut output_preview_elapsed = std::time::Duration::ZERO;
-    if show_panes {
+    let list_start = std::time::Instant::now();
+    let list_elapsed: std::time::Duration;
+    if show_panes && app.pane_layout == crate::tui::state::PaneLayout::Right {
+        // RIGHT layout: list on the left, a Details-over-Output
+        // column on the right. `PaneVisibility` still decides which
+        // of the two panes (if either) fill that column.
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+            .split(chunks[1]);
+        draw_list(f, app, cols[0]);
+        list_elapsed = list_start.elapsed();
         match app.pane_visibility {
             crate::tui::state::PaneVisibility::Both => {
-                let detail_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-                    .split(chunks[2]);
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(
+                        [Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
+                    )
+                    .split(cols[1]);
                 let details_start = std::time::Instant::now();
-                draw_details(f, app, detail_chunks[0]);
+                draw_details(f, app, rows[0]);
                 details_elapsed = details_start.elapsed();
                 let output_preview_start = std::time::Instant::now();
-                draw_output_preview(f, app, detail_chunks[1]);
+                draw_output_preview(f, app, rows[1]);
                 output_preview_elapsed = output_preview_start.elapsed();
             }
             crate::tui::state::PaneVisibility::Details => {
                 let details_start = std::time::Instant::now();
-                draw_details(f, app, chunks[2]);
+                draw_details(f, app, cols[1]);
                 details_elapsed = details_start.elapsed();
             }
             crate::tui::state::PaneVisibility::OutputPreview => {
                 let output_preview_start = std::time::Instant::now();
-                draw_output_preview(f, app, chunks[2]);
+                draw_output_preview(f, app, cols[1]);
                 output_preview_elapsed = output_preview_start.elapsed();
             }
-            // Both panes hidden: `show_panes` is already false above,
-            // so `chunks[2]` has zero height and the list gets the
-            // space. Nothing to draw.
+            // Unreachable: `show_panes` is false when `Hidden`.
             crate::tui::state::PaneVisibility::Hidden => {}
+        }
+    } else {
+        // BOTTOM layout (historical): list on top, the detail row
+        // below it (`detail_h` tall, 0 when hidden). Details and
+        // Output Preview are split left/right.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Fill(1), Constraint::Length(detail_h)].as_ref())
+            .split(chunks[1]);
+        draw_list(f, app, rows[0]);
+        list_elapsed = list_start.elapsed();
+        if show_panes {
+            match app.pane_visibility {
+                crate::tui::state::PaneVisibility::Both => {
+                    let detail_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints(
+                            [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
+                        )
+                        .split(rows[1]);
+                    let details_start = std::time::Instant::now();
+                    draw_details(f, app, detail_chunks[0]);
+                    details_elapsed = details_start.elapsed();
+                    let output_preview_start = std::time::Instant::now();
+                    draw_output_preview(f, app, detail_chunks[1]);
+                    output_preview_elapsed = output_preview_start.elapsed();
+                }
+                crate::tui::state::PaneVisibility::Details => {
+                    let details_start = std::time::Instant::now();
+                    draw_details(f, app, rows[1]);
+                    details_elapsed = details_start.elapsed();
+                }
+                crate::tui::state::PaneVisibility::OutputPreview => {
+                    let output_preview_start = std::time::Instant::now();
+                    draw_output_preview(f, app, rows[1]);
+                    output_preview_elapsed = output_preview_start.elapsed();
+                }
+                // Both panes hidden: `detail_h` is 0, so `rows[1]` has
+                // zero height and the list gets the space.
+                crate::tui::state::PaneVisibility::Hidden => {}
+            }
         }
     }
 
     let input_start = std::time::Instant::now();
-    draw_input(f, app, chunks[3]);
+    draw_input(f, app, chunks[2]);
     let input_elapsed = input_start.elapsed();
 
     let status_start = std::time::Instant::now();
-    draw_status(f, app, chunks[4]);
+    draw_status(f, app, chunks[3]);
     let status_elapsed = status_start.elapsed();
 
     // Breaks down a slow `terminal.draw()` call (already logged as
@@ -4645,6 +4697,20 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     } else {
         None
     };
+    // Pane-placement chip: shown only when the detail panes are
+    // docked to the right instead of below the list, so the user
+    // knows why the list is narrower and where the panes went.
+    let pane_layout_chip = if app.pane_layout != crate::tui::state::PaneLayout::Bottom {
+        Some(Span::styled(
+            format!(" {} ", app.pane_layout.label().to_ascii_uppercase()),
+            Style::default()
+                .fg(Theme::badge_fg_color())
+                .bg(Theme::highlight_color())
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        None
+    };
     let mut spans = vec![
         Span::styled("smart", Theme::dim()),
         Span::styled("history", Theme::accent()),
@@ -4686,6 +4752,10 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         spans.push(chip);
     }
     if let Some(chip) = pane_vis_chip {
+        spans.push(Span::styled("  ", Theme::default()));
+        spans.push(chip);
+    }
+    if let Some(chip) = pane_layout_chip {
         spans.push(Span::styled("  ", Theme::default()));
         spans.push(chip);
     }

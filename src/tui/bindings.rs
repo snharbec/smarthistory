@@ -555,6 +555,17 @@ pub enum Action {
     ///
     /// Default key: `Shift-F11`. Works in any mode.
     DecreasePaneHeight,
+    /// Toggle where the detail panes dock: below the history list
+    /// (`BOTTOM`, the historical layout) or to the right of it
+    /// (`RIGHT`, with Details stacked over Output Preview). Purely a
+    /// placement toggle — which panes are visible is still
+    /// `Action::TogglePaneVisibility`'s job. Persisted in the session
+    /// file so the chosen layout carries over.
+    ///
+    /// Default key: unbind — ships unbound; opt in with
+    /// `key.toggle-pane-layout=<spec>` or open it from the command
+    /// palette. Works in any mode.
+    TogglePaneLayout,
     /// Open the prefix picker. The
     /// picker is a centred
     /// overlay (modelled on
@@ -807,6 +818,7 @@ impl Action {
             Action::TogglePaneVisibility => "toggle-pane-visibility",
             Action::IncreasePaneHeight => "increase-pane-height",
             Action::DecreasePaneHeight => "decrease-pane-height",
+            Action::TogglePaneLayout => "toggle-pane-layout",
             Action::PickPrefix => "pick-prefix",
             Action::JiraFieldComplete => "jira-field-complete",
             Action::CodegraphRelations => "codegraph-relations",
@@ -880,6 +892,7 @@ impl Action {
             Action::TogglePaneVisibility => "Toggle pane visibility",
             Action::IncreasePaneHeight => "Increase pane height",
             Action::DecreasePaneHeight => "Decrease pane height",
+            Action::TogglePaneLayout => "Toggle pane layout",
             Action::PickPrefix => "Pick prefix mode",
             Action::JiraFieldComplete => "JIRA field complete",
             Action::CodegraphRelations => "Browse callers / callees",
@@ -967,7 +980,9 @@ impl Action {
                 "panes"
             }
             Action::TogglePaneVisibility => "layout",
-            Action::IncreasePaneHeight | Action::DecreasePaneHeight => "layout",
+            Action::IncreasePaneHeight
+            | Action::DecreasePaneHeight
+            | Action::TogglePaneLayout => "layout",
         }
     }
 
@@ -1113,6 +1128,10 @@ impl Action {
             Action::TogglePaneVisibility => "F10",
             Action::IncreasePaneHeight => "F11",
             Action::DecreasePaneHeight => "S-F11",
+            // Unbound by default — the pane placement is a set-and-
+            // forget preference for most users; discoverable via the
+            // command palette or `key.toggle-pane-layout=<spec>`.
+            Action::TogglePaneLayout => "none",
             Action::JiraFieldComplete => "Tab",
             Action::PickPrefix => "F1",
             Action::CodegraphRelations => "C-r",
@@ -1643,6 +1662,7 @@ pub const ALL_ACTIONS: &[Action] = &[
     Action::TogglePaneVisibility,
     Action::IncreasePaneHeight,
     Action::DecreasePaneHeight,
+    Action::TogglePaneLayout,
     Action::JiraFieldComplete,
     Action::PickPrefix,
     Action::CodegraphRelations,
