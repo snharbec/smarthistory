@@ -181,6 +181,58 @@ fn highlight_matches_multi_word_out_of_order() {
     assert_eq!(content, vec!["git", " ", "commit", " -m"]);
 }
 
+/// Fuzzy highlighting marks the characters consumed by the subsequence,
+/// not just contiguous substrings: `gco` lights `g`, `c` and `o` inside
+/// `git commit`.
+#[test]
+fn highlight_fuzzy_matches_subsequence() {
+    let spans = super::render::highlight_fuzzy_matches("git commit", "gco");
+    let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+    assert_eq!(content, vec!["g", "it ", "co", "mmit"]);
+    // The matched runs carry the highlight color; the plain runs don't.
+    assert_eq!(
+        spans[0].style.fg,
+        Some(crate::tui::theme::Theme::highlight_color())
+    );
+    assert_eq!(spans[1].style.fg, None);
+    assert_eq!(
+        spans[2].style.fg,
+        Some(crate::tui::theme::Theme::highlight_color())
+    );
+}
+
+#[test]
+fn highlight_fuzzy_matches_case_insensitive() {
+    let spans = super::render::highlight_fuzzy_matches("Git Commit", "gco");
+    let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+    assert_eq!(content, vec!["G", "it ", "Co", "mmit"]);
+}
+
+#[test]
+fn highlight_fuzzy_matches_multi_word() {
+    let spans = super::render::highlight_fuzzy_matches("git commit -m", "git cm");
+    let content: Vec<String> = spans.iter().map(|s| s.content.to_string()).collect();
+    assert_eq!(content, vec!["git", " ", "c", "o", "m", "mit -m"]);
+}
+
+/// A word that isn't a subsequence of the text contributes no marks, and
+/// when NO word matches, the whole string is returned plain (one span).
+#[test]
+fn highlight_fuzzy_matches_no_match_is_plain() {
+    let spans = super::render::highlight_fuzzy_matches("git commit", "xyz");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content, "git commit".to_string());
+    assert_eq!(spans[0].style.fg, None);
+}
+
+/// Empty body → plain text, mirroring `highlight_matches`.
+#[test]
+fn highlight_fuzzy_matches_empty_body() {
+    let spans = super::render::highlight_fuzzy_matches("git commit", "");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content, "git commit".to_string());
+}
+
 /// Reproduces a real reported freeze: typing a two-word query
 /// (`"classification database"`) into `:` (segments) mode made the
 /// whole TUI stall for ~12 seconds while rendering a large flattened
@@ -16531,6 +16583,63 @@ fn render_row_prefers_match_highlight_over_syntax_cache_when_query_nonempty() {
     assert!(
         !has_cached_marker,
         "an active search query must bypass the syntax-highlight cache entirely, got: {:?}",
+        line.spans
+    );
+}
+
+/// In a prefix mode the row highlight must cover EVERY word of the
+/// search body, not just the last one. Regression test for highlight
+/// running against the raw `app.query` (`*git status`) instead of
+/// `search_body()` (`git status`): the leading `*` was welded onto the
+/// first word, so `git` never matched the row text and only `status`
+/// lit up.
+#[test]
+fn render_row_highlights_every_word_in_a_prefixed_query() {
+    let mut app = directories_test_app(&[]);
+    // Panes mode: the leading `*` selects the mode and is NOT part of
+    // the search text.
+    app.query = format!("{}git status", app.query_prefixes.panes);
+    let row = command_test_row("git status --short");
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let hl = crate::tui::theme::Theme::highlight_color();
+    let highlighted =
+        |needle: &str| line.spans.iter().any(|s| s.content.contains(needle) && s.style.fg == Some(hl));
+    assert!(
+        highlighted("git"),
+        "the first body word 'git' must be highlighted; spans: {:?}",
+        line.spans
+    );
+    assert!(
+        highlighted("status"),
+        "the second body word 'status' must be highlighted; spans: {:?}",
+        line.spans
+    );
+}
+
+/// In fuzzy mode, `render_row` must route through the subsequence
+/// highlighter, so a query like `gco` lights the scattered characters it
+/// actually matched in `git commit` — not just contiguous substrings.
+#[test]
+fn render_row_uses_fuzzy_highlight_in_fuzzy_mode() {
+    use crate::tui::state::MatchAlgorithm;
+    let mut app = directories_test_app(&[]);
+    app.match_algorithm = MatchAlgorithm::Fuzzy;
+    app.query = "gco".to_string();
+    let row = command_test_row("git commit");
+    let line = crate::tui::render::render_row(&row, &app, false, 3);
+    let hl = crate::tui::theme::Theme::highlight_color();
+    assert!(
+        line.spans
+            .iter()
+            .any(|s| s.content == "g" && s.style.fg == Some(hl)),
+        "fuzzy mode must highlight the leading 'g' of the subsequence; spans: {:?}",
+        line.spans
+    );
+    assert!(
+        line.spans
+            .iter()
+            .any(|s| s.content == "co" && s.style.fg == Some(hl)),
+        "fuzzy mode must highlight the 'co' run; spans: {:?}",
         line.spans
     );
 }

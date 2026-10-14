@@ -6142,8 +6142,21 @@ pub(crate) fn render_row<'a>(
                 .get(&(command_highlight_is_light(), cmd_display.clone()))
         {
             cached.clone()
+        } else if app.is_fuzzy_query() {
+            // Fuzzy mode matches on subsequences, so highlight the
+            // characters actually consumed by the subsequence rather
+            // than only contiguous substrings (which would miss e.g.
+            // `gco` in `git commit`).
+            highlight_fuzzy_matches(&cmd_display, app.search_body())
         } else {
-            highlight_matches(&cmd_display, &app.query)
+            // Highlight against the search BODY, not the raw query: the
+            // row was filtered by `query_matches_text`, which strips the
+            // leading prefix-mode char (`*`, `#`, `@`, …) via
+            // `search_body`. Passing the raw `app.query` here left that
+            // char welded onto the first word, so it never matched the
+            // row text — every word after the first highlighted, the
+            // first didn't (with a two-word query, "only the last word").
+            highlight_matches(&cmd_display, app.search_body())
         };
         if row.mode == "pane" {
             for s in &mut text_spans {
@@ -6307,6 +6320,16 @@ pub(super) fn highlight_matches(text: &str, query: &str) -> Vec<Span<'static>> {
         }
     }
 
+    styled_spans_from_highlights(&text_chars, &highlights)
+}
+
+/// Coalesce a per-character `highlights` mask into styled spans: each
+/// run of `true` becomes one bold/highlight-coloured span, each run of
+/// `false` a plain `Span::raw`. Shared by the substring
+/// (`highlight_matches`) and fuzzy (`highlight_fuzzy_matches`)
+/// highlighters so both style matches identically. An empty `text`
+/// yields an empty `Vec` (same as the pre-refactor behaviour).
+fn styled_spans_from_highlights(text_chars: &[char], highlights: &[bool]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut i = 0;
     while i < text_chars.len() {
@@ -6327,8 +6350,64 @@ pub(super) fn highlight_matches(text: &str, query: &str) -> Vec<Span<'static>> {
             spans.push(Span::raw(segment));
         }
     }
-
     spans
+}
+
+/// Highlight the characters consumed by a FUZZY (subsequence) match —
+/// the counterpart of `highlight_matches` for
+/// `MatchAlgorithm::Fuzzy`. Mirrors `fuzzy_match`'s own per-word greedy
+/// scan: for each whitespace-separated word of the body, walk `text` and
+/// mark every character the subsequence consumes, so `gco` lights `g`,
+/// `c` and `o` inside `git commit` (not just a contiguous substring). A
+/// word only contributes marks once it has FULLY matched; a word that
+/// instead matched the row's comment (fuzzy matching is `command ||
+/// comment` per word) leaves `text` unmarked. Case-insensitive via ASCII
+/// case-folding, the same folding `fuzzy_match` uses, which keeps
+/// character indices aligned. Falls back to plain text when no word
+/// matched `text` at all.
+pub(super) fn highlight_fuzzy_matches(text: &str, pattern: &str) -> Vec<Span<'static>> {
+    let text_chars: Vec<char> = text.chars().collect();
+    // `to_ascii_lowercase` (not `to_lowercase`) so the folded string has
+    // exactly one char per original char — the indices into `highlights`
+    // stay valid. This matches `fuzzy_match`'s own folding, so the
+    // highlight covers exactly what the predicate matched.
+    let lower_chars: Vec<char> = text.to_ascii_lowercase().chars().collect();
+    let mut highlights = vec![false; text_chars.len()];
+    let mut any_matched = false;
+
+    for word in pattern.split_whitespace() {
+        let word_lower = word.to_ascii_lowercase();
+        let mut word_chars = word_lower.chars();
+        let mut current = match word_chars.next() {
+            Some(c) => c,
+            None => continue,
+        };
+        let mut positions: Vec<usize> = Vec::new();
+        let mut matched = false;
+        for (i, c) in lower_chars.iter().enumerate() {
+            if *c == current {
+                positions.push(i);
+                match word_chars.next() {
+                    Some(next) => current = next,
+                    None => {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if matched {
+            any_matched = true;
+            for p in positions {
+                highlights[p] = true;
+            }
+        }
+    }
+
+    if !any_matched {
+        return vec![Span::raw(text.to_string())];
+    }
+    styled_spans_from_highlights(&text_chars, &highlights)
 }
 
 /// Truncate a multi-line command string

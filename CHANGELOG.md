@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- The TUI's `C-f` FUZZY match mode now highlights the characters it actually
+  matched, not just contiguous substrings: the highlight marks every character
+  consumed by the subsequence, so a query like `gco` lights the `g`, `c` and `o`
+  scattered through `git commit`. Previously fuzzy mode reused the substring
+  highlighter, so a genuine subsequence match (the whole point of fuzzy mode)
+  showed no highlight unless the query also happened to be a contiguous
+  substring.
 - New `Action::CreatePersistentSession` (unbound by default) — save the
   multiplexer session you are *in* as a persistent `session.<id>` entry. It
   opens the same dialog as `Action::AddSession`, pre-filled with the current
@@ -108,6 +115,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The row match-highlight now covers **every** word of the search, not just the
+  last. In a prefix mode (e.g. `*`, `#`, `@`, `/`) the highlight ran against the
+  raw query including the leading prefix character, which was welded onto the
+  first word — so that word never matched the row text and stayed unhighlighted
+  (with a two-word query, only the last word lit up). The highlight now runs
+  against `search_body()` (the query with the prefix stripped), the same text
+  the match itself is computed from.
 - The `dropdown.predict` window showed its suggestions in **reverse** rank order
   and pinned the highlight to the bottom edge. Suggestions are ranked
   most-probable-first, but the window appended them furthest-rank-first, so the
