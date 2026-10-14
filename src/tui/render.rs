@@ -59,8 +59,9 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // `BOTTOM` layout only: the details row height adapts to the
     // user's `pane_height` setting (default 8 lines). `page_size` is
     // the total terminal height; `detail_row_height` clamps to what
-    // the current terminal can afford. The `RIGHT` layout ignores
-    // this and splits its column 50/50 instead.
+    // the current terminal can afford. The `RIGHT` layout ignores this
+    // height (it sizes the column by `pane_width` width instead, and
+    // splits Details/Output vertically 50/50).
     let detail_h = if show_panes
         && app.pane_layout == crate::tui::state::PaneLayout::Bottom
     {
@@ -95,11 +96,18 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     let list_elapsed: std::time::Duration;
     if show_panes && app.pane_layout == crate::tui::state::PaneLayout::Right {
         // RIGHT layout: list on the left, a Details-over-Output
-        // column on the right. `PaneVisibility` still decides which
-        // of the two panes (if either) fill that column.
+        // column on the right. The column's width comes from
+        // `pane_width` (F11 / S-F11 nudge it); `PaneVisibility` still
+        // decides which of the two panes (if either) fill it.
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+            .constraints(
+                [
+                    Constraint::Percentage(app.pane_width.list_percent()),
+                    Constraint::Percentage(app.pane_width.percent()),
+                ]
+                .as_ref(),
+            )
             .split(chunks[1]);
         draw_list(f, app, cols[0]);
         list_elapsed = list_start.elapsed();

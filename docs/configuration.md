@@ -382,10 +382,16 @@ Where the Details and Output Preview panes dock relative to the history list:
 
 - `bottom` (default) — the historical layout: the list spans the full width and
   the detail row sits **below** it, with Details and Output Preview split
-  left/right. The row height is controlled by `F11` / `Shift-F11`.
-- `right` — the list takes the left ~60% of the width and a right-hand column
-  stacks **Details on top and Output Preview below** it (a fixed 50/50 split;
-  `F11` / `Shift-F11` don't affect it).
+  left/right.
+- `right` — the list takes the left portion of the width and a right-hand column
+  stacks **Details on top and Output Preview below** it (that vertical split is
+  a fixed 50/50).
+
+`F11` / `Shift-F11` resize the detail panes in whichever orientation the active
+layout uses: the bottom row's **height** in `bottom` (lines; default 8, floor 1),
+or the right column's **width** in `right` (percent; default 40%, clamped
+20–80%). Each is remembered independently in the session file — `paneheight=<N>`
+and `panewidth=<N>` respectively — so switching layouts preserves both.
 
 ```ini
 panes.layout=right   # Details-over-Output column on the right of the list

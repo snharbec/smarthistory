@@ -1494,12 +1494,20 @@ is tall enough again, no action needed.
 | Default key  | `F11`                  |
 | Category     | layout                 |
 
-Grow the detail / output-preview row height by one line, up to a
-terminal-size-dependent maximum that always leaves at least a few lines for the
-history list. The setting is persisted in the session file (`paneheight=<N>`, a
-plain line count) so the user's chosen height carries over to the next TUI
-startup. Useful when reading a long source-context preview: hold `F11` to grow
-the pane exactly as far as needed, one line at a time.
+Grow the detail panes one step, up to a maximum that always leaves room for the
+history list. What "one step" means depends on the active layout (see
+`TogglePaneLayout`):
+
+- **`BOTTOM`** (default) — one line taller. Bounded by a terminal-size-dependent
+  maximum that always leaves at least a few lines for the history list. The
+  setting is persisted in the session file (`paneheight=<N>`, a plain line
+  count) so the user's chosen height carries over to the next TUI startup.
+- **`RIGHT`** — one step (5%) wider for the right-hand detail column, clamped
+  between 20% and 80% of the terminal width. Persisted as `panewidth=<N>` (a
+  plain percentage).
+
+Useful when reading a long source-context preview: hold `F11` to grow the pane
+exactly as far as needed.
 
 ### `DecreasePaneHeight`
 
@@ -1510,12 +1518,16 @@ the pane exactly as far as needed, one line at a time.
 | Default key  | `S-F11`                |
 | Category     | layout                 |
 
-Shrink the detail / output-preview row height by one line, down to a floor of a
-single visible line. The out-of-box default is 8 lines, but that is not a floor
-— keep pressing `S-F11` to collapse the row to one line (the pane's top border
-and title). To remove the panes entirely, use `F10`'s `Hidden` state instead
-(this action's floor stays at one line so a pane is always at least minimally
-visible). The mirror image of `IncreasePaneHeight`.
+Shrink the detail panes one step — the mirror image of `IncreasePaneHeight`,
+with the same layout dependence:
+
+- **`BOTTOM`** — one line shorter, down to a floor of a single visible line. The
+  out-of-box default is 8 lines, but that is not a floor — keep pressing `S-F11`
+  to collapse the row to one line (the pane's top border and title). To remove
+  the panes entirely, use `F10`'s `Hidden` state instead (this action's floor
+  stays at one line so a pane is always at least minimally visible).
+- **`RIGHT`** — one step (5%) narrower for the right column, down to a floor of
+  20% of the terminal width.
 
 ### `TogglePaneLayout`
 

@@ -783,11 +783,12 @@ impl PaneHeight {
 ///   right-hand column stacks Details on top and Output Preview below
 ///   it.
 ///
-/// Orthogonal to [`PaneVisibility`] (which panes are shown) and
-/// [`PaneHeight`] (how tall the bottom row is — `Right` mode uses a
-/// fixed 50/50 split of the column instead). Toggled at runtime by
-/// `Action::TogglePaneLayout` (unbound by default; set
-/// `key.toggle-pane-layout=<spec>`), configured via
+/// Orthogonal to [`PaneVisibility`] (which panes are shown). The
+/// pane *size* is controlled by the same `F11` / `Shift-F11` keys in
+/// both layouts: [`PaneHeight`] (the bottom row's line count) in
+/// `Bottom`, [`PaneWidth`] (the right column's width percentage) in
+/// `Right`. Toggled at runtime by `Action::TogglePaneLayout` (unbound
+/// by default; set `key.toggle-pane-layout=<spec>`), configured via
 /// `panes.layout=bottom|right`, and remembered in the session file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaneLayout {
@@ -834,8 +835,89 @@ impl PaneLayout {
     }
 }
 
+/// The width (as a percentage of the terminal width) of the
+/// right-hand details / output-preview column used by
+/// [`PaneLayout::Right`]. Nudged by the same
+/// `Action::IncreasePaneHeight` / `Action::DecreasePaneHeight` keys
+/// (`F11` / `Shift-F11`) that resize the bottom detail row in
+/// [`PaneLayout::Bottom`] — so those keys always grow / shrink the
+/// detail panes, whichever layout is active. Persisted in the session
+/// file (`panewidth=`), independent of [`PaneHeight`] so switching
+/// layouts preserves each setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneWidth(u16);
+
+impl Default for PaneWidth {
+    fn default() -> Self {
+        PaneWidth(Self::DEFAULT)
+    }
+}
+
+impl PaneWidth {
+    /// Out-of-box right-column width, in percent (matches the
+    /// historical 60/40 list/column split).
+    pub const DEFAULT: u16 = 40;
+
+    /// Narrowest the right column may get, in percent — the history
+    /// list keeps at least the complementary width. The bounds are
+    /// symmetric, so one constant covers "list at least 20% wide".
+    pub const MIN: u16 = 20;
+
+    /// Widest the right column may get, in percent.
+    pub const MAX: u16 = 80;
+
+    /// Percent points per `F11` / `Shift-F11` press. Larger than the
+    /// bottom row's 1-line step because a 1% width change is nearly
+    /// invisible; 5% is a perceptible nudge without overshooting.
+    pub const STEP: u16 = 5;
+
+    /// One step wider, clamped to `MAX`.
+    pub fn increase(self) -> Self {
+        PaneWidth(self.0.saturating_add(Self::STEP).min(Self::MAX))
+    }
+
+    /// One step narrower, clamped to `MIN`.
+    pub fn decrease(self) -> Self {
+        PaneWidth(self.0.saturating_sub(Self::STEP).max(Self::MIN))
+    }
+
+    /// The column width as a `u16` percentage, always within
+    /// `MIN..=MAX` (defensive clamp for a hand-edited session value).
+    pub fn percent(self) -> u16 {
+        self.0.clamp(Self::MIN, Self::MAX)
+    }
+
+    /// The complementary width (percent) for the history list.
+    pub fn list_percent(self) -> u16 {
+        100 - self.percent()
+    }
+
+    /// Human-readable label for the status bar, e.g. "40%".
+    pub fn label(self) -> String {
+        format!("{}%", self.percent())
+    }
+
+    /// Canonical string for persistence: the plain percentage.
+    pub fn as_str(self) -> String {
+        self.0.to_string()
+    }
+
+    /// Parse a persisted value: a plain integer percentage, clamped
+    /// into `MIN..=MAX`. Returns `None` for anything that isn't a
+    /// valid integer.
+    pub fn parse(s: &str) -> Option<Self> {
+        s.trim()
+            .parse::<u16>()
+            .ok()
+            .map(|n| PaneWidth(n.clamp(Self::MIN, Self::MAX)))
+    }
+}
+
 #[cfg(test)]
 mod pane_height_tests;
+
+#[cfg(test)]
+mod pane_width_tests;
 
 /// Which kind of entry the
 /// `AddEntryDialog` is
