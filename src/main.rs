@@ -1781,6 +1781,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     let _ = writeln!(f, "  zsh.mode = {}", cfg.zsh_default_mode);
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
+    let _ = writeln!(f, "  panes.layout = {}", cfg.pane_layout().as_str());
     use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
     for a in ALL_ACTIONS {
@@ -2581,6 +2582,16 @@ pub struct Config {
     /// and the default (tmux)
     /// is used.
     multiplexer: crate::multiplexer::MultiplexerKind,
+    /// Where the details / output-preview panes dock, from
+    /// `panes.layout=bottom|right` (default `bottom`, the historical
+    /// layout with the detail row below the list). `right` makes the
+    /// list share the width with a right-hand column that stacks
+    /// Details over Output Preview. Toggled at runtime by
+    /// `Action::TogglePaneLayout`; the session file remembers the last
+    /// choice, so this config value only sets the *initial* default
+    /// before any in-TUI toggle (same precedence as
+    /// `duplicatefilter`).
+    pane_layout: crate::tui::state::PaneLayout,
     /// Named sessions parsed from
     /// `session.<key> = "name"` /
     /// `session.<key>.dir = "~/path"` /
@@ -2801,6 +2812,7 @@ impl Config {
             // directories list.
             session_dirs: Vec::new(),
             multiplexer: crate::multiplexer::MultiplexerKind::default(),
+            pane_layout: crate::tui::state::PaneLayout::default(),
             sessions: Vec::new(),
             projects: Vec::new(),
             project_idle_threshold_secs: 1800,
@@ -3079,6 +3091,16 @@ impl Config {
                         value
                     ),
                 },
+                "panes.layout" => {
+                    match crate::tui::state::PaneLayout::parse(value) {
+                        Some(layout) => self.pane_layout = layout,
+                        None => eprintln!(
+                            "warning: panes.layout={:?} is not one of \
+                             bottom/right; keeping the previous value",
+                            value
+                        ),
+                    }
+                }
                 "ollama.url" => {
                     ollama_url = value.to_string();
                 }
@@ -4364,6 +4386,14 @@ impl Config {
     /// [`crate::multiplexer::MultiplexerKind`].
     pub fn multiplexer(&self) -> crate::multiplexer::MultiplexerKind {
         self.multiplexer
+    }
+
+    /// Where the details / output-preview panes dock: `Bottom` (the
+    /// historical layout, detail row below the list) or `Right`
+    /// (list left, Details-over-Output column on the right). Set via
+    /// `panes.layout=bottom|right`; see [`crate::tui::state::PaneLayout`].
+    pub fn pane_layout(&self) -> crate::tui::state::PaneLayout {
+        self.pane_layout
     }
 
     /// Named sessions parsed from the config file.

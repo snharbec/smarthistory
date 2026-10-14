@@ -58,6 +58,8 @@ value" so you can confirm what the TUI actually sees.
   - [`zsh.mode`](#zshmode)
   - [`segments.minwords`](#segmentsminwords)
   - [`tui.highlight`](#tuihighlight)
+- [Detail panes](#detail-panes)
+  - [`panes.layout`](#paneslayout)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -362,6 +364,46 @@ on `$PATH`.
 ```ini
 tui.highlight=on
 ```
+
+---
+
+## Detail panes
+
+### `panes.layout`
+
+|                     |                          |
+| ------------------- | ------------------------ |
+| **Type**            | `bottom` \| `right`      |
+| **Default**         | `bottom`                 |
+| **Session key**     | `panelayout=`            |
+| **Toggle action**   | `toggle-pane-layout` (unbound) |
+
+Where the Details and Output Preview panes dock relative to the history list:
+
+- `bottom` (default) — the historical layout: the list spans the full width and
+  the detail row sits **below** it, with Details and Output Preview split
+  left/right. The row height is controlled by `F11` / `Shift-F11`.
+- `right` — the list takes the left ~60% of the width and a right-hand column
+  stacks **Details on top and Output Preview below** it (a fixed 50/50 split;
+  `F11` / `Shift-F11` don't affect it).
+
+```ini
+panes.layout=right   # Details-over-Output column on the right of the list
+panes.layout=bottom  # historical: detail row below the list (default)
+```
+
+*Which* panes are visible is separate — that's `F10`
+(`Action::TogglePaneVisibility`): `BOTH` fills the docked area with both,
+`Details` / `Output` put just one pane there, and `Hidden` removes the panes
+entirely (the list reclaims the space). Below 20 terminal lines both panes are
+hidden automatically regardless.
+
+The placement can also be flipped at runtime with `Action::TogglePaneLayout`,
+which ships **unbound**; set `key.toggle-pane-layout=<spec>` to bind it (or open
+it from the command palette, `Ctrl-Q`). The last choice is remembered in the
+session file (`panelayout=right` / `panelayout=bottom`) and takes precedence
+over `panes.layout` on the next launch, exactly like the other layout settings —
+so the config key sets the *initial* default before any in-TUI toggle.
 
 ---
 
@@ -1661,6 +1703,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `zsh.mode`                      | `sess` \| `dir` \| `global`       | `sess`                                                           | [History list & filtering](#history-list--filtering)                      |
 | `segments.minwords`             | non-negative int                  | `5`                                                              | [History list & filtering](#history-list--filtering)                      |
 | `tui.highlight`                 | `on` \| `off`                     | `off`                                                            | [History list & filtering](#history-list--filtering)                      |
+| `panes.layout`                  | `bottom` \| `right`               | `bottom`                                                         | [Detail panes](#detail-panes)                                             |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.limit`                | positive int                      | `6`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.minchars`             | non-negative int                  | `1`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |

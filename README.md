@@ -260,7 +260,10 @@ The duplicate filter and the "delete matching" actions ship **unbound** by
 default (set them via `key.toggle-duplicate-filter=...` and
 `key.delete-matching=...` in your config to re-enable them). Same for the bulk
 multi-select actions: `key.clear-marks=...` and `key.bulk-delete-marked=...`
-(delete every marked row, with confirmation).
+(delete every marked row, with confirmation), and for the detail-pane
+placement toggle (`key.toggle-pane-layout=...`, which docks the details +
+output panes to the right of the list instead of below it — see
+[`panes.layout`](#key-settings)).
 
 All keybindings are user-configurable via `key.<action>=<spec>` in the config
 file. See [docs/actions.md](docs/actions.md) for the full reference (all 48
@@ -577,6 +580,7 @@ starting with `#` are comments; blank lines are ignored.
 | Key                              | Meaning                                                      | Default                                        |
 | -------------------------------- | ------------------------------------------------------------ | ---------------------------------------------- |
 | `multiplexer=tmux\|herdr`        | Which multiplexer backend to use for `#` and `*` modes.      | `tmux`                                         |
+| `panes.layout=bottom\|right`     | Dock the detail panes below the list or in a right column (Details over Output Preview). | `bottom`                                       |
 | `tmuxpaneoutputdir=~/path`       | Directory containing per-pane tmux logs.                     | `~/.cache/tmux-history`                        |
 | `ignorecapture=cmd1 cmd2 ...`    | Commands whose output is never captured.                     | `vi nvim vim top htop emacs more less lazygit` |
 | `capturelines=N` or `=ALL`       | Default number of captured output lines.                     | `20`                                           |

@@ -116,6 +116,12 @@ pub(crate) struct TuiSession {
     /// back to `PaneHeight::default()`
     /// (8 lines).
     pane_height: Option<String>,
+    /// Last detail-pane placement, persisted as the lowercase
+    /// `PaneLayout::as_str()` (`bottom` / `right`). `None` means "no
+    /// preference" and falls back to `panes.layout=` (then
+    /// `PaneLayout::default()`). Unrecognised values are silently
+    /// dropped on load.
+    pane_layout: Option<String>,
     /// The active color scheme (`"light"` /
     /// `"dark"`) at the end of the last
     /// session, toggled via
@@ -412,6 +418,19 @@ impl TuiSession {
                         s.pane_height =
                             Some(value.to_string());
                     }
+                // Same pattern as the other session fields: only
+                // accept values that `PaneLayout::parse` recognises
+                // (lowercase `bottom` / `right`, plus `below` / `down`
+                // / `side` aliases).
+                "panelayout"
+                    if crate::tui::state::PaneLayout::parse(
+                        value,
+                    )
+                    .is_some()
+                    => {
+                        s.pane_layout =
+                            Some(value.to_string());
+                    }
                 // Same pattern as the other session
                 // fields: only accept values that
                 // `ColorScheme::parse` recognises
@@ -525,6 +544,9 @@ impl TuiSession {
         }
         if let Some(ref ph) = self.pane_height {
             out.push_str(&format!("paneheight={}\n", ph));
+        }
+        if let Some(ref pl) = self.pane_layout {
+            out.push_str(&format!("panelayout={}\n", pl));
         }
         if let Some(ref sc) = self.scheme {
             out.push_str(&format!("colorscheme={}\n", sc));
@@ -1391,8 +1413,16 @@ pub(crate) struct App {
     /// Adjusted one line at a time by
     /// `Action::IncreasePaneHeight` /
     /// `Action::DecreasePaneHeight` and persisted in
-    /// the session file.
+    /// the session file. Only used by the `Bottom`
+    /// layout; `Right` uses a fixed 50/50 column
+    /// split instead.
     pane_height: crate::tui::state::PaneHeight,
+    /// Where the detail panes dock: `Bottom` (below the
+    /// list, the historical layout) or `Right` (list
+    /// left, Details-over-Output column on the right).
+    /// Toggled with `Action::TogglePaneLayout`, seeded
+    /// from `panes.layout=` / the session file.
+    pane_layout: crate::tui::state::PaneLayout,
     /// The currently-selected TUI palette. Defaults to
     /// `SelectedTheme::None`, which means the manually-configured
     /// colors from `tuicolor.*` are used.
@@ -5305,6 +5335,11 @@ impl App {
             match_algorithm: MatchAlgorithm::default(),
             pane_visibility,
             pane_height,
+            // Seeded from `panes.layout=` / the session file by
+            // `run_tui_to_stdout` right after construction (same
+            // "constructor sets a safe default, the real entry point
+            // overwrites it" pattern as `session_dirs_roots`).
+            pane_layout: crate::tui::state::PaneLayout::default(),
             theme,
             detected_scheme,
             bindings,
@@ -12406,6 +12441,15 @@ pub fn run_tui_to_stdout(
         .as_deref()
         .and_then(crate::tui::state::PaneHeight::parse)
         .unwrap_or_default();
+    // Pane-placement precedence: the session file's last in-TUI
+    // toggle wins, else the `panes.layout=` config value, else the
+    // default (`Bottom`) — same "session overrides the config default"
+    // pattern as `duplicatefilter` above.
+    let initial_pane_layout = session
+        .pane_layout
+        .as_deref()
+        .and_then(crate::tui::state::PaneLayout::parse)
+        .unwrap_or_else(|| app_cfg.pane_layout());
     let home_list = build_home_list(&app_cfg);
     // The `sessiondirs=...` walk is deliberately NOT computed here
     // (unlike `home_list` above). It used to run unconditionally on
@@ -12463,6 +12507,10 @@ pub fn run_tui_to_stdout(
         app.recompile_regex();
         app.refresh();
     }
+    // Seed the pane placement resolved above (session > config >
+    // default). `App::new` starts at the default; this is the
+    // entry-point override, mirroring `directory_source` etc.
+    app.pane_layout = initial_pane_layout;
     app.segments_min_words = app_cfg.segments_min_words();
     app.tui_highlight_enabled = app_cfg.tui_highlight();
     // `--root <DIR>` overrides the base directory both plain `/`
@@ -12841,6 +12889,15 @@ pub fn run_tui_to_stdout(
             None
         } else {
             Some(app.pane_height.as_str())
+        },
+        // Persist only when the user has toggled away from the
+        // default (`Bottom`) — same persist-only-if-non-default
+        // policy as `pane_visibility` above. This is what makes the
+        // `Action::TogglePaneLayout` choice stick across launches.
+        pane_layout: if app.pane_layout == crate::tui::state::PaneLayout::default() {
+            None
+        } else {
+            Some(app.pane_layout.as_str().to_string())
         },
         // Persist only when the user has toggled away
         // from the default (`Dark`) — same
@@ -14363,6 +14420,13 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             // line (`PaneHeight::FLOOR`).
             app.pane_height = app.pane_height.decrease();
             app.set_status_message(format!("Pane height: {}", app.pane_height.label()));
+            false
+        }
+        Action::TogglePaneLayout => {
+            // Flip detail-pane placement: BOTTOM (detail row below the
+            // list) ↔ RIGHT (list left, Details-over-Output column).
+            app.pane_layout = app.pane_layout.next();
+            app.set_status_message(format!("Pane layout: {}", app.pane_layout.label()));
             false
         }
         Action::JiraFieldComplete => {
@@ -17943,6 +18007,7 @@ mod tui_session_tests {
             directory_source: Some("tmux".to_string()),
             pane_visibility: Some("output".to_string()),
             pane_height: Some("20".to_string()),
+            pane_layout: Some("right".to_string()),
             scheme: Some("light".to_string()),
             pane_last_touched: {
                 let mut m = std::collections::HashMap::new();
@@ -17968,6 +18033,7 @@ mod tui_session_tests {
         assert_eq!(loaded.directory_source.as_deref(), Some("tmux"));
         assert_eq!(loaded.pane_visibility.as_deref(), Some("output"));
         assert_eq!(loaded.pane_height.as_deref(), Some("20"));
+        assert_eq!(loaded.pane_layout.as_deref(), Some("right"));
         assert_eq!(loaded.scheme.as_deref(), Some("light"));
         assert_eq!(
             loaded.pane_last_touched.get("wB:p1").copied(),
@@ -18310,6 +18376,10 @@ mod tui_session_tests {
             } else {
                 Some(app_pane_height.as_str())
             },
+            // The pane-placement toggle ships with no CLI flag, so it
+            // is always persisted (only when non-default) — mirror
+            // that here with the default (`None`).
+            pane_layout: None,
             scheme: None,
             pane_last_touched: std::collections::HashMap::new(),
             command_menu_recent: Vec::new(),

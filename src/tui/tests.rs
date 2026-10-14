@@ -6618,6 +6618,7 @@ fn session_round_trips_sort_order() {
         directory_source: None,
         pane_visibility: None,
         pane_height: None,
+        pane_layout: None,
         scheme: None,
         pane_last_touched: std::collections::HashMap::new(),
         command_menu_recent: Vec::new(),
@@ -7360,6 +7361,31 @@ fn pane_visibility_cycle_includes_hidden_and_round_trips() {
     assert_eq!(PaneVisibility::parse("OFF"), Some(PaneVisibility::Hidden));
     assert_eq!(PaneVisibility::parse("bogus"), None);
     assert_eq!(PaneVisibility::Hidden.label(), "hidden");
+}
+
+/// `PaneLayout` flips BOTTOM ↔ RIGHT, round-trips through the
+/// `panelayout=` / `panes.layout=` string form (with `below`/`side`
+/// aliases), rejects garbage, and the toggle action flips the app's
+/// placement and reports it in the status bar.
+#[test]
+fn pane_layout_cycle_round_trips_and_dispatches() {
+    use crate::tui::state::PaneLayout;
+    assert_eq!(PaneLayout::default(), PaneLayout::Bottom);
+    assert_eq!(PaneLayout::Bottom.next(), PaneLayout::Right);
+    assert_eq!(PaneLayout::Right.next(), PaneLayout::Bottom);
+    for l in [PaneLayout::Bottom, PaneLayout::Right] {
+        assert_eq!(PaneLayout::parse(l.as_str()), Some(l));
+    }
+    assert_eq!(PaneLayout::parse("below"), Some(PaneLayout::Bottom));
+    assert_eq!(PaneLayout::parse("side"), Some(PaneLayout::Right));
+    assert_eq!(PaneLayout::parse("garbage"), None);
+
+    let mut app = global_test_app(&[("a", 1)]);
+    assert_eq!(app.pane_layout, PaneLayout::Bottom);
+    assert!(!dispatch_action(&mut app, Action::TogglePaneLayout));
+    assert_eq!(app.pane_layout, PaneLayout::Right);
+    assert!(!dispatch_action(&mut app, Action::TogglePaneLayout));
+    assert_eq!(app.pane_layout, PaneLayout::Bottom);
 }
 
 /// Actions the user has
@@ -15511,6 +15537,69 @@ fn details_and_output_preview_shown_at_20_lines() {
     assert!(
         text.contains("Output Preview"),
         "Output Preview pane should be shown at 20 lines, got: {text:?}"
+    );
+}
+
+/// Helper: render `app` into an in-memory terminal of the given size
+/// and return the screen as one `String` per row (top to bottom).
+fn render_rows(app: &mut crate::tui::App, width: u16, height: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, app))
+        .expect("draw");
+    let buf = terminal.backend().buffer();
+    let w = buf.area.width as usize;
+    buf.content
+        .chunks(w)
+        .map(|row| row.iter().map(|c| c.symbol()).collect())
+        .collect()
+}
+
+/// `PaneLayout::Right` docks the panes to the right of the list, with
+/// Details on top and Output Preview below it (stacked vertically,
+/// not side-by-side). At a normal terminal size both titles must be
+/// onscreen, and Details must be the upper of the two.
+#[test]
+fn right_layout_stacks_details_over_output_preview() {
+    use crate::tui::state::PaneLayout;
+    let mut app = directories_test_app(&[]);
+    app.pane_layout = PaneLayout::Right;
+
+    let rows = render_rows(&mut app, 120, 40);
+    let details_row = rows
+        .iter()
+        .position(|l| l.contains("Details"))
+        .expect("Details pane title onscreen in right layout");
+    let output_row = rows
+        .iter()
+        .position(|l| l.contains("Output Preview"))
+        .expect("Output Preview pane title onscreen in right layout");
+    assert!(
+        details_row < output_row,
+        "in right layout Details must sit ABOVE Output Preview (details row {details_row}, output row {output_row})"
+    );
+}
+
+/// `PaneVisibility::Hidden` hides both panes even on a tall terminal
+/// (>= 20 lines), where they would otherwise be shown — the explicit
+/// half of the `F10` cycle, complementing the automatic `< 20 lines`
+/// cutoff.
+#[test]
+fn hidden_visibility_hides_both_panes_on_a_tall_terminal() {
+    use crate::tui::state::PaneVisibility;
+    let mut app = directories_test_app(&[]);
+    app.pane_visibility = PaneVisibility::Hidden;
+
+    let rows = render_rows(&mut app, 120, 40);
+    let text = rows.join("\n");
+    assert!(
+        !text.contains("Details"),
+        "Details pane must be hidden in the Hidden state, got: {text:?}"
+    );
+    assert!(
+        !text.contains("Output Preview"),
+        "Output Preview pane must be hidden in the Hidden state, got: {text:?}"
     );
 }
 

@@ -1517,6 +1517,31 @@ and title). To remove the panes entirely, use `F10`'s `Hidden` state instead
 (this action's floor stays at one line so a pane is always at least minimally
 visible). The mirror image of `IncreasePaneHeight`.
 
+### `TogglePaneLayout`
+
+| Field        | Value                |
+| ------------ | -------------------- |
+| Config key   | `toggle-pane-layout` |
+| Display name | Toggle pane layout   |
+| Default key  | (unbound)            |
+| Category     | layout               |
+
+Flip where the detail panes dock, between `BOTTOM` (the historical layout: the
+list spans the full width, the detail row sits below it, and Details / Output
+Preview are split left/right) and `RIGHT` (the list takes the left ~60% of the
+width and a right-hand column stacks Details on top and Output Preview below
+it). Ships **unbound** — opt in with `key.toggle-pane-layout=<spec>` in the
+config, or open it from the command palette (`Ctrl-Q`).
+
+Purely a placement toggle: *which* panes are visible is still
+`TogglePaneVisibility`'s job, and the column obeys that state (`BOTH` fills it
+with Details over Output Preview, `Details`/`Output` put just that one pane in
+it, `Hidden` removes it and the list reclaims the full width). The choice is
+persisted in the session file (`panelayout=right`) and restored on the next
+launch, exactly like `panevisibility=`; the config key
+[`panes.layout`](configuration.md#paneslayout) sets the initial default before
+any in-TUI toggle.
+
 ---
 
 ## codegraph
