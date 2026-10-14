@@ -19239,16 +19239,23 @@ fn process_pane_cmdlines_does_not_respawn_after_completing_for_the_same_snapshot
     );
 
     // A genuinely NEW snapshot (the panes list actually changed)
-    // must still trigger exactly one fresh spawn.
+    // must still trigger exactly one fresh lookup.
+    //
+    // Assert on `pane_cmdlines_spawned_for_snapshot` (set synchronously
+    // at the top of the spawn path), NOT on `pane_cmdlines_request.
+    // is_some()`: `process_pane_cmdlines` spawns AND drains in the same
+    // call, so when the background lookup finishes before that drain the
+    // request is cleared again before the call returns. Asserting
+    // `is_some()` therefore raced the worker thread and flaked on loaded
+    // CI runners. The marker is the load-bearing "attempted for this
+    // snapshot" state the respawn guard actually checks.
     app.panes_snapshot_id = app.panes_snapshot_id.wrapping_add(1);
     app.process_pane_cmdlines();
-    assert!(
-        app.pane_cmdlines_request.is_some(),
-        "a real snapshot change must still spawn a fresh lookup"
-    );
     assert_eq!(
         app.pane_cmdlines_spawned_for_snapshot,
-        Some(app.panes_snapshot_id)
+        Some(app.panes_snapshot_id),
+        "a real snapshot change must still attempt a fresh lookup for the \
+         new snapshot"
     );
 }
 
