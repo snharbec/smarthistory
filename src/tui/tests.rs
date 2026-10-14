@@ -3133,6 +3133,27 @@ fn cycle_search_mode_preserves_query_body() {
     assert!(app.query.contains("git commit"));
 }
 
+/// The session file's persisted form of the `C-f` match algorithm
+/// must round-trip through `as_str`/`parse`, and `parse` must reject
+/// garbage (so a hand-edited session file falls back to the default
+/// rather than wedging startup) while accepting the canonical values
+/// plus the documented friendly aliases.
+#[test]
+fn match_algorithm_as_str_parse_round_trips() {
+    for algo in [
+        MatchAlgorithm::Substring,
+        MatchAlgorithm::Fuzzy,
+        MatchAlgorithm::Regex,
+    ] {
+        assert_eq!(MatchAlgorithm::parse(algo.as_str()), Some(algo));
+    }
+    assert_eq!(MatchAlgorithm::parse("FUZZY"), Some(MatchAlgorithm::Fuzzy));
+    assert_eq!(MatchAlgorithm::parse("sub"), Some(MatchAlgorithm::Substring));
+    assert_eq!(MatchAlgorithm::parse("re"), Some(MatchAlgorithm::Regex));
+    assert_eq!(MatchAlgorithm::parse("nonsense"), None);
+    assert_eq!(MatchAlgorithm::parse(""), None);
+}
+
 // --- App::edit_referenced_file end-to-end ------------------------------
 
 #[test]
@@ -6581,6 +6602,7 @@ fn session_round_trips_sort_order() {
         duplicate_filter: None,
         exit_filter: None,
         sort_order: Some("frequency".to_string()),
+        match_algorithm: None,
         theme: None,
         directory_source: None,
         pane_visibility: None,
@@ -33612,6 +33634,52 @@ fn spawn_files_walk_unlocked_plain_text_still_uses_substring_matcher() {
     let visible = crate::tui::mode::files::fetch(&mut app).unwrap();
     let names: Vec<&str> = visible.iter().map(|r| r.command.as_str()).collect();
     assert_eq!(names, vec!["apple.txt"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// In Fuzzy (or Regex) mode, `files::fetch` must NOT pre-filter by
+/// substring — otherwise a fuzzy subsequence like `multirs` would be
+/// dropped while still looking for a literal `multirs` substring,
+/// before `App::refresh`'s algorithm-aware post-filter ever runs.
+/// This is the counterpart of `directories::fetch`'s `use_sql_like`
+/// gate: fetch returns the full candidate set, and the fuzzy/regex
+/// predicate (`query_matches_text`, exercised below) narrows it.
+#[test]
+fn files_fetch_skips_substring_prefilter_in_fuzzy_mode() {
+    let dir = std::env::temp_dir().join(format!(
+        "smarthistory_files_fuzzy_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("multiplexer.rs"), "x").unwrap();
+    std::fs::write(dir.join("banana.txt"), "x").unwrap();
+
+    let mut app = directories_test_app(&[]);
+    app.files_root = dir.clone();
+    app.query = format!("{}multirs", app.query_prefixes.files);
+    app.match_algorithm = MatchAlgorithm::Fuzzy;
+    app.spawn_files_walk();
+
+    let request = app.files_state.request.take().expect("walk should have been spawned");
+    app.files_state.all_rows = Some(drain_files_walk(request));
+    let candidates = crate::tui::mode::files::fetch(&mut app).unwrap();
+    let mut names: Vec<&str> = candidates.iter().map(|r| r.command.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["banana.txt", "multiplexer.rs"],
+        "fuzzy fetch must return every candidate, not just the substring matches"
+    );
+
+    // What `App::refresh`'s post-filter does with that candidate set:
+    // only the fuzzy subsequence match survives.
+    let matched: Vec<&str> = candidates
+        .iter()
+        .filter(|r| app.query_matches_text(&r.command))
+        .map(|r| r.command.as_str())
+        .collect();
+    assert_eq!(matched, vec!["multiplexer.rs"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

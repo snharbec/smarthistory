@@ -1086,11 +1086,13 @@ The full set:
 | `--pane-height <HEIGHT>`                              | `paneheight=` (session)       | The TUI runs with the given details/output-preview row height, in terminal lines (e.g. `--pane-height 14`); the `paneheight=` line is omitted. Values below the 8-line historical floor are clamped up to it.                            |
 | `--panes-filter <FILTER>`                             | (none)                        | The `panes_filter` field is not currently persisted in the session file (it resets to its default on every launch), so this flag has no persistence side-effect. It's tracked in `CliOverrides` for symmetry and accurate documentation. |
 
-Other session fields (`theme`, `sort_order`, `exit_filter`, `duplicate_filter`,
-`directory_source`, `pane_height` when changed via F11 inside the TUI,
-`pane_visibility` when changed inside the TUI) **are** persisted — those state
-changes are only reachable through interactive use of the TUI, and the persisted
-session is the natural place to remember them across launches.
+Other session fields (`theme`, `sort_order`, `match_algorithm` (the `C-f`
+algorithm, persisted as `matchalgorithm=substring|fuzzy|regex`, only when
+non-default), `exit_filter`, `duplicate_filter`, `directory_source`,
+`pane_height` when changed via F11 inside the TUI, `pane_visibility` when
+changed inside the TUI) **are** persisted — those state changes are only
+reachable through interactive use of the TUI, and the persisted session is the
+natural place to remember them across launches.
 
 1. `--mode` flag (or `$SMARTHISTORY_TUI_MODE` / `$SMARTHISTORY_MODE`)
 2. `initialmode=` from `~/.config/smarthistory/config`

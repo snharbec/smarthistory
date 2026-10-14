@@ -6,7 +6,7 @@
 //! configured per-extension command, via the SmartOpen
 use crate::tui::mode::CheckReport;
 /// key `Ctrl-]`).
-use crate::tui::state::HistoryRow;
+use crate::tui::state::{HistoryRow, MatchAlgorithm};
 use crate::tui::App;
 use anyhow::Result;
 
@@ -122,9 +122,20 @@ pub(crate) fn pattern(app: &App) -> &str {
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     let want_dirs = app.is_directory_picker();
     let pattern = crate::files::FilesState::current_pattern(&app.query, app.query_prefixes.files);
+    // In Fuzzy/Regex mode this function must NOT pre-filter by
+    // substring: the generic post-filter in `App::refresh` (which
+    // branches on `match_algorithm`) applies the correct matching
+    // strategy to `r.command`/`r.comment` afterwards. Pre-filtering
+    // by substring here would drop rows that a fuzzy/regex search
+    // SHOULD match (e.g. `multirs` → `multiplexer.rs`) before that
+    // post-filter ever sees them. So keep every row (empty token
+    // list = match-all) and let the post-filter narrow — the exact
+    // counterpart of `directories::fetch`'s `use_sql_like` gate.
+    // Glob syntax, too, is a Substring-mode feature only.
+    let use_substring_filter = app.match_algorithm == MatchAlgorithm::Substring;
     let mut words = pattern.split_whitespace();
     let first_word = words.next().unwrap_or("");
-    let is_glob = first_word.contains(['*', '?', '[']);
+    let is_glob = use_substring_filter && first_word.contains(['*', '?', '[']);
     // Mirrors `App::spawn_files_walk`'s old per-walk filter
     // resolution, just run in memory on every keystroke instead of
     // gating a filesystem walk — see the module-level doc comment
@@ -141,8 +152,11 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             }
         }
     } else {
-        let tokens: Vec<String> =
-            pattern.split_whitespace().map(|w| w.to_lowercase()).collect();
+        let tokens: Vec<String> = if use_substring_filter {
+            pattern.split_whitespace().map(|w| w.to_lowercase()).collect()
+        } else {
+            Vec::new()
+        };
         (String::new(), crate::files::FilesFilterSpec::Substring(tokens))
     };
     let Some(all_rows) = app.files_state.all_rows.as_ref() else {

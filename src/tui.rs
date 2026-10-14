@@ -67,6 +67,15 @@ pub(crate) struct TuiSession {
     /// when loading so a hand-edited session file can't wedge
     /// the TUI on startup.
     sort_order: Option<String>,
+    /// Last match algorithm, persisted as the lowercase
+    /// `MatchAlgorithm::as_str()` ("substring", "fuzzy", "regex").
+    /// Toggled in the TUI with `C-f` (`Action::ToggleSearchMode`
+    /// / `CycleMatchAlgorithm`). `None` means "no preference" and
+    /// falls back to `MatchAlgorithm::default()` (i.e. `Substring`,
+    /// the historical plain-text behavior). Values that don't parse
+    /// as a `MatchAlgorithm` are silently dropped when loading so a
+    /// hand-edited session file can't wedge the TUI on startup.
+    match_algorithm: Option<String>,
     /// Last selected theme slug (e.g. `"dracula"`, `"tokyo-night"`,
     /// or `"none"` for the manual-config palette). Persisted across
     /// TUI invocations so the user always lands back on their
@@ -330,6 +339,17 @@ impl TuiSession {
                         s.sort_order = Some(value.to_string());
                     }
                 }
+                // Same pattern as the sort order: only accept
+                // values that `MatchAlgorithm::parse` recognises
+                // (substring/fuzzy/regex, plus a few friendly
+                // aliases). Garbled values are silently dropped so
+                // a hand-edited session file can't wedge the TUI on
+                // startup.
+                "matchalgorithm" => {
+                    if MatchAlgorithm::parse(value).is_some() {
+                        s.match_algorithm = Some(value.to_string());
+                    }
+                }
                 "theme" => s.theme = Some(value.to_string()),
                 "directorysource"
                     // Same pattern
@@ -490,6 +510,9 @@ impl TuiSession {
         }
         if let Some(ref so) = self.sort_order {
             out.push_str(&format!("sortorder={}\n", so));
+        }
+        if let Some(ref ma) = self.match_algorithm {
+            out.push_str(&format!("matchalgorithm={}\n", ma));
         }
         if let Some(ref t) = self.theme {
             out.push_str(&format!("theme={}\n", t));
@@ -12421,6 +12444,24 @@ pub fn run_tui_to_stdout(
         home_list,
         session_subdirs,
     );
+    // Restore the persisted match algorithm (`C-f`). `None` (or an
+    // unparseable value) means "no preference" — keep the default
+    // (`Substring`). Applied here, immediately after `App::new`, so
+    // the algorithm is in effect for the very first frame: `App::new`
+    // itself already ran one `refresh()` with the default, so
+    // recompile the regex and refresh once more when the restored
+    // value differs. Mirrors how `duplicate_filter` /
+    // `command_menu_recent` are merged in after construction.
+    if let Some(restored) = session
+        .match_algorithm
+        .as_deref()
+        .and_then(MatchAlgorithm::parse)
+        && restored != app.match_algorithm
+    {
+        app.match_algorithm = restored;
+        app.recompile_regex();
+        app.refresh();
+    }
     app.segments_min_words = app_cfg.segments_min_words();
     app.tui_highlight_enabled = app_cfg.tui_highlight();
     // `--root <DIR>` overrides the base directory both plain `/`
@@ -12736,6 +12777,15 @@ pub fn run_tui_to_stdout(
             None
         } else {
             Some(app.sort_order.as_str().to_string())
+        },
+        // Persist only when the user has toggled away from the
+        // default (`Substring`) — same persist-only-if-non-default
+        // policy as `sort_order` / `exit_filter`. This is what makes
+        // the `C-f` algorithm choice stick across TUI invocations.
+        match_algorithm: if app.match_algorithm == MatchAlgorithm::default() {
+            None
+        } else {
+            Some(app.match_algorithm.as_str().to_string())
         },
         theme: Some(app.theme.slug().to_string()),
         // Same persist-only-if-non-default
@@ -17887,6 +17937,7 @@ mod tui_session_tests {
             duplicate_filter: Some(false),
             exit_filter: Some("err".to_string()),
             sort_order: Some("frequency".to_string()),
+            match_algorithm: Some("fuzzy".to_string()),
             theme: Some("dracula".to_string()),
             directory_source: Some("tmux".to_string()),
             pane_visibility: Some("output".to_string()),
@@ -17911,6 +17962,7 @@ mod tui_session_tests {
         assert_eq!(loaded.duplicate_filter, Some(false));
         assert_eq!(loaded.exit_filter.as_deref(), Some("err"));
         assert_eq!(loaded.sort_order.as_deref(), Some("frequency"));
+        assert_eq!(loaded.match_algorithm.as_deref(), Some("fuzzy"));
         assert_eq!(loaded.theme.as_deref(), Some("dracula"));
         assert_eq!(loaded.directory_source.as_deref(), Some("tmux"));
         assert_eq!(loaded.pane_visibility.as_deref(), Some("output"));
@@ -18233,6 +18285,7 @@ mod tui_session_tests {
             duplicate_filter: Some(true),
             exit_filter: None,
             sort_order: None,
+            match_algorithm: None,
             theme: Some("dracula".to_string()),
             directory_source: None,
             pane_visibility: if overrides.pane_visibility
