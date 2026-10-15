@@ -279,8 +279,7 @@ for the deeper implementation reference.
 ## Match algorithm
 
 The match algorithm (`C-f`) determines _how_ the query body is matched against
-the history rows. It applies to all prefix modes except JIRA (which uses its own
-JQL syntax).
+the history rows.
 
 | Algorithm | Behavior                                                                                             |
 | --------- | ---------------------------------------------------------------------------------------------------- |
@@ -292,9 +291,16 @@ The active algorithm is shown as a chip in the mode strip (`FUZZY` in green,
 `REGEX` in yellow) and as a suffix in the input border title (e.g.
 `history · fuzzy`, `notes · regex`).
 
-The match algorithm works only in some specific prefix mode. For instance it
-does not work inside the jira mode, where the request is send directly via JQL
-towards the JIRA server.
+**Not every prefix mode can apply the algorithm.** It is only available in the
+modes whose search is done in-process against the row text — **history** (no
+prefix), **output** (`+`), **directories** (`#`), **panes** (`*`), and **files**
+(`/`). Every other mode runs its own search first (the `note_search` library's
+query parser for notes/todos/project/segments/similar, JIRA's JQL, the
+ag/codegraph full-text index, or its own substring filter for tags, zoxide,
+processes, worktree, pass, browser, paperless). In those modes the algorithm is
+**not available**, so selecting `FUZZY`/`REGEX` there falls back to the mode's
+normal search — it does not try to re-filter the already-narrowed rows (which
+could only drop valid hits, e.g. a project note matched via its body text).
 
 ## Prefix modes
 
@@ -602,12 +608,14 @@ starting with `#` are comments; blank lines are ignored.
 
 ### Match algorithm notes
 
-- The match algorithm does **not** apply to JIRA (`-` mode), which parses its
-  own JQL syntax.
-- In notes (`@`) and todos (`!`) mode, the algorithm is accepted but the
-  `note_search` library's own query parser takes precedence for the SQL-level
-  filtering.
-- In directories (`#`), panes (`*`), and files (`/`) mode, the algorithm is
-  fully applied — fuzzy search in directories, regex in panes, etc.
+- The algorithm is **fully applied** only in history (no prefix), output (`+`),
+  directories (`#`), panes (`*`), and files (`/`) mode — fuzzy search in
+  directories, regex in panes, etc.
+- Every other prefix mode is an **own-search** mode and falls back to its normal
+  search when `FUZZY`/`REGEX` is selected: JIRA (`-`, JQL), notes (`@`) / todos
+  (`!`) / project (`.`) / segments (`:`) / similar (`"`) (the `note_search`
+  query parser), and tags (`$`), codegraph (`&`), ag (`,`), zoxide (`~`),
+  processes (`%`), pass (`)`), worktree (`;`), browser (`^`), paperless (`<`)
+  (each its own substring/index search).
 
 For the full configuration reference, see [TECHNICAL.md](TECHNICAL.md).

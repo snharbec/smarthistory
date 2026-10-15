@@ -499,10 +499,17 @@ mode strip as a chip.
 | Category     | search               |
 
 Toggle between substring, fuzzy, and regex match algorithms. Cycle: Substring →
-Fuzzy → Regex → Substring. Applied to all prefix modes (history, directories,
-panes, notes, etc.) except JIRA — JIRA's server-side JQL parsing is its own
-thing. The active algorithm is shown as a `· algoname` suffix in the input
-border title.
+Fuzzy → Regex → Substring. The active algorithm is shown as a `· algoname`
+suffix in the input border title.
+
+The algorithm is **only available** in the modes whose search runs in-process
+against the row text: history (no prefix), output (`+`), directories (`#`),
+panes (`*`), and files (`/`). Every other prefix mode runs its own search
+(JIRA's JQL, the `note_search` parser for notes/todos/project/segments/similar,
+the ag/codegraph index, or its own substring filter for tags/zoxide/processes/
+worktree/pass/browser/paperless). In those modes `FUZZY`/`REGEX` is **not
+available**, so it falls back to that mode's normal search rather than
+re-filtering (and dropping) the rows its own search already produced.
 
 The chosen algorithm is persisted in the session file and restored on the next
 TUI launch (the same `~/.cache/smarthistory/session` file `sortorder=`/`theme=`

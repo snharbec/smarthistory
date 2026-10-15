@@ -2615,6 +2615,39 @@ impl App {
         self.match_algorithm == MatchAlgorithm::Fuzzy
     }
 
+    /// Whether the active prefix mode actually supports the match
+    /// algorithm (Fuzzy / Regex) — i.e. whether `refresh()`'s
+    /// algorithm-aware post-filter is meaningful for it.
+    ///
+    /// Only the modes whose `fetch` DEFERS to the algorithm qualify:
+    /// the modes whose SQL/`self.query` filter is skipped when the
+    /// algorithm isn't Substring, leaving the post-filter to do the
+    /// matching (`history` + its `output` / `llm` / `question` variants,
+    /// `directories`, `panes`, `files`). Every other mode runs its own
+    /// search first — the `note_search` library's query parser (notes /
+    /// todos / project picker / segments / similar), JIRA's JQL, the
+    /// ag / codegraph FTS, or its own substring filter (tags, zoxide,
+    /// processes, worktree, pass, browser, paperless). For those, the
+    /// algorithm is NOT available: their `fetch` has already narrowed
+    /// the rows, so a fuzzy/regex post-filter on top can only *drop*
+    /// valid matches — e.g. a project note matched via its body text
+    /// would be discarded because its `command`/`comment` don't contain
+    /// the typed words. In that case the normal search stands (the
+    /// post-filter is skipped).
+    fn match_algorithm_applies(&self) -> bool {
+        use crate::tui::mode::ModeKind;
+        matches!(
+            crate::tui::mode::active_mode(self),
+            ModeKind::History
+                | ModeKind::Output
+                | ModeKind::Llm
+                | ModeKind::Question
+                | ModeKind::Directories
+                | ModeKind::Panes
+                | ModeKind::Files
+        )
+    }
+
     /// True if the current query is an output-content search
     /// (prefixed with configured output prefix).
     fn is_output_query(&self) -> bool {
@@ -5846,10 +5879,13 @@ impl App {
         let fetch_start = std::time::Instant::now();
         self.rows = self.fetch().unwrap_or_default();
         let fetch_elapsed = fetch_start.elapsed();
-        if self.match_algorithm != MatchAlgorithm::Substring
-            && !self.is_ag_query()
-            && !self.is_codegraph_query()
-        {
+        // Apply the algorithm-aware post-filter only for modes that
+        // actually support the algorithm. Modes that run their own
+        // search (`note_search` parser, JQL, ag/codegraph FTS, their own
+        // substring filter) fall back to that normal search rather than
+        // having fuzzy/regex drop rows it has already filtered — see
+        // `match_algorithm_applies`.
+        if self.match_algorithm != MatchAlgorithm::Substring && self.match_algorithm_applies() {
             // Two-phase borrow: copy the rows out, then post-filter.
             // Avoids the borrow checker complaining about
             // simultaneously borrowing `self.rows` and `self`.

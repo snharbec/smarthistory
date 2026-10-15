@@ -115,6 +115,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `C-f`'s `FUZZY` / `REGEX` algorithms now fall back to the mode's **normal**
+  search in every prefix mode that can't actually apply them — e.g. the project
+  picker (`.`), notes (`@`), todos (`!`), JIRA (`-`), and any other mode whose
+  `fetch` runs its own search first. Previously the algorithm-aware post-filter
+  ran on top of those modes' already-narrowed rows and could only *drop* valid
+  hits: a project note matched via its body text was discarded because its
+  list-row text (filename/title) didn't contain the typed words. The algorithm
+  is now applied only where it's real — history (no prefix), output (`+`),
+  directories (`#`), panes (`*`), and files (`/`).
 - The row match-highlight now covers **every** word of the search, not just the
   last. In a prefix mode (e.g. `*`, `#`, `@`, `/`) the highlight ran against the
   raw query including the leading prefix character, which was welded onto the
