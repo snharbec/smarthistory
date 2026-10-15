@@ -3217,6 +3217,61 @@ fn match_algorithm_as_str_parse_round_trips() {
     assert_eq!(MatchAlgorithm::parse(""), None);
 }
 
+/// `match_algorithm_applies` must be true only for the modes whose
+/// `fetch` defers to the algorithm (so the fuzzy/regex post-filter is
+/// meaningful) and false for every mode that runs its own search — the
+/// latter fall back to their normal search instead of letting fuzzy
+/// drop already-filtered rows (the reported project-prefix bug).
+#[test]
+fn match_algorithm_applies_only_to_supporting_modes() {
+    let mut app = directories_test_app(&[]);
+    let p = app.query_prefixes.clone();
+
+    // Supported: bare history, and the modes whose fetch skips its own
+    // filter when the algorithm isn't Substring.
+    for q in [
+        String::new(),
+        "git status".to_string(),
+        format!("{}x", p.output),
+        format!("{}x", p.llm),
+        format!("{}x", p.question),
+        format!("{}x", p.directories),
+        format!("{}x", p.panes),
+        format!("{}x", p.files),
+    ] {
+        app.query = q.clone();
+        assert!(
+            app.match_algorithm_applies(),
+            "query {q:?} must support the match algorithm"
+        );
+    }
+
+    // Not supported: own-search modes fall back to the normal search.
+    for q in [
+        format!("{}x", p.notes),
+        format!("{}x", p.todo),
+        format!("{}x", p.project_pick),
+        format!("{}x", p.jira),
+        format!("{}x", p.tags),
+        format!("{}x", p.codegraph),
+        format!("{}x", p.ag),
+        format!("{}x", p.zoxide),
+        format!("{}x", p.processes),
+        format!("{}x", p.pass),
+        format!("{}x", p.worktree),
+        format!("{}x", p.segments),
+        format!("{}x", p.similar),
+        format!("{}x", p.paperless),
+        format!("{}x", p.browser),
+    ] {
+        app.query = q.clone();
+        assert!(
+            !app.match_algorithm_applies(),
+            "query {q:?} must fall back to its normal search, not the algorithm post-filter"
+        );
+    }
+}
+
 // --- App::edit_referenced_file end-to-end ------------------------------
 
 #[test]
@@ -10621,6 +10676,37 @@ fn fetch_todos_populates_real_timestamps() {
             after + 1
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// In the modes that run their own search (here: the `note_search`-
+/// backed notes mode), selecting Fuzzy must fall back to that normal
+/// search rather than applying a fuzzy post-filter over `command` /
+/// `comment`. Regression test for the reported "fuzzy doesn't work in
+/// the project prefix" bug: a note matched via its BODY ("prose" here,
+/// present in the note text but not in its filename/title) used to be
+/// dropped by the post-filter, which only saw the filename/title.
+#[test]
+fn fuzzy_falls_back_to_normal_search_in_notes_mode() {
+    let (dir, db_path) = setup_todo_db();
+    let mut app = global_test_app(&[("a", 1)]);
+    app.notes_dir = Some(dir.clone());
+    app.notes_database = Some(db_path.clone());
+
+    for algo in [MatchAlgorithm::Substring, MatchAlgorithm::Fuzzy] {
+        app.match_algorithm = algo;
+        app.query = "@prose".to_string();
+        app.refresh();
+        let names: Vec<&str> = app.merged_rows().iter().map(|r| r.command.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "algo {algo:?}: the body-only match must survive (got rows {names:?}); \
+             fuzzy must fall back to the normal note search"
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&db_path);
 }
