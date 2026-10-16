@@ -367,8 +367,12 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // function over `app.sessions`
     // and `app.hosts`) the
     // count is deterministic.
+    ensure_directory_sections(app);
     let mut composed: Vec<HistoryRow> = app.session_panes.clone();
     configured_sections_into(&mut composed, app);
+    if let Some(rows) = &app.panes_directory_rows {
+        composed.extend(rows.iter().cloned());
+    }
     let section_rows: Vec<HistoryRow> = if app.panes_filter.is_default() {
         composed
     } else {
@@ -408,7 +412,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         .collect();
     if tokens.is_empty() {
         return Ok(apply_collapsed_groups(
-            insert_sessions_group_header(section_rows),
+            insert_sessions_group_header(limit_zoxide_rows(section_rows)),
             &app.collapsed_pane_groups,
         ));
     }
@@ -512,9 +516,103 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         }
     }
     Ok(apply_collapsed_groups(
-        insert_sessions_group_header(out),
+        insert_sessions_group_header(limit_zoxide_rows(out)),
         &app.collapsed_pane_groups,
     ))
+}
+
+/// At most this many zoxide rows are shown in the panes view's
+/// `zoxide` section — the zoxide database easily holds hundreds of
+/// directories, which would otherwise bury the live sessions,
+/// `Directories` and `hosts` sections. Applied AFTER the query filter,
+/// so it's the top-N (by frecency) of the MATCHING directories; the
+/// full list is still one keystroke away in `~` mode.
+pub(crate) const PANES_ZOXIDE_LIMIT: usize = 10;
+
+/// Drop every zoxide child row past the first `PANES_ZOXIDE_LIMIT`.
+fn limit_zoxide_rows(rows: Vec<HistoryRow>) -> Vec<HistoryRow> {
+    let mut seen = 0usize;
+    rows.into_iter()
+        .filter(|r| {
+            if r.mode == "directory" && r.source == "zoxide" {
+                seen += 1;
+                seen <= PANES_ZOXIDE_LIMIT
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
+/// Populate `app.panes_directory_rows` (once per TUI session) with
+/// the `zoxide` and `worktrees` sections. See
+/// `directory_section_rows` for the row shape.
+fn ensure_directory_sections(app: &mut App) {
+    if app.panes_directory_rows.is_some() {
+        return;
+    }
+    // Never touch the real zoxide database / git repo from unit
+    // tests — tests that want these sections set
+    // `app.panes_directory_rows` themselves.
+    if cfg!(test) {
+        app.panes_directory_rows = Some(Vec::new());
+        return;
+    }
+    let zoxide_paths = crate::tui::mode::zoxide::query_zoxide_paths();
+    let worktrees = crate::tui::mode::worktree::current_repo_worktrees(app);
+    app.panes_directory_rows = Some(directory_section_rows(zoxide_paths, worktrees, &app.home_list));
+}
+
+/// Build the panes view's `zoxide` and `worktrees` sections: a
+/// `mode == "workspace"` header (collapsible, like `Directories` /
+/// `hosts`) followed by the exact rows `~` / `;` mode would show for
+/// an empty query — `mode == "directory"`, `source == "zoxide"` /
+/// `"worktree"` — so `stage_pane_selection` can hand them to the same
+/// staging those modes use. A section with no rows (zoxide not
+/// installed, cwd not in a git repo) is omitted entirely. Child ids
+/// are re-based far below the other sections' synthetic ids so they
+/// never collide with them.
+pub(crate) fn directory_section_rows(
+    zoxide_paths: Vec<String>,
+    worktrees: Vec<crate::tui::mode::worktree::WorktreeEntry>,
+    home_list: &[String],
+) -> Vec<HistoryRow> {
+    let mut out = Vec::new();
+    let sections = [
+        (
+            "zoxide",
+            "zoxide directories",
+            -30_000,
+            -1_000_000,
+            crate::tui::mode::zoxide::build_rows(zoxide_paths, &[], home_list),
+        ),
+        (
+            "worktrees",
+            "git worktrees of the current repo",
+            -35_000,
+            -2_000_000,
+            crate::tui::mode::worktree::build_rows(worktrees, &[], home_list),
+        ),
+    ];
+    for (label, comment, header_id, child_base, children) in sections {
+        let Some(source) = children.first().map(|r| r.source.clone()) else {
+            continue;
+        };
+        out.push(HistoryRow {
+            id: header_id,
+            command: label.to_string(),
+            session_id: label.to_string(),
+            comment: comment.to_string(),
+            mode: "workspace".to_string(),
+            source,
+            ..Default::default()
+        });
+        out.extend(children.into_iter().enumerate().map(|(idx, mut row)| {
+            row.id = child_base - idx as i64;
+            row
+        }));
+    }
+    out
 }
 
 /// Prepend a synthetic `# Sessions` header directly above the first
@@ -598,7 +696,10 @@ fn apply_collapsed_groups(
     while idx < rows.len() {
         let row = rows[idx].clone();
         let is_group_header = row.mode == "workspace"
-            && matches!(row.source.as_str(), "workspace-group" | "sessions" | "hosts");
+            && matches!(
+                row.source.as_str(),
+                "workspace-group" | "sessions" | "hosts" | "zoxide" | "worktree"
+            );
         let is_collapsed = is_group_header && collapsed.contains(&row.command);
         idx += 1;
         out.push(row.clone());

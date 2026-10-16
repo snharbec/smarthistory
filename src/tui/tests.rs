@@ -19388,6 +19388,105 @@ fn fetch_panes_substring_filter_matches_command_or_cwd() {
     assert_eq!(rows[0].command, "vim");
 }
 
+// --- zoxide / worktrees sections (`directory_section_rows`) ----
+
+fn panes_directory_test_app(zoxide_dirs: &[String], worktree_dir: &str) -> App {
+    let mut app = panes_test_app(&[("%1", "@1", "/tmp", "zsh")]);
+    app.panes_directory_rows = Some(crate::tui::mode::panes::directory_section_rows(
+        zoxide_dirs.to_vec(),
+        vec![crate::tui::mode::worktree::WorktreeEntry {
+            path: worktree_dir.to_string(),
+            branch: Some("feature/panes-wt".to_string()),
+            is_bare: false,
+        }],
+        &[],
+    ));
+    app
+}
+
+/// `*` with no filter shows a `zoxide` and a `worktrees` header, each
+/// followed by its directory rows.
+#[test]
+fn fetch_panes_appends_zoxide_and_worktree_sections() {
+    let z = zoxide_test_dir("panes-section");
+    let w = zoxide_test_dir("panes-worktree");
+    let mut app = panes_directory_test_app(std::slice::from_ref(&z), &w);
+    app.query = String::from("*");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let zi = rows
+        .iter()
+        .position(|r| r.mode == "workspace" && r.command == "zoxide")
+        .expect("zoxide header");
+    assert_eq!(rows[zi + 1].mode, "directory");
+    assert_eq!(rows[zi + 1].source, "zoxide");
+    assert_eq!(rows[zi + 1].directory, z);
+    let wi = rows
+        .iter()
+        .position(|r| r.mode == "workspace" && r.command == "worktrees")
+        .expect("worktrees header");
+    assert_eq!(rows[wi + 1].source, "worktree");
+    assert_eq!(rows[wi + 1].command, "feature/panes-wt");
+    assert_eq!(rows[wi + 1].directory, w);
+}
+
+/// The query filters the new sections like every other panes group:
+/// a token matching only the worktree drops the zoxide section.
+#[test]
+fn fetch_panes_filters_zoxide_and_worktree_sections() {
+    let z = zoxide_test_dir("panes-filter");
+    let w = zoxide_test_dir("panes-filter-wt");
+    let mut app = panes_directory_test_app(std::slice::from_ref(&z), &w);
+    app.query = String::from("*panes-wt");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    assert!(rows.iter().all(|r| r.source != "zoxide"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.source == "worktree" && r.mode == "directory"));
+}
+
+/// Only the top `PANES_ZOXIDE_LIMIT` zoxide rows are shown.
+#[test]
+fn fetch_panes_limits_zoxide_rows() {
+    let dirs: Vec<String> = (0..crate::tui::mode::panes::PANES_ZOXIDE_LIMIT + 5)
+        .map(|i| zoxide_test_dir(&format!("panes-limit-{i}")))
+        .collect();
+    let w = zoxide_test_dir("panes-limit-wt");
+    let mut app = panes_directory_test_app(&dirs, &w);
+    app.query = String::from("*");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let shown: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.mode == "directory" && r.source == "zoxide")
+        .map(|r| r.directory.as_str())
+        .collect();
+    assert_eq!(shown.len(), crate::tui::mode::panes::PANES_ZOXIDE_LIMIT);
+    assert_eq!(shown[0], dirs[0], "zoxide's own frecency order is kept");
+}
+
+/// Selecting a worktree row in panes mode stages the same directory
+/// jump `;` mode does; selecting a zoxide row opens the same save
+/// prompt `~` mode does.
+#[test]
+fn panes_directory_rows_select_like_their_own_modes() {
+    let z = zoxide_test_dir("panes-select");
+    let w = zoxide_test_dir("panes-select-wt");
+    let mut app = panes_directory_test_app(std::slice::from_ref(&z), &w);
+    app.query = String::from("*");
+    app.merged_rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+
+    let wi = app.merged_rows.iter().position(|r| r.source == "worktree" && r.mode == "directory").unwrap();
+    app.list_state.select(Some(wi));
+    app.select_for_run();
+    let staged = app.selection.clone().expect("worktree row must stage a command");
+    assert!(staged.contains(&w), "{staged}");
+
+    app.selection = None;
+    app.pick_mode = None;
+    let zi = app.merged_rows.iter().position(|r| r.source == "zoxide" && r.mode == "directory").unwrap();
+    app.list_state.select(Some(zi));
+    app.select_for_run();
+    let prompt = app.zoxide_save_prompt.as_ref().expect("zoxide row must open the save prompt");
+    assert_eq!(prompt.directory, z);
+}
+
 // --- Sessions group header (`insert_sessions_group_header`) ----
 //
 // Live tmux/herdr workspaces get a common synthetic `# Sessions`

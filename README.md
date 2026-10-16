@@ -459,6 +459,10 @@ row stages `herdr workspace focus <id>`; selecting a pane row stages
 workspace (header + every child pane); typing a token that matches a pane's
 command / cwd keeps that pane and its parent workspace header.
 
+- **`*` mode (zoxide + worktrees)**: `# zoxide` (top 10 matching zoxide
+  directories) and `# worktrees` (git worktrees of the current repo) blocks
+  follow the hosts. Selecting a row does the same as selecting it in `~` / `;`
+  mode. See [docs/modes/panes.md](docs/modes/panes.md).
 - **`*` mode (hosts)**: a `# hosts` block at the bottom of the panes view. Each
   host becomes a row; selecting a row either focuses an existing workspace
   already running that host's `ssh` connection (or matching the host's display

@@ -1612,6 +1612,12 @@ pub(crate) struct App {
     /// `select-pane` / `switch-client`
     /// action on Enter can target it.
     session_panes: Vec<HistoryRow>,
+    /// The panes (`*`) mode's `zoxide` and `worktrees` sections
+    /// (header + child rows, unfiltered), built once per TUI session
+    /// by `panes::ensure_directory_sections` — same snapshot-once
+    /// trade-off as `session_panes`, so typing doesn't re-spawn
+    /// `zoxide query -l` / `git worktree list` per keystroke.
+    panes_directory_rows: Option<Vec<HistoryRow>>,
     /// Named sessions parsed from
     /// Named sessions from the config file
     /// (`session.<id>=...`, `session.<id>.dir=...`).
@@ -5454,6 +5460,7 @@ impl App {
             // rationale.
             tmux_windows: Vec::new(),
             session_panes: Vec::new(),
+            panes_directory_rows: None,
             sessions: Vec::new(),
             hosts: Vec::new(),
             host_defs: Vec::new(),
@@ -5875,6 +5882,9 @@ impl App {
         // user types `*` already shows the list.
         if self.is_panes_query() {
             crate::tui::mode::panes::refresh_session_panes(self);
+            // The `zoxide` / `worktrees` sections' rows are plain
+            // directory rows that get the `T`-marked treatment too.
+            crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         }
         let fetch_start = std::time::Instant::now();
         self.rows = self.fetch().unwrap_or_default();
@@ -6093,7 +6103,7 @@ impl App {
                     }
                 }
             } else if let Some(idx) = self.merged_rows.iter().position(|r| {
-                (r.mode == "pane" || r.mode == "session" || r.mode == "host")
+                matches!(r.mode.as_str(), "pane" | "session" | "host" | "directory")
                     && self.query_matches_text(&r.command)
             }) {
                 self.list_state.select(Some(idx));

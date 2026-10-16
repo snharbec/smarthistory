@@ -68,7 +68,8 @@ each one is still its own independently matchable group, exactly as before.
 
 ## Collapsing group headers
 
-`Enter` on the `# Sessions`, `# Directories`, or `# hosts` header **collapses**
+`Enter` on the `# Sessions`, `# Directories`, `# hosts`, `# zoxide`, or
+`# worktrees` header **collapses**
 it instead of trying to focus something — a `▾` (expanded, the default) / `▸`
 (collapsed) triangle before the `#` shows the current state. Collapsing
 `# Sessions` hides every live workspace's `## ` sub-heading and all their panes
@@ -80,7 +81,7 @@ if you type a query that would otherwise match one of its hidden children).
 
 An individual live workspace's own `## <label>` sub-heading is a different thing
 and is NOT collapsible — `Enter` on it still stages the focus command, same as
-before this feature existed. Only the three top-level group headers toggle.
+before this feature existed. Only the top-level group headers toggle.
 
 ## Selecting a row
 
@@ -96,7 +97,11 @@ before this feature existed. Only the three top-level group headers toggle.
 - `Enter` on a **workspace** sub-heading (`## <label>`) stages the
   workspace-focus command (no specific pane). Useful when the workspace is in
   another window / tab and you just want to land in it.
-- `Enter` on the `# Sessions` / `# Directories` / `# hosts` group header
+- `Enter` on a **zoxide** / **worktree** row behaves exactly like selecting it
+  in `~` / `;` mode — see
+  [Directory groups](#directory-groups-zoxide-and-worktrees) below.
+- `Enter` on any `# ` group header (`Sessions`, `Directories`, `hosts`,
+  `zoxide`, `worktrees`)
   collapses/expands it instead — see
   [Collapsing group headers](#collapsing-group-headers) above.
 
@@ -165,6 +170,29 @@ otherwise makes 1–2 character searches unusably eager). This scoping only
 applies in Substring match mode (`Ctrl-F` default) — Fuzzy/Regex mode matches
 the whole query as one pattern and doesn't split it into scope vs. content
 tokens.
+
+## Directory groups: zoxide and worktrees
+
+After `hosts`, two more groups list directories the same way their own prefix
+modes do:
+
+- **`# zoxide`** — the directories from the local `zoxide` database
+  ([`~` mode](zoxide.md)), highest frecency first. Capped at the top **10**
+  _matching_ entries so a large zoxide database doesn't bury the other
+  groups — the full list is in `~` mode.
+- **`# worktrees`** — the `git worktree` checkouts of the repo containing the
+  current directory ([`;` mode](worktree.md)), shown by branch name with the
+  path alongside.
+
+Selecting a row does exactly what selecting it in its own mode does: a zoxide
+row goes through `~` mode's flow (including its "save this directory?" prompt
+for a directory not yet in `Directories`), and a worktree row stages the same
+create/focus session command as `;` mode. A `T` marker shows when a directory
+already has an active pane. A group is omitted when it has no entries (zoxide
+not installed, or not inside a git repo). Both lists are read once per picker
+launch, like the multiplexer snapshot. Both headers collapse like the others,
+and their labels scope the search (`*zox`, `*worktree`). The `F7`/`F8`/`F9`
+filters hide them.
 
 `F7` / `F8` / `F9` (below) do the same group restriction, just via a fixed
 keybinding instead of typing a token — the two mechanisms are complementary, not

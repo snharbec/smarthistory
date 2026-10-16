@@ -120,7 +120,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// row-building) so tests can exercise that logic with synthetic
 /// paths without spawning the real `zoxide` binary or touching the
 /// user's real zoxide database.
-fn query_zoxide_paths() -> Vec<String> {
+pub(crate) fn query_zoxide_paths() -> Vec<String> {
     let output = std::process::Command::new("zoxide").args(["query", "-l"]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)

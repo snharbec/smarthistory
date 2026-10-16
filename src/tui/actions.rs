@@ -1532,7 +1532,10 @@ impl App {
                 // of which was ever a real focusable target, so this
                 // replaces a staged command that always silently
                 // failed with something actually useful.
-                if matches!(row.source.as_str(), "workspace-group" | "sessions" | "hosts") {
+                if matches!(
+                    row.source.as_str(),
+                    "workspace-group" | "sessions" | "hosts" | "zoxide" | "worktree"
+                ) {
                     self.toggle_pane_group_collapsed(&row.command.clone());
                     return;
                 }
@@ -1589,6 +1592,15 @@ impl App {
                         self.multiplexer.name(),
                         label
                     ));
+                }
+            }
+            // `zoxide` / `worktrees` section rows: same staging as
+            // selecting the row in `~` / `;` mode itself.
+            "directory" => {
+                if row.source == "zoxide" {
+                    self.stage_zoxide_selection();
+                } else {
+                    self.stage_directory_selection();
                 }
             }
             "pane" => {

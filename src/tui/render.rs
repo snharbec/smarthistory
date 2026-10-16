@@ -5853,7 +5853,10 @@ pub(crate) fn render_row<'a>(
         // their `Directories`/`hosts` `# `-header with no
         // intermediate level.
         spans.push(Span::raw("    · "));
-    } else if row.mode == "session" || row.mode == "host" {
+    } else if row.mode == "session"
+        || row.mode == "host"
+        || (row.mode == "directory" && app.is_panes_query())
+    {
         spans.push(Span::raw("  · "));
     } else if row.mode == "workspace" && row.source == "workspace" {
         // An individual live tmux/herdr workspace — nested one
