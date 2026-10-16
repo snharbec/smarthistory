@@ -23,22 +23,25 @@ if [[ -n "$_smarthistory_server_socket" ]] \
     && zmodload zsh/system 2>/dev/null; then
     _smarthistory_server_ok=1
 fi
-# `_smarthistory_run <args...>` — drop-in for `smarthistory <args...>`
-# (same stdout, stderr and exit status). Falls back to exec'ing the
-# binary only when the socket can't be connected to, i.e. when the
-# request was never sent; once it was sent, a broken/timed-out reply
-# returns 1 rather than re-running the command (no double `add`).
-_smarthistory_run() {
+# `_smarthistory_server_call <args...>` — send one request to the shell
+# server. Sets `_smarthistory_server_sent` (0 when the socket couldn't be
+# connected to, i.e. nothing was sent), `_smarthistory_server_out` and
+# `_smarthistory_server_err`, and returns the command's exit status. A
+# broken or timed-out reply after the request was sent returns 1 with
+# `_smarthistory_server_sent=1`, so callers never re-run the command
+# (no double `add`).
+_smarthistory_server_call() {
     emulate -L zsh
     # Byte semantics for `${#req}` / `${body[a,b]}` — the response
     # header's lengths are byte counts.
     setopt no_multibyte
-    if (( ! _smarthistory_server_ok )) \
-        || ! zsocket "$_smarthistory_server_socket" 2>/dev/null; then
-        command smarthistory "$@"
-        return
-    fi
-    local -i fd=$REPLY written=0 n code out_len err_len
+    _smarthistory_server_sent=0
+    _smarthistory_server_out=
+    _smarthistory_server_err=
+    (( _smarthistory_server_ok )) || return 1
+    zsocket "$_smarthistory_server_socket" 2>/dev/null || return 1
+    _smarthistory_server_sent=1
+    local -i fd=$REPLY written=0 n out_len err_len
     local k req buf chunk header body
     local -a fields hdr
     fields=(SH1 RUN "C$PWD")
@@ -63,10 +66,58 @@ _smarthistory_run() {
     [[ "$buf" == *$'\n'* && "$header" == "SH1 "* ]] || return 1
     body=${buf#*$'\n'}
     hdr=(${=header})
-    code=${hdr[2]} out_len=${hdr[3]} err_len=${hdr[4]}
-    print -rn -- "${body[1,out_len]}"
-    (( err_len )) && print -rnu2 -- "${body[out_len+1,-1]}"
-    return $code
+    out_len=${hdr[3]} err_len=${hdr[4]}
+    _smarthistory_server_out=${body[1,out_len]}
+    (( err_len )) && _smarthistory_server_err=${body[out_len+1,-1]}
+    return ${hdr[2]}
+}
+# `_smarthistory_run <args...>` — drop-in for `smarthistory <args...>`
+# (same stdout, stderr and exit status), served by the shell server
+# when it's reachable and exec'ing the binary otherwise.
+_smarthistory_run() {
+    _smarthistory_server_call "$@"
+    local rc=$?
+    if (( ! _smarthistory_server_sent )); then
+        command smarthistory "$@"
+        return
+    fi
+    print -rn -- "$_smarthistory_server_out"
+    [[ -n "$_smarthistory_server_err" ]] && print -rnu2 -- "$_smarthistory_server_err"
+    return $rc
+}
+# `_smarthistory_capture <args...>` — `REPLY=$(smarthistory <args...>
+# 2>/dev/null)` without the `$(...)` subshell fork when the server
+# answers (trailing newlines trimmed the same way). Used on the
+# per-keystroke paths (dropdown search/predict, Up/Down).
+_smarthistory_capture() {
+    _smarthistory_server_call "$@"
+    local rc=$?
+    if (( ! _smarthistory_server_sent )); then
+        REPLY=$(command smarthistory "$@" 2>/dev/null)
+        return
+    fi
+    REPLY=$_smarthistory_server_out
+    while [[ "$REPLY" == *$'\n' ]]; do
+        REPLY=${REPLY%$'\n'}
+    done
+    return $rc
+}
+# `cut -f2` in zsh: replace each line of `$REPLY` by its second
+# TAB-separated field (lines without a TAB stay whole, like `cut`).
+_smarthistory_reply_field2() {
+    local -a lines
+    local line
+    for line in "${(@f)REPLY}"; do
+        if [[ "$line" == *$'\t'* ]]; then
+            line=${line#*$'\t'}
+            line=${line%%$'\t'*}
+        fi
+        lines+=("$line")
+    done
+    REPLY=${(pj:\n:)lines}
+    while [[ "$REPLY" == *$'\n' ]]; do
+        REPLY=${REPLY%$'\n'}
+    done
 }
 
 # Debug logging. Set SMARTHISTORY_DEBUG=1 in the environment to enable
@@ -1389,7 +1440,8 @@ _smarthistory_dropdown_paint() {
     fi
     for raw in "${_smarthistory_dropdown_candidates[@]}"; do
         (( i >= max_rows )) && break
-        c=$(_smarthistory_unescape "$raw")
+        _smarthistory_unescape "$raw"
+        c=$REPLY
         # A multiline command would otherwise break the one-row-per-
         # candidate layout; show a visible marker instead, same
         # convention the Rust TUI list uses for the same reason.
@@ -1577,7 +1629,8 @@ _smarthistory_dropdown_paint() {
     local out=""
     if (( _smarthistory_dropdown_chosen == 1 )); then
         local _sm_ghost_raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
-        local _sm_ghost_full=$(_smarthistory_unescape "$_sm_ghost_raw")
+        _smarthistory_unescape "$_sm_ghost_raw"
+        local _sm_ghost_full=$REPLY
         _sm_ghost_full=${_sm_ghost_full//$'\n'/'; '}
         _sm_ghost_full=${_sm_ghost_full//$'\r'/}
         if [[ "$_sm_ghost_full" == "$BUFFER"* ]]; then
@@ -1883,14 +1936,16 @@ _smarthistory_predict_raw() {
         global) _sm_predict_scope_args=() ;;
     esac
     if [[ -n "$_smarthistory_last_cmd" ]]; then
-        REPLY=$(_smarthistory_run next "$_smarthistory_last_cmd" --limit "$limit" "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
+        _smarthistory_capture next "$_smarthistory_last_cmd" --limit "$limit" "${_sm_predict_scope_args[@]}"
+        _smarthistory_reply_field2
     else
         local -a _sm_frequent_scope_args
         case "$_smarthistory_mode" in
             dir) _sm_frequent_scope_args=(--directory "$PWD") ;;
             *)   _sm_frequent_scope_args=() ;;
         esac
-        REPLY=$(_smarthistory_run next --limit "$limit" "${_sm_frequent_scope_args[@]}" 2>/dev/null | cut -f2)
+        _smarthistory_capture next --limit "$limit" "${_sm_frequent_scope_args[@]}"
+        _smarthistory_reply_field2
     fi
 }
 
@@ -2020,7 +2075,8 @@ _smarthistory_dropdown_render() {
             dir)    args+=(--directory "$PWD") ;;
             global) ;;
         esac
-        raw=$(_smarthistory_run search "${args[@]}" 2>/dev/null)
+        _smarthistory_capture search "${args[@]}"
+        raw=$REPLY
     fi
     local -a _sm_dropdown_lines
     _sm_dropdown_lines=("${(f)raw}")
@@ -2403,7 +2459,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
             && $_smarthistory_dropdown_chosen -eq 1 \
             && ${#_smarthistory_dropdown_candidates} -gt 0 ]] || return 1
         local raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
-        BUFFER=$(_smarthistory_unescape "$raw")
+        _smarthistory_unescape "$raw"
+        BUFFER=$REPLY
         case "$1" in
             start) CURSOR=0 ;;
             end)   CURSOR=${#BUFFER} ;;
@@ -2504,7 +2561,8 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     _smarthistory_dropdown_run_first() {
         if [[ $_smarthistory_dropdown_visible -eq 1 && ${#_smarthistory_dropdown_candidates} -gt 0 ]]; then
             local raw=${_smarthistory_dropdown_candidates[1]}
-            BUFFER=$(_smarthistory_unescape "$raw")
+            _smarthistory_unescape "$raw"
+            BUFFER=$REPLY
             CURSOR=${#BUFFER}
             _smarthistory_reset_state
             zle .accept-line
@@ -2710,7 +2768,8 @@ _smarthistory_prime_cache() {
         global) ;;
     esac
     _smarthistory_debug_log "prime_cache: cache MISS, running: smarthistory search ${args[*]}"
-    _smarthistory_matches=$(_smarthistory_run search "${args[@]}" 2>/dev/null)
+    _smarthistory_capture search "${args[@]}"
+    _smarthistory_matches=$REPLY
     _smarthistory_index=0
     _smarthistory_query_key="$query_key"
     _smarthistory_last_match=""
@@ -2746,10 +2805,19 @@ _smarthistory_unescape() {
     # replacement is an ANSI-C
     # quoted string that yields a
     # real newline.
-    local out=$1
-    out=${out//\\n/$'\n'}
-    out=${out//\\r/$'\r'}
-    printf %s "$out"
+    #
+    # Result goes to `$REPLY` (same convention as
+    # `_smarthistory_strip_ansi`) rather than stdout: the dropdown
+    # paints one row per candidate on every keystroke, and a
+    # `$(...)` capture per row forked a subshell each time — the
+    # bulk of the per-keystroke paint cost. Trailing newlines are
+    # still trimmed, exactly as the former `$(...)` capture did.
+    REPLY=$1
+    REPLY=${REPLY//\\n/$'\n'}
+    REPLY=${REPLY//\\r/$'\r'}
+    while [[ "$REPLY" == *$'\n' ]]; do
+        REPLY=${REPLY%$'\n'}
+    done
 }
 
 
@@ -3067,7 +3135,8 @@ _smarthistory_up_history() {
     # originally typed it).
     local raw_match=${_smarthistory_lines[$_smarthistory_index]}
     local match
-    match=$(_smarthistory_unescape "$raw_match")
+    _smarthistory_unescape "$raw_match"
+    match=$REPLY
     BUFFER="$match"
     CURSOR=${#BUFFER}
     # Store the un-escaped version
@@ -3184,7 +3253,8 @@ _smarthistory_down_history() {
     _smarthistory_index=$((_smarthistory_index - 1))
     local raw_match=${_smarthistory_lines[$_smarthistory_index]}
     local match
-    match=$(_smarthistory_unescape "$raw_match")
+    _smarthistory_unescape "$raw_match"
+    match=$REPLY
     BUFFER="$match"
     CURSOR=${#BUFFER}
     _smarthistory_last_match="$match"
@@ -3241,7 +3311,8 @@ _smarthistory_next_history() {
     fi
     local raw_match=${_smarthistory_candidates[$((_smarthistory_next_index + 1))]}
     local match
-    match=$(_smarthistory_unescape "$raw_match")
+    _smarthistory_unescape "$raw_match"
+    match=$REPLY
     BUFFER="$match"
     CURSOR=${#BUFFER}
     _smarthistory_next_index=$((_smarthistory_next_index + 1))
