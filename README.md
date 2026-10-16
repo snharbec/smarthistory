@@ -109,6 +109,13 @@ of falling through to zsh's native history.
   `session.<key> = "name"` + `session.<key>.dir = "~/path"`. They appear in the
   panes (`*`) view under a `# Directories` header; selecting one
   creates/switches a workspace.
+- **Shell server** (zsh): `smarthistory init zsh` starts a small persistent
+  `smarthistory shell-server` on a private local Unix socket, and the shell
+  hooks (per-keystroke dropdown search, per-prompt `add`, startup `config get`)
+  talk to it instead of exec'ing the binary each time — no keystroke lag even
+  when the binary lives on a network share. Falls back to exec when the server
+  isn't reachable; `shellserver.enabled=off` disables it. See
+  [docs/shell-server.md](docs/shell-server.md).
 - **Single Rust binary, no runtime dependencies.** No `fzf`, no `uuidgen`, no
   `/dev/urandom` access.
 
@@ -198,6 +205,7 @@ smarthistory import-atuin              # import from atuin
 smarthistory update                    # normalize stored directory paths
 smarthistory ask <question>            # ask the LLM a question from the console (see below)
 smarthistory comments list|add|delete  # manage comment-expansion entries
+smarthistory shell-server [--status|--stop]  # persistent server for the zsh hooks (auto-started by init zsh)
 ```
 
 ### TUI subcommand options

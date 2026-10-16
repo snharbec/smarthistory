@@ -62,6 +62,8 @@ value" so you can confirm what the TUI actually sees.
   - [`panes.layout`](#paneslayout)
 - [Compact display](#compact-display)
   - [`tui.compact`](#tuicompact)
+- [Shell server](#shell-server)
+  - [`shellserver.enabled`](#shellserverenabled)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -452,6 +454,28 @@ command palette, `Ctrl-Q`). The last choice is remembered in the session file
 next launch.
 
 ---
+
+## Shell server
+
+### `shellserver.enabled`
+
+|                  |                                       |
+| ---------------- | ------------------------------------- |
+| **Type**         | `on` \| `off`                         |
+| **Default**      | `on`                                  |
+| **Env override** | — (`SMARTHISTORY_SERVER_SOCKET` moves the socket) |
+
+Whether `smarthistory init zsh` starts the persistent `smarthistory
+shell-server` (if it isn't running yet) and the zsh snippet sends its
+non-interactive calls (`search` on every keystroke for the live dropdown, `add`
+on every prompt, `config get` at startup, …) over its Unix socket instead of
+exec'ing the binary each time. Biggest win when the binary sits on a network
+share (SMB/NFS). With `off`, the snippet execs the binary as before. zsh only —
+bash always execs. See [`docs/shell-server.md`](shell-server.md).
+
+```ini
+shellserver.enabled=off
+```
 
 ## Live dropdown completion
 

@@ -12,6 +12,8 @@ mod llm;
 mod multiplexer;
 mod paperless;
 mod server;
+#[cfg(unix)]
+mod shell_server;
 mod tui;
 mod util;
 
@@ -809,6 +811,20 @@ enum Commands {
     /// default, since anyone who can reach the port can read every
     /// tracked project's directories, commands, notes, and visited
     /// URLs for any day.
+    /// Run the persistent shell server the zsh integration uses to
+    /// avoid exec'ing this binary on every keystroke / prompt.
+    ///
+    /// Started automatically by `smarthistory init zsh` (unless
+    /// `shellserver.enabled=off`); listens on a private Unix socket in
+    /// the temp dir. See docs/shell-server.md.
+    ShellServer {
+        /// Stop the running server.
+        #[arg(long, conflicts_with = "status")]
+        stop: bool,
+        /// Print whether a server is running (exit 1 if not).
+        #[arg(long)]
+        status: bool,
+    },
     Serve {
         /// Port to listen on. Defaults to `serve.port`, or `4590` if
         /// that's not set either.
@@ -1748,6 +1764,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         "  dropdown.enabled = {}",
         if cfg.dropdown_enabled { "on" } else { "off" }
     );
+    let _ = writeln!(
+        f,
+        "  shellserver.enabled = {}",
+        if cfg.shell_server_enabled { "on" } else { "off" }
+    );
     let _ = writeln!(f, "  dropdown.limit = {}", cfg.dropdown_limit);
     let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
     let _ = writeln!(f, "  segments.minwords = {}", cfg.segments_min_words);
@@ -2204,6 +2225,12 @@ pub struct Config {
     /// existing opt-in features (it hooks every keystroke), so it
     /// defaults off. Set via `dropdown.enabled=on|off`.
     dropdown_enabled: bool,
+    /// Whether `smarthistory init zsh` starts (and the zsh snippet
+    /// uses) the persistent `smarthistory shell-server`, which runs
+    /// the hot-path CLI calls without exec'ing the binary each time.
+    /// Default `true`. Set via `shellserver.enabled=on|off`. See
+    /// `docs/shell-server.md`.
+    shell_server_enabled: bool,
     /// Max number of candidates the dropdown shows. Read by
     /// `init.zsh` via `smarthistory config get dropdown.limit` at
     /// shell-init time and passed as `--limit` to the same
@@ -2773,6 +2800,7 @@ impl Config {
             // above: empty config means "feature disabled".
             paperless: None,
             dropdown_enabled: false,
+            shell_server_enabled: true,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
             segments_min_words: 5,
@@ -3022,6 +3050,9 @@ impl Config {
                 }
                 "dropdown.enabled" => {
                     self.dropdown_enabled = crate::util::parse_bool(value, false);
+                }
+                "shellserver.enabled" => {
+                    self.shell_server_enabled = crate::util::parse_bool(value, true);
                 }
                 "dropdown.limit" => match value.trim().parse::<usize>() {
                     Ok(n) if n > 0 => self.dropdown_limit = n,
@@ -8585,7 +8616,45 @@ fn run_tui_command(
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    run_command(Args::parse())
+}
+
+/// Parse `argv` and run it exactly like `main` would, returning the
+/// process exit code instead of exiting. Used by the shell server's
+/// forked workers (`shell_server::run_worker`).
+#[cfg(unix)]
+pub(crate) fn run_cli<I, T>(argv: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match Args::try_parse_from(argv) {
+        Ok(args) => match run_command(args) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("Error: {e:?}");
+                1
+            }
+        },
+        Err(e) => {
+            let _ = e.print();
+            e.exit_code()
+        }
+    }
+}
+
+fn run_command(args: Args) -> anyhow::Result<()> {
+    // Handled before `init_db`: the server forks per request, and must
+    // never carry an open SQLite handle across `fork()`.
+    if let Commands::ShellServer { stop, status } = args.command {
+        #[cfg(unix)]
+        return crate::shell_server::cli(stop, status);
+        #[cfg(not(unix))]
+        {
+            let _ = (stop, status);
+            anyhow::bail!("shell-server is only supported on Unix");
+        }
+    }
     let conn = init_db()?;
 
     match args.command {
@@ -9053,7 +9122,24 @@ fn main() -> anyhow::Result<()> {
                 ),
             };
             let session_id = generate_uuid_v4();
-            println!("{}", snippet.replace("{session_id}", &session_id));
+            // zsh talks to the persistent shell server (started here
+            // if it isn't running yet) instead of exec'ing this binary
+            // on every keystroke; an empty path disables that and the
+            // snippet execs as before.
+            #[cfg(unix)]
+            let server_socket = if shell == "zsh" && Config::load().shell_server_enabled {
+                crate::shell_server::ensure_running().display().to_string()
+            } else {
+                String::new()
+            };
+            #[cfg(not(unix))]
+            let server_socket = String::new();
+            println!(
+                "{}",
+                snippet
+                    .replace("{session_id}", &session_id)
+                    .replace("{server_socket}", &server_socket)
+            );
         }
         Commands::Completions { shell } => {
             let mut cmd = <Args as clap::CommandFactory>::command();
@@ -9705,6 +9791,9 @@ fn main() -> anyhow::Result<()> {
                     "dropdown.enabled" => {
                         println!("{}", if cfg.dropdown_enabled { "on" } else { "off" })
                     }
+                    "shellserver.enabled" => {
+                        println!("{}", if cfg.shell_server_enabled { "on" } else { "off" })
+                    }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),
                     "segments.minwords" => println!("{}", cfg.segments_min_words),
@@ -10326,6 +10415,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Check { prefix } => {
             tui::run_tui_check(prefix, false)?;
         }
+        Commands::ShellServer { .. } => unreachable!("handled before init_db"),
     }
     Ok(())
 }
