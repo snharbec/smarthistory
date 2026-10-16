@@ -19476,7 +19476,7 @@ fn panes_directory_rows_select_like_their_own_modes() {
     app.list_state.select(Some(wi));
     app.select_for_run();
     let staged = app.selection.clone().expect("worktree row must stage a command");
-    assert!(staged.contains(&w), "{staged}");
+    assert!(staged.contains(&w), "staged command must target the worktree directory");
 
     app.selection = None;
     app.pick_mode = None;
