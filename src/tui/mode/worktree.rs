@@ -174,16 +174,25 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // needed at the very end to build the rows.
     let filter = app.worktree_pattern().trim().to_string();
     let filter_tokens: Vec<&str> = filter.split_whitespace().filter(|t| !t.is_empty()).collect();
+    let entries = current_repo_worktrees(app);
+    Ok(build_rows(entries, &filter_tokens, &app.home_list))
+}
+
+/// Every `git worktree list --porcelain` entry for the repo containing
+/// the current directory, in git's own order (main worktree first).
+/// Empty when the cwd isn't inside a git repo or the `git` call fails.
+/// Shared by `fetch` and the panes (`*`) mode's `worktrees` section.
+pub(crate) fn current_repo_worktrees(app: &mut App) -> Vec<WorktreeEntry> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let Some(repo_root) = find_repo_root(&cwd) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(&repo_root)
         .args(["worktree", "list", "--porcelain"])
         .output();
-    let entries = match output {
+    match output {
         Ok(o) if o.status.success() => match parse_worktree_list_bytes(&o.stdout) {
             Ok(entries) => entries,
             Err(()) => {
@@ -206,8 +215,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             }
         },
         _ => Vec::new(),
-    };
-    Ok(build_rows(entries, &filter_tokens, &app.home_list))
+    }
 }
 
 /// A single `git worktree list --porcelain` entry.
