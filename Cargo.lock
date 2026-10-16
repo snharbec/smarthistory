@@ -3504,6 +3504,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "libc",
  "note_search",
  "notify",
  "plist",

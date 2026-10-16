@@ -6,6 +6,69 @@
 # no /dev/urandom, no OS RNG), so it works in any minimal environment.
 export SMART_HISTORY_SESSION="{session_id}"
 
+# Persistent shell server (`smarthistory shell-server`, see
+# docs/shell-server.md). `smarthistory init zsh` starts it when it isn't
+# running yet and substitutes its socket path below (empty when
+# `shellserver.enabled=off`). Every non-interactive call this snippet
+# makes — `search` on each keystroke for the live dropdown, `add` on
+# each prompt, `config get` at startup — goes through
+# `_smarthistory_run`, which sends the request over the socket via the
+# `zsh/net/socket` builtin instead of exec'ing the binary. That matters
+# most when the binary lives on a network share (SMB/NFS), where every
+# exec pages it in over the network and shows up as keystroke lag.
+_smarthistory_server_socket="{server_socket}"
+_smarthistory_server_ok=0
+if [[ -n "$_smarthistory_server_socket" ]] \
+    && zmodload zsh/net/socket 2>/dev/null \
+    && zmodload zsh/system 2>/dev/null; then
+    _smarthistory_server_ok=1
+fi
+# `_smarthistory_run <args...>` — drop-in for `smarthistory <args...>`
+# (same stdout, stderr and exit status). Falls back to exec'ing the
+# binary only when the socket can't be connected to, i.e. when the
+# request was never sent; once it was sent, a broken/timed-out reply
+# returns 1 rather than re-running the command (no double `add`).
+_smarthistory_run() {
+    emulate -L zsh
+    # Byte semantics for `${#req}` / `${body[a,b]}` — the response
+    # header's lengths are byte counts.
+    setopt no_multibyte
+    if (( ! _smarthistory_server_ok )) \
+        || ! zsocket "$_smarthistory_server_socket" 2>/dev/null; then
+        command smarthistory "$@"
+        return
+    fi
+    local -i fd=$REPLY written=0 n code out_len err_len
+    local k req buf chunk header body
+    local -a fields hdr
+    fields=(SH1 RUN "C$PWD")
+    for k in ${(k)parameters[(R)*export*]}; do
+        fields+=("E$k=${(P)k}")
+    done
+    for k in "$@"; do
+        fields+=("A$k")
+    done
+    req="${(pj:\0:)fields}"$'\0\0'
+    while (( written < ${#req} )); do
+        syswrite -c n -o $fd -- "${req:$written}" || break
+        (( written += n ))
+    done
+    if (( written == ${#req} )); then
+        while sysread -i $fd -t 10 chunk; do
+            buf+=$chunk
+        done
+    fi
+    exec {fd}>&-
+    header=${buf%%$'\n'*}
+    [[ "$buf" == *$'\n'* && "$header" == "SH1 "* ]] || return 1
+    body=${buf#*$'\n'}
+    hdr=(${=header})
+    code=${hdr[2]} out_len=${hdr[3]} err_len=${hdr[4]}
+    print -rn -- "${body[1,out_len]}"
+    (( err_len )) && print -rnu2 -- "${body[out_len+1,-1]}"
+    return $code
+}
+
 # Debug logging. Set SMARTHISTORY_DEBUG=1 in the environment to enable
 # the line-editor widget to log its decisions to
 # ~/.local/cache/smarthistory/widget-debug.log. Useful when the Up/Down
@@ -81,7 +144,7 @@ _smarthistory_precmd() {
     # pane scrollback via `herdr pane read` and extract
     # the command line + output automatically.
     if [ -n "$HERDR_PANE_ID" ]; then
-        smarthistory capture-herdr "$_smarthistory_cmd" --exit-code $exit_code 2>/dev/null
+        _smarthistory_run capture-herdr "$_smarthistory_cmd" --exit-code $exit_code 2>/dev/null
     # When running inside a tmux session, the full pane is mirrored to
     # ~/.cache/tmux-history/output-${TMUX_PANE}.log. If that file
     # exists, use `smarthistory capture-tmux` to grab the command line
@@ -92,18 +155,18 @@ _smarthistory_precmd() {
         # back to the default location if the binary is unavailable
         # or returns nothing.
         local tmux_dir
-        tmux_dir=$(smarthistory config get tmuxpaneoutputdir 2>/dev/null)
+        tmux_dir=$(_smarthistory_run config get tmuxpaneoutputdir 2>/dev/null)
         if [ -z "$tmux_dir" ]; then
             tmux_dir="$HOME/.cache/tmux-history"
         fi
         local tmux_log="$tmux_dir/output-${TMUX_PANE}.log"
         if [ -f "$tmux_log" ]; then
-            smarthistory capture-tmux "$_smarthistory_cmd" "$tmux_log" --exit-code $exit_code 2>/dev/null
+            _smarthistory_run capture-tmux "$_smarthistory_cmd" "$tmux_log" --exit-code $exit_code 2>/dev/null
         else
-            smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
+            _smarthistory_run add "$_smarthistory_cmd" --exit-code $exit_code
         fi
     else
-        smarthistory add "$_smarthistory_cmd" --exit-code $exit_code
+        _smarthistory_run add "$_smarthistory_cmd" --exit-code $exit_code
     fi
     # Resolve and publish the current time-tracking project
     # (`prompt.project=on`, see its declaration above) — after
@@ -128,7 +191,7 @@ _smarthistory_precmd() {
     # want, not an error.
     if [[ "$_smarthistory_prompt_project_enabled" = "1" ]]; then
         local -a _sm_project_lines
-        _sm_project_lines=("${(f)$(smarthistory project current --with-time 2>/dev/null)}")
+        _sm_project_lines=("${(f)$(_smarthistory_run project current --with-time 2>/dev/null)}")
         _smarthistory_current_project="${_sm_project_lines[1]}"
         _smarthistory_current_project_secs="${_sm_project_lines[2]}"
         # "hh:mm" rendering of the raw seconds above, computed here in
@@ -269,7 +332,7 @@ _smarthistory_last_match=""
 # ~/.config/smarthistory/config (defaults to "sess", the historical
 # hardcoded value); this only picks what a new shell starts on —
 # Ctrl-g still cycles sess -> dir -> global -> sess regardless.
-_smarthistory_mode=$(smarthistory config get zsh.mode 2>/dev/null)
+_smarthistory_mode=$(_smarthistory_run config get zsh.mode 2>/dev/null)
 case "$_smarthistory_mode" in
     sess|dir|global) ;;
     *) _smarthistory_mode="sess" ;;
@@ -280,7 +343,7 @@ esac
 # without a `smarthistory config get` round-trip on every keypress.
 # Falls back to the historical default `?` if the lookup fails (e.g.
 # an old binary without the `prefix.question` config-get case).
-_smarthistory_question_prefix=$(smarthistory config get prefix.question 2>/dev/null)
+_smarthistory_question_prefix=$(_smarthistory_run config get prefix.question 2>/dev/null)
 [ -n "$_smarthistory_question_prefix" ] || _smarthistory_question_prefix="?"
 
 # ---- Live dropdown completion (opt-in, config file only) ----
@@ -337,22 +400,22 @@ typeset -g _smarthistory_boxchars="ascii"
 # ~/.config/smarthistory/config. Capped at 3 candidates regardless
 # of `dropdown.limit` (see `_smarthistory_dropdown_render`).
 typeset -g _smarthistory_dropdown_predict_enabled="0"
-if [[ "$(smarthistory config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
+if [[ "$(_smarthistory_run config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_dropdown_enabled="1"
-    _smarthistory_dropdown_limit_raw=$(smarthistory config get dropdown.limit 2>/dev/null)
+    _smarthistory_dropdown_limit_raw=$(_smarthistory_run config get dropdown.limit 2>/dev/null)
     [[ "$_smarthistory_dropdown_limit_raw" == <-> ]] && _smarthistory_dropdown_limit=$_smarthistory_dropdown_limit_raw
-    _smarthistory_dropdown_minchars_raw=$(smarthistory config get dropdown.minchars 2>/dev/null)
+    _smarthistory_dropdown_minchars_raw=$(_smarthistory_run config get dropdown.minchars 2>/dev/null)
     [[ "$_smarthistory_dropdown_minchars_raw" == <-> ]] && _smarthistory_dropdown_minchars=$_smarthistory_dropdown_minchars_raw
     unset _smarthistory_dropdown_limit_raw _smarthistory_dropdown_minchars_raw
-    case "$(smarthistory config get dropdown.matchmode 2>/dev/null)" in
+    case "$(_smarthistory_run config get dropdown.matchmode 2>/dev/null)" in
         substring) _smarthistory_matchmode="substring" ;;
         *) _smarthistory_matchmode="prefix" ;;
     esac
-    case "$(smarthistory config get dropdown.boxchars 2>/dev/null)" in
+    case "$(_smarthistory_run config get dropdown.boxchars 2>/dev/null)" in
         unicode) _smarthistory_boxchars="unicode" ;;
         *) _smarthistory_boxchars="ascii" ;;
     esac
-    [[ "$(smarthistory config get dropdown.predict 2>/dev/null)" == "on" ]] \
+    [[ "$(_smarthistory_run config get dropdown.predict 2>/dev/null)" == "on" ]] \
         && _smarthistory_dropdown_predict_enabled="1"
 fi
 # Whether `_smarthistory_precmd` resolves and publishes the current
@@ -365,7 +428,7 @@ fi
 # above). See `_smarthistory_precmd`'s use of this and
 # `_smarthistory_current_project` below.
 typeset -g _smarthistory_prompt_project_enabled="0"
-[[ "$(smarthistory config get prompt.project 2>/dev/null)" == "on" ]] \
+[[ "$(_smarthistory_run config get prompt.project 2>/dev/null)" == "on" ]] \
     && _smarthistory_prompt_project_enabled="1"
 # Whether `_smarthistory_preexec`/`_smarthistory_precmd` emit OSC 133
 # shell-integration markers around every command, giving
@@ -377,7 +440,7 @@ typeset -g _smarthistory_prompt_project_enabled="0"
 # `smarthistory config get` round trip just to check a flag would add
 # real subprocess latency to every single command.
 typeset -g _smarthistory_osc133_enabled="1"
-[[ "$(smarthistory config get shellintegration.osc133 2>/dev/null)" == "off" ]] \
+[[ "$(_smarthistory_run config get shellintegration.osc133 2>/dev/null)" == "off" ]] \
     && _smarthistory_osc133_enabled="0"
 # The most recently resolved project slug (empty string when no
 # project is active/tracking is paused), its accumulated active
@@ -420,7 +483,7 @@ _smarthistory_sync_prompt_env
 # (surfaced via `smarthistory check`, not a startup warning).
 typeset -g _smarthistory_dropdown_highlight_enabled="0"
 if [[ "$_smarthistory_dropdown_enabled" = "1" \
-    && "$(smarthistory config get dropdown.highlight 2>/dev/null)" == "on" \
+    && "$(_smarthistory_run config get dropdown.highlight 2>/dev/null)" == "on" \
     && -n "$(command -v bat 2>/dev/null)" ]]; then
     _smarthistory_dropdown_highlight_enabled="1"
 fi
@@ -431,7 +494,7 @@ fi
 # by default like `dropdown.enabled` above. Enable with
 # `commentexpand.enabled=on` in ~/.config/smarthistory/config.
 typeset -g _smarthistory_commentexpand_enabled="0"
-if [[ "$(smarthistory config get commentexpand.enabled 2>/dev/null)" == "on" ]]; then
+if [[ "$(_smarthistory_run config get commentexpand.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_commentexpand_enabled="1"
 fi
 # Glob-triggered Tab file completion: pressing Tab on a word
@@ -443,7 +506,7 @@ fi
 # `globcomplete.enabled=on` in ~/.config/smarthistory/config. See
 # `_smarthistory_globcomplete_accept` below for the widget itself.
 typeset -g _smarthistory_globcomplete_enabled="0"
-if [[ "$(smarthistory config get globcomplete.enabled 2>/dev/null)" == "on" ]]; then
+if [[ "$(_smarthistory_run config get globcomplete.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_globcomplete_enabled="1"
 fi
 # True (and sets `REPLY` to the word) iff the cursor is at the
@@ -1125,7 +1188,7 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     # .zshrc keeps it enabled after init.
     local _sm_dropdown_xtrace_was=$options[xtrace]
     setopt NO_XTRACE
-    _smarthistory_dropdown_palette_raw=$(smarthistory config get palette 2>/dev/null)
+    _smarthistory_dropdown_palette_raw=$(_smarthistory_run config get palette 2>/dev/null)
     # The CLI emits one `key=value` line per `tuicolor.*` slot. A
     # failure (binary missing, corrupt config, permission denied)
     # leaves `_palette_raw` empty; we then skip the loop and the
@@ -1820,14 +1883,14 @@ _smarthistory_predict_raw() {
         global) _sm_predict_scope_args=() ;;
     esac
     if [[ -n "$_smarthistory_last_cmd" ]]; then
-        REPLY=$(smarthistory next "$_smarthistory_last_cmd" --limit "$limit" "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
+        REPLY=$(_smarthistory_run next "$_smarthistory_last_cmd" --limit "$limit" "${_sm_predict_scope_args[@]}" 2>/dev/null | cut -f2)
     else
         local -a _sm_frequent_scope_args
         case "$_smarthistory_mode" in
             dir) _sm_frequent_scope_args=(--directory "$PWD") ;;
             *)   _sm_frequent_scope_args=() ;;
         esac
-        REPLY=$(smarthistory next --limit "$limit" "${_sm_frequent_scope_args[@]}" 2>/dev/null | cut -f2)
+        REPLY=$(_smarthistory_run next --limit "$limit" "${_sm_frequent_scope_args[@]}" 2>/dev/null | cut -f2)
     fi
 }
 
@@ -1957,7 +2020,7 @@ _smarthistory_dropdown_render() {
             dir)    args+=(--directory "$PWD") ;;
             global) ;;
         esac
-        raw=$(smarthistory search "${args[@]}" 2>/dev/null)
+        raw=$(_smarthistory_run search "${args[@]}" 2>/dev/null)
     fi
     local -a _sm_dropdown_lines
     _sm_dropdown_lines=("${(f)raw}")
@@ -2486,7 +2549,7 @@ _smarthistory_commentexpand_check() {
     local word=${LBUFFER%' '}
     [[ -n "$word" && "$word" != *[[:space:]]* ]] || return
     local resolved
-    resolved=$(smarthistory expand "$word" 2>/dev/null)
+    resolved=$(_smarthistory_run expand "$word" 2>/dev/null)
     [[ -n "$resolved" ]] || return
     BUFFER="${resolved} "
     CURSOR=$#BUFFER
@@ -2647,7 +2710,7 @@ _smarthistory_prime_cache() {
         global) ;;
     esac
     _smarthistory_debug_log "prime_cache: cache MISS, running: smarthistory search ${args[*]}"
-    _smarthistory_matches=$(smarthistory search "${args[@]}" 2>/dev/null)
+    _smarthistory_matches=$(_smarthistory_run search "${args[@]}" 2>/dev/null)
     _smarthistory_index=0
     _smarthistory_query_key="$query_key"
     _smarthistory_last_match=""
@@ -3166,7 +3229,7 @@ _smarthistory_next_history() {
         global) _sm_next_scope_args=() ;;
     esac
     local -a _smarthistory_candidates
-    _smarthistory_candidates=("${(f)$(smarthistory next "$_smarthistory_last_cmd" --limit 10 "${_sm_next_scope_args[@]}" 2>/dev/null | cut -f2)}")
+    _smarthistory_candidates=("${(f)$(_smarthistory_run next "$_smarthistory_last_cmd" --limit 10 "${_sm_next_scope_args[@]}" 2>/dev/null | cut -f2)}")
     local n=${#_smarthistory_candidates}
     if [ $n -eq 0 ]; then
         zle -M "no suggestions after '$_smarthistory_last_cmd'"
