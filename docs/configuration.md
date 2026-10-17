@@ -72,6 +72,8 @@ value" so you can confirm what the TUI actually sees.
   - [`dropdown.matchmode`](#dropdownmatchmode)
   - [`dropdown.boxchars`](#dropdownboxchars)
   - [`dropdown.predict`](#dropdownpredict)
+- [Autosuggestions](#autosuggestions)
+  - [`autosuggest.enabled`](#autosuggestenabled)
 - [Comment expansion](#comment-expansion)
   - [`commentexpand.enabled`](#commentexpandenabled)
 - [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion)
@@ -774,6 +776,38 @@ dropdown.predict=on
 ```
 
 ---
+
+## Autosuggestions
+
+### `autosuggest.enabled`
+
+|                  |               |
+| ---------------- | ------------- |
+| **Type**         | `on` \| `off` |
+| **Default**      | `off`         |
+| **Env override** | —             |
+
+Shows the newest history command that starts with what you've typed as dimmed
+ghost text after the cursor, like zsh-autosuggestions (turn that plugin off
+when you enable this, or both will draw over each other). The search follows
+the current scope (SESS / DIR / GLOBAL, `Ctrl-g`) and always matches from the
+start of the line, whatever `dropdown.matchmode` says. Nothing is suggested
+on an empty line, with the cursor in the middle of the line, or for a line
+starting with a space.
+
+```ini
+autosuggest.enabled=on
+```
+
+**Keys**: `Right`, `End` or `Ctrl-E` accept the whole suggestion; `Alt-F` or
+`Ctrl-Right` accept its next word. With no suggestion showing, each key does
+its normal job (move right, end of line, forward word).
+
+**With the dropdown on** (`dropdown.enabled=on`), the ghost text is the first
+dropdown row that extends the typed line, so no extra search runs. A row you
+highlighted with `Up`/`Down` takes precedence: `Right`/`Ctrl-E` commit that
+row, as before. Dismissing the dropdown with `Esc` or `Ctrl-K` also hides the
+suggestion for the rest of the line.
 
 ## Comment expansion
 
@@ -1776,6 +1810,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `panes.layout`                  | `bottom` \| `right`               | `bottom`                                                         | [Detail panes](#detail-panes)                                             |
 | `tui.compact`                   | `on` \| `off`                     | `off`                                                            | [Compact display](#compact-display)                                       |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
+| `autosuggest.enabled`           | `on` \| `off`                     | `off`                                                            | [Autosuggestions](#autosuggestions)                                       |
 | `dropdown.limit`                | positive int                      | `6`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.minchars`             | non-negative int                  | `1`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.highlight`            | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |

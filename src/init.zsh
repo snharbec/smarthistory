@@ -472,6 +472,20 @@ typeset -g _smarthistory_boxchars="ascii"
 # ~/.config/smarthistory/config. Capped at 3 candidates regardless
 # of `dropdown.limit` (see `_smarthistory_dropdown_render`).
 typeset -g _smarthistory_dropdown_predict_enabled="0"
+# Inline autosuggestions (`autosuggest.enabled=on`, off by default):
+# the newest history command starting with the typed line is shown
+# dimmed after the cursor, like zsh-autosuggestions. Works with or
+# without the dropdown — with it, the ghost text is the first
+# dropdown row that extends the line, so no second search runs. See
+# `_smarthistory_autosuggest_render` and the accept widgets below.
+typeset -g _smarthistory_autosuggest_enabled="0"
+if [[ "$(_smarthistory_run config get autosuggest.enabled 2>/dev/null)" == "on" ]]; then
+    _smarthistory_autosuggest_enabled="1"
+fi
+# The suggestion suffix (the not-yet-typed part) currently shown as
+# ghost text, or empty. Cleared by `_smarthistory_dropdown_clear`, so
+# every path that wipes POSTDISPLAY also drops it.
+typeset -g _smarthistory_autosuggest_text=""
 if [[ "$(_smarthistory_run config get dropdown.enabled 2>/dev/null)" == "on" ]]; then
     _smarthistory_dropdown_enabled="1"
     _smarthistory_dropdown_limit_raw=$(_smarthistory_run config get dropdown.limit 2>/dev/null)
@@ -822,6 +836,7 @@ _smarthistory_dropdown_clear() {
     _smarthistory_dropdown_chosen=0
     _smarthistory_walking_history=0
     _smarthistory_dropdown_active_kind=""
+    _smarthistory_autosuggest_text=""
 }
 
 # Remove every `region_highlight` entry whose start offset falls
@@ -1647,7 +1662,14 @@ _smarthistory_dropdown_paint() {
     # way candidate rows already are (`; `), so a multi-line
     # candidate's ghost text can't desync the box's own
     # newline-counted layout that follows it in `out`.
+    #
+    # With `autosuggest.enabled=on` and no row highlighted, the ghost
+    # text is the autosuggestion instead: the first candidate that
+    # extends the typed line (`_smarthistory_autosuggest_pick`), which
+    # Right / Ctrl-E / End / Alt-F then accept (see
+    # `_smarthistory_autosuggest_accept`). Never on an empty line.
     local out=""
+    local _sm_ghost_text=""
     if (( _smarthistory_dropdown_chosen == 1 )); then
         local _sm_ghost_raw=${_smarthistory_dropdown_candidates[$((_smarthistory_dropdown_selected+1))]}
         _smarthistory_unescape "$_sm_ghost_raw"
@@ -1655,19 +1677,24 @@ _smarthistory_dropdown_paint() {
         _sm_ghost_full=${_sm_ghost_full//$'\n'/'; '}
         _sm_ghost_full=${_sm_ghost_full//$'\r'/}
         if [[ "$_sm_ghost_full" == "$BUFFER"* ]]; then
-            local _sm_ghost_text=${_sm_ghost_full#$BUFFER}
-            if [[ -n "$_sm_ghost_text" ]]; then
-                if [[ -n "$_smarthistory_dropdown_hl_dim" ]]; then
-                    _hl_start=$#out
-                    out+="$_sm_ghost_text"
-                    _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_dim")
-                else
-                    out+="$_sm_ghost_text"
-                fi
-            fi
+            _sm_ghost_text=${_sm_ghost_full#$BUFFER}
         fi
-        unset _sm_ghost_raw _sm_ghost_full _sm_ghost_text
+        unset _sm_ghost_raw _sm_ghost_full
+    elif [[ "$_smarthistory_autosuggest_enabled" = "1" ]] && (( $#BUFFER > 0 )) \
+        && _smarthistory_autosuggest_pick "${_smarthistory_dropdown_candidates[@]}"; then
+        _sm_ghost_text=$REPLY
+        _smarthistory_autosuggest_text=$REPLY
     fi
+    if [[ -n "$_sm_ghost_text" ]]; then
+        if [[ -n "$_smarthistory_dropdown_hl_dim" ]]; then
+            _hl_start=$#out
+            out+="$_sm_ghost_text"
+            _hl+=("$_hl_start $#out $_smarthistory_dropdown_hl_dim")
+        else
+            out+="$_sm_ghost_text"
+        fi
+    fi
+    unset _sm_ghost_text
     out+=$'\n'
     if [[ -n "$_smarthistory_dropdown_hl_accent" ]]; then
         _hl_start=$#out
@@ -2321,14 +2348,14 @@ _smarthistory_register_hook() {
 # when nothing is showing (see its own doc comment), so this is a
 # harmless no-op the vast majority of keystrokes.
 for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
-    backward-delete-char delete-char backward-kill-word \
+    backward-delete-char vi-backward-delete-char delete-char backward-kill-word \
     kill-whole-line bracketed-paste; do
     _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_clear
 done
 unset _smarthistory_dropdown_w
 if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     for _smarthistory_dropdown_w in self-insert self-insert-unmeta \
-        backward-delete-char delete-char backward-kill-word \
+        backward-delete-char vi-backward-delete-char delete-char backward-kill-word \
         kill-whole-line bracketed-paste; do
         _smarthistory_register_hook $_smarthistory_dropdown_w _smarthistory_dropdown_render
     done
@@ -2504,6 +2531,7 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
             && _smarthistory_dropdown_commit end; then
             return
         fi
+        _smarthistory_autosuggest_accept && return
         zle end-of-line
     }
     zle -N _smarthistory_dropdown_select_end
@@ -2554,6 +2582,7 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
             && _smarthistory_dropdown_commit; then
             return
         fi
+        _smarthistory_autosuggest_accept && return
         zle forward-char
     }
     zle -N _smarthistory_dropdown_select_end_arrow
@@ -3382,6 +3411,127 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
     bindkey '^[[D' _smarthistory_dropdown_select_start_arrow
     bindkey '^[OC' _smarthistory_dropdown_select_end_arrow
     bindkey '^[OD' _smarthistory_dropdown_select_start_arrow
+fi
+# ---- Inline autosuggestions (`autosuggest.enabled=on`) ----
+#
+# Pick the autosuggestion from raw (still `\n`-escaped) candidate
+# commands, newest first: the first single-line one that is longer
+# than `$BUFFER` and starts with it. Sets `REPLY` to the suffix to
+# show (the part not yet typed) and returns 0, or returns 1 with an
+# empty `REPLY`. `"$BUFFER"*` is quoted so glob characters typed on
+# the line match literally.
+_smarthistory_autosuggest_pick() {
+    local _sm_cand _sm_full
+    for _sm_cand in "$@"; do
+        _smarthistory_unescape "$_sm_cand"
+        _sm_full=$REPLY
+        [[ "$_sm_full" == *$'\n'* ]] && continue
+        if (( $#_sm_full > $#BUFFER )) && [[ "$_sm_full" == "$BUFFER"* ]]; then
+            REPLY=${_sm_full:$#BUFFER}
+            return 0
+        fi
+    done
+    REPLY=""
+    return 1
+}
+# Standalone ghost text, for when the dropdown is off (with it on,
+# `_smarthistory_dropdown_paint` draws the suggestion as part of the
+# box). Hooked after the edit widgets, which run
+# `_smarthistory_dropdown_clear` first, so this always starts from an
+# empty POSTDISPLAY. Same guards as the dropdown: cursor at the end,
+# non-empty line, no leading space (privacy convention). Always a
+# `--prefix` search, whatever `_smarthistory_matchmode` says — a
+# suggestion has to extend what was typed.
+_smarthistory_autosuggest_render() {
+    [[ "$_smarthistory_autosuggest_enabled" = "1" ]] || return
+    [[ "$_smarthistory_dropdown_enabled" = "1" ]] && return
+    _smarthistory_autosuggest_text=""
+    (( CURSOR == $#BUFFER && $#BUFFER > 0 )) || return
+    [[ "$BUFFER" == [[:space:]]* ]] && return
+    local -a _sm_args _sm_lines
+    _sm_args=("$BUFFER" --prefix --limit 5 --fields command --ansi=off)
+    case "$_smarthistory_mode" in
+        sess)   _sm_args+=(--session) ;;
+        dir)    _sm_args+=(--directory "$PWD") ;;
+    esac
+    _smarthistory_capture search "${_sm_args[@]}"
+    _sm_lines=("${(f)REPLY}")
+    _smarthistory_autosuggest_pick "${_sm_lines[@]}" || return
+    _smarthistory_autosuggest_text=$REPLY
+    _smarthistory_dropdown_hl_prune
+    POSTDISPLAY=$REPLY
+    if [[ -n "$_smarthistory_dropdown_hl_dim" ]]; then
+        region_highlight+=("$#BUFFER $(( $#BUFFER + $#POSTDISPLAY )) $_smarthistory_dropdown_hl_dim")
+    fi
+}
+# Redraw whichever ghost text is active after an accept changed the
+# line — the dropdown (which paints the suggestion itself) or the
+# standalone render.
+_smarthistory_autosuggest_refresh() {
+    if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
+        _smarthistory_dropdown_render
+    else
+        _smarthistory_autosuggest_render
+    fi
+}
+# Accept the whole suggestion: append it, cursor to the end. Returns
+# 1 (nothing done) when no suggestion is showing, so callers fall
+# through to the key's normal action.
+_smarthistory_autosuggest_accept() {
+    [[ -n "$_smarthistory_autosuggest_text" ]] && (( CURSOR == $#BUFFER )) || return 1
+    BUFFER+=$_smarthistory_autosuggest_text
+    CURSOR=$#BUFFER
+    _smarthistory_dropdown_clear
+    _smarthistory_autosuggest_refresh
+    return 0
+}
+# Accept the suggestion up to the end of its next word (any leading
+# whitespace plus one word), leaving the rest shown as ghost text.
+_smarthistory_autosuggest_accept_word() {
+    [[ -n "$_smarthistory_autosuggest_text" ]] && (( CURSOR == $#BUFFER )) || return 1
+    setopt localoptions extendedglob
+    local _sm_word=${(M)_smarthistory_autosuggest_text##[[:space:]]#[^[:space:]]##}
+    [[ -n "$_sm_word" ]] || _sm_word=$_smarthistory_autosuggest_text
+    BUFFER+=$_sm_word
+    CURSOR=$#BUFFER
+    _smarthistory_dropdown_clear
+    _smarthistory_autosuggest_refresh
+    return 0
+}
+_smarthistory_autosuggest_right() {
+    _smarthistory_autosuggest_accept || zle forward-char
+}
+_smarthistory_autosuggest_end() {
+    _smarthistory_autosuggest_accept || zle end-of-line
+}
+_smarthistory_autosuggest_word() {
+    _smarthistory_autosuggest_accept_word || zle forward-word
+}
+zle -N _smarthistory_autosuggest_right
+zle -N _smarthistory_autosuggest_end
+zle -N _smarthistory_autosuggest_word
+if [[ "$_smarthistory_autosuggest_enabled" = "1" ]]; then
+    if [[ "$_smarthistory_dropdown_enabled" != "1" ]]; then
+        for _smarthistory_autosuggest_w in self-insert self-insert-unmeta \
+            backward-delete-char vi-backward-delete-char delete-char backward-kill-word \
+            kill-whole-line bracketed-paste; do
+            _smarthistory_register_hook $_smarthistory_autosuggest_w _smarthistory_autosuggest_render
+        done
+        unset _smarthistory_autosuggest_w
+        # Right / Ctrl-E: with the dropdown on, its own Right/Ctrl-E
+        # widgets already fall back to the suggestion (see
+        # `_smarthistory_dropdown_select_end[_arrow]`).
+        bind_key_universal kcuf1 _smarthistory_autosuggest_right
+        bindkey '^[[C' _smarthistory_autosuggest_right
+        bindkey '^[OC' _smarthistory_autosuggest_right
+        bindkey '^E' _smarthistory_autosuggest_end
+    fi
+    bind_key_universal kend _smarthistory_autosuggest_end
+    bindkey '^[[F' _smarthistory_autosuggest_end
+    bindkey '^[OF' _smarthistory_autosuggest_end
+    bindkey '^[f' _smarthistory_autosuggest_word
+    bindkey '^[[1;5C' _smarthistory_autosuggest_word
+    bindkey '^[[5C' _smarthistory_autosuggest_word
 fi
 # Ctrl-g: cycle the search scope (SESS -> DIR -> GLOBAL -> SESS) and
 # confirm the new scope via a transient `zle -M` message.
