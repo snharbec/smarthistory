@@ -147,84 +147,73 @@ matches, not just the one(s) that do. Searching `*Home` shows the `Directories`
 header and every configured directory entry, with `Home` pre-selected — not just
 the `Home` row with its header stripped away.
 
-**Group-name scoping**: a query token that's a case-insensitive substring of a
-group's displayed header label narrows the list to just that group, even though
-the token doesn't literally appear in any child row's own text — `dir` for
-`Directories`, `host`/`hosts` for `Hosts`, or **any live workspace's own name**,
-e.g. `note` for a workspace named `NoteSearch`. This works uniformly across all
-three kinds of group because they're all just `mode == "workspace"` header rows
-with a label — nothing about `Directories`/`Hosts` is special-cased. Combine a
-scope token with a content token to pick a specific entry within that group:
-`*note claude` scopes to the `NoteSearch` workspace via `note` (not "claude" —
-nothing about the workspace itself need mention "note", it's the workspace's own
-name that matches) and selects its `claude` pane specifically — the whole
-`NoteSearch` workspace stays shown, not narrowed to just that one pane, and a
-`claude` pane in a _different_, unscoped workspace is excluded entirely rather
-than accidentally selected. Useful whenever a name could otherwise be ambiguous
-between a directory shortcut, a host, and a live workspace of the same or a
-similar name. A scope token alone (`*dir`, `*note`) shows the whole group with
-its header selected; there's no single row to prefer without an accompanying
-content token. A scope token must be at least 3 characters — shorter tokens are
-treated as ordinary content (matching almost every group's label as a substring
-otherwise makes 1–2 character searches unusably eager). This scoping only
-applies in Substring match mode (`Ctrl-F` default) — Fuzzy/Regex mode matches
-the whole query as one pattern and doesn't split it into scope vs. content
-tokens.
+**Group-name scoping**: a query token that's a case-insensitive substring of a group's displayed header
+label narrows the list to just that group, even though the token doesn't literally appear in any
+child row's own text — `dir` for `Directories`, `host`/`hosts` for `Hosts`, or **any live workspace's own name**,
+e.g. `note` for a workspace named `NoteSearch`. This works uniformly across all three kinds of group
+because they're all just `mode == "workspace"` header rows with a label — nothing about
+`Directories`/`Hosts` is special-cased. Combine a scope token with a content token to pick a specific
+entry within that group: `*note claude` scopes to the `NoteSearch` workspace via `note` (not "claude" —
+nothing about the workspace itself need mention "note", it's the workspace's own name that matches)
+and selects its `claude` pane specifically — the whole `NoteSearch` workspace stays shown, not narrowed
+to just that one pane, and a `claude` pane in a _different_, unscoped workspace is excluded entirely
+rather than accidentally selected. Useful whenever a name could otherwise be ambiguous between a
+directory shortcut, a host, and a live workspace of the same or a similar name. A scope token alone
+(`*dir`, `*note`) shows the whole group with its header selected; there's no single row to prefer
+without an accompanying content token. A scope token must be at least 3 characters — shorter tokens
+are treated as ordinary content (matching almost every group's label as a substring otherwise makes
+1–2 character searches unusably eager). This scoping only applies in Substring match mode (`Ctrl-F`
+default) — Fuzzy/Regex mode matches the whole query as one pattern and doesn't split it into scope
+vs. content tokens.
 
 ## Directory groups: zoxide and worktrees
 
 After `hosts`, two more groups list directories the same way their own prefix
 modes do:
 
-- **`# zoxide`** — the directories from the local `zoxide` database
-  ([`~` mode](zoxide.md)), highest frecency first. Capped at the top **10**
-  _matching_ entries so a large zoxide database doesn't bury the other
-  groups — the full list is in `~` mode.
-- **`# worktrees`** — the `git worktree` checkouts of the repo containing the
-  current directory ([`;` mode](worktree.md)), shown by branch name with the
-  path alongside.
+- **`# zoxide`** — the directories from the local `zoxide` database ([`~` mode](zoxide.md)), highest frecency first. Capped
+  at the top **10** _matching_ entries so a large zoxide database doesn't bury the other groups — the full
+  list is in `~` mode.
+- **`# worktrees`** — the `git worktree` checkouts of the repo containing the current directory ([`;` mode](worktree.md)),
+  shown by branch name with the path alongside.
 
-Selecting a row does exactly what selecting it in its own mode does: a zoxide
-row goes through `~` mode's flow (including its "save this directory?" prompt
-for a directory not yet in `Directories`), and a worktree row stages the same
-create/focus session command as `;` mode. A `T` marker shows when a directory
-already has an active pane. A group is omitted when it has no entries (zoxide
-not installed, or not inside a git repo). Both lists are read once per picker
-launch, like the multiplexer snapshot. Both headers collapse like the others,
-and their labels scope the search (`*zox`, `*worktree`). The `F7`/`F8`/`F9`
-filters hide them.
+Selecting a row does exactly what selecting it in its own mode does: a zoxide row goes through `~`
+mode's flow (including its "save this directory?" prompt for a directory not yet in `Directories`),
+and a worktree row stages the same create/focus session command as `;` mode. A `T` marker shows when a
+directory already has an active pane. A group is omitted when it has no entries (zoxide not
+installed, or not inside a git repo). Both lists are read once per picker launch, like the
+multiplexer snapshot. Both headers collapse like the others, and their labels scope the search
+(`*zox`, `*worktree`). The `F7`/`F8`/`F9` filters hide them.
 
-`F7` / `F8` / `F9` (below) do the same group restriction, just via a fixed
-keybinding instead of typing a token — the two mechanisms are complementary, not
-exclusive: `F9` toggles the `Directories`-only view, and typing `dir` as a token
-does the same thing without touching the filter keys.
+`F7` / `F8` / `F9` (below) do the same group restriction, just via a fixed keybinding instead of typing a
+token — the two mechanisms are complementary, not exclusive: `F9` toggles the `Directories`-only view,
+and typing `dir` as a token does the same thing without touching the filter keys.
 
 ## Sources
 
 The panes view is built from two queries run once at TUI start:
 
-1. `tmux list-windows -a` for tmux (parsed to extract `pane_id`,
-   `pane_current_path`, `window_id`, `session_name`).
+1. `tmux list-windows -a` for tmux (parsed to extract `pane_id`, `pane_current_path`, `window_id`,
+   `session_name`).
 2. `herdr workspace list` + `herdr pane list` for herdr.
 
-The multiplexer is selected via `multiplexer=tmux|herdr` in the config (default
-`tmux`). The snapshot is cached for the session and not refreshed on navigation.
+The multiplexer is selected via `multiplexer=tmux|herdr` in the config (default `tmux`). The snapshot is
+cached for the session and not refreshed on navigation.
 
 ## `--panes-filter` initial filter
 
-`F7` / `F8` / `F9` cycle the panes filter between `all`, `windows` (live
-multiplexer panes only), `hosts` (the `# hosts` block only), `sessions` (the
-`# Directories` block only — the filter's internal name/config value stays
-`sessions` for backward compatibility, but also accepts `directories` /
-`directory` / `dir` / `dirs` as aliases). The active filter is shown as a chip
-in the mode strip, labeled `DIRECTORIES` for the sessions/directories filter.
+`F7` / `F8` / `F9` cycle the panes filter between `all`, `windows` (live multiplexer panes only), `hosts` (the `#
+hosts` block only), `sessions` (the `# Directories` block only — the filter's internal name/config value
+stays `sessions` for backward compatibility, but also accepts `directories` / `directory` / `dir` / `dirs` as
+aliases). The active filter is shown as a chip in the mode strip, labeled `DIRECTORIES` for the
+sessions/directories filter.
 
 ## Cross-references
 
-- [Directories mode — the per-directory view; `#` shows the _unique_ directories the shell has been in, `*` shows every pane currently running in them](directories.md)
+- [Directories mode — the per-directory view; `#` shows the _unique_ directories the shell has been in, `*`
+  shows every pane currently running in them](directories.md)
 - [`smarthistory pane-exec` — reconnect a freshly opened pane/window without going through this picker](../configuration.md#hostkey)
 - [TECHNICAL — multiplexer backend details](../../TECHNICAL.md#multiplexer-integration)
 - [README — multiplexer integration](../../README.md#multiplexer-integration-tmux--herdr)
-- **[Multiplexer backend reference](../../docs/multiplexer.md)** — backend
-  selection, building with the `herdr` feature, setup guides for both backends,
-  troubleshooting.
+- **[Multiplexer backend reference](../../docs/multiplexer.md)** — backend selection, building with the `herdr` feature, setup guides
+  for both backends, troubleshooting.

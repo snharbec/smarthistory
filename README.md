@@ -165,6 +165,10 @@ which can pick a newer (and, at times, actually broken — e.g. a transitive
 tested against. `--locked` builds the exact versions in `Cargo.lock`, same as
 `cargo build`/`cargo test`/CI.
 
+This is my personal comment, I want to check if that is visible inside the Diff view. 
+
+
+
 **bash support is a smaller subset of zsh support.** History recording works
 everywhere, but the interactive widgets (Ctrl-R picker, Up/Down history-walk,
 comment-expansion, Ctrl-S, Ctrl-G) need bash >= 4.0 — macOS ships bash 3.2.57 by
@@ -293,15 +297,15 @@ reference (every `key.<action>`, `prefix.<name>`, `tuicolor.*`,
 for the deeper implementation reference.
 
 ## Match algorithm
-
+  * [ ] 
 The match algorithm (`C-f`) determines _how_ the query body is matched against
 the history rows.
 
 | Algorithm | Behavior                                                                                             |
 | --------- | ---------------------------------------------------------------------------------------------------- |
 | SUBSTRING | Every whitespace-separated word must appear as a case-insensitive substring (AND-combined). Default. |
-| FUZZY     | fzf-style subsequence match: every character of each word must appear in order, case-insensitive.    |
-| REGEX     | The body is compiled as a Rust regex. Implicit `.*` anchors unless `^`/`$` provided.                 |
+| FUZZY      | fzf-style subsequence match: every character of each word must appear in order, case-insensitive.    |
+| REGEX    | The body is compiled as a Rust regex. Implicit `.*` anchors unless `^`/`$` provided.                 |
 
 The active algorithm is shown as a chip in the mode strip (`FUZZY` in green,
 `REGEX` in yellow) and as a suffix in the input border title (e.g.
