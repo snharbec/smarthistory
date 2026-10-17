@@ -144,7 +144,7 @@ async fn history_handler(
     let history = spawn_blocking_result(move || {
         let conn = open_readonly_conn()?;
         let cfg = crate::Config::load();
-        let days = q.days.unwrap_or(7).clamp(1, 366);
+        let days = q.days.unwrap_or(7).clamp(1, crate::MAX_HISTORY_DAYS);
         let history = crate::project_history(&conn, &cfg, &q.project, days)?;
         Ok(serde_json::to_value(history)?)
     })
