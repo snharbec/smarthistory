@@ -8079,6 +8079,10 @@ struct DayTotal {
     active_secs: i64,
 }
 
+/// Upper bound on [`project_history`]'s `days` (one year plus a leap
+/// day — the same cap `smarthistory serve`'s `/api/history` applies).
+pub(crate) const MAX_HISTORY_DAYS: u32 = 366;
+
 /// A project's active-time total for each of the trailing `days`
 /// calendar days (including today), oldest first — the data source
 /// for `smarthistory serve`'s `/api/history` 7-day search view.
@@ -8092,6 +8096,10 @@ pub(crate) fn project_history(
     slug: &str,
     days: u32,
 ) -> anyhow::Result<Vec<DayTotal>> {
+    // Bounded here, not just at the `/api/history` call site, so no
+    // caller can make this pre-allocate (and loop over) an arbitrary
+    // number of days.
+    let days = days.min(MAX_HISTORY_DAYS);
     let today = chrono::Local::now().date_naive();
     let mut out = Vec::with_capacity(days as usize);
     for offset in (0..days).rev() {
