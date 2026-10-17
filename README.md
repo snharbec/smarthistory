@@ -78,6 +78,10 @@ of falling through to zsh's native history.
   frequency via SQLite's `LEAD()` window function, scoped to the current search
   mode (SESS/DIR/GLOBAL). The live dropdown can also show this on an empty line
   (`dropdown.predict=on`).
+- **Autosuggestions** (`autosuggest.enabled=on`): the newest matching history
+  command appears as dimmed ghost text after the cursor, like
+  zsh-autosuggestions; `Right` / `Ctrl-E` accept it, `Alt-F` accepts one word.
+  See [docs/configuration.md](docs/configuration.md#autosuggestions).
 - **LLM features** (opt-in via `ollama.url` / `ollama.model`): translate
   natural-language into a runnable command (`=`), describe a command in plain
   prose (`Ctrl+K`), and correct a broken command (`Ctrl+T`). Question mode (`?`)
@@ -185,6 +189,8 @@ no equivalent of.
 | `Ctrl+S` | Insert the most-probable next command; press again to cycle.                                                                                       |
 | `Ctrl+T` | File picker (like fzf's Ctrl-T): pick one or more files under the current directory (`C-x` marks, `Ctrl-A` marks all) and insert them at the cursor. |
 | `Alt+T`  | Toggle the live dropdown's match mode (prefix ↔ substring).                                                                                        |
+| `Right` / `Ctrl+E` / `End` | With `autosuggest.enabled=on`: accept the ghost-text suggestion (normal cursor movement otherwise).                                    |
+| `Alt+F` / `Ctrl+Right`     | With `autosuggest.enabled=on`: accept the next word of the suggestion.                                                                  |
 
 ### From the CLI
 

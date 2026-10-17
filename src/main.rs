@@ -1766,6 +1766,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(
         f,
+        "  autosuggest.enabled = {}",
+        if cfg.autosuggest_enabled { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        f,
         "  shellserver.enabled = {}",
         if cfg.shell_server_enabled { "on" } else { "off" }
     );
@@ -2225,6 +2230,11 @@ pub struct Config {
     /// existing opt-in features (it hooks every keystroke), so it
     /// defaults off. Set via `dropdown.enabled=on|off`.
     dropdown_enabled: bool,
+    /// Whether the zsh snippet shows the newest matching history
+    /// command as dimmed ghost text after the cursor (like
+    /// zsh-autosuggestions). Default `false`, opt-in like
+    /// `dropdown.enabled`. Set via `autosuggest.enabled=on|off`.
+    autosuggest_enabled: bool,
     /// Whether `smarthistory init zsh` starts (and the zsh snippet
     /// uses) the persistent `smarthistory shell-server`, which runs
     /// the hot-path CLI calls without exec'ing the binary each time.
@@ -2800,6 +2810,7 @@ impl Config {
             // above: empty config means "feature disabled".
             paperless: None,
             dropdown_enabled: false,
+            autosuggest_enabled: false,
             shell_server_enabled: true,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
@@ -3050,6 +3061,9 @@ impl Config {
                 }
                 "dropdown.enabled" => {
                     self.dropdown_enabled = crate::util::parse_bool(value, false);
+                }
+                "autosuggest.enabled" => {
+                    self.autosuggest_enabled = crate::util::parse_bool(value, false);
                 }
                 "shellserver.enabled" => {
                     self.shell_server_enabled = crate::util::parse_bool(value, true);
@@ -9798,6 +9812,9 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     "multiplexer" => println!("{}", cfg.multiplexer().as_str()),
                     "dropdown.enabled" => {
                         println!("{}", if cfg.dropdown_enabled { "on" } else { "off" })
+                    }
+                    "autosuggest.enabled" => {
+                        println!("{}", if cfg.autosuggest_enabled { "on" } else { "off" })
                     }
                     "shellserver.enabled" => {
                         println!("{}", if cfg.shell_server_enabled { "on" } else { "off" })
