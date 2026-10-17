@@ -318,6 +318,27 @@ _smarthistory_select() {
 zle -N _smarthistory_select
 bindkey '^R' _smarthistory_select
 
+# File picker (Ctrl+T), modeled on fzf's `fzf-file-widget`: opens the
+# smarthistory TUI locked into the file picker over the current
+# directory (`--glob-complete ""` — an empty pattern lists every file,
+# narrowed as you type), and inserts the chosen path(s) at the cursor,
+# each shell-quoted and followed by a space, exactly where fzf's
+# Ctrl-T would. `C-x` marks rows and `Ctrl-A` marks every visible row
+# for a multi-file selection; Enter returns the marked rows (or just
+# the highlighted one). Esc/Ctrl-C leaves the line untouched. Same
+# un-redirected `$(...)` capture as `_smarthistory_select` above: the
+# TUI draws to stderr and prints only its result to stdout.
+_smarthistory_file_picker() {
+    local result
+    result=$(smarthistory tui --glob-complete "")
+    if [[ -n "$result" ]]; then
+        LBUFFER="${LBUFFER}${result} "
+    fi
+    zle reset-prompt
+}
+zle -N _smarthistory_file_picker
+bindkey '^T' _smarthistory_file_picker
+
 # Up-arrow: when the user has typed something, replace the current line
 # with the next match from the smarthistory DB. Each press moves back
 # through the result set. When the result set is exhausted (either the
@@ -421,11 +442,11 @@ typeset -g _smarthistory_dropdown_minchars=1
 # The dropdown's match mode: "prefix" (only commands STARTING WITH
 # what's typed — the historical, hardcoded behavior) or "substring"
 # (matches anywhere in the command, same as Up/Down and the TUI's own
-# search). Cycled with Ctrl-t (`_smarthistory_cycle_matchmode`,
+# search). Cycled with Alt-t (`_smarthistory_cycle_matchmode`,
 # defined below the dropdown-enabled block). The starting value for a
 # brand-new shell is configurable via `dropdown.matchmode=prefix|substring`
 # in ~/.config/smarthistory/config (defaults to "prefix"); this only
-# picks what a new shell starts on — Ctrl-t still toggles regardless.
+# picks what a new shell starts on — Alt-t still toggles regardless.
 typeset -g _smarthistory_matchmode="prefix"
 # The dropdown box's border glyph set — "ascii" (default) or
 # "unicode" (the rounded `╭─╮` / `╰─╯` corners). Set via
@@ -2037,7 +2058,7 @@ _smarthistory_dropdown_render() {
         # inside the URL), which is surprising for a live as-you-type
         # completion (unlike Up/Down's keypress-triggered walk, which
         # keeps the broader substring match). Only added when
-        # `_smarthistory_matchmode` is "prefix" (the default) — Ctrl-t
+        # `_smarthistory_matchmode` is "prefix" (the default) — Alt-t
         # (`_smarthistory_cycle_matchmode`) toggles it to "substring" for
         # anyone who wants the broader match here too, accepting the
         # above noise tradeoff.
@@ -2688,7 +2709,7 @@ _smarthistory_cycle_matchmode() {
     _smarthistory_sync_prompt_env
     if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
         # Same re-render-immediately rationale as `_smarthistory_cycle_mode`
-        # — Ctrl-T doesn't fire self-insert, so nothing else would trigger
+        # — Alt-t doesn't fire self-insert, so nothing else would trigger
         # a re-query under the new match mode. Unconditional call (not
         # gated on visibility/minchars): `_smarthistory_reset_state` just
         # cleared `_smarthistory_dropdown_visible` to 0 above, so a
@@ -3365,12 +3386,13 @@ fi
 # Ctrl-g: cycle the search scope (SESS -> DIR -> GLOBAL -> SESS) and
 # confirm the new scope via a transient `zle -M` message.
 bindkey '^G' _smarthistory_cycle_mode
-# Ctrl-t: toggle the dropdown's match mode (prefix <-> substring —
+# Alt-t: toggle the dropdown's match mode (prefix <-> substring —
 # see `_smarthistory_cycle_matchmode`). Unconditional, like Ctrl-g
 # above, not gated behind the dropdown-enabled block — the state still
 # changes (and is still confirmed via `zle -M`) even when the dropdown
 # is off, it just has nothing to visibly re-render in that case.
-bindkey '^T' _smarthistory_cycle_matchmode
+# (Ctrl-t is the fzf-style file picker, `_smarthistory_file_picker`.)
+bindkey '^[t' _smarthistory_cycle_matchmode
 # Ctrl-S: insert the most probable next command (see the
 # _smarthistory_next_history widget above). On most terminals
 # Ctrl-S is the XOFF flow-control character; `stty -ixon` makes
