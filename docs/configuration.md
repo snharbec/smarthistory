@@ -624,7 +624,7 @@ commands that START WITH what's typed (the historical, hardcoded behavior — a
 plain substring match made typing `ls` match `open "http://.../details"`, since
 that URL contains "ls"); `substring` matches anywhere in the command, the same
 broader match the `Up`/`Down` history-walk widget and the TUI's own search
-already use. `Ctrl-t` (`_smarthistory_cycle_matchmode`) toggles between the two
+already use. `Alt-t` (`_smarthistory_cycle_matchmode`) toggles between the two
 at runtime regardless of this setting — it only picks the starting point for a
 new shell, same relationship [`zsh.mode`](#zshmode)/`Ctrl-g` has. Each press
 confirms the new mode with a transient `zle -M` status message ("smarthistory
@@ -1689,7 +1689,7 @@ needing to know anything about `init.zsh`'s internal shell variables. A prompt
 system like oh-my-posh runs as its own subprocess on every prompt render, so it
 can only see real exported env vars — not zsh-internal state like
 `$_smarthistory_mode`. `init.zsh`'s own [`zsh.mode`](#zshmode)/`Ctrl-g` and
-[`dropdown.matchmode`](#dropdownmatchmode)/`Ctrl-t` widgets confirm each toggle
+[`dropdown.matchmode`](#dropdownmatchmode)/`Alt-t` widgets confirm each toggle
 with a transient `zle -M` status message ("smarthistory mode set to DIR") driven
 by this same underlying state, kept in sync by `_smarthistory_sync_prompt_env` —
 `SMARTHISTORY_MODE`/`SMARTHISTORY_MATCHMODE` are that state, exported for anyone
@@ -1717,7 +1717,7 @@ raw-seconds version).
 | Variable                       | Values                      | Updated by                                                       |
 | ------------------------------ | --------------------------- | ---------------------------------------------------------------- |
 | `SMARTHISTORY_MODE`            | `sess` \| `dir` \| `global` | `Ctrl-g` (`_smarthistory_cycle_mode`)                            |
-| `SMARTHISTORY_MATCHMODE`       | `prefix` \| `substring`     | `Ctrl-t` (`_smarthistory_cycle_matchmode`)                       |
+| `SMARTHISTORY_MATCHMODE`       | `prefix` \| `substring`     | `Alt-t` (`_smarthistory_cycle_matchmode`)                       |
 | `SMARTHISTORY_PROJECT`         | project slug, or empty      | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
 | `SMARTHISTORY_PROJECT_TIME`    | seconds (raw int), or empty | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
 | `SMARTHISTORY_PROJECT_TIME_HM` | `hh:mm`, or empty           | Every command, when `prompt.project=on` (`_smarthistory_precmd`) |
@@ -1750,7 +1750,7 @@ RPROMPT='${SMARTHISTORY_PROJECT:+[$SMARTHISTORY_PROJECT $SMARTHISTORY_PROJECT_TI
 ```
 
 All examples re-run their command/template/expansion on every prompt draw, so
-the indicator stays current as you toggle `Ctrl-g`/`Ctrl-t` or change
+the indicator stays current as you toggle `Ctrl-g`/`Alt-t` or change
 directories — no shell restart needed.
 
 ---

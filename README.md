@@ -183,6 +183,8 @@ no equivalent of.
 | `Down`   | Walk forward through matches; clear the line at the start.                                                                                         |
 | `Ctrl+G` | Cycle scope: SESS → DIR → GLOBAL → STATS → SESS.                                                                                                   |
 | `Ctrl+S` | Insert the most-probable next command; press again to cycle.                                                                                       |
+| `Ctrl+T` | File picker (like fzf's Ctrl-T): pick one or more files under the current directory (`C-x` marks, `Ctrl-A` marks all) and insert them at the cursor. |
+| `Alt+T`  | Toggle the live dropdown's match mode (prefix ↔ substring).                                                                                        |
 
 ### From the CLI
 
