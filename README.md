@@ -94,7 +94,7 @@ of falling through to zsh's native history.
   directories are active in a tmux session or herdr workspace; the `*` mode
   lists all panes across all sessions/workspaces as a tree; selecting a row
   switches to that workspace or pane. A `# hosts` block in the same view lists
-  every `host.<key>` from the config file (merged with `~/.ssh/config`);
+  every `host.<key>` from the config file;
   selecting a host row creates a new workspace and bootstraps an `ssh`
   connection inside it, or focuses an already-running one. See
   [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend
@@ -164,10 +164,6 @@ which can pick a newer (and, at times, actually broken — e.g. a transitive
 `zune-jpeg` version that fails to compile) combination than the one this repo is
 tested against. `--locked` builds the exact versions in `Cargo.lock`, same as
 `cargo build`/`cargo test`/CI.
-
-This is my personal comment, I want to check if that is visible inside the Diff view. 
-
-
 
 **bash support is a smaller subset of zsh support.** History recording works
 everywhere, but the interactive widgets (Ctrl-R picker, Up/Down history-walk,
@@ -297,15 +293,15 @@ reference (every `key.<action>`, `prefix.<name>`, `tuicolor.*`,
 for the deeper implementation reference.
 
 ## Match algorithm
-  * [ ] 
+
 The match algorithm (`C-f`) determines _how_ the query body is matched against
 the history rows.
 
 | Algorithm | Behavior                                                                                             |
 | --------- | ---------------------------------------------------------------------------------------------------- |
 | SUBSTRING | Every whitespace-separated word must appear as a case-insensitive substring (AND-combined). Default. |
-| FUZZY      | fzf-style subsequence match: every character of each word must appear in order, case-insensitive.    |
-| REGEX    | The body is compiled as a Rust regex. Implicit `.*` anchors unless `^`/`$` provided.                 |
+| FUZZY     | fzf-style subsequence match: every character of each word must appear in order, case-insensitive.    |
+| REGEX     | The body is compiled as a Rust regex. Implicit `.*` anchors unless `^`/`$` provided.                 |
 
 The active algorithm is shown as a chip in the mode strip (`FUZZY` in green,
 `REGEX` in yellow) and as a suffix in the input border title (e.g.
@@ -489,14 +485,15 @@ command / cwd keeps that pane and its parent workspace header.
   name on herdr), or creates a new workspace and bootstraps the `ssh` body
   inside the first pane.
 
-### Named hosts (config + `~/.ssh/config` merge)
+### Named hosts
 
 Hosts are configured with `host.<key>` keys in `~/.config/smarthistory/hosts` (a
 dedicated file, read only by the TUI) — or in the main
 `~/.config/smarthistory/config` file, or split across both. The first field
-(`host.<key>.host`) is the SSH config `Host` alias (also used as the connection
-target when no `.hostname` is set). Every other field is optional and inherits
-from the matching `~/.ssh/config` block when unset.
+(`host.<key>.host`) is the connection target — a hostname or an SSH config
+`Host` alias (`ssh` itself still reads `~/.ssh/config` when connecting). Every
+other field is optional; smarthistory does not read `~/.ssh/config` to fill
+them in.
 
 ```ini
 # ~/.config/smarthistory/hosts
@@ -519,18 +516,16 @@ unmodified.
 | Field                 | Meaning                                      | Default                    |
 | --------------------- | -------------------------------------------- | -------------------------- |
 | `host.<key>`          | Display name.                                | (alias)                    |
-| `host.<key>.host`     | SSH config `Host` alias / connection target. | (required)                 |
-| `host.<key>.hostname` | Real `HostName` (overrides SSH config).      | (alias)                    |
+| `host.<key>.host`     | Connection target / SSH config `Host` alias. | (required)                 |
+| `host.<key>.hostname` | Real `HostName` passed to `ssh`.             | (alias)                    |
 | `host.<key>.user`     | Login user.                                  | `$USER`                    |
 | `host.<key>.port`     | TCP port.                                    | `22`                       |
-| `host.<key>.identity` | Path to private key.                         | (inherits from SSH config) |
+| `host.<key>.identity` | Path to private key.                         | (none)                     |
 | `host.<key>.dir`      | Display-only cwd.                            | (none)                     |
 | `host.<key>.exec`     | Command to run after the `ssh` body.         | (none)                     |
 
-`~/.ssh/config` entries without a `host.<key>` companion are auto-appended. SSH
-config `Host *` blocks are treated as defaults (matching OpenSSH's own
-semantics) and contribute their `User` / `IdentityFile` / `Port` to subsequent
-explicit blocks but are not themselves listed as host rows.
+Only `host.<key>` entries are listed — `~/.ssh/config` blocks are not
+auto-appended as host rows.
 
 Selecting a host row:
 
