@@ -93,7 +93,9 @@ of falling through to zsh's native history.
 - **Multiplexer integration** (tmux and herdr): the `#` mode shows which
   directories are active in a tmux session or herdr workspace; the `*` mode
   lists all panes across all sessions/workspaces as a tree; selecting a row
-  switches to that workspace or pane. A `# hosts` block in the same view lists
+  switches to that workspace or pane. In `*` mode the first ten rows are
+  numbered: type the digit (with an empty filter, or `Alt`+digit any time) to
+  jump without `Enter`. A `# hosts` block in the same view lists
   every `host.<key>` from the config file;
   selecting a host row creates a new workspace and bootstraps an `ssh`
   connection inside it, or focuses an already-running one. See
