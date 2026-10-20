@@ -72,8 +72,13 @@ pub(crate) const ALLOWED_COMMANDS: &[&str] = &[
 ];
 
 /// How often the idle listener re-checks that its socket file is still
-/// its own (see `run_server`).
-const SOCKET_CHECK_INTERVAL_MS: i32 = 60_000;
+/// its own, and that its background monitor is still running (see
+/// `run_server`).
+const SOCKET_CHECK_INTERVAL_MS: i32 = 10_000;
+
+/// The monitor is restarted at most this often, so one that exits
+/// immediately (e.g. on a broken config) can't spin.
+const MONITOR_RESPAWN_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Request {
@@ -358,7 +363,27 @@ fn run_server(socket: &Path) -> Result<()> {
         libc::signal(libc::SIGCHLD, libc::SIG_IGN);
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
+    // The background multiplexer monitor (see `crate::mux_monitor`).
+    // Forked here, while still single-threaded, and re-forked if it
+    // exits (config change, crash) — at most once per
+    // MONITOR_RESPAWN_INTERVAL.
+    let state_dir = socket.parent().map(Path::to_path_buf);
+    let spawn_monitor = || {
+        state_dir
+            .clone()
+            .and_then(|dir| crate::mux_monitor::spawn(dir, listener.as_raw_fd()))
+    };
+    let mut monitor = spawn_monitor();
+    let mut monitor_started = Instant::now();
     loop {
+        // SAFETY: `kill(pid, 0)` only probes for existence. With
+        // SIGCHLD ignored, an exited monitor leaves no zombie, so the
+        // probe fails as soon as it is gone.
+        let monitor_alive = monitor.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0);
+        if !monitor_alive && monitor_started.elapsed() >= MONITOR_RESPAWN_INTERVAL {
+            monitor = spawn_monitor();
+            monitor_started = Instant::now();
+        }
         let mut pfd = libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,

@@ -1130,7 +1130,7 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let backend_rows = app.multiplexer.snapshot_current_panes(current_pane);
+        let backend_rows = crate::tui::mode::panes::backend_pane_rows(app, current_pane);
 
         // First pass: build a
         // (session_label → Vec<pane_record>)
@@ -1974,4 +1974,43 @@ impl App {
         self.list_state.select(Some(0));
         self.refresh();
     }
+}
+
+/// The multiplexer pane rows for the `*` view, for `current_pane`.
+///
+/// In order of preference:
+/// 1. a live result waiting from `App::process_live_panes` (it
+///    differed from the cached rows shown so far);
+/// 2. the shell server monitor's cached snapshot
+///    (`crate::mux_state`), when it is fresh — shown immediately,
+///    with a live fetch started in the background to correct it;
+/// 3. a blocking live fetch (no server, monitor off, stale cache, or a
+///    test double backend).
+pub(crate) fn backend_pane_rows(
+    app: &mut App,
+    current_pane: &str,
+) -> Vec<crate::multiplexer::CurrentPaneInfo> {
+    use crate::multiplexer::panes_for_caller;
+    let Some(kind) = app.multiplexer.kind() else {
+        return app.multiplexer.snapshot_current_panes(current_pane);
+    };
+    if let Some(rows) = app.pending_live_panes.take() {
+        app.panes_from_cache = Some(rows.clone());
+        return panes_for_caller(kind, rows, current_pane);
+    }
+    let Some(cache) = crate::mux_state::read_fresh_panes(kind) else {
+        app.panes_from_cache = None;
+        app.cached_pane_cmdlines.clear();
+        return app.multiplexer.snapshot_current_panes(current_pane);
+    };
+    app.cached_pane_cmdlines = cache.cmdlines;
+    app.panes_from_cache = Some(cache.panes.clone());
+    if app.live_panes_request.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::multiplexer::backend_for(kind).snapshot_all_panes());
+        });
+        app.live_panes_request = Some(rx);
+    }
+    panes_for_caller(kind, cache.panes, current_pane)
 }

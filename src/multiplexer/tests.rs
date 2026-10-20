@@ -1115,3 +1115,51 @@
             current_pane
         );
     }
+
+    fn pane(id: &str, ws: &str, last: bool) -> CurrentPaneInfo {
+        CurrentPaneInfo {
+            pane_id: id.to_string(),
+            window_id: ws.to_string(),
+            tab_id: String::new(),
+            session_label: ws.to_string(),
+            path: "/tmp".to_string(),
+            current_command: String::new(),
+            is_last: last,
+        }
+    }
+
+    #[test]
+    fn herdr_panes_for_pane_drops_self_and_marks_own_workspace() {
+        let rows = vec![pane("w1:p1", "w1", false), pane("w1:p2", "w1", false), pane("w2:p1", "w2", false)];
+        let out = herdr_panes_for_pane(rows, "w1:p1");
+        let ids: Vec<_> = out.iter().map(|r| (r.pane_id.as_str(), r.is_last)).collect();
+        assert_eq!(ids, [("w1:p2", true), ("w2:p1", false)]);
+    }
+
+    #[test]
+    fn herdr_panes_for_pane_without_caller_keeps_everything_unmarked() {
+        let rows = vec![pane("w1:p1", "w1", true)];
+        let out = herdr_panes_for_pane(rows, "");
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].is_last);
+    }
+
+    #[test]
+    fn tmux_panes_for_caller_only_drops_own_pane_and_keeps_pane_last() {
+        let rows = vec![pane("%1", "@1", false), pane("%2", "@1", true)];
+        let out = panes_for_caller(MultiplexerKind::Tmux, rows.clone(), "%1");
+        assert_eq!(out, vec![rows[1].clone()]);
+        assert_eq!(panes_for_caller(MultiplexerKind::Tmux, rows.clone(), ""), rows);
+    }
+
+    #[test]
+    fn parse_herdr_workspaces_reads_focus_and_labels() {
+        let result = serde_json::json!({"workspaces": [
+            {"workspace_id": "w1", "label": "a", "focused": false},
+            {"workspace_id": "w2", "label": "b", "focused": true},
+            {"workspace_id": "", "label": "bad"}
+        ]});
+        let ws = parse_herdr_workspaces(&result);
+        assert_eq!(ws.len(), 2);
+        assert!(ws[1].focused && ws[1].id == "w2" && ws[1].label == "b");
+    }

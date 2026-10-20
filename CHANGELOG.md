@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- `smarthistory last-session [--print]`: switch back to the previously active
+  tmux session or herdr workspace; run it twice to toggle, like `cd -`. tmux
+  uses `tmux switch-client -l`. herdr has no such command, so the shell
+  server's new background monitor records herdr's workspace focus history
+  from its event stream. Meant for a key binding, e.g. tmux
+  `bind-key L run-shell "smarthistory last-session"`. See
+  [docs/multiplexer.md](docs/multiplexer.md#switching-back-smarthistory-last-session).
+- The shell server now forks a background multiplexer monitor
+  (`shellserver.monitor=on|off`, default on). Every
+  `shellserver.monitor.interval` ms (default 2000), and on herdr also right
+  after any workspace/tab/pane change, it caches the tmux/herdr snapshot,
+  including herdr pane command lines. The TUI's `*` and `#` modes show that
+  cache right away instead of waiting on `tmux`/`herdr`. `*` then re-fetches
+  live in the background and swaps the result in if anything changed. A
+  snapshot older than 6 s is ignored. See
+  [docs/shell-server.md](docs/shell-server.md#background-multiplexer-monitor).
+
+### Changed
+
+- The shell server checks every 10 s, instead of every minute, whether its
+  socket was removed or replaced, and whether its monitor is still running.
+
 ## 3.0.0 - 2026-10-18
 
 ### Added

@@ -10,6 +10,9 @@ mod highlight;
 mod jira;
 mod llm;
 mod multiplexer;
+#[cfg(unix)]
+mod mux_monitor;
+mod mux_state;
 mod paperless;
 mod server;
 #[cfg(unix)]
@@ -656,6 +659,25 @@ enum Commands {
     /// `session.<id>` match re-runs its `.exec` directly (a normal
     /// local command, no such mismatch).
     PaneExec,
+    /// Switch back to the previously active tmux session / herdr
+    /// workspace, like `cd -`: run it twice to toggle between two.
+    ///
+    /// tmux: `tmux switch-client -l` (tmux tracks the last session per
+    /// client itself). herdr: has no "previous workspace" command, so
+    /// the shell server's background monitor records every workspace
+    /// focus change (`shellserver.monitor`, on by default) and this
+    /// focuses the most recent one that still exists.
+    ///
+    /// Acts on the multiplexer this shell runs inside (herdr first,
+    /// then tmux), else on the configured `multiplexer=`. Meant for a
+    /// key binding, e.g. tmux `bind-key L run-shell "smarthistory
+    /// last-session"`.
+    LastSession {
+        /// Print the previous session / workspace name instead of
+        /// switching to it.
+        #[arg(long)]
+        print: bool,
+    },
     /// Open the interactive `create-note` dialog directly, without
     /// having to launch the TUI and press the `Action::CreateNote`
     /// keybinding first.
@@ -1774,6 +1796,16 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
         "  shellserver.enabled = {}",
         if cfg.shell_server_enabled { "on" } else { "off" }
     );
+    let _ = writeln!(
+        f,
+        "  shellserver.monitor = {}",
+        if cfg.shell_server_monitor { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        f,
+        "  shellserver.monitor.interval = {}",
+        cfg.shell_server_monitor_interval_ms
+    );
     let _ = writeln!(f, "  dropdown.limit = {}", cfg.dropdown_limit);
     let _ = writeln!(f, "  dropdown.minchars = {}", cfg.dropdown_min_chars);
     let _ = writeln!(f, "  segments.minwords = {}", cfg.segments_min_words);
@@ -2241,6 +2273,15 @@ pub struct Config {
     /// Default `true`. Set via `shellserver.enabled=on|off`. See
     /// `docs/shell-server.md`.
     shell_server_enabled: bool,
+    /// Whether the shell server runs its background multiplexer
+    /// monitor (`crate::mux_monitor`): a cached tmux/herdr snapshot
+    /// for the TUI's `*` / `#` modes, and herdr's focus history for
+    /// `smarthistory last-session`. Default `true`. Set via
+    /// `shellserver.monitor=on|off`.
+    shell_server_monitor: bool,
+    /// How often (ms) the monitor re-takes the snapshot. Default
+    /// 2000, minimum 250. Set via `shellserver.monitor.interval=<ms>`.
+    shell_server_monitor_interval_ms: u64,
     /// Max number of candidates the dropdown shows. Read by
     /// `init.zsh` via `smarthistory config get dropdown.limit` at
     /// shell-init time and passed as `--limit` to the same
@@ -2812,6 +2853,8 @@ impl Config {
             dropdown_enabled: false,
             autosuggest_enabled: false,
             shell_server_enabled: true,
+            shell_server_monitor: true,
+            shell_server_monitor_interval_ms: 2000,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
             segments_min_words: 5,
@@ -3068,6 +3111,16 @@ impl Config {
                 "shellserver.enabled" => {
                     self.shell_server_enabled = crate::util::parse_bool(value, true);
                 }
+                "shellserver.monitor" => {
+                    self.shell_server_monitor = crate::util::parse_bool(value, true);
+                }
+                "shellserver.monitor.interval" => match value.trim().parse::<u64>() {
+                    Ok(n) if n >= 250 => self.shell_server_monitor_interval_ms = n,
+                    _ => eprintln!(
+                        "warning: shellserver.monitor.interval={:?} is not a number of milliseconds >= 250; keeping the previous value",
+                        value
+                    ),
+                },
                 "dropdown.limit" => match value.trim().parse::<usize>() {
                     Ok(n) if n > 0 => self.dropdown_limit = n,
                     _ => eprintln!(
@@ -9366,6 +9419,13 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::LastSession { print } => {
+            let cfg = Config::load();
+            if let Err(e) = crate::mux_state::last_session_cli(cfg.multiplexer(), print) {
+                eprintln!("smarthistory: {e}");
+                std::process::exit(1);
+            }
+        }
         Commands::CreateNote { title, content } => {
             run_tui_command(
                 conn,
@@ -9818,6 +9878,12 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     }
                     "shellserver.enabled" => {
                         println!("{}", if cfg.shell_server_enabled { "on" } else { "off" })
+                    }
+                    "shellserver.monitor" => {
+                        println!("{}", if cfg.shell_server_monitor { "on" } else { "off" })
+                    }
+                    "shellserver.monitor.interval" => {
+                        println!("{}", cfg.shell_server_monitor_interval_ms)
                     }
                     "dropdown.limit" => println!("{}", cfg.dropdown_limit),
                     "dropdown.minchars" => println!("{}", cfg.dropdown_min_chars),

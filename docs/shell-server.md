@@ -28,7 +28,7 @@ the binary file again.
 - If the socket can't be reached (server stopped, `zsh/net/socket` missing),
   the snippet transparently execs the binary instead, exactly as before.
 - The server exits on `smarthistory shell-server --stop`, or by itself within
-  a minute of its socket file being removed or replaced.
+  about ten seconds of its socket file being removed or replaced.
 
 ```bash
 smarthistory shell-server --status   # "running at <socket> (<identity>)", exit 1 if not
@@ -51,6 +51,32 @@ Each request runs in a fresh process forked from the server, with the calling
 shell's working directory and exported environment, so it behaves exactly
 like an exec: the config and database are read anew on every call, and the
 output, error messages, and exit status are identical.
+
+## Background multiplexer monitor
+
+The server also forks one long-lived child, the **monitor**
+(`shellserver.monitor=on`, the default). It keeps two files up to date next to
+the socket:
+
+- **`mux-panes.json`**: a tmux / herdr snapshot (every pane, every active
+  context, and for herdr each pane's foreground command line). It is re-taken
+  every `shellserver.monitor.interval` ms (default 2000). On herdr it is also
+  re-taken right after any workspace, tab, or pane change, because the monitor
+  subscribes to herdr's event stream. The TUI's `*` (panes) and `#`
+  (directories) modes show this snapshot right away instead of waiting on
+  `tmux` / `herdr`. `*` then does one live fetch in the background and swaps it
+  in if anything changed. A snapshot older than 6 s is ignored and the TUI
+  fetches live, the same as without a server.
+- **`herdr-focus.json`**: herdr's workspace focus history, most recent first,
+  recorded from herdr's `workspace_focused` events.
+  [`smarthistory last-session`](multiplexer.md#switching-back-smarthistory-last-session)
+  uses it. tmux needs no history; it tracks the last session itself.
+
+The monitor exits with the server. If it dies, the server restarts it within
+about ten seconds, and also after you change `multiplexer=` or the monitor
+keys in the config (re-read every 30 s). With `shellserver.monitor=off` it
+stays idle. The TUI then fetches live every time, and `last-session` on herdr
+only knows switches it made itself.
 
 ## Socket
 

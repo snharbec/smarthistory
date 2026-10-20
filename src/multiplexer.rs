@@ -220,7 +220,7 @@ impl MultiplexerKind {
 /// than at the call
 /// site.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActiveContext {
     /// Stable id the backend
     /// accepts as a focus target
@@ -373,6 +373,23 @@ pub trait MultiplexerBackend: Send + Sync {
     /// (id, window_id, path,
     /// command, is_last).
     fn snapshot_current_panes(&self, current_pane: &str) -> Vec<CurrentPaneInfo>;
+
+    /// Which real backend this is. `None` (the default) for test
+    /// doubles, which keeps them away from the shell server's
+    /// on-disk pane cache (`crate::mux_cache`): only a real backend's
+    /// snapshot may be replaced by the cached copy.
+    fn kind(&self) -> Option<MultiplexerKind> {
+        None
+    }
+
+    /// Every pane, not filtered for any caller: nothing excluded, and
+    /// `is_last` only where it is caller-independent (tmux's own
+    /// `pane_last` flag). This is what the shell server's background
+    /// monitor caches; [`panes_for_caller`] turns it into what
+    /// [`Self::snapshot_current_panes`] returns.
+    fn snapshot_all_panes(&self) -> Vec<CurrentPaneInfo> {
+        self.snapshot_current_panes("")
+    }
 
     /// Stage a command that, when
     /// the parent shell runs it,
@@ -535,7 +552,7 @@ pub trait MultiplexerBackend: Send + Sync {
 /// not a
 /// `Vec<CurrentPaneInfo>`).
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CurrentPaneInfo {
     /// tmux: `%N`; herdr: `w1:p1`
     /// (workspace-scoped pane
@@ -652,6 +669,48 @@ pub fn backend_for(kind: MultiplexerKind) -> Box<dyn MultiplexerBackend> {
         #[cfg(not(feature = "herdr"))]
         MultiplexerKind::Herdr => Box::new(TmuxBackend),
     }
+}
+
+/// Turn an unfiltered [`MultiplexerBackend::snapshot_all_panes`] list
+/// into the `*`-view list for one caller: drop the caller's own pane
+/// (no "switch to myself" row) and, for herdr, mark the panes of the
+/// caller's own workspace as `is_last` so it bubbles to the top.
+///
+/// For herdr the caller's pane is `$HERDR_PANE_ID` when set (herdr
+/// injects it into every managed pane), falling back to
+/// `current_pane`. tmux's `is_last` is tmux's own `pane_last` flag,
+/// already in the rows, so only the exclusion applies.
+pub fn panes_for_caller(
+    kind: MultiplexerKind,
+    rows: Vec<CurrentPaneInfo>,
+    current_pane: &str,
+) -> Vec<CurrentPaneInfo> {
+    match kind {
+        MultiplexerKind::Tmux => rows
+            .into_iter()
+            .filter(|r| current_pane.is_empty() || r.pane_id != current_pane)
+            .collect(),
+        MultiplexerKind::Herdr => {
+            let me = std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| current_pane.to_string());
+            herdr_panes_for_pane(rows, &me)
+        }
+    }
+}
+
+/// The herdr half of [`panes_for_caller`], with the caller's pane id
+/// passed in (no env lookup) so it is testable.
+fn herdr_panes_for_pane(rows: Vec<CurrentPaneInfo>, me: &str) -> Vec<CurrentPaneInfo> {
+    let my_workspace = me.split(':').next().filter(|s| !s.is_empty());
+    rows.into_iter()
+        .filter(|r| me.is_empty() || r.pane_id != me)
+        .map(|mut r| {
+            r.is_last = my_workspace.map(|w| r.window_id == w).unwrap_or(false);
+            r
+        })
+        .collect()
 }
 
 // --- tmux backend ------------------------------------------------
@@ -968,6 +1027,10 @@ fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
 }
 
 impl MultiplexerBackend for TmuxBackend {
+    fn kind(&self) -> Option<MultiplexerKind> {
+        Some(MultiplexerKind::Tmux)
+    }
+
     fn snapshot(&self) -> Vec<ActiveContext> {
         // Field order:
         //   pane_id | pane_current_path |
@@ -1031,9 +1094,13 @@ impl MultiplexerBackend for TmuxBackend {
         //   pane_current_path |
         //   pane_current_command |
         //   pane_last flag
+        panes_for_caller(MultiplexerKind::Tmux, self.snapshot_all_panes(), current_pane)
+    }
+
+    fn snapshot_all_panes(&self) -> Vec<CurrentPaneInfo> {
         const FORMAT: &str = "#{pane_id} | #{window_id} | #{session_name} | #{pane_current_path} | #{pane_current_command} | #{?pane_last,1,0}";
         match tmux_run(&["list-panes", "-a", "-F", FORMAT]) {
-            Some(bytes) => tmux_list_panes_parse(&bytes, current_pane),
+            Some(bytes) => tmux_list_panes_parse(&bytes, ""),
             None => Vec::new(),
         }
     }
@@ -1371,9 +1438,16 @@ struct HerdrPaneRecord {
 #[cfg(feature = "herdr")]
 pub fn herdr_pane_cmdline(pane_id: &str) -> Option<String> {
     let json = herdr_run_json(&["pane", "process-info", "--pane", pane_id])?;
-    let processes = json
-        .get("result")
-        .and_then(|r| r.get("process_info"))
+    parse_herdr_process_info(json.get("result")?)
+}
+
+/// Pull the foreground command line out of a `pane.process_info`
+/// `result` (same shape over the CLI and the socket API). See
+/// [`herdr_pane_cmdline`] for the `cmdline` → `argv0` preference.
+#[cfg(feature = "herdr")]
+pub(crate) fn parse_herdr_process_info(result: &serde_json::Value) -> Option<String> {
+    let processes = result
+        .get("process_info")
         .and_then(|p| p.get("foreground_processes"))
         .and_then(|p| p.as_array())?;
     let first = processes.first()?;
@@ -1658,6 +1732,50 @@ fn herdr_socket_request_at(
         return None;
     }
     reply.get("result").cloned()
+}
+
+/// One socket-API request against an explicit socket path, for
+/// callers outside this module (the shell server's background
+/// monitor, `smarthistory last-session`). See
+/// [`herdr_socket_request_at`].
+#[cfg(feature = "herdr")]
+pub(crate) fn herdr_request(
+    method: &str,
+    params: serde_json::Value,
+    path: &std::path::Path,
+) -> Option<serde_json::Value> {
+    herdr_socket_request_at(method, params, path)
+}
+
+/// One herdr workspace as `workspace.list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrWorkspace {
+    pub id: String,
+    pub label: String,
+    pub focused: bool,
+}
+
+/// Parse a `workspace.list` `result` (`{"workspaces": [...]}`).
+pub fn parse_herdr_workspaces(result: &serde_json::Value) -> Vec<HerdrWorkspace> {
+    result
+        .get("workspaces")
+        .and_then(|w| w.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|ws| {
+                    let id = ws.get("workspace_id")?.as_str()?.to_string();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(HerdrWorkspace {
+                        label: ws.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        focused: ws.get("focused").and_then(|v| v.as_bool()).unwrap_or(false),
+                        id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Focus a specific herdr pane by id via the socket API's
@@ -2189,85 +2307,27 @@ impl MultiplexerBackend for HerdrBackend {
             .collect()
     }
 
+    fn kind(&self) -> Option<MultiplexerKind> {
+        Some(MultiplexerKind::Herdr)
+    }
+
     fn snapshot_current_panes(&self, current_pane: &str) -> Vec<CurrentPaneInfo> {
-        // The `*`-mode view
-        // shows **every**
-        // herdr pane across
-        // every workspace —
-        // not just the
-        // current workspace's
-        // siblings. The user
-        // asked for this so they
-        // can pick a pane from
-        // any workspace and jump
-        // to it; the per-row
-        // `[wA]` badge (the
-        // workspace id, surfaced
-        // via `session_label`)
-        // lets the user tell at
-        // a glance which workspace
-        // a pane belongs to.
-        //
-        // The pane the TUI is
-        // running in (read from
-        // `HERDR_PANE_ID`, falling
-        // back to the
-        // `current_pane` arg the
-        // TUI's
-        // `fetch_session_panes`
-        // path passes in) is
-        // excluded so the user
-        // never stages a no-op
-        // jump to themselves.
-        //
-        // herdr sets
-        // `HERDR_PANE_ID` in every
-        // pane process's env; the
-        // existing tmux flow reads
-        // `$TMUX_PANE` for the same
-        // purpose. When neither is
-        // set we return an empty
-        // list (the user isn't running
-        // inside a herdr pane, so
-        // they have no siblings to
-        // switch to — and `pane
-        // list` would also return
-        // nothing useful in that
-        // case).
-        let current_pane_env = std::env::var("HERDR_PANE_ID")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| current_pane.to_string());
+        // Every herdr pane across every workspace (not just the
+        // current workspace's siblings), with the caller's own pane
+        // dropped and its workspace's panes marked `is_last` — see
+        // `panes_for_caller`.
+        panes_for_caller(MultiplexerKind::Herdr, self.snapshot_all_panes(), current_pane)
+    }
+
+    fn snapshot_all_panes(&self) -> Vec<CurrentPaneInfo> {
+        // `herdr pane list` carries the panes; `herdr workspace list`
+        // resolves workspace ids (`wB`) to their human-readable
+        // `label` for the row badge. A failed workspace lookup just
+        // falls back to the id.
         let json = match herdr_run_json(&["pane", "list"]) {
             Some(j) => j,
             None => return Vec::new(),
         };
-        // Fetch the workspace
-        // list too so we can
-        // resolve workspace
-        // IDs (e.g. `wB`) to
-        // their human-readable
-        // `label` (e.g.
-        // `smarthistory`,
-        // `dir: Downloads`).
-        // The renderer uses
-        // `session_label` as
-        // the workspace header's
-        // primary text, so the
-        // user sees `smarthistory`
-        // rather than the bare
-        // `wB` id (the user's
-        // explicit ask: "use
-        // the name of the
-        // workspace instead
-        // [of just the count]").
-        // The lookup is
-        // best-effort: if the
-        // workspace list call
-        // fails we fall back to
-        // the bare workspace
-        // id (still useful, just
-        // less friendly).
         let workspace_labels: std::collections::HashMap<String, String> =
             match herdr_run_json(&["workspace", "list"]) {
                 Some(ws_json) => parse_workspace_labels(&ws_json),
@@ -2275,254 +2335,31 @@ impl MultiplexerBackend for HerdrBackend {
             };
         let parsed = parse_herdr_pane_list(&json);
         herdr_snapshot_debug_log(&format!(
-            "snapshot_current_panes: parsed {} panes, current_pane_env={:?}; \
-             filtering out current_pane_env now",
+            "snapshot_all_panes: parsed {} panes, {} workspace labels",
             parsed.len(),
-            current_pane_env
+            workspace_labels.len()
         ));
-        // The workspace id of the
-        // TUI's own pane (the
-        // popup, if launched as
-        // one). The user's
-        // "current workspace" is
-        // the one containing this
-        // pane — we mark the
-        // first pane in that
-        // workspace as
-        // `is_last: true` so the
-        // `refresh_session_panes_impl`
-        // sort logic can pin the
-        // current workspace to
-        // the second position
-        // (see the user's
-        // complaint: "this always
-        // has the newest
-        // timestamp but for me
-        // it does not make sense
-        // to switch to it").
-        //
-        // Without this, the
-        // herdr backend leaves
-        // `is_last: false` on
-        // every pane (herdr's
-        // `pane list` JSON
-        // doesn't expose a
-        // "currently focused"
-        // field, unlike tmux's
-        // `#{pane_last}`), so
-        // the current-workspace
-        // pin never fires for
-        // herdr users and the
-        // current workspace
-        // always sits at the top
-        // of the list.
-        //
-        // `HERDR_PANE_ID` has the
-        // form `wN:pM` (e.g.
-        // `w31:p1`). The
-        // workspace id is
-        // everything before the
-        // first `:`. We use this
-        // prefix to identify
-        // panes that share the
-        // same workspace as the
-        // TUI.
-        let current_workspace_id: Option<String> = current_pane_env
-            .split(':')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let workspace_label_count = workspace_labels.len();
-        let filtered: Vec<CurrentPaneInfo> = parsed
+        parsed
             .into_iter()
-            .filter(|r| r.pane_id != current_pane_env)
             .map(|r| {
                 let label = workspace_labels
                     .get(&r.workspace_id)
                     .cloned()
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| r.workspace_id.clone());
-                // Mark the first pane
-                // in the current
-                // workspace (the
-                // workspace
-                // containing the
-                // TUI's own
-                // pane) as
-                // `is_last: true` so
-                // the sort
-                // logic can pin
-                // it to the
-                // second
-                // position.
-                //
-                // Only the FIRST
-                // pane in the
-                // current
-                // workspace gets
-                // `is_last: true`
-                // because:
-                //   1. The
-                //      `refresh_session_panes_impl`
-                //      sort logic
-                //      uses the
-                //      FIRST
-                //      `is_last`
-                //      pane it
-                //      encounters
-                //      to identify
-                //      the current
-                //      workspace
-                //      (any
-                //      subsequent
-                //      hits would
-                //      overwrite
-                //      with the
-                //      same
-                //      workspace
-                //      label), so
-                //      one is
-                //      enough.
-                //   2. The
-                //      cold-start
-                //      stamp in
-                //      pass 1 of
-                //      the impl
-                //      only fires
-                //      for panes
-                //      WITHOUT
-                //      an existing
-                //      `last_touched`
-                //      entry;
-                //      marking
-                //      multiple
-                //      panes means
-                //      the first
-                //      one
-                //      bubbles to
-                //      the top
-                //      (correct)
-                //      and the
-                //      others
-                //      sort by
-                //      their
-                //      existing
-                //      timestamps
-                //      (also
-                //      correct).
-                //      Either way
-                //      the
-                //      user-visible
-                //      behavior is
-                //      the same.
-                //
-                // `is_last` is a
-                // workspace-level
-                // flag (we want
-                // to pin the
-                // workspace to
-                // position 1,
-                // not a specific
-                // pane), so we
-                // use the
-                // `is_last` of
-                // the first pane
-                // in the current
-                // workspace as
-                // the signal
-                // and leave the
-                // rest at false.
-                // But for the
-                // cold-start
-                // stamp to fire
-                // on the
-                // first-seen pane
-                // in the current
-                // workspace, we
-                // also need that
-                // pane to have
-                // `is_last: true`
-                // — so we just
-                // mark all panes
-                // in the current
-                // workspace as
-                // `is_last: true`.
-                // The first-seen
-                // one wins
-                // (subsequent
-                // cold-start
-                // stamps would
-                // be no-ops on
-                // the
-                // already-stamped
-                // first pane).
-                let is_last = current_workspace_id
-                    .as_deref()
-                    .map(|w| r.workspace_id == w)
-                    .unwrap_or(false);
-                if is_last {
-                    herdr_snapshot_debug_log(&format!(
-                        "snapshot_current_panes: marking pane_id={:?} as is_last \
-                         (in current workspace {:?})",
-                        r.pane_id, current_workspace_id
-                    ));
-                }
-                // The pane's `current_command`
-                // is initialized to the agent
-                // name (e.g. `pi`) so the row
-                // renders immediately. The
-                // full process command line
-                // (e.g. `nvim config.toml`,
-                // `-zsh`, `ssh har@host`) is
-                // fetched asynchronously by
-                // the App's background
-                // `pane_cmdlines` lookup and
-                // patched in after the first
-                // frame — see
-                // `App::spawn_pane_cmdlines`
-                // and
-                // `App::process_pane_cmdlines`.
-                // This keeps the panes view
-                // fast (no ~30ms-per-pane
-                // blocking call on the
-                // render path).
                 CurrentPaneInfo {
                     pane_id: r.pane_id,
-                    window_id: r.workspace_id.clone(),
-                    // The herdr tab_id
-                    // (`wA:t1`) drives
-                    // the pane-level
-                    // focus staging
-                    // (`focus_pane`).
+                    window_id: r.workspace_id,
                     tab_id: r.tab_id,
-                    // The workspace's
-                    // human-readable
-                    // `label` (e.g.
-                    // `smarthistory`,
-                    // `dir: Downloads`)
-                    // from `herdr
-                    // workspace list`,
-                    // falling back to
-                    // the bare workspace
-                    // id (`wA`) if the
-                    // label isn't
-                    // available.
                     session_label: label,
                     path: r.cwd,
                     current_command: r.agent,
-                    is_last,
+                    // Caller-relative for herdr; set by
+                    // `panes_for_caller`.
+                    is_last: false,
                 }
             })
-            .collect();
-        herdr_snapshot_debug_log(&format!(
-            "snapshot_current_panes: {} workspace labels, {} panes after current_pane filter \
-             (HERDR_PANE_ID={:?}, current_workspace_id={:?})",
-            workspace_label_count,
-            filtered.len(),
-            current_pane_env,
-            current_workspace_id
-        ));
-        filtered
+            .collect()
     }
 
     fn focus_command(&self, pane_id: &str) -> Option<String> {
