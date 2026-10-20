@@ -157,7 +157,12 @@ pub(crate) fn ensure_multiplexer_snapshot(app: &mut App) {
         return;
     }
     let tmux_debug = std::env::var("SMARTHISTORY_DEBUG_TMUX").is_ok();
-    let rows = app.multiplexer.snapshot();
+    // The shell server monitor's cached snapshot when fresh (at most
+    // a poll interval old — fine for T-markers), else a live fetch.
+    let rows = match app.multiplexer.kind().and_then(crate::mux_state::read_fresh_panes) {
+        Some(cache) => cache.contexts,
+        None => app.multiplexer.snapshot(),
+    };
     if tmux_debug {
         crate::tui::tmux_filter_debug_log(&format!(
             "multiplexer snapshot: {} rows (backend={})",

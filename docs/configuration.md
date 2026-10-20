@@ -64,6 +64,8 @@ value" so you can confirm what the TUI actually sees.
   - [`tui.compact`](#tuicompact)
 - [Shell server](#shell-server)
   - [`shellserver.enabled`](#shellserverenabled)
+  - [`shellserver.monitor`](#shellservermonitor)
+  - [`shellserver.monitor.interval`](#shellservermonitorinterval)
 - [Live dropdown completion](#live-dropdown-completion)
   - [`dropdown.enabled`](#dropdownenabled)
   - [`dropdown.limit`](#dropdownlimit)
@@ -477,6 +479,35 @@ bash always execs. See [`docs/shell-server.md`](shell-server.md).
 
 ```ini
 shellserver.enabled=off
+```
+
+### `shellserver.monitor`
+
+|             |               |
+| ----------- | ------------- |
+| **Type**    | `on` \| `off` |
+| **Default** | `on`          |
+
+Whether the shell server runs its background multiplexer monitor. The monitor
+keeps a cached tmux / herdr snapshot, so the TUI's `*` and `#` modes open
+without waiting on `tmux` / `herdr`. On herdr it also records the workspace
+focus history that `smarthistory last-session` needs. Has no effect while
+`shellserver.enabled=off`. See
+[`docs/shell-server.md`](shell-server.md#background-multiplexer-monitor).
+
+### `shellserver.monitor.interval`
+
+|             |                         |
+| ----------- | ----------------------- |
+| **Type**    | milliseconds, `>= 250`  |
+| **Default** | `2000`                  |
+
+How often the monitor re-takes the snapshot. On herdr, changes also trigger an
+immediate refresh, so a longer interval mostly affects pane directories and
+running commands.
+
+```ini
+shellserver.monitor.interval=5000
 ```
 
 ## Live dropdown completion

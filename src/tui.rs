@@ -1762,6 +1762,19 @@ pub(crate) struct App {
     /// per real snapshot (i.e. once per actual panes-list change),
     /// not once per tick.
     pane_cmdlines_spawned_for_snapshot: Option<u64>,
+    /// When the `*` rows were built from the shell server's cached
+    /// snapshot (`crate::mux_state`), the background live fetch that
+    /// replaces them if anything changed. See `process_live_panes`.
+    live_panes_request: Option<mpsc::Receiver<Vec<crate::multiplexer::CurrentPaneInfo>>>,
+    /// The unfiltered cached rows the current `session_panes` were
+    /// built from, compared against the live result.
+    panes_from_cache: Option<Vec<crate::multiplexer::CurrentPaneInfo>>,
+    /// A live result that differs from the cache, consumed by the next
+    /// `refresh_session_panes_impl`.
+    pending_live_panes: Option<Vec<crate::multiplexer::CurrentPaneInfo>>,
+    /// herdr pane cmdlines from the cached snapshot (pane id → cmdline),
+    /// used instead of the per-pane background lookup when complete.
+    cached_pane_cmdlines: std::collections::HashMap<String, String>,
 
     /// Memoization cache for `pane::ensure_selected_context`:
     /// for each pane id we've recently read, the
@@ -3046,7 +3059,11 @@ impl App {
             && self.is_panes_query()
             && self.session_panes.iter().any(|r| r.mode == "pane")
         {
-            self.spawn_pane_cmdlines(self.panes_snapshot_id);
+            if self.apply_cached_pane_cmdlines() {
+                self.pane_cmdlines_spawned_for_snapshot = Some(self.panes_snapshot_id);
+            } else {
+                self.spawn_pane_cmdlines(self.panes_snapshot_id);
+            }
         }
         let Some(request) = self.pane_cmdlines_request.as_ref() else {
             return;
@@ -3119,26 +3136,7 @@ impl App {
         // skipped (their pane_id is empty in
         // our snapshot map, so a `Some("")`
         // entry would be a no-op anyway).
-        if self.is_panes_query() {
-            let mut old_previews: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            for row in &self.rows {
-                if row.mode == "pane" && !row.preview.is_empty() {
-                    old_previews.insert(row.session_id.clone(), row.preview.clone());
-                }
-            }
-            self.rows = self.fetch().unwrap_or_default();
-            // Restore the previews onto the
-            // matching new rows.
-            for row in self.rows.iter_mut() {
-                if row.mode == "pane"
-                    && let Some(preview) = old_previews.get(&row.session_id)
-                {
-                    row.preview = preview.clone();
-                }
-            }
-            self.merged_rows = self.build_merged_rows();
-        }
+        self.refetch_panes_rows_keep_previews();
     }
 
     /// How long the background reachability monitor sleeps between full
@@ -3146,6 +3144,95 @@ impl App {
     /// coming back up (or going down) is reflected within a reasonable
     /// wait; long enough that idling in `*` mode doesn't keep spawning a
     /// `ping` subprocess per host every render tick.
+    /// Re-run the panes fetch so changed `session_panes` reach
+    /// `self.rows` / `self.merged_rows`, keeping the pane previews
+    /// already loaded (the fresh rows come back without them, which
+    /// would flash the row's tab id for a frame). A no-op outside the
+    /// `*` mode.
+    fn refetch_panes_rows_keep_previews(&mut self) {
+    if self.is_panes_query() {
+        let mut old_previews: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for row in &self.rows {
+            if row.mode == "pane" && !row.preview.is_empty() {
+                old_previews.insert(row.session_id.clone(), row.preview.clone());
+            }
+        }
+        self.rows = self.fetch().unwrap_or_default();
+        // Restore the previews onto the
+        // matching new rows.
+        for row in self.rows.iter_mut() {
+            if row.mode == "pane"
+                && let Some(preview) = old_previews.get(&row.session_id)
+            {
+                row.preview = preview.clone();
+            }
+        }
+        self.merged_rows = self.build_merged_rows();
+    }
+        // A live swap can shrink the list under the cursor.
+        let n = self.merged_rows.len();
+        if let Some(sel) = self.list_state.selected()
+            && sel >= n
+        {
+            self.list_state.select(n.checked_sub(1));
+        }
+    }
+
+    /// Patch herdr pane cmdlines from the shell server's cached
+    /// snapshot into `session_panes`. Returns whether every pane row
+    /// got one (then the per-pane background lookup can be skipped).
+    fn apply_cached_pane_cmdlines(&mut self) -> bool {
+        if self.cached_pane_cmdlines.is_empty() {
+            return false;
+        }
+        let cmdlines = std::mem::take(&mut self.cached_pane_cmdlines);
+        let ids: Vec<String> = self
+            .session_panes
+            .iter()
+            .filter(|r| r.mode == "pane")
+            .map(|r| r.session_id.clone())
+            .collect();
+        let mut all = true;
+        for id in &ids {
+            match cmdlines.get(id) {
+                Some(cmd) => self.patch_pane_cmdline(id, cmd),
+                None => all = false,
+            }
+        }
+        self.cached_pane_cmdlines = cmdlines;
+        self.refetch_panes_rows_keep_previews();
+        all
+    }
+
+    /// Drain the background live panes fetch started when the `*`
+    /// rows were built from the cached snapshot. If the live result
+    /// differs, rebuild the panes list from it. Called from the run
+    /// loop tick.
+    fn process_live_panes(&mut self) {
+        let Some(rx) = self.live_panes_request.as_ref() else {
+            return;
+        };
+        let rows = match rx.try_recv() {
+            Ok(rows) => rows,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.live_panes_request = None;
+                return;
+            }
+        };
+        self.live_panes_request = None;
+        if self.panes_from_cache.as_ref() == Some(&rows) {
+            return;
+        }
+        self.pending_live_panes = Some(rows);
+        self.session_panes.clear();
+        if self.is_panes_query() {
+            crate::tui::mode::panes::refresh_session_panes(self);
+            self.refetch_panes_rows_keep_previews();
+        }
+    }
+
     const HOST_REACHABILITY_REFRESH_SECS: u64 = 20;
 
     /// (Re-)spawn the background host-reachability monitor. Cancels any
@@ -5474,6 +5561,10 @@ impl App {
             panes_filter: PanesFilter::default(),
             collapsed_pane_groups: std::collections::HashSet::new(),
             pane_cmdlines_request: None,
+            live_panes_request: None,
+            panes_from_cache: None,
+            pending_live_panes: None,
+            cached_pane_cmdlines: std::collections::HashMap::new(),
             panes_snapshot_id: 0,
             pane_cmdlines_spawned_for_snapshot: None,
             // Lazy pane-preview memoization: maps pane_id
@@ -13321,6 +13412,7 @@ fn run_loop(
         // anything that doesn't match the
         // current snapshot.
         app.process_pane_cmdlines();
+        app.process_live_panes();
 
         // Drain the background host-reachability
         // monitor and (re-)spawn it if the

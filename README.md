@@ -99,6 +99,8 @@ of falling through to zsh's native history.
   connection inside it, or focuses an already-running one. See
   [docs/multiplexer.md](docs/multiplexer.md) for the full reference (backend
   selection, building with herdr, setup, troubleshooting).
+  `smarthistory last-session` switches back to the previous session or
+  workspace (toggles like `cd -`), for tmux and herdr.
 - **Output capture** for both tmux (`pipe-pane` log) and herdr
   (`herdr pane read`): captured output is searchable via the `+` prefix and
   viewable via `Ctrl+L`. Uses exact OSC 133 shell-integration markers to
@@ -118,7 +120,9 @@ of falling through to zsh's native history.
   hooks (per-keystroke dropdown search, per-prompt `add`, startup `config get`)
   talk to it instead of exec'ing the binary each time — no keystroke lag even
   when the binary lives on a network share. Falls back to exec when the server
-  isn't reachable; `shellserver.enabled=off` disables it. See
+  isn't reachable; `shellserver.enabled=off` disables it. The server also
+  runs a background monitor that keeps a tmux/herdr pane snapshot cached, so
+  the `*` and `#` modes open without waiting on the multiplexer. See
   [docs/shell-server.md](docs/shell-server.md).
 - **Single Rust binary, no runtime dependencies.** No `fzf`, no `uuidgen`, no
   `/dev/urandom` access.
@@ -204,6 +208,7 @@ smarthistory tui   [options]            # launch the TUI
 smarthistory init  zsh                  # emit the zsh init snippet
 smarthistory completions zsh            # emit a zsh tab-completion script for this CLI (bash/fish/powershell/elvish too)
 smarthistory pane-exec                  # reconnect the current tmux/herdr session (see below)
+smarthistory last-session [--print]     # switch back to the previous tmux session / herdr workspace
 smarthistory create-note [--title T] [--content C]  # open the create-note dialog directly (see below)
 smarthistory config get <key>          # print a resolved config value
 smarthistory config list               # print all config values

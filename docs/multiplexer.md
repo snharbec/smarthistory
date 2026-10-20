@@ -166,6 +166,32 @@ a startup command yet, so the bootstrap is best-effort: the bare create command
 is staged and the user can re-select the row to retry the bootstrap once the
 workspace is up.
 
+## Switching back: `smarthistory last-session`
+
+`smarthistory last-session` switches to the previously active tmux session or
+herdr workspace. Run it twice to toggle between two, like `cd -`.
+`--print` only prints the name.
+
+- **tmux**: runs `tmux switch-client -l`. tmux tracks the last session per
+  client itself, so every switch counts, however it was made.
+- **herdr**: herdr has no "previous workspace" command. The shell server's
+  [background monitor](shell-server.md#background-multiplexer-monitor) records
+  every workspace focus change from herdr's event stream. `last-session`
+  focuses the most recent workspace that still exists, skipping closed ones.
+  Without the monitor (`shellserver.enabled=off` or `shellserver.monitor=off`)
+  it only knows the switches it made itself.
+
+It acts on the multiplexer the shell runs inside (`$HERDR_PANE_ID` /
+`$HERDR_SOCKET_PATH`, then `$TMUX`), else on the configured `multiplexer=`.
+Bind it to a key:
+
+```bash
+# ~/.tmux.conf
+bind-key L run-shell "smarthistory last-session"
+```
+
+For herdr, bind a key in its config to run `smarthistory last-session`.
+
 ## Output capture
 
 Output capture is the second half of the "multiplexer support" story. The `+`
