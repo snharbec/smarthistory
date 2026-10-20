@@ -116,9 +116,11 @@ lookup.
 
 ## Number keys
 
-The first ten visible rows show a dim `1` … `9`, `0` badge. Pressing that
-digit activates the row right away, the same as selecting it and pressing
-`Enter`. This works for workspace headers, panes, sessions and hosts alike.
+The first ten visible rows show a `1` … `9`, `0` badge. Pressing that digit
+activates the row right away, the same as selecting it and pressing `Enter`.
+This works for workspace headers, panes, sessions and hosts alike. The
+`Sessions` heading gets no number, since it has nothing to switch to. Numbers
+on live tmux session / herdr workspace headers are bold; the rest are dim.
 
 - A plain digit only jumps while the filter is still empty (just `*`). Once
   you have typed filter text, digits type normally, so `*w4` or `*2024` still

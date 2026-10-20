@@ -1775,10 +1775,12 @@ pub(crate) struct App {
     /// herdr pane cmdlines from the cached snapshot (pane id → cmdline),
     /// used instead of the per-pane background lookup when complete.
     cached_pane_cmdlines: std::collections::HashMap<String, String>,
-    /// Data index of the first `*`-mode row on screen, written by
-    /// `draw_list`. The number keys (`panes_number_jump`) count from
-    /// it, matching the `1`..`9`, `0` badges drawn on those rows.
-    panes_first_visible: usize,
+    /// The `*`-mode rows on screen (data indices `first..end`),
+    /// written by `draw_list`. The number keys (`panes_number_jump`)
+    /// and the `1`..`9`, `0` badges both come from
+    /// `panes_jump_targets` over this window, so they always agree.
+    /// `usize::MAX` end until the first draw.
+    panes_visible: (usize, usize),
 
     /// Memoization cache for `pane::ensure_selected_context`:
     /// for each pane id we've recently read, the
@@ -5569,7 +5571,7 @@ impl App {
             panes_from_cache: None,
             pending_live_panes: None,
             cached_pane_cmdlines: std::collections::HashMap::new(),
-            panes_first_visible: 0,
+            panes_visible: (0, usize::MAX),
             panes_snapshot_id: 0,
             pane_cmdlines_spawned_for_snapshot: None,
             // Lazy pane-preview memoization: maps pane_id
@@ -14177,8 +14179,25 @@ fn panes_number_jump(app: &App, key: &KeyEvent) -> Option<Option<usize>> {
         return None;
     }
     let k = if digit == 0 { 9 } else { digit - 1 };
-    let idx = app.panes_first_visible + k;
-    Some((idx < app.merged_rows().len()).then_some(idx))
+    let (first, end) = app.panes_visible;
+    Some(panes_jump_targets(app.merged_rows(), first, end).get(k).copied())
+}
+
+/// The rows that get a number key in `*` mode: the first ten rows of
+/// the visible window `first..end`, skipping the `Sessions` group
+/// heading (it has nothing to switch to). Position `k` in the result
+/// is digit `k + 1` (`0` for the tenth).
+pub(crate) fn panes_jump_targets(rows: &[HistoryRow], first: usize, end: usize) -> Vec<usize> {
+    (first..end.min(rows.len()))
+        .filter(|&i| !is_sessions_heading(&rows[i]))
+        .take(10)
+        .collect()
+}
+
+/// The `Sessions` group heading above the live tmux sessions / herdr
+/// workspaces (see `insert_sessions_group_header`).
+fn is_sessions_heading(row: &HistoryRow) -> bool {
+    row.mode == "workspace" && row.source == "workspace-group"
 }
 
 /// Execute a single `Action`. Returns `true` when the action

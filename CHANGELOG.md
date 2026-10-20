@@ -24,7 +24,8 @@ All notable changes to this project will be documented in this file.
   [docs/shell-server.md](docs/shell-server.md#background-multiplexer-monitor).
 - Number keys in `*` (panes) mode: the first ten visible rows show a `1` …
   `9`, `0` badge, and pressing that digit activates the row immediately, with
-  no `Enter`. Plain digits only jump while the filter is empty, so `*w4` still
+  no `Enter`. The `Sessions` heading is skipped, and session/workspace
+  numbers are bold. Plain digits only jump while the filter is empty, so `*w4` still
   filters. `Alt`+digit always jumps. See
   [docs/modes/panes.md](docs/modes/panes.md#number-keys).
 

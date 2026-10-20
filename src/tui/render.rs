@@ -5312,6 +5312,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(3)
         .max(3);
 
+    let jump_targets = if is_panes {
+        crate::tui::panes_jump_targets(merged, first_visible, last_visible)
+    } else {
+        Vec::new()
+    };
     let items: Vec<ListItem> = (first_visible..last_visible)
         .map(|i| {
             if i < pad {
@@ -5326,15 +5331,19 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 let is_selected = app.list_state.selected() == Some(data_idx);
                 let mut line = render_row(r, app, is_selected, age_width);
                 if is_panes {
-                    // Jump-key badge: the first ten visible rows are
-                    // `1`..`9`, `0` (see `panes_number_jump`).
-                    let k = i - first_visible;
-                    let badge = if k < 10 {
-                        format!("{} ", (k + 1) % 10)
-                    } else {
-                        "  ".to_string()
+                    // Jump-key badge `1`..`9`, `0` (see
+                    // `panes_number_jump`); bold on live session /
+                    // workspace headers so they stand out from panes.
+                    let badge = match jump_targets.iter().position(|&t| t == data_idx) {
+                        Some(k) => format!("{} ", (k + 1) % 10),
+                        None => "  ".to_string(),
                     };
-                    line.spans.insert(0, Span::styled(badge, Theme::dim()));
+                    let style = if r.mode == "workspace" && r.source == "workspace" {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Theme::dim()
+                    };
+                    line.spans.insert(0, Span::styled(badge, style));
                 }
                 ListItem::new(line)
             }
@@ -5491,7 +5500,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         app.list_state.select(data_idx);
     }
     if is_panes {
-        app.panes_first_visible = first_visible;
+        app.panes_visible = (first_visible, last_visible);
     }
 }
 

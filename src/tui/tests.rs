@@ -36208,3 +36208,19 @@ fn digits_outside_panes_mode_still_type() {
     handle_key(&mut app, KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
     assert_eq!(app.query, "3");
 }
+
+#[test]
+fn panes_jump_targets_skip_sessions_heading_and_cap_at_ten() {
+    let row = |mode: &str, source: &str| HistoryRow {
+        mode: mode.to_string(),
+        source: source.to_string(),
+        ..Default::default()
+    };
+    let mut rows = vec![row("workspace", "workspace-group"), row("workspace", "workspace")];
+    rows.extend((0..12).map(|_| row("pane", "pane")));
+    let targets = panes_jump_targets(&rows, 0, usize::MAX);
+    assert_eq!(targets.len(), 10);
+    assert_eq!(targets[0], 1, "`1` is the workspace header, not the Sessions heading");
+    // A scrolled window counts from its own first row.
+    assert_eq!(panes_jump_targets(&rows, 5, 8), vec![5, 6, 7]);
+}
