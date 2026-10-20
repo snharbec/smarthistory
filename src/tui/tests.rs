@@ -36224,3 +36224,116 @@ fn panes_jump_targets_skip_sessions_heading_and_cap_at_ten() {
     // A scrolled window counts from its own first row.
     assert_eq!(panes_jump_targets(&rows, 5, 8), vec![5, 6, 7]);
 }
+
+fn shortcut_app(shortcuts: &[(&str, usize)]) -> App {
+    let mut app = panes_test_app(&[("%5", "@1", "/var", "vim")]);
+    let session = |id: i64, name: &str, dir: &str| HistoryRow {
+        id,
+        command: name.to_string(),
+        directory: dir.to_string(),
+        mode: "session".to_string(),
+        source: "sessions".to_string(),
+        ..Default::default()
+    };
+    app.sessions = vec![session(-10_000, "Home", "/tmp/home"), session(-10_001, "Downloads", "/tmp/dl")];
+    app.session_shortcuts = shortcuts.iter().map(|(s, i)| (s.to_string(), *i)).collect();
+    app.query = "*".to_string();
+    app.query_cursor = 1;
+    app.refresh();
+    app
+}
+
+fn type_str(app: &mut App, s: &str) -> bool {
+    let mut done = false;
+    for c in s.chars() {
+        done = handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        if done {
+            break;
+        }
+    }
+    done
+}
+
+fn enter_on_session(name: &str) -> Option<String> {
+    let mut app = shortcut_app(&[]);
+    let idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| r.mode == "session" && r.command == name)
+        .expect("session row");
+    app.list_state.select(Some(idx));
+    app.select_for_run();
+    app.selection
+}
+
+#[test]
+fn session_shortcut_runs_session_without_enter() {
+    let mut app = shortcut_app(&[("ho", 0), ("do", 1)]);
+    assert!(type_str(&mut app, " do"));
+    assert!(app.selection.is_some());
+    assert_eq!(app.selection, enter_on_session("Downloads"));
+}
+
+#[test]
+fn shortcut_prefix_lists_only_sessions_with_shortcuts_and_narrows() {
+    let mut app = shortcut_app(&[("ho", 0), ("do", 1)]);
+    assert!(!type_str(&mut app, " "));
+    let names: Vec<_> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(names, ["Home", "Downloads"]);
+    assert_eq!(app.shortcut_for_row(&app.merged_rows()[1].clone()), Some("do"));
+    assert!(!type_str(&mut app, "h"));
+    let names: Vec<_> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(names, ["Home"]);
+}
+
+#[test]
+fn enter_in_shortcut_list_runs_selected_session() {
+    let mut app = shortcut_app(&[("ho", 0), ("do", 1)]);
+    type_str(&mut app, " d");
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(app.selection, enter_on_session("Downloads"));
+}
+
+#[test]
+fn session_shortcut_without_prefix_just_filters() {
+    let mut app = shortcut_app(&[("ho", 0)]);
+    assert!(!type_str(&mut app, "ho"));
+    assert!(app.selection.is_none());
+    assert_eq!(app.query, "*ho");
+}
+
+#[test]
+fn empty_shortcut_prefix_matches_filter_directly() {
+    let mut app = shortcut_app(&[("ho", 0)]);
+    app.session_shortcut_prefix.clear();
+    assert!(type_str(&mut app, "ho"));
+    assert_eq!(app.selection, enter_on_session("Home"));
+}
+
+#[test]
+fn session_shortcut_that_prefixes_another_waits_for_the_longer_one() {
+    let mut app = shortcut_app(&[("h", 1), ("ho", 0)]);
+    assert!(!type_str(&mut app, " h"));
+    assert!(app.selection.is_none());
+    assert!(type_str(&mut app, "o"));
+    assert_eq!(app.selection, enter_on_session("Home"));
+}
+
+#[test]
+fn digits_type_into_shortcut_list() {
+    let mut app = shortcut_app(&[("1x", 0)]);
+    assert!(!type_str(&mut app, " 1"));
+    assert_eq!(app.query, "* 1");
+    assert!(type_str(&mut app, "x"));
+}
+
+#[test]
+fn session_shortcut_ignored_outside_panes_mode() {
+    let mut app = shortcut_app(&[("ho", 0)]);
+    app.query.clear();
+    app.query_cursor = 0;
+    app.refresh();
+    assert!(!type_str(&mut app, " ho"));
+    assert!(app.selection.is_none());
+}

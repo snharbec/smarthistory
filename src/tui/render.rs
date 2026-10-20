@@ -5312,11 +5312,18 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(3)
         .max(3);
 
-    let jump_targets = if is_panes {
+    let shortcut_list = is_panes && crate::tui::in_shortcut_list(app);
+    let jump_targets = if is_panes && !shortcut_list {
         crate::tui::panes_jump_targets(merged, first_visible, last_visible)
     } else {
         Vec::new()
     };
+    let shortcut_width = app
+        .session_shortcuts
+        .iter()
+        .map(|(s, _)| s.chars().count())
+        .max()
+        .unwrap_or(0);
     let items: Vec<ListItem> = (first_visible..last_visible)
         .map(|i| {
             if i < pad {
@@ -5330,7 +5337,19 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 let r = &merged[data_idx];
                 let is_selected = app.list_state.selected() == Some(data_idx);
                 let mut line = render_row(r, app, is_selected, age_width);
-                if is_panes {
+                if shortcut_list {
+                    // Shortcut list: the session's shortcut in front,
+                    // padded so the names line up.
+                    let sc = app.shortcut_for_row(r).unwrap_or("");
+                    let pad = shortcut_width.saturating_sub(sc.chars().count());
+                    line.spans.insert(
+                        0,
+                        Span::styled(
+                            format!("{sc}{} ", " ".repeat(pad)),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                    );
+                } else if is_panes {
                     // Jump-key badge `1`..`9`, `0` (see
                     // `panes_number_jump`); bold on live session /
                     // workspace headers so they stand out from panes.

@@ -4370,3 +4370,27 @@ tmuxpaneoutputdir=~/custom-tmux
             report.issues()
         );
     }
+
+#[test]
+fn session_shortcut_keeps_spaces_and_first_duplicate_wins() {
+    let mut cfg = Config::default();
+    cfg.parse_multi(&[
+        "session.home = \"Home\"\nsession.home.dir = \"~/\"\nsession.home.shortcut = \" ho\"\n\
+         session.dl = \"Downloads\"\nsession.dl.shortcut = \" ho\"\nsession.nv = \"NVIM\"\nsession.nv.shortcut = nv\n",
+    ]);
+    // Default prefix " " is stripped from the old `" ho"` form.
+    assert_eq!(cfg.session_shortcuts(), vec![("ho".to_string(), 0), ("nv".to_string(), 2)]);
+}
+
+#[test]
+fn shortcut_prefix_is_configurable_and_kept_verbatim() {
+    let mut cfg = Config::default();
+    cfg.parse_multi(&[
+        "panes.shortcutprefix = \",\"\nsession.a = \"A\"\nsession.a.shortcut = \",x\"\nsession.b = \"B\"\nsession.b.shortcut = y\n",
+    ]);
+    assert_eq!(cfg.panes_shortcut_prefix(), ",");
+    assert_eq!(cfg.session_shortcuts(), vec![("x".to_string(), 0), ("y".to_string(), 1)]);
+    let mut cfg = Config::default();
+    cfg.parse_multi(&["panes.shortcutprefix = \"\"\nsession.a = \"A\"\nsession.a.shortcut = \" x\"\n"]);
+    assert_eq!(cfg.session_shortcuts(), vec![(" x".to_string(), 0)]);
+}

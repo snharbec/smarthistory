@@ -130,6 +130,37 @@ on live tmux session / herdr workspace headers are bold; the rest are dim.
 - With the filter empty, a digit that has no row behind it is ignored.
 - The numbers follow the screen: after scrolling, `1` is the top visible row.
 
+## Session shortcuts
+
+Give a configured session a `shortcut`:
+
+```ini
+# ~/.config/smarthistory/sessions
+session.home = "Home"
+session.home.dir = "~/"
+session.home.shortcut = "ho"
+```
+
+Type the shortcut prefix right after `*`. It is
+[`panes.shortcutprefix`](../configuration.md#panesshortcutprefix), a space by
+default. The list then shows only the sessions that have a shortcut, each
+with its shortcut in bold in front. Keep typing to narrow the list. As soon
+as what you typed matches a shortcut exactly (`* ho`), that session opens at
+once, without `Enter`. It switches to the session's workspace if one is
+running, and creates it otherwise, the same as selecting its row. `Enter` on
+a row in the list works too.
+
+- Write shortcuts without the prefix. A value that still starts with it
+  (`" ho"`) has it stripped.
+- The match is exact and case-sensitive.
+- A shortcut that is the start of a longer one (`h` and `ho`) waits for the
+  longer one. Reach the shorter one with `Enter` on its row.
+- If two sessions use the same shortcut, the first one in the file wins.
+- Digits type into the shortcut, and number keys don't jump while the list
+  is shown.
+- With `panes.shortcutprefix = ""` there is no list: the filter itself is
+  matched against the shortcuts, so `*ho` opens the session directly.
+
 ## Group-aware filter
 
 The filter is **group-aware**: typing a token that matches a workspace label

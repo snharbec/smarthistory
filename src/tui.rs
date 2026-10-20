@@ -1627,6 +1627,14 @@ pub(crate) struct App {
     /// appended to the panes view by
     /// `fetch_session_panes_impl`.
     sessions: Vec<HistoryRow>,
+    /// `session.<id>.shortcut` → index into `sessions`. Typing a
+    /// shortcut exactly after the `*` prefix runs that session (see
+    /// `panes_session_shortcut`).
+    session_shortcuts: Vec<(String, usize)>,
+    /// `panes.shortcutprefix` (default `" "`): `*` + this lists the
+    /// sessions with a shortcut. Empty: shortcuts match the filter
+    /// directly, with no list.
+    session_shortcut_prefix: String,
     /// Host entries parsed from the
     /// config file (`host.<id>=...`,
     /// `host.<id>.host=...`) merged
@@ -5555,6 +5563,8 @@ impl App {
             session_panes: Vec::new(),
             panes_directory_rows: None,
             sessions: Vec::new(),
+            session_shortcuts: Vec::new(),
+            session_shortcut_prefix: " ".to_string(),
             hosts: Vec::new(),
             host_defs: Vec::new(),
             host_reachable: std::collections::HashMap::new(),
@@ -12797,6 +12807,8 @@ pub fn run_tui_to_stdout(
     // Load named sessions from the config file
     // (`session.<id>=...`, `session.<id>.dir=...`).
     app.sessions = app_cfg.sessions();
+    app.session_shortcuts = app_cfg.session_shortcuts();
+    app.session_shortcut_prefix = app_cfg.panes_shortcut_prefix().to_string();
     if !app.sessions.is_empty() {
         // App::new calls refresh() which populates
         // session_panes BEFORE we set sessions
@@ -14149,8 +14161,101 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         && let KeyCode::Char(c) = key.code
     {
         app.push_char(c);
+        if let Some(idx) = panes_session_shortcut(app) {
+            return run_session_shortcut(app, idx);
+        }
     }
     false
+}
+
+/// The configured session whose `shortcut` the `*` filter now equals
+/// exactly (spaces included), if any. A shortcut that is the start of
+/// a longer one (`" h"` vs `" ho"`) never fires on its own, since the
+/// user may still be typing the longer one.
+fn panes_session_shortcut(app: &App) -> Option<usize> {
+    if app.comment_edit.is_some() {
+        return None;
+    }
+    let typed = session_shortcut_typed(app)?;
+    if typed.is_empty() {
+        return None;
+    }
+    let (shortcut, idx) = app.session_shortcuts.iter().find(|(s, _)| s == typed)?;
+    let is_prefix_of_another = app
+        .session_shortcuts
+        .iter()
+        .any(|(s, _)| s.len() > shortcut.len() && s.starts_with(shortcut.as_str()));
+    (!is_prefix_of_another).then_some(*idx)
+}
+
+/// The shortcut text typed so far, when the `*` filter is in shortcut
+/// mode: the filter starts with `panes.shortcutprefix` (`""` right
+/// after the prefix itself). With an empty prefix the whole filter is
+/// the shortcut text. `None` when not in `*` mode, no session has a
+/// shortcut, or the filter doesn't start with the prefix.
+pub(crate) fn session_shortcut_typed(app: &App) -> Option<&str> {
+    if !app.is_panes_query() || app.session_shortcuts.is_empty() {
+        return None;
+    }
+    let body = crate::tui::mode::panes::pattern(app);
+    if app.session_shortcut_prefix.is_empty() {
+        return Some(body);
+    }
+    body.strip_prefix(app.session_shortcut_prefix.as_str())
+}
+
+/// Whether the `*` view shows the shortcut list instead of the
+/// normal panes view (prefix typed, prefix non-empty).
+pub(crate) fn in_shortcut_list(app: &App) -> bool {
+    !app.session_shortcut_prefix.is_empty() && session_shortcut_typed(app).is_some()
+}
+
+impl App {
+    /// The shortcut of a configured-session row, if it has one.
+    pub(crate) fn shortcut_for_row(&self, row: &HistoryRow) -> Option<&str> {
+        if row.mode != "session" {
+            return None;
+        }
+        let idx = self
+            .sessions
+            .iter()
+            .position(|s| s.command == row.command && s.directory == row.directory)?;
+        self.session_shortcuts
+            .iter()
+            .find(|(_, i)| *i == idx)
+            .map(|(s, _)| s.as_str())
+    }
+}
+
+/// Run configured session `idx` exactly as if its row had been
+/// selected and Enter pressed: switch to its workspace when one is
+/// running, else create it. The filter is reset to the bare `*`
+/// first, so the session's row is in the list (the shortcut text
+/// itself would usually filter it out); if it is still hidden (a
+/// collapsed group, F7/F8 filter), the row is appended for the run.
+fn run_session_shortcut(app: &mut App, idx: usize) -> bool {
+    let Some(session) = app.sessions.get(idx).cloned() else {
+        return false;
+    };
+    app.query = app.query_prefixes.panes.to_string();
+    app.query_cursor = 1;
+    app.refresh();
+    let pos = app
+        .merged_rows
+        .iter()
+        .position(|r| r.mode == "session" && r.command == session.command && r.directory == session.directory);
+    let pos = match pos {
+        Some(p) => p,
+        None => {
+            app.merged_rows.push(HistoryRow {
+                session_id: session.command.clone(),
+                ..session
+            });
+            app.merged_rows.len() - 1
+        }
+    };
+    app.list_state.select(Some(pos));
+    dispatch_action(app, Action::Run)
 }
 
 /// `*` (panes) mode number keys: the first ten visible rows carry a
@@ -14171,6 +14276,7 @@ fn panes_number_jump(app: &App, key: &KeyEvent) -> Option<Option<usize>> {
     if !app.is_panes_query()
         || app.comment_edit.is_some()
         || key.modifiers.contains(KeyModifiers::CONTROL)
+        || in_shortcut_list(app)
     {
         return None;
     }

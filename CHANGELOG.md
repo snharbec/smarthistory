@@ -28,6 +28,13 @@ All notable changes to this project will be documented in this file.
   numbers are bold. Plain digits only jump while the filter is empty, so `*w4` still
   filters. `Alt`+digit always jumps. See
   [docs/modes/panes.md](docs/modes/panes.md#number-keys).
+- Session shortcuts: `session.<key>.shortcut = "ho"`. In `*` mode, typing the
+  shortcut prefix (`panes.shortcutprefix`, a space by default) lists the
+  sessions that have a shortcut. Typing one of them creates or switches to
+  that session at once, without `Enter`. A shortcut that is the start of a
+  longer one waits for the longer one. `panes.shortcutprefix = ""` drops the
+  list and matches the filter directly. See
+  [docs/modes/panes.md](docs/modes/panes.md#session-shortcuts).
 
 ### Changed
 

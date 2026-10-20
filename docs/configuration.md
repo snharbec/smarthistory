@@ -60,6 +60,7 @@ value" so you can confirm what the TUI actually sees.
   - [`tui.highlight`](#tuihighlight)
 - [Detail panes](#detail-panes)
   - [`panes.layout`](#paneslayout)
+  - [`panes.shortcutprefix`](#panesshortcutprefix)
 - [Compact display](#compact-display)
   - [`tui.compact`](#tuicompact)
 - [Shell server](#shell-server)
@@ -419,6 +420,26 @@ it from the command palette, `Ctrl-Q`). The last choice is remembered in the
 session file (`panelayout=right` / `panelayout=bottom`) and takes precedence
 over `panes.layout` on the next launch, exactly like the other layout settings —
 so the config key sets the *initial* default before any in-TUI toggle.
+
+### `panes.shortcutprefix`
+
+|             |                          |
+| ----------- | ------------------------ |
+| **Type**    | string (quoted, verbatim) |
+| **Default** | `" "` (one space)        |
+
+In `*` mode, typing this right after the `*` shows the list of sessions that
+have a [`session.<key>.shortcut`](#multiplexer-integration). Typing a shortcut
+there opens that session without `Enter`. Write shortcuts without the prefix
+(`session.home.shortcut = "ho"`). A value that still starts with the prefix is
+stripped. Set it to `""` to drop the list; shortcuts then match the filter
+directly.
+
+```ini
+panes.shortcutprefix = ","   # `*,ho` opens the `ho` session
+```
+
+See [docs/modes/panes.md](modes/panes.md#session-shortcuts).
 
 ---
 
@@ -1300,6 +1321,7 @@ Sub-keys:
 | `session.<key>`                 | yes                    | The display name (used in the picker / status bar)                      |
 | `session.<key>.dir`             | no                     | The directory the session starts in (after `cd`)                        |
 | `session.<key>.exec`            | no                     | The command to run after creating the workspace (e.g. `nvim`, `claude`) |
+| `session.<key>.shortcut`        | no                     | Typed after `*` + [`panes.shortcutprefix`](#panesshortcutprefix) (default a space), opens the session without `Enter` |
 | `session.<key>.startup_command` | accepted, not yet used | Reserved for future use                                                 |
 
 ```ini
@@ -1307,6 +1329,7 @@ Sub-keys:
 session.monorepo="monorepo"
 session.monorepo.dir=~/work/monorepo
 session.monorepo.exec=claude
+session.monorepo.shortcut=mo
 
 session.notes="notes"
 session.notes.dir=~/Documents/notes
@@ -1893,6 +1916,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `session.<key>`                 | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.dir`             | path                              | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.exec`            | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
+| `session.<key>.shortcut`        | string (verbatim, quoted)         | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.startup_command` | string                            | (reserved)                                                       | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>`                    | string                            | —                                                                 | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>.host`               | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
