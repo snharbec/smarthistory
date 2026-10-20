@@ -36224,3 +36224,79 @@ fn panes_jump_targets_skip_sessions_heading_and_cap_at_ten() {
     // A scrolled window counts from its own first row.
     assert_eq!(panes_jump_targets(&rows, 5, 8), vec![5, 6, 7]);
 }
+
+fn shortcut_app(shortcuts: &[(&str, usize)]) -> App {
+    let mut app = panes_test_app(&[("%5", "@1", "/var", "vim")]);
+    let session = |id: i64, name: &str, dir: &str| HistoryRow {
+        id,
+        command: name.to_string(),
+        directory: dir.to_string(),
+        mode: "session".to_string(),
+        source: "sessions".to_string(),
+        ..Default::default()
+    };
+    app.sessions = vec![session(-10_000, "Home", "/tmp/home"), session(-10_001, "Downloads", "/tmp/dl")];
+    app.session_shortcuts = shortcuts.iter().map(|(s, i)| (s.to_string(), *i)).collect();
+    app.query = "*".to_string();
+    app.query_cursor = 1;
+    app.refresh();
+    app
+}
+
+fn type_str(app: &mut App, s: &str) -> bool {
+    let mut done = false;
+    for c in s.chars() {
+        done = handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        if done {
+            break;
+        }
+    }
+    done
+}
+
+fn enter_on_session(name: &str) -> Option<String> {
+    let mut app = shortcut_app(&[]);
+    let idx = app
+        .merged_rows()
+        .iter()
+        .position(|r| r.mode == "session" && r.command == name)
+        .expect("session row");
+    app.list_state.select(Some(idx));
+    app.select_for_run();
+    app.selection
+}
+
+#[test]
+fn session_shortcut_runs_session_without_enter() {
+    let mut app = shortcut_app(&[(" ho", 0), (" do", 1)]);
+    assert!(type_str(&mut app, " do"));
+    assert!(app.selection.is_some());
+    assert_eq!(app.selection, enter_on_session("Downloads"));
+}
+
+#[test]
+fn session_shortcut_needs_exact_text_including_space() {
+    let mut app = shortcut_app(&[(" ho", 0)]);
+    assert!(!type_str(&mut app, "ho"));
+    assert!(app.selection.is_none());
+    assert_eq!(app.query, "*ho");
+}
+
+#[test]
+fn session_shortcut_that_prefixes_another_waits_for_the_longer_one() {
+    let mut app = shortcut_app(&[(" h", 1), (" ho", 0)]);
+    assert!(!type_str(&mut app, " h"));
+    assert!(app.selection.is_none());
+    assert!(type_str(&mut app, "o"));
+    assert_eq!(app.selection, enter_on_session("Home"));
+}
+
+#[test]
+fn session_shortcut_ignored_outside_panes_mode() {
+    let mut app = shortcut_app(&[(" ho", 0)]);
+    app.query.clear();
+    app.query_cursor = 0;
+    app.refresh();
+    assert!(!type_str(&mut app, " ho"));
+    assert!(app.selection.is_none());
+}

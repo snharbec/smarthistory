@@ -4370,3 +4370,13 @@ tmuxpaneoutputdir=~/custom-tmux
             report.issues()
         );
     }
+
+#[test]
+fn session_shortcut_keeps_spaces_and_first_duplicate_wins() {
+    let mut cfg = Config::default();
+    cfg.parse_multi(&[
+        "session.home = \"Home\"\nsession.home.dir = \"~/\"\nsession.home.shortcut = \" ho\"\n\
+         session.dl = \"Downloads\"\nsession.dl.shortcut = \" ho\"\nsession.nv = \"NVIM\"\nsession.nv.shortcut = nv\n",
+    ]);
+    assert_eq!(cfg.session_shortcuts(), vec![(" ho".to_string(), 0), ("nv".to_string(), 2)]);
+}

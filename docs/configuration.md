@@ -1300,6 +1300,7 @@ Sub-keys:
 | `session.<key>`                 | yes                    | The display name (used in the picker / status bar)                      |
 | `session.<key>.dir`             | no                     | The directory the session starts in (after `cd`)                        |
 | `session.<key>.exec`            | no                     | The command to run after creating the workspace (e.g. `nvim`, `claude`) |
+| `session.<key>.shortcut`        | no                     | Text that, typed exactly after `*`, opens the session without `Enter` (spaces count, e.g. `" ho"`) |
 | `session.<key>.startup_command` | accepted, not yet used | Reserved for future use                                                 |
 
 ```ini
@@ -1307,6 +1308,7 @@ Sub-keys:
 session.monorepo="monorepo"
 session.monorepo.dir=~/work/monorepo
 session.monorepo.exec=claude
+session.monorepo.shortcut=" mo"
 
 session.notes="notes"
 session.notes.dir=~/Documents/notes
@@ -1893,6 +1895,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `session.<key>`                 | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.dir`             | path                              | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.exec`            | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
+| `session.<key>.shortcut`        | string (verbatim, quoted)         | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |
 | `session.<key>.startup_command` | string                            | (reserved)                                                       | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>`                    | string                            | —                                                                 | [Multiplexer integration](#multiplexer-integration)                       |
 | `host.<key>.host`               | string                            | —                                                                | [Multiplexer integration](#multiplexer-integration)                       |

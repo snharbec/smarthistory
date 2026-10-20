@@ -2135,6 +2135,11 @@ struct SessionDef {
     name: String,
     dir: String,
     exec: String,
+    /// `session.<id>.shortcut = " ho"`: typing exactly this after the
+    /// `*` prefix creates/switches to the session at once, no Enter.
+    /// Kept verbatim, spaces included — a leading space keeps it apart
+    /// from ordinary filter text.
+    shortcut: String,
 }
 
 /// A directory-to-project binding from the config file.
@@ -3727,6 +3732,7 @@ impl Config {
                                             name: String::new(),
                                             dir: unquoted.to_string(),
                                             exec: String::new(),
+                                            shortcut: String::new(),
                                         },
                                     ));
                                 }
@@ -3740,8 +3746,32 @@ impl Config {
                                             name: String::new(),
                                             dir: String::new(),
                                             exec: unquoted.to_string(),
+                                            shortcut: String::new(),
                                         },
                                     ));
+                                }
+                                ("shortcut", _) => {
+                                    // Verbatim inside the quotes: no
+                                    // inner trim, so `" ho"` keeps its
+                                    // leading space.
+                                    let raw = value.trim();
+                                    let raw = raw
+                                        .strip_prefix('"')
+                                        .and_then(|r| r.strip_suffix('"'))
+                                        .unwrap_or(raw)
+                                        .to_string();
+                                    match pos {
+                                        Some(idx) => self.sessions[idx].1.shortcut = raw,
+                                        None => self.sessions.push((
+                                            key.to_string(),
+                                            SessionDef {
+                                                name: String::new(),
+                                                dir: String::new(),
+                                                exec: String::new(),
+                                                shortcut: raw,
+                                            },
+                                        )),
+                                    }
                                 }
                                 ("startup_command", _) => {
                                     // Accepted but not used yet.
@@ -3761,6 +3791,7 @@ impl Config {
                                             name: unquoted.to_string(),
                                             dir: String::new(),
                                             exec: String::new(),
+                                            shortcut: String::new(),
                                         },
                                     )),
                                 }
@@ -4552,6 +4583,19 @@ impl Config {
                 }
             })
             .collect()
+    }
+
+    /// `session.<id>.shortcut` values, each paired with its session's
+    /// index in [`Self::sessions`]. Empty shortcuts are left out; for a
+    /// shortcut used twice, the first session declared wins.
+    pub fn session_shortcuts(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = Vec::new();
+        for (idx, (_, def)) in self.sessions.iter().enumerate() {
+            if !def.shortcut.is_empty() && !out.iter().any(|(s, _)| *s == def.shortcut) {
+                out.push((def.shortcut.clone(), idx));
+            }
+        }
+        out
     }
 
     /// Session entries that have a `.dir` set, with the directory

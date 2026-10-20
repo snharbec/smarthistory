@@ -130,6 +130,31 @@ on live tmux session / herdr workspace headers are bold; the rest are dim.
 - With the filter empty, a digit that has no row behind it is ignored.
 - The numbers follow the screen: after scrolling, `1` is the top visible row.
 
+## Session shortcuts
+
+Give a configured session a `shortcut`:
+
+```ini
+# ~/.config/smarthistory/sessions
+session.home = "Home"
+session.home.dir = "~/"
+session.home.shortcut = " ho"
+```
+
+In `*` mode, as soon as the filter equals the shortcut exactly (here `* ho`),
+the session runs at once, without `Enter`. It switches to the session's
+workspace if one is running, and creates it otherwise, the same as selecting
+its row.
+
+- The match is exact and case-sensitive, and spaces count. A leading space,
+  as in `" ho"`, keeps a shortcut apart from ordinary filter text: `*ho`
+  still just filters.
+- A shortcut that is the start of a longer one (`" h"` and `" ho"`) waits for
+  the longer one. Reach the shorter one by selecting its row and pressing
+  `Enter`.
+- If two sessions use the same shortcut, the first one in the file wins.
+- Quote the value, so spaces are kept.
+
 ## Group-aware filter
 
 The filter is **group-aware**: typing a token that matches a workspace label
