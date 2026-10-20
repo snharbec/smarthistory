@@ -1775,6 +1775,10 @@ pub(crate) struct App {
     /// herdr pane cmdlines from the cached snapshot (pane id → cmdline),
     /// used instead of the per-pane background lookup when complete.
     cached_pane_cmdlines: std::collections::HashMap<String, String>,
+    /// Data index of the first `*`-mode row on screen, written by
+    /// `draw_list`. The number keys (`panes_number_jump`) count from
+    /// it, matching the `1`..`9`, `0` badges drawn on those rows.
+    panes_first_visible: usize,
 
     /// Memoization cache for `pane::ensure_selected_context`:
     /// for each pane id we've recently read, the
@@ -5565,6 +5569,7 @@ impl App {
             panes_from_cache: None,
             pending_live_panes: None,
             cached_pane_cmdlines: std::collections::HashMap::new(),
+            panes_first_visible: 0,
             panes_snapshot_id: 0,
             pane_cmdlines_spawned_for_snapshot: None,
             // Lazy pane-preview memoization: maps pane_id
@@ -14121,6 +14126,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return dispatch_action(app, action);
     }
 
+    match panes_number_jump(app, &key) {
+        Some(Some(idx)) => {
+            app.list_state.select(Some(idx));
+            crate::tui::mode::ensure_selected_context(app);
+            return dispatch_action(app, Action::Run);
+        }
+        Some(None) => return false,
+        None => {}
+    }
+
     // Unbound characters extend the query. We accept any plain
     // printable character (Shift is allowed — terminals report
     // uppercase letters as `Char('G')` + `SHIFT`, so excluding
@@ -14134,6 +14149,36 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         app.push_char(c);
     }
     false
+}
+
+/// `*` (panes) mode number keys: the first ten visible rows carry a
+/// `1`..`9`, `0` badge, and pressing that digit activates the row
+/// right away, like selecting it and pressing Enter.
+///
+/// A plain digit only jumps while the filter body is still empty
+/// (`*` alone), so `*w4` / `*2024` keep typing into the filter;
+/// Alt+digit always jumps. Returns `None` when the key isn't a jump
+/// (the caller types it as usual), `Some(Some(idx))` for the row's
+/// data index, and `Some(None)` for a jump digit with no row behind
+/// it, which is ignored rather than typed.
+fn panes_number_jump(app: &App, key: &KeyEvent) -> Option<Option<usize>> {
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    let digit = c.to_digit(10)? as usize;
+    if !app.is_panes_query()
+        || app.comment_edit.is_some()
+        || key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return None;
+    }
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if !alt && !app.panes_pattern().trim().is_empty() {
+        return None;
+    }
+    let k = if digit == 0 { 9 } else { digit - 1 };
+    let idx = app.panes_first_visible + k;
+    Some((idx < app.merged_rows().len()).then_some(idx))
 }
 
 /// Execute a single `Action`. Returns `true` when the action

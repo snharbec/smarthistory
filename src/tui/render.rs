@@ -5324,7 +5324,19 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 };
                 let r = &merged[data_idx];
                 let is_selected = app.list_state.selected() == Some(data_idx);
-                ListItem::new(render_row(r, app, is_selected, age_width))
+                let mut line = render_row(r, app, is_selected, age_width);
+                if is_panes {
+                    // Jump-key badge: the first ten visible rows are
+                    // `1`..`9`, `0` (see `panes_number_jump`).
+                    let k = i - first_visible;
+                    let badge = if k < 10 {
+                        format!("{} ", (k + 1) % 10)
+                    } else {
+                        "  ".to_string()
+                    };
+                    line.spans.insert(0, Span::styled(badge, Theme::dim()));
+                }
+                ListItem::new(line)
             }
         })
         .collect();
@@ -5477,6 +5489,9 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.list_state = ListState::default().with_offset(0);
         app.list_state.select(data_idx);
+    }
+    if is_panes {
+        app.panes_first_visible = first_visible;
     }
 }
 

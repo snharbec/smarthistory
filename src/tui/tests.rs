@@ -36145,3 +36145,66 @@ fn create_jira_issue_dialog_cloned_field_is_still_tab_reachable() {
     );
 }
 
+
+fn two_pane_app(query: &str) -> App {
+    let mut app = panes_test_app(&[("%5", "@1", "/tmp", "vim"), ("%6", "@1", "/var", "zsh")]);
+    app.query = query.to_string();
+    app.query_cursor = app.query.chars().count();
+    app.refresh();
+    app
+}
+
+fn expected_run_selection(idx: usize) -> Option<String> {
+    let mut app = two_pane_app("*");
+    app.list_state.select(Some(idx));
+    app.select_for_run();
+    app.selection
+}
+
+#[test]
+fn panes_digit_with_empty_filter_runs_that_row() {
+    let mut app = two_pane_app("*");
+    assert!(app.merged_rows().len() >= 2);
+    let done = handle_key(&mut app, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert!(done);
+    assert_eq!(app.selection, expected_run_selection(1));
+    assert_eq!(app.query, "*");
+}
+
+#[test]
+fn panes_digit_after_filter_text_types_into_filter() {
+    let mut app = two_pane_app("*v");
+    let done = handle_key(&mut app, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert!(!done);
+    assert!(app.selection.is_none());
+    assert_eq!(app.query, "*v2");
+}
+
+#[test]
+fn panes_alt_digit_jumps_even_with_filter_text() {
+    let mut app = two_pane_app("*v");
+    let n = app.merged_rows().len();
+    assert!(n >= 1);
+    let done = handle_key(&mut app, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+    assert!(done);
+    assert_eq!(app.query, "*v");
+    assert!(app.selection.is_some());
+}
+
+#[test]
+fn panes_digit_without_row_is_ignored_not_typed() {
+    let mut app = two_pane_app("*");
+    let n = app.merged_rows().len();
+    assert!(n < 9, "test assumes fewer than 9 rows, got {n}");
+    let done = handle_key(&mut app, KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+    assert!(!done);
+    assert!(app.selection.is_none());
+    assert_eq!(app.query, "*");
+}
+
+#[test]
+fn digits_outside_panes_mode_still_type() {
+    let mut app = two_pane_app("");
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+    assert_eq!(app.query, "3");
+}

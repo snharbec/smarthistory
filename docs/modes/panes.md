@@ -114,6 +114,20 @@ starts a plain local shell with no connection of its own; run
 already named after the config entry that created it and needs no separate
 lookup.
 
+## Number keys
+
+The first ten visible rows show a dim `1` … `9`, `0` badge. Pressing that
+digit activates the row right away, the same as selecting it and pressing
+`Enter`. This works for workspace headers, panes, sessions and hosts alike.
+
+- A plain digit only jumps while the filter is still empty (just `*`). Once
+  you have typed filter text, digits type normally, so `*w4` or `*2024` still
+  filter.
+- `Alt`+digit always jumps, even after filter text. On macOS the terminal
+  must send Option as Meta (Esc+) for this.
+- With the filter empty, a digit that has no row behind it is ignored.
+- The numbers follow the screen: after scrolling, `1` is the top visible row.
+
 ## Group-aware filter
 
 The filter is **group-aware**: typing a token that matches a workspace label
