@@ -36268,23 +36268,52 @@ fn enter_on_session(name: &str) -> Option<String> {
 
 #[test]
 fn session_shortcut_runs_session_without_enter() {
-    let mut app = shortcut_app(&[(" ho", 0), (" do", 1)]);
+    let mut app = shortcut_app(&[("ho", 0), ("do", 1)]);
     assert!(type_str(&mut app, " do"));
     assert!(app.selection.is_some());
     assert_eq!(app.selection, enter_on_session("Downloads"));
 }
 
 #[test]
-fn session_shortcut_needs_exact_text_including_space() {
-    let mut app = shortcut_app(&[(" ho", 0)]);
+fn shortcut_prefix_lists_only_sessions_with_shortcuts_and_narrows() {
+    let mut app = shortcut_app(&[("ho", 0), ("do", 1)]);
+    assert!(!type_str(&mut app, " "));
+    let names: Vec<_> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(names, ["Home", "Downloads"]);
+    assert_eq!(app.shortcut_for_row(&app.merged_rows()[1].clone()), Some("do"));
+    assert!(!type_str(&mut app, "h"));
+    let names: Vec<_> = app.merged_rows().iter().map(|r| r.command.clone()).collect();
+    assert_eq!(names, ["Home"]);
+}
+
+#[test]
+fn enter_in_shortcut_list_runs_selected_session() {
+    let mut app = shortcut_app(&[("ho", 0), ("do", 1)]);
+    type_str(&mut app, " d");
+    app.list_state.select(Some(0));
+    app.select_for_run();
+    assert_eq!(app.selection, enter_on_session("Downloads"));
+}
+
+#[test]
+fn session_shortcut_without_prefix_just_filters() {
+    let mut app = shortcut_app(&[("ho", 0)]);
     assert!(!type_str(&mut app, "ho"));
     assert!(app.selection.is_none());
     assert_eq!(app.query, "*ho");
 }
 
 #[test]
+fn empty_shortcut_prefix_matches_filter_directly() {
+    let mut app = shortcut_app(&[("ho", 0)]);
+    app.session_shortcut_prefix.clear();
+    assert!(type_str(&mut app, "ho"));
+    assert_eq!(app.selection, enter_on_session("Home"));
+}
+
+#[test]
 fn session_shortcut_that_prefixes_another_waits_for_the_longer_one() {
-    let mut app = shortcut_app(&[(" h", 1), (" ho", 0)]);
+    let mut app = shortcut_app(&[("h", 1), ("ho", 0)]);
     assert!(!type_str(&mut app, " h"));
     assert!(app.selection.is_none());
     assert!(type_str(&mut app, "o"));
@@ -36292,8 +36321,16 @@ fn session_shortcut_that_prefixes_another_waits_for_the_longer_one() {
 }
 
 #[test]
+fn digits_type_into_shortcut_list() {
+    let mut app = shortcut_app(&[("1x", 0)]);
+    assert!(!type_str(&mut app, " 1"));
+    assert_eq!(app.query, "* 1");
+    assert!(type_str(&mut app, "x"));
+}
+
+#[test]
 fn session_shortcut_ignored_outside_panes_mode() {
-    let mut app = shortcut_app(&[(" ho", 0)]);
+    let mut app = shortcut_app(&[("ho", 0)]);
     app.query.clear();
     app.query_cursor = 0;
     app.refresh();

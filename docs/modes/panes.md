@@ -138,22 +138,28 @@ Give a configured session a `shortcut`:
 # ~/.config/smarthistory/sessions
 session.home = "Home"
 session.home.dir = "~/"
-session.home.shortcut = " ho"
+session.home.shortcut = "ho"
 ```
 
-In `*` mode, as soon as the filter equals the shortcut exactly (here `* ho`),
-the session runs at once, without `Enter`. It switches to the session's
-workspace if one is running, and creates it otherwise, the same as selecting
-its row.
+Type the shortcut prefix right after `*`. It is
+[`panes.shortcutprefix`](../configuration.md#panesshortcutprefix), a space by
+default. The list then shows only the sessions that have a shortcut, each
+with its shortcut in bold in front. Keep typing to narrow the list. As soon
+as what you typed matches a shortcut exactly (`* ho`), that session opens at
+once, without `Enter`. It switches to the session's workspace if one is
+running, and creates it otherwise, the same as selecting its row. `Enter` on
+a row in the list works too.
 
-- The match is exact and case-sensitive, and spaces count. A leading space,
-  as in `" ho"`, keeps a shortcut apart from ordinary filter text: `*ho`
-  still just filters.
-- A shortcut that is the start of a longer one (`" h"` and `" ho"`) waits for
-  the longer one. Reach the shorter one by selecting its row and pressing
-  `Enter`.
+- Write shortcuts without the prefix. A value that still starts with it
+  (`" ho"`) has it stripped.
+- The match is exact and case-sensitive.
+- A shortcut that is the start of a longer one (`h` and `ho`) waits for the
+  longer one. Reach the shorter one with `Enter` on its row.
 - If two sessions use the same shortcut, the first one in the file wins.
-- Quote the value, so spaces are kept.
+- Digits type into the shortcut, and number keys don't jump while the list
+  is shown.
+- With `panes.shortcutprefix = ""` there is no list: the filter itself is
+  matched against the shortcuts, so `*ho` opens the session directly.
 
 ## Group-aware filter
 

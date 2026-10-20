@@ -1845,6 +1845,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     let _ = writeln!(f, "  initialmode = {}", cfg.initial_mode());
     let _ = writeln!(f, "  multiplexer = {}", cfg.multiplexer().as_str());
     let _ = writeln!(f, "  panes.layout = {}", cfg.pane_layout().as_str());
+    let _ = writeln!(f, "  panes.shortcutprefix = {:?}", cfg.panes_shortcut_prefix);
     use crate::tui::bindings::ALL_ACTIONS;
     let bindings = cfg.key_bindings();
     for a in ALL_ACTIONS {
@@ -2284,6 +2285,11 @@ pub struct Config {
     /// `smarthistory last-session`. Default `true`. Set via
     /// `shellserver.monitor=on|off`.
     shell_server_monitor: bool,
+    /// Typed right after the `*` prefix, lists the sessions that have a
+    /// `session.<id>.shortcut`; typing a shortcut then runs it. Default
+    /// `" "`. Empty disables the list: shortcuts then match the filter
+    /// directly. Set via `panes.shortcutprefix="<text>"`.
+    panes_shortcut_prefix: String,
     /// How often (ms) the monitor re-takes the snapshot. Default
     /// 2000, minimum 250. Set via `shellserver.monitor.interval=<ms>`.
     shell_server_monitor_interval_ms: u64,
@@ -2859,6 +2865,7 @@ impl Config {
             autosuggest_enabled: false,
             shell_server_enabled: true,
             shell_server_monitor: true,
+            panes_shortcut_prefix: " ".to_string(),
             shell_server_monitor_interval_ms: 2000,
             dropdown_limit: 6,
             dropdown_min_chars: 1,
@@ -3211,6 +3218,15 @@ impl Config {
                         value
                     ),
                 },
+                "panes.shortcutprefix" => {
+                    // Verbatim inside the quotes, so `" "` survives.
+                    let raw = value.trim();
+                    self.panes_shortcut_prefix = raw
+                        .strip_prefix('"')
+                        .and_then(|r| r.strip_suffix('"'))
+                        .unwrap_or(raw)
+                        .to_string();
+                }
                 "panes.layout" => {
                     match crate::tui::state::PaneLayout::parse(value) {
                         Some(layout) => self.pane_layout = layout,
@@ -4586,16 +4602,29 @@ impl Config {
     }
 
     /// `session.<id>.shortcut` values, each paired with its session's
-    /// index in [`Self::sessions`]. Empty shortcuts are left out; for a
-    /// shortcut used twice, the first session declared wins.
+    /// index in [`Self::sessions`]. A value that still starts with
+    /// `panes.shortcutprefix` (the old `" ho"` form) has it stripped.
+    /// Empty shortcuts are left out; for a shortcut used twice, the
+    /// first session declared wins.
     pub fn session_shortcuts(&self) -> Vec<(String, usize)> {
+        let prefix = self.panes_shortcut_prefix.as_str();
         let mut out: Vec<(String, usize)> = Vec::new();
         for (idx, (_, def)) in self.sessions.iter().enumerate() {
-            if !def.shortcut.is_empty() && !out.iter().any(|(s, _)| *s == def.shortcut) {
-                out.push((def.shortcut.clone(), idx));
+            let sc = if prefix.is_empty() {
+                def.shortcut.as_str()
+            } else {
+                def.shortcut.strip_prefix(prefix).unwrap_or(&def.shortcut)
+            };
+            if !sc.is_empty() && !out.iter().any(|(s, _)| s == sc) {
+                out.push((sc.to_string(), idx));
             }
         }
         out
+    }
+
+    /// `panes.shortcutprefix` (default `" "`).
+    pub fn panes_shortcut_prefix(&self) -> &str {
+        &self.panes_shortcut_prefix
     }
 
     /// Session entries that have a `.dir` set, with the directory
@@ -9926,6 +9955,7 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     "shellserver.monitor" => {
                         println!("{}", if cfg.shell_server_monitor { "on" } else { "off" })
                     }
+                    "panes.shortcutprefix" => println!("{:?}", cfg.panes_shortcut_prefix),
                     "shellserver.monitor.interval" => {
                         println!("{}", cfg.shell_server_monitor_interval_ms)
                     }

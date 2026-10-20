@@ -367,6 +367,9 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     // function over `app.sessions`
     // and `app.hosts`) the
     // count is deterministic.
+    if crate::tui::in_shortcut_list(app) {
+        return Ok(shortcut_rows(app));
+    }
     ensure_directory_sections(app);
     let mut composed: Vec<HistoryRow> = app.session_panes.clone();
     configured_sections_into(&mut composed, app);
@@ -2013,4 +2016,25 @@ pub(crate) fn backend_pane_rows(
         app.live_panes_request = Some(rx);
     }
     panes_for_caller(kind, cache.panes, current_pane)
+}
+
+/// The `*` view in shortcut mode (`*` + `panes.shortcutprefix`): one
+/// row per configured session that has a shortcut starting with what
+/// has been typed after the prefix, in config order. The rows are the
+/// same session rows the normal view has, so Enter on one behaves the
+/// same; `render_row` shows each one's shortcut in front.
+fn shortcut_rows(app: &App) -> Vec<HistoryRow> {
+    let typed = crate::tui::session_shortcut_typed(app).unwrap_or("");
+    app.session_shortcuts
+        .iter()
+        .filter(|(sc, _)| sc.starts_with(typed))
+        .filter_map(|(_, idx)| {
+            let s = app.sessions.get(*idx)?;
+            Some(HistoryRow {
+                id: -20_001 - (*idx as i64),
+                session_id: s.command.clone(),
+                ..s.clone()
+            })
+        })
+        .collect()
 }
