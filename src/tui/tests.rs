@@ -14364,6 +14364,55 @@ fn repo_dir_name_falls_back_when_there_is_no_final_component() {
     assert_eq!(repo_dir_name(std::path::Path::new("/home/u/proj/..")).as_str(), "repo");
 }
 
+/// `main_repo_root_from_common_dir`: a normal repo's common dir is its
+/// `.git` directory (root = parent); a bare repo's is the repo itself,
+/// named without its `.git` suffix.
+#[test]
+fn main_repo_root_from_common_dir_handles_normal_and_bare_repos() {
+    use crate::tui::mode::worktree::main_repo_root_from_common_dir;
+    assert_eq!(
+        main_repo_root_from_common_dir(std::path::Path::new("/home/u/proj/acme/.git")),
+        std::path::Path::new("/home/u/proj/acme")
+    );
+    assert_eq!(
+        main_repo_root_from_common_dir(std::path::Path::new("/srv/acme.git")),
+        std::path::Path::new("/srv/acme")
+    );
+    assert_eq!(
+        main_repo_root_from_common_dir(std::path::Path::new("/srv/my.repo")),
+        std::path::Path::new("/srv/my.repo"),
+        "only a `.git` extension is dropped"
+    );
+}
+
+/// Regression: inside a linked worktree, `find_repo_root` returns the
+/// worktree's own checkout, so a worktree created from there was
+/// grouped under `<basedir>/<worktree-name>` instead of
+/// `<basedir>/<repo-name>`. `find_main_repo_root` must resolve back to
+/// the main repo — and leave a main checkout unchanged.
+#[test]
+fn find_main_repo_root_resolves_a_linked_worktree_to_its_main_repo() {
+    use crate::tui::mode::worktree::{find_main_repo_root, find_repo_root};
+    let Some(repo) = worktree_scratch_repo("main_root", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    let target = repo.parent().unwrap().join(format!(
+        "{}-wt-main-root",
+        repo.file_name().unwrap().to_str().unwrap()
+    ));
+    crate::tui::mode::worktree::create_worktree(&repo, &target, "feature", false, "")
+        .expect("create_worktree should succeed");
+
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+    let linked_root = find_repo_root(&target).expect("linked worktree is inside a repo");
+    assert_eq!(canon(&find_main_repo_root(&linked_root)), canon(&repo));
+    assert_eq!(canon(&find_main_repo_root(&repo)), canon(&repo));
+
+    let _ = std::fs::remove_dir_all(&target);
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
 /// `resolve_worktree_location` is the single decision point behind both
 /// the location step's preview and the worktree that step creates.
 /// Blank must mean the sibling default (already per-repo, so the repo
@@ -15589,6 +15638,7 @@ fn worktree_create_pick_location_step_renders_resolved_path_preview() {
     let mut app = directories_test_app(&[]);
     app.worktree_create_flow = Some(crate::tui::state::WorktreeCreateFlow {
         repo_root: std::path::PathBuf::from("/home/u/proj/acme"),
+        main_repo_root: std::path::PathBuf::from("/home/u/proj/acme"),
         step: crate::tui::state::WorktreeCreateStep::PickLocation,
         branch: "feature/login".to_string(),
         is_new_branch: true,

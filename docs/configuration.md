@@ -1732,6 +1732,11 @@ project's worktrees without mixing them — repo `/work/acme` and repo
 names differ, so point `basedir` at a project-specific path if you track two
 same-named checkouts.
 
+`<repo-name>` is always the **main** repository's name, even when the dialog is
+opened inside a linked worktree: a worktree created from
+`~/worktrees/acme/feature/x` goes to `~/worktrees/acme/<branch>`, not
+`~/worktrees/x/<branch>`.
+
 ```ini
 worktree.basedir=~/worktrees
 worktree.defaultbranch=main

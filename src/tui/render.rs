@@ -1951,7 +1951,7 @@ fn draw_worktree_create_flow(f: &mut Frame, flow: &crate::tui::state::WorktreeCr
     if flow.step == WorktreeCreateStep::PickLocation {
         // Same resolver `Enter` uses, so the previewed path is exactly
         // the one that gets created.
-        let dir = crate::tui::mode::worktree::resolve_worktree_location(&flow.filter, &flow.repo_root);
+        let dir = crate::tui::mode::worktree::resolve_worktree_location(&flow.filter, &flow.main_repo_root);
         let text = vec![
             Line::from(Span::styled(
                 "Directory to group this project's worktrees under.",
