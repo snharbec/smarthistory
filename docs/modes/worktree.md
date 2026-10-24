@@ -46,8 +46,8 @@ TUI: `CreateWorktree` and `DisposeWorktree` (see below).
 The `CreateWorktree` action (unbound by default — open it via the command
 palette, or bind `key.create-worktree=<spec>`) opens a step-through dialog:
 pick or create a branch, optionally pick a base branch for a new branch,
-optionally carry over the current checkout's uncommitted changes (`git
-stash`), choose where the worktree is created (only when `worktree.basedir`
+optionally move (`y`) or copy (`c`, keeping them in the source too) the
+current checkout's uncommitted changes (`git stash`), choose where the worktree is created (only when `worktree.basedir`
 isn't configured — a blank answer accepts the sibling default), and
 optionally assign the new worktree to a time-tracking project
 (`project.<slug>.dir=`). A configured `worktree.basedir` groups worktrees per

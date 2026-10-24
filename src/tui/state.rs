@@ -1273,6 +1273,21 @@ pub enum WorktreeCreateStep {
 /// type something new" pickers, just fed different candidate lists and
 /// interpreting "matches nothing" differently (see each step's own
 /// handling in `App::advance_worktree_create_flow`).
+/// The `ConfirmCarryOver` step's answer: what happens to the source
+/// checkout's uncommitted changes when a new worktree is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CarryOver {
+    /// Leave them in the source checkout only (`n`).
+    #[default]
+    None,
+    /// `git stash push` in the source, `stash apply` in the new
+    /// worktree — the changes move (`y`).
+    Move,
+    /// Same as `Move`, then `stash apply --index` back in the source,
+    /// so both checkouts end up with the changes (`c`).
+    Copy,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorktreeCreateFlow {
     /// Root of the repo the new worktree is created in/from, resolved
@@ -1296,10 +1311,9 @@ pub struct WorktreeCreateFlow {
     /// The existing branch a new `branch` is created from. Only
     /// meaningful when `is_new_branch` is true.
     pub base_branch: String,
-    /// Whether to `git stash push`/`stash apply` the source checkout's
-    /// uncommitted changes into the new worktree. Only asked (and only
-    /// meaningful) when the source checkout was dirty.
-    pub carry_over: bool,
+    /// What to do with the source checkout's uncommitted changes. Only
+    /// asked (and only meaningful) when the source checkout was dirty.
+    pub carry_over: CarryOver,
     /// The `project.<slug>` to bind the new worktree's directory to,
     /// or `None` to skip assignment (a blank `Enter` on `PickProject`).
     pub project_slug: Option<String>,

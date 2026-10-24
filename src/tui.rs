@@ -15277,11 +15277,15 @@ fn handle_worktree_create_flow_key(app: &mut App, key: KeyEvent) -> bool {
     if flow.step == crate::tui::state::WorktreeCreateStep::ConfirmCarryOver {
         return match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                app.worktree_create_confirm_carry_over(true);
+                app.worktree_create_confirm_carry_over(crate::tui::state::CarryOver::Move);
+                false
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                app.worktree_create_confirm_carry_over(crate::tui::state::CarryOver::Copy);
                 false
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                app.worktree_create_confirm_carry_over(false);
+                app.worktree_create_confirm_carry_over(crate::tui::state::CarryOver::None);
                 false
             }
             _ => false,

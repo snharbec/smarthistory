@@ -422,7 +422,7 @@ impl App {
             branch: String::new(),
             is_new_branch: false,
             base_branch: String::new(),
-            carry_over: false,
+            carry_over: crate::tui::state::CarryOver::None,
             project_slug: None,
             location_dir,
             options,
@@ -636,12 +636,15 @@ impl App {
         }
     }
 
-    /// `y`/`n` pressed on the `ConfirmCarryOver` step: records the
+    /// `y`/`c`/`n` pressed on the `ConfirmCarryOver` step: records the
     /// choice and continues through the same tail the dirty-check
     /// branch in `worktree_create_after_branch_chosen` uses (a clean
     /// repo skips this step entirely, so both paths converge on
     /// `worktree_create_after_carry_over`).
-    pub(crate) fn worktree_create_confirm_carry_over(&mut self, carry_over: bool) {
+    pub(crate) fn worktree_create_confirm_carry_over(
+        &mut self,
+        carry_over: crate::tui::state::CarryOver,
+    ) {
         if self.worktree_create_flow.is_none() {
             return;
         }
@@ -680,7 +683,7 @@ impl App {
             &flow.base_branch,
         ) {
             Ok(()) => {
-                if flow.carry_over {
+                if flow.carry_over != crate::tui::state::CarryOver::None {
                     // `--include-untracked` so untracked-only dirty
                     // state (new files that were never `git add`-ed)
                     // actually gets captured — without it, `stash push`
@@ -708,15 +711,20 @@ impl App {
                         .arg(&flow.repo_root)
                         .args(["stash", "push", "--include-untracked"])
                         .output();
-                    let nothing_to_stash = push.as_ref().is_ok_and(|o| {
+                    // Only a successful push that actually saved
+                    // something may be applied: a failed push would
+                    // otherwise apply whatever older stash entry is on
+                    // top — into the new worktree, and for `Copy` into
+                    // the source checkout too.
+                    let stashed = push.as_ref().is_ok_and(|o| {
                         let text = format!(
                             "{}{}",
                             String::from_utf8_lossy(&o.stdout),
                             String::from_utf8_lossy(&o.stderr)
                         );
-                        text.contains("No local changes to save")
+                        o.status.success() && !text.contains("No local changes to save")
                     });
-                    if !nothing_to_stash {
+                    if stashed {
                         let apply = std::process::Command::new("git")
                             .arg("-C")
                             .arg(&path)
@@ -729,6 +737,26 @@ impl App {
                                 "worktree created, but stash apply failed: {}",
                                 String::from_utf8_lossy(&o.stderr).trim()
                             ));
+                        }
+                        // `Copy`: put the changes straight back into the
+                        // (now clean) source checkout. `--index` so
+                        // staged changes stay staged there, exactly as
+                        // they were before the push.
+                        if flow.carry_over == crate::tui::state::CarryOver::Copy {
+                            let restore = std::process::Command::new("git")
+                                .arg("-C")
+                                .arg(&flow.repo_root)
+                                .args(["stash", "apply", "--index"])
+                                .output();
+                            if let Ok(o) = restore
+                                && !o.status.success()
+                            {
+                                self.set_status_message(format!(
+                                    "worktree created, but restoring changes in the source failed \
+                                     (still in `git stash list`): {}",
+                                    String::from_utf8_lossy(&o.stderr).trim()
+                                ));
+                            }
                         }
                     }
                 }
