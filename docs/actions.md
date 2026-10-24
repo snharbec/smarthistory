@@ -1364,9 +1364,13 @@ worktree` checkout for the repo containing the current directory:
    is created from. Preselected from `worktree.defaultbranch` if configured,
    otherwise auto-detected (the remote's `HEAD`, then a local `main`/`master`,
    then the repo's current branch).
-3. **Carry over uncommitted changes?** (`y`/`n`, only asked when the current
-   checkout is dirty) — `y` runs `git stash push` in the source checkout and
-   `git stash apply` in the new worktree.
+3. **Carry over uncommitted changes?** (`y`/`c`/`n`, only asked when the
+   current checkout is dirty) — `y` *moves* them: `git stash push
+   --include-untracked` in the source checkout and `git stash apply` in the new
+   worktree. `c` *copies* them: the same, then `git stash apply --index` back in
+   the source, so both checkouts have the changes (staged edits stay staged in
+   the source). `n` leaves them in the source only. The stash entry is never
+   dropped, so a failed apply loses nothing.
 4. **Where?** (only asked when `worktree.basedir` is *not* configured —
    otherwise the configured base already answers it) — type the directory to
    group this project's worktrees under; the step previews the resolved

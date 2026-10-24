@@ -14679,7 +14679,7 @@ fn worktree_create_flow_carry_over_captures_untracked_file() {
             app.worktree_create_flow.as_ref().map(|f| f.step),
             Some(WorktreeCreateStep::ConfirmCarryOver)
         );
-        app.worktree_create_confirm_carry_over(true);
+        app.worktree_create_confirm_carry_over(crate::tui::state::CarryOver::Move);
         let ret = app.advance_worktree_create_flow(); // -> PickProject (blank filter) -> execute
         assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
         assert!(ret || app.selection.is_some(), "a cd command must be staged on success");
@@ -14704,6 +14704,66 @@ fn worktree_create_flow_carry_over_captures_untracked_file() {
         .arg(&repo)
         .args(["worktree", "remove", "--force"])
         .arg(base_dir.join("feature"))
+        .output();
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// `CarryOver::Copy` (`c`): the changes land in the new worktree AND
+/// stay in the source checkout — including a staged edit staying
+/// staged there (`stash apply --index`) and an untracked file.
+#[test]
+fn worktree_create_flow_copy_keeps_changes_in_source_too() {
+    let _g = lock_or_recover(&CWD_LOCK);
+    let Some(repo) = worktree_scratch_repo("flow_copy", "trunk") else {
+        return;
+    };
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "feature"]).output();
+    std::fs::write(repo.join("README.md"), "edited\n").expect("edit tracked file");
+    let _ = std::process::Command::new("git").arg("-C").arg(&repo).args(["add", "README.md"]).output();
+    std::fs::write(repo.join("untracked.txt"), "new work\n").expect("write untracked file");
+    let repo_name = repo.file_name().expect("repo name").to_string_lossy().into_owned();
+    let configured_basedir = std::env::temp_dir()
+        .join(format!("smarthistory_worktree_copy_target_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&configured_basedir);
+    let new_wt = configured_basedir.join(&repo_name).join("feature");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&repo).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.worktree_basedir = Some(configured_basedir.clone());
+        app.open_worktree_create_flow();
+        app.worktree_create_flow.as_mut().expect("flow open").filter = "feature".to_string();
+        assert!(!app.advance_worktree_create_flow()); // -> ConfirmCarryOver
+        app.worktree_create_confirm_carry_over(crate::tui::state::CarryOver::Copy);
+        app.advance_worktree_create_flow(); // -> PickProject (blank) -> execute
+        assert!(app.worktree_create_flow.is_none(), "the dialog must close on success");
+
+        for dir in [&repo, &new_wt] {
+            assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "edited\n");
+            assert_eq!(std::fs::read_to_string(dir.join("untracked.txt")).unwrap(), "new work\n");
+        }
+        let staged = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .expect("git diff");
+        assert_eq!(
+            String::from_utf8_lossy(&staged.stdout).trim(),
+            "README.md",
+            "the staged edit must still be staged in the source checkout"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(&new_wt)
         .output();
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&configured_basedir);
@@ -15643,7 +15703,7 @@ fn worktree_create_pick_location_step_renders_resolved_path_preview() {
         branch: "feature/login".to_string(),
         is_new_branch: true,
         base_branch: "main".to_string(),
-        carry_over: false,
+        carry_over: crate::tui::state::CarryOver::None,
         project_slug: None,
         location_dir: None,
         options: Vec::new(),
