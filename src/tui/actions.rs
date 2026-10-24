@@ -407,14 +407,17 @@ impl App {
         // Configured `worktree.basedir` fixes the directory up front
         // (`<basedir>/<repo-name>`), so `PickLocation` is skipped
         // entirely; without one it stays unknown until the user
-        // confirms/types it there. Computed before `repo_root` is moved
-        // into the flow below.
+        // confirms/types it there. Named after the main repo, so a
+        // worktree created from inside another worktree still lands
+        // under the project's directory, not the worktree's.
+        let main_repo_root = crate::tui::mode::worktree::find_main_repo_root(&repo_root);
         let location_dir = self
             .worktree_basedir
             .as_ref()
-            .map(|base| crate::tui::mode::worktree::repo_worktree_parent(base, &repo_root));
+            .map(|base| crate::tui::mode::worktree::repo_worktree_parent(base, &main_repo_root));
         self.worktree_create_flow = Some(crate::tui::state::WorktreeCreateFlow {
             repo_root,
+            main_repo_root,
             step: crate::tui::state::WorktreeCreateStep::PickBranch,
             branch: String::new(),
             is_new_branch: false,
@@ -473,6 +476,7 @@ impl App {
         };
         let step = flow.step;
         let repo_root = flow.repo_root.clone();
+        let main_repo_root = flow.main_repo_root.clone();
         let typed = flow.filter.trim().to_string();
         let filtered = crate::tui::state::worktree_create_filtered_options(flow);
         let chosen = filtered.get(flow.selected).cloned();
@@ -539,7 +543,7 @@ impl App {
                 // step's preview — so what's shown is what gets created.
                 let dir = crate::tui::mode::worktree::resolve_worktree_location(
                     &typed,
-                    &repo_root,
+                    &main_repo_root,
                 );
                 if let Some(f) = self.worktree_create_flow.as_mut() {
                     f.location_dir = Some(dir);
@@ -667,7 +671,7 @@ impl App {
             self.worktree_create_after_carry_over();
             return false;
         }
-        let path = self.worktree_create_target_path(&flow.repo_root, &flow.branch);
+        let path = self.worktree_create_target_path(&flow.main_repo_root, &flow.branch);
         match crate::tui::mode::worktree::create_worktree(
             &flow.repo_root,
             &path,

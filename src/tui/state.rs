@@ -1278,6 +1278,12 @@ pub struct WorktreeCreateFlow {
     /// Root of the repo the new worktree is created in/from, resolved
     /// once when the dialog opens.
     pub repo_root: std::path::PathBuf,
+    /// The main repo `repo_root` belongs to (equal to it unless the
+    /// dialog was opened inside a linked worktree) — see
+    /// `worktree::find_main_repo_root`. Only used to name and place
+    /// the per-project worktree directory; git commands keep running
+    /// in `repo_root`, so carry-over stashes the current checkout.
+    pub main_repo_root: std::path::PathBuf,
     /// Which step is currently showing.
     pub step: WorktreeCreateStep,
     /// The branch to check out into the new worktree — either an

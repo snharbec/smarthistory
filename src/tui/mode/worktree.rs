@@ -97,6 +97,51 @@ pub(crate) fn find_repo_root(dir: &std::path::Path) -> Option<std::path::PathBuf
     Some(std::path::PathBuf::from(root))
 }
 
+/// The main repository a checkout belongs to — for a linked worktree,
+/// the repo it was created from rather than the worktree itself.
+/// `--show-toplevel` (what [`find_repo_root`] returns) is the
+/// worktree's own checkout, so naming the per-project directory after
+/// it would group a worktree-of-a-worktree under the *worktree's*
+/// name instead of the project's. Resolved via `--git-common-dir`,
+/// which every linked worktree shares with its main repo: its parent
+/// for a normal `.git` directory, or the bare repo itself with any
+/// `.git` suffix dropped (`monorepo.git` → `monorepo`). Falls back to
+/// `repo_root` when `git` fails, so naming is never worse than before.
+pub(crate) fn find_main_repo_root(repo_root: &std::path::Path) -> std::path::PathBuf {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output();
+    let common = match output {
+        Ok(o) if o.status.success() => std::str::from_utf8(&o.stdout)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    };
+    match common {
+        Some(common) => main_repo_root_from_common_dir(std::path::Path::new(&common)),
+        None => repo_root.to_path_buf(),
+    }
+}
+
+/// Pure half of [`find_main_repo_root`]: map a `--git-common-dir`
+/// path to the main repo root it belongs to.
+pub(crate) fn main_repo_root_from_common_dir(common: &std::path::Path) -> std::path::PathBuf {
+    if common.file_name().is_some_and(|n| n == ".git")
+        && let Some(parent) = common.parent()
+    {
+        return parent.to_path_buf();
+    }
+    // Bare repo: the common dir *is* the repo.
+    if common.extension().is_some_and(|e| e == "git") {
+        common.with_extension("")
+    } else {
+        common.to_path_buf()
+    }
+}
+
 /// The directory name identifying the repo rooted at `repo_root`, used
 /// as the per-project level in [`default_worktree_base`] and
 /// [`repo_worktree_parent`] so two different repos never share a
