@@ -12133,13 +12133,13 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 if self.list_area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
-                    self.move_selection(1);
+                    self.move_selection(-1);
                     crate::tui::mode::ensure_selected_context(self);
                 }
             }
             MouseEventKind::ScrollUp => {
                 if self.list_area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
-                    self.move_selection(-1);
+                    self.move_selection(1);
                     crate::tui::mode::ensure_selected_context(self);
                 }
             }
