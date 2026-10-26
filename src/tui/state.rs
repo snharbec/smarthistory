@@ -749,6 +749,11 @@ impl PaneHeight {
         PaneHeight(self.0.saturating_sub(1).max(Self::FLOOR))
     }
 
+    /// Set directly (for mouse drag).
+    pub fn set_raw(self, rows: u16, page_size: usize) -> Self {
+        PaneHeight(rows.max(Self::FLOOR).min(Self::max_for(page_size)))
+    }
+
     /// The tallest the details row may grow to for a given
     /// terminal size: total height minus the fixed chrome
     /// (`CHROME_ROWS`) minus `MIN_LIST_ROWS` for the history list.
@@ -901,6 +906,11 @@ impl PaneWidth {
     /// One step narrower, clamped to `MIN`.
     pub fn decrease(self) -> Self {
         PaneWidth(self.0.saturating_sub(Self::STEP).max(Self::MIN))
+    }
+
+    /// Set directly (for mouse drag).
+    pub fn set_raw(self, percent: u16) -> Self {
+        PaneWidth(percent.clamp(Self::MIN, Self::MAX))
     }
 
     /// The column width as a `u16` percentage, always within

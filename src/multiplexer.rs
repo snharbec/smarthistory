@@ -969,6 +969,15 @@ pub(crate) fn current_session_name() -> Option<String> {
 }
 
 #[allow(dead_code)]
+fn set_nonblocking(fd: std::os::fd::RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
 fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::process::{Command, Stdio};
@@ -997,11 +1006,12 @@ fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
     // existing TUI code.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let mut stdout = child.stdout.take()?;
+    {
+        use std::os::fd::AsRawFd;
+        set_nonblocking(stdout.as_raw_fd());
+    }
     let mut buf = Vec::new();
     loop {
-        if let Some(s) = child.stdout.take() {
-            stdout = s;
-        }
         let mut chunk = [0u8; 4096];
         match stdout.read(&mut chunk) {
             // A closed pipe still delivers whatever the OS
@@ -1012,7 +1022,8 @@ fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
             // >4096-byte response, and breaking on "child already
             // exited" truncates the output.
             Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Ok(n) => { buf.extend_from_slice(&chunk[..n]); continue; },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {} // Sleep below
             Err(_) => break,
         }
         if std::time::Instant::now() >= deadline {
@@ -1305,6 +1316,10 @@ fn herdr_run_json(args: &[&str]) -> Option<serde_json::Value> {
         }
     };
     let mut stdout = child.stdout.take()?;
+    {
+        use std::os::fd::AsRawFd;
+        set_nonblocking(stdout.as_raw_fd());
+    }
     let mut buf = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
@@ -1319,7 +1334,8 @@ fn herdr_run_json(args: &[&str]) -> Option<serde_json::Value> {
             // and breaking on "child already exited" truncates the
             // JSON mid-value, which then fails to parse.
             Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Ok(n) => { buf.extend_from_slice(&chunk[..n]); continue; },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => break,
         }
         if std::time::Instant::now() >= deadline {
@@ -1896,6 +1912,10 @@ pub fn herdr_pane_read(pane_id: &str, lines: usize) -> Option<String> {
         Err(_) => return None,
     };
     let mut stdout = child.stdout.take()?;
+    {
+        use std::os::fd::AsRawFd;
+        set_nonblocking(stdout.as_raw_fd());
+    }
     let mut buf = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
@@ -1909,7 +1929,8 @@ pub fn herdr_pane_read(pane_id: &str, lines: usize) -> Option<String> {
             // of a >4096-byte response, and breaking on "child
             // already exited" truncates the output.
             Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Ok(n) => { buf.extend_from_slice(&chunk[..n]); continue; },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => break,
         }
         if std::time::Instant::now() >= deadline {

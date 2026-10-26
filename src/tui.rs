@@ -1212,6 +1212,8 @@ pub(crate) struct App {
     rows: Vec<HistoryRow>,
     list_state: ListState,
     selection: Option<String>,
+    list_area: ratatui::layout::Rect,
+    detail_area: ratatui::layout::Rect,
     pick_mode: Option<PickMode>,
     cancelled: bool,
     /// When `Some`, we are editing the comment of a history row.
@@ -5477,6 +5479,8 @@ impl App {
             rows: Vec::new(),
             list_state,
             selection: None,
+            list_area: ratatui::layout::Rect::default(),
+            detail_area: ratatui::layout::Rect::default(),
             pick_mode: None,
             cancelled: false,
             comment_edit: None,
@@ -12123,6 +12127,53 @@ impl App {
         self.confirm_delete = None;
         Ok(())
     }
+
+    fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseEventKind, MouseButton};
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if self.list_area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    self.move_selection(-1);
+                    crate::tui::mode::ensure_selected_context(self);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if self.list_area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    self.move_selection(1);
+                    crate::tui::mode::ensure_selected_context(self);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.list_area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    let clicked_row = mouse.row.saturating_sub(self.list_area.y);
+                    let offset = self.list_state.offset();
+                    let new_index = offset + clicked_row as usize;
+                    if new_index < self.merged_rows().len() {
+                        self.list_state.select(Some(new_index));
+                        crate::tui::mode::ensure_selected_context(self);
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.pane_layout == crate::tui::state::PaneLayout::Right {
+                    let right_x = self.detail_area.x + self.detail_area.width;
+                    let detail_width = right_x.saturating_sub(mouse.column);
+                    if right_x > 0 {
+                        let pct = (detail_width as u32 * 100 / right_x as u32) as u16;
+                        self.pane_width = self.pane_width.set_raw(pct);
+                    }
+                } else if self.pane_layout == crate::tui::state::PaneLayout::Bottom {
+                    let bottom_y = self.detail_area.y + self.detail_area.height;
+                    let new_height = bottom_y.saturating_sub(mouse.row);
+                    let page_size = crossterm::terminal::size()
+                        .map(|(_, rows)| rows as usize)
+                        .unwrap_or(20);
+                    self.pane_height = self.pane_height.set_raw(new_height, page_size);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Run the TUI.
@@ -12904,7 +12955,8 @@ pub fn run_tui_to_stdout(
     crossterm::execute!(
         render,
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::cursor::Hide
+        crossterm::cursor::Hide,
+        crossterm::event::EnableMouseCapture
     )?;
 
     let backend = CrosstermBackend::new(render);
@@ -12914,7 +12966,8 @@ pub fn run_tui_to_stdout(
     let _ = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::terminal::LeaveAlternateScreen,
-        crossterm::cursor::Show
+        crossterm::cursor::Show,
+        crossterm::event::DisableMouseCapture
     );
     let _ = crossterm::terminal::disable_raw_mode();
 
@@ -13523,8 +13576,13 @@ fn run_loop(
                 continue;
             }
         };
-        let Event::Key(key) = event else {
-            continue;
+        let key = match event {
+            Event::Key(k) => k,
+            Event::Mouse(mouse) => {
+                app.handle_mouse_event(mouse);
+                continue;
+            }
+            _ => continue,
         };
 
         // If an LLM request is in flight, check if this is a

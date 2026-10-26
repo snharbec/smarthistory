@@ -133,6 +133,8 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
                 .as_ref(),
             )
             .split(chunks[1]);
+        app.list_area = cols[0];
+        app.detail_area = cols[1];
         draw_list(f, app, cols[0]);
         list_elapsed = list_start.elapsed();
         match app.pane_visibility {
@@ -179,6 +181,8 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Fill(1), Constraint::Length(detail_h)].as_ref())
             .split(chunks[1]);
+        app.list_area = rows[0];
+        app.detail_area = rows[1];
         draw_list(f, app, rows[0]);
         list_elapsed = list_start.elapsed();
         if show_panes {
