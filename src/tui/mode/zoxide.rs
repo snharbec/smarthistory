@@ -45,7 +45,7 @@ pub(crate) fn check(_app: &App) -> CheckReport {
         Ok(o) if o.status.success() => {
             let version = String::from_utf8_lossy(&o.stdout).trim().to_string();
             let base = CheckReport::ok(mode, format!("zoxide binary found: {version}"));
-            let list_output = std::process::Command::new("zoxide").args(["query", "-l"]).output();
+            let list_output = std::process::Command::new("zoxide").args(["query", "-l", "--all"]).output();
             let count_report = match list_output {
                 Ok(lo) if lo.status.success() => {
                     let n = String::from_utf8_lossy(&lo.stdout)
@@ -121,7 +121,18 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
 /// paths without spawning the real `zoxide` binary or touching the
 /// user's real zoxide database.
 pub(crate) fn query_zoxide_paths() -> Vec<String> {
-    let output = std::process::Command::new("zoxide").args(["query", "-l"]).output();
+    // Pass `--all` to prevent zoxide from blocking on disk checks (e.g. for hung network mounts).
+    // For older zoxide versions (<0.8), `--all` might fail, so we fall back to `--no-check`.
+    let output = std::process::Command::new("zoxide")
+        .args(["query", "-l", "--all"])
+        .output()
+        .and_then(|o| {
+            if !o.status.success() {
+                std::process::Command::new("zoxide").args(["query", "-l", "--no-check"]).output()
+            } else {
+                Ok(o)
+            }
+        });
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -150,9 +161,9 @@ pub(crate) fn build_rows(
     let total = paths.len() as i64;
     let mut rows: Vec<HistoryRow> = Vec::new();
     for (idx, directory) in paths.into_iter().enumerate() {
-        if !std::path::Path::new(&directory).is_dir() {
-            continue;
-        }
+        // We intentionally skip checking `is_dir()` here, as a broken network
+        // mount (like sshfs) would cause it to hang indefinitely, defeating the
+        // purpose of passing `--all` (formerly `--no-check`) to zoxide.
         if !filter_tokens.is_empty()
             && !filter_tokens
                 .iter()
