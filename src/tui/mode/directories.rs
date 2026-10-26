@@ -212,9 +212,7 @@ pub(crate) fn ensure_session_subdirs(app: &mut App) {
             // Dedup on canonical path so a symlink and the real path
             // it points to don't produce two rows — same as
             // `build_session_subdirs`.
-            let key = std::fs::canonicalize(&sub)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| sub.to_string_lossy().into_owned());
+            let key = crate::util::canonicalize_directory(&sub.to_string_lossy());
             if seen.insert(key) {
                 out.push(sub);
             }
@@ -845,7 +843,9 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // refresh, which is
         // the right behaviour
         // anyway.
-        if !std::path::Path::new(&window.path).is_dir() {
+        if !crate::util::is_on_network_mount(&window.path)
+            && !std::path::Path::new(&window.path).is_dir()
+        {
             crate::tui::tmux_filter_debug_log(&format!(
                 "filtered tmux pane %{}: pane_current_path {:?} is not a directory",
                 window.pane_id, window.path

@@ -774,3 +774,84 @@
         assert!(!ping_reachable(""));
         assert!(!ping_reachable("   "));
     }
+
+    /// `mountinfo` field 5 is the mount point and the field right after
+    /// the `-` separator is the fstype; octal escapes inside a field
+    /// (`\040` space, `\134` backslash) decode. Getting this wrong
+    /// would either mislabel a local mount as remote (skipping a
+    /// canonicalization that matters) or miss a remote one (and hang).
+    #[test]
+    fn parse_mountinfo_extracts_mount_point_and_fstype() {
+        let text = "36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue\n\
+                    1210 71 0:76 / /mnt/lager/data\\040vg rw,relatime shared:716 - cifs //fileserv01/data_vg rw,vers=3.1.1\n\
+                    broken line without separator\n";
+        assert_eq!(
+            parse_mountinfo(text),
+            vec![
+                ("/mnt2".to_string(), "ext3".to_string()),
+                ("/mnt/lager/data vg".to_string(), "cifs".to_string()),
+            ]
+        );
+        assert_eq!(unescape_mountinfo(r"a\134b"), "a\\b");
+    }
+
+    /// Only remote/automount filesystems are exempt from
+    /// canonicalization. A local filesystem misclassified as remote
+    /// would silently stop resolving symlinks in stored paths.
+    #[test]
+    fn network_fs_types_are_recognised() {
+        for remote in [
+            "cifs", "nfs", "nfs4", "smb3", "smbfs", "9p", "ceph", "glusterfs", "fuse.sshfs",
+            "fuse.rclone", "davfs", "autofs",
+        ] {
+            assert!(is_network_fs_type(remote), "{remote} should count as remote");
+        }
+        for local in ["btrfs", "ext4", "xfs", "tmpfs", "overlay", "proc", "fuseblk", "vfat"] {
+            assert!(!is_network_fs_type(local), "{local} should count as local");
+        }
+    }
+
+    /// A path under a remote mount is never canonicalized, so a dead
+    /// share can't freeze the caller: the input comes back verbatim.
+    /// Uses whatever the host actually has mounted, and is a no-op
+    /// assertion (skips) when the host has no remote mount at all.
+    #[test]
+    fn canonicalize_directory_skips_remote_mounts() {
+        let Some((mount_point, _)) = mount_table()
+            .into_iter()
+            .find(|(_, fstype)| is_network_fs_type(fstype))
+        else {
+            return;
+        };
+        let path = format!("{mount_point}/smarthistory-canonicalize-guard-test");
+        assert!(
+            is_on_network_mount(&path),
+            "{path} should be recognised as living on a remote mount"
+        );
+        assert_eq!(canonicalize_directory(&path), path);
+    }
+
+    /// Local paths keep the old behaviour: symlinks are resolved.
+    #[test]
+    fn canonicalize_directory_still_resolves_local_symlinks() {
+        let base = std::env::temp_dir().join(format!(
+            "smarthistory-canon-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).expect("create temp dir");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let resolved = canonicalize_directory(&link.to_string_lossy());
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&target)
+                .expect("canonicalize target")
+                .to_string_lossy()
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
