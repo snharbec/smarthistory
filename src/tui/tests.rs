@@ -13747,20 +13747,26 @@ fn zoxide_build_rows_preserves_zoxide_rank_order() {
     );
 }
 
-/// A zoxide database entry whose directory has since been deleted is
-/// skipped — there's nothing to jump to, and staging a `tmux
-/// new-session -c <dir>` for a non-existent path would just fail.
+/// `build_rows` never stats the paths it is given. A zoxide entry whose
+/// directory has since been deleted (or whose network share is
+/// currently unreachable) is still listed: checking existence would
+/// issue a `stat()` per entry, and one on a dead CIFS/NFS mount blocks
+/// for the mount's timeout, freezing the whole TUI. This is what
+/// `zoxide query --all` (formerly `--no-check`) expresses on the
+/// zoxide side; selecting such a row stages a `cd`/session-create the
+/// shell reports an error for, which is preferable to a frozen UI.
 #[test]
-fn zoxide_build_rows_skips_nonexistent_directories() {
+fn zoxide_build_rows_keeps_unreachable_directories() {
     let real = zoxide_test_dir("real");
     let deleted = format!("{}-does-not-exist", real);
     let rows = crate::tui::mode::zoxide::build_rows(
-        vec![deleted, real.clone()],
+        vec![deleted.clone(), real.clone()],
         &[],
         &[],
     );
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].directory, real);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].directory, deleted);
+    assert_eq!(rows[1].directory, real);
 }
 
 /// The typed query filters by case-insensitive substring, AND-matched

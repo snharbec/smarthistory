@@ -712,6 +712,18 @@ pub fn canonicalize_directory(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
+    // Never stat a network / automount path here. `std::fs::canonicalize`
+    // issues one `readlink()` per path component, and on a dead CIFS/NFS
+    // share (or an `autofs` entry whose trigger hangs) each of those
+    // blocks for the mount's timeout — tens of seconds per component.
+    // That froze the whole TUI on startup in the `*` panes view, which
+    // canonicalizes every live pane's cwd. Skipping is the documented
+    // fallback anyway: the `Err(_)` arm below returns the input
+    // verbatim, so both the stored and the queried side still compare
+    // equal.
+    if path.starts_with('/') && is_on_network_mount(path) {
+        return path.to_string();
+    }
     match std::fs::canonicalize(path) {
         Ok(p) => p.to_string_lossy().into_owned(),
         // Fall back to the input
@@ -726,6 +738,139 @@ pub fn canonicalize_directory(path: &str) -> String {
         // filter works.
         Err(_) => path.to_string(),
     }
+}
+
+/// Filesystem types whose path lookups can block for a long time when
+/// the backing store is unreachable: a CIFS/NFS server that went away,
+/// an sshfs/rclone/gvfs mount over a dead link, or an `autofs` entry
+/// whose trigger never answers. `canonicalize_directory` refuses to
+/// touch paths under these.
+fn is_network_fs_type(fstype: &str) -> bool {
+    matches!(
+        fstype,
+        "nfs"
+            | "nfs4"
+            | "cifs"
+            | "smb3"
+            | "smbfs"
+            | "afs"
+            | "9p"
+            | "ceph"
+            | "glusterfs"
+            | "davfs"
+            | "davfs2"
+            | "lustre"
+            | "beegfs"
+            | "ncpfs"
+            | "ocfs2"
+            | "gfs2"
+            | "autofs"
+    ) || fstype.starts_with("fuse.")
+}
+
+/// True when `path` lives under a mount point whose filesystem type is
+/// network/remote (see [`is_network_fs_type`]). Purely a string test
+/// against the cached mount table — it never touches the path itself,
+/// which is the point: it must be safe to call on a path whose stat
+/// calls would hang.
+pub fn is_on_network_mount(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let p = std::path::Path::new(path);
+    mount_table()
+        .iter()
+        .any(|(mount_point, fstype)| is_network_fs_type(fstype) && p.starts_with(mount_point))
+}
+
+/// Cached mount table plus the instant it was read: see [`mount_table`].
+type MountTableCache =
+    std::sync::Mutex<Option<(std::time::Instant, Vec<(String, String)>)>>;
+
+/// `(mount point, fstype)` pairs from the kernel's mount table, cached
+/// for a couple of seconds. The TUI calls `canonicalize_directory` in
+/// hot loops (once per pane / directory row), so re-parsing
+/// `/proc/self/mountinfo` on every call would be wasteful; a short TTL
+/// keeps up with shares that get mounted or unmounted while the TUI
+/// runs.
+fn mount_table() -> Vec<(String, String)> {
+    use std::sync::LazyLock;
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(2);
+    static CACHE: LazyLock<MountTableCache> = LazyLock::new(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = CACHE.lock()
+        && let Some((read_at, table)) = guard.as_ref()
+        && read_at.elapsed() < TTL
+    {
+        return table.clone();
+    }
+    let table = read_mount_table();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), table.clone()));
+    }
+    table
+}
+
+#[cfg(target_os = "linux")]
+fn read_mount_table() -> Vec<(String, String)> {
+    match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(text) => parse_mountinfo(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_mount_table() -> Vec<(String, String)> {
+    // No portable mount table to consult: never claim a path is remote,
+    // so behaviour there is exactly the pre-existing one.
+    Vec::new()
+}
+
+/// Parse `/proc/self/mountinfo` text into `(mount point, fstype)`
+/// pairs. A line looks like
+/// `36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw`,
+/// i.e. field 5 is the mount point and the field right after the ` - `
+/// separator is the filesystem type. Whitespace inside a field is
+/// octal-escaped (`\040` for a space).
+fn parse_mountinfo(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(sep) = fields.iter().position(|f| *f == "-") else {
+            continue;
+        };
+        // The mount point is field 5 (index 4) and must precede the
+        // separator; the fstype is the field right after it.
+        if sep < 5 || sep + 1 >= fields.len() {
+            continue;
+        }
+        out.push((unescape_mountinfo(fields[4]), fields[sep + 1].to_string()));
+    }
+    out
+}
+
+/// Decode the octal escapes `/proc/self/mountinfo` uses for whitespace
+/// and backslashes in a field (e.g. `\040` for a space).
+fn unescape_mountinfo(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = String::with_capacity(field.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1..i + 4].iter().all(u8::is_ascii_digit)
+            && let Ok(code) = u8::from_str_radix(&field[i + 1..i + 4], 8)
+        {
+            out.push(code as char);
+            i += 4;
+            continue;
+        }
+        let ch = field[i..].chars().next().unwrap_or('\\');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// Read the current working
