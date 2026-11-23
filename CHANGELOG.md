@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Source mode (`|`, `prefix.source=<char>`): the zsh and bash hooks record every
+  visited directory containing `.git` or `build.xml`, and whether it is a git
+  source. Selecting a git source with several worktrees offers a picker. The
+  choice opens in a tmux session / herdr workspace named after its directory,
+  reusing one already rooted there and adding `-2`, `-3`, … on a name clash. A
+  linked worktree is recorded as its main repository. See
+  [docs/modes/source.md](docs/modes/source.md).
 - `smarthistory last-session [--print]`: switch back to the previously active
   tmux session or herdr workspace; run it twice to toggle, like `cd -`. tmux
   uses `tmux switch-client -l`. herdr has no such command, so the shell

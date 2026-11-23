@@ -350,6 +350,7 @@ configurable via `prefix.<mode>=<char>`.
 | Processes   | `%`    | List every running OS process (macOS + Linux, all users). Selecting one opens a confirm dialog to send it a signal — SIGTERM by default, `Tab`/`Shift-Tab` cycles SIGKILL/SIGHUP/SIGINT. The preview pane shows the process's cwd, executable path, and full environment.                                                                                                                                      |
 | Project     | `.`    | List `type: project` notes for time tracking. Selecting one runs `smarthistory project select <slug>`, setting the current project. See [Time tracking](#time-tracking) below.                                                                                                                                                                                                                                 |
 | Worktree    | `;`    | List `git worktree` checkouts for the repo containing the current directory. Selecting one creates a new tmux session / herdr workspace there — same staging as an unmarked Directories-mode row. Requires being inside a git repo.                                                                                                                                                                            |
+| Source      | `\|`   | Search visited directories containing `.git` or `build.xml`. Selecting a git source with several worktrees offers a picker. The choice opens in a new tmux session / herdr workspace named after the directory, or reuses one already rooted there. |
 
 **Detailed per-mode reference**: every mode has a long-form page in
 [`docs/modes/`](docs/modes/README.md) — example queries, special tokens,
@@ -641,7 +642,7 @@ starting with `#` are comments; blank lines are ignored.
   search when `FUZZY`/`REGEX` is selected: JIRA (`-`, JQL), notes (`@`) / todos
   (`!`) / project (`.`) / segments (`:`) / similar (`"`) (the `note_search`
   query parser), and tags (`$`), codegraph (`&`), ag (`,`), zoxide (`~`),
-  processes (`%`), pass (`)`), worktree (`;`), browser (`^`), paperless (`<`)
-  (each its own substring/index search).
+  processes (`%`), pass (`)`), worktree (`;`), source (`|`), browser (`^`),
+  paperless (`<`) (each its own substring/index search).
 
 For the full configuration reference, see [TECHNICAL.md](TECHNICAL.md).

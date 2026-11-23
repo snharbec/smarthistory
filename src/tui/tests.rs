@@ -1324,6 +1324,7 @@ fn prefix_help_lines_for_covers_every_mode_kind_non_empty() {
         crate::tui::mode::ModeKind::Pass,
         crate::tui::mode::ModeKind::ProjectPick,
         crate::tui::mode::ModeKind::Worktree,
+        crate::tui::mode::ModeKind::Source,
     ]
     .iter()
     {
@@ -27908,10 +27909,10 @@ fn cycle_recent_prefix_modes_orders_by_most_recently_used_then_wraps() {
         "first untouched mode in ALL_MODE_KINDS's declared order"
     );
 
-    // 17 more presses complete a full 20-mode lap back to Segments
-    // (Notes, Todo, Segments used + 17 untouched = 20 candidates:
+    // 18 more presses complete a full 21-mode lap back to Segments
+    // (Notes, Todo, Segments used + 18 untouched = 21 candidates:
     // every ModeKind except History and Panes).
-    for _ in 0..17 {
+    for _ in 0..18 {
         app.cycle_recent_prefix_modes();
     }
     assert_eq!(
@@ -28031,9 +28032,9 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
 }
 
 #[test]
-fn prefix_picker_has_twentytwo_entries() {
+fn prefix_picker_has_twentythree_entries() {
     let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
-    assert_eq!(picker.options.len(), 22);
+    assert_eq!(picker.options.len(), 23);
 }
 
 #[test]
@@ -28086,8 +28087,8 @@ fn meta_tab_complete_unique_match_activates_directly() {
     assert!(app.prefix_picker.is_none(), "unique match should not open a picker");
 }
 
-/// An ambiguous partial name ("s" matches both "segments" and
-/// "similar") opens the picker pre-filtered to just those matches,
+/// An ambiguous partial name ("s" matches "segments", "similar" and
+/// "source") opens the picker pre-filtered to just those matches,
 /// marked `activate_only` so committing discards the body.
 #[test]
 fn meta_tab_complete_ambiguous_match_opens_filtered_picker() {
@@ -28099,8 +28100,13 @@ fn meta_tab_complete_ambiguous_match_opens_filtered_picker() {
         .prefix_picker
         .as_ref()
         .expect("ambiguous match should open a picker");
-    assert_eq!(picker.options.len(), 2, "expected exactly Segments and Similar");
-    assert!(picker.options.iter().all(|o| o.name == "segments" || o.name == "similar"));
+    assert_eq!(picker.options.len(), 3, "expected exactly Segments, Similar and Source");
+    assert!(
+        picker
+            .options
+            .iter()
+            .all(|o| o.name == "segments" || o.name == "similar" || o.name == "source")
+    );
     assert!(picker.activate_only, "meta-opened picker must be activate_only");
     assert_eq!(app.query, "'s", "query should be untouched until Enter commits");
 }
@@ -28118,7 +28124,7 @@ fn meta_tab_complete_bare_quote_opens_picker_with_all_entries() {
         .prefix_picker
         .as_ref()
         .expect("bare ' + Tab should open a picker");
-    assert_eq!(picker.options.len(), 22, "bare ' + Tab should show every mode");
+    assert_eq!(picker.options.len(), 23, "bare ' + Tab should show every mode");
 }
 
 /// A partial name matching nothing sets a status message and does
@@ -28243,7 +28249,7 @@ fn handle_prefix_picker_key_home_end_jump() {
     app.open_prefix_picker();
     let end = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, end);
-    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 21);
+    assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 22);
     let home = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
     handle_prefix_picker_key(&mut app, home);
     assert_eq!(app.prefix_picker.as_ref().unwrap().selected, 0);

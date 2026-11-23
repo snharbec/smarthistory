@@ -130,6 +130,10 @@ pub enum ModeKind {
     /// Not `dedup_eligible` (each worktree is a distinct path, same
     /// reasoning as `Processes`'s unique-PID exclusion).
     Worktree,
+    /// `|` (default). Lists visited directories containing `.git` or
+    /// `build.xml`. Selecting one offers its git worktrees, if any,
+    /// then opens a tmux session / herdr workspace there.
+    Source,
 }
 
 impl ModeKind {
@@ -160,6 +164,7 @@ impl ModeKind {
             ModeKind::Pass => ')',
             ModeKind::ProjectPick => '.',
             ModeKind::Worktree => ';',
+            ModeKind::Source => '|',
         }
     }
 
@@ -190,6 +195,7 @@ impl ModeKind {
             ModeKind::Pass => "pass",
             ModeKind::ProjectPick => "project",
             ModeKind::Worktree => "worktree",
+            ModeKind::Source => "source",
         }
     }
 
@@ -229,6 +235,7 @@ impl ModeKind {
             ModeKind::Pass => "Pass",
             ModeKind::ProjectPick => "Projects",
             ModeKind::Worktree => "Worktree",
+            ModeKind::Source => "Source",
         }
     }
 
@@ -261,6 +268,7 @@ impl ModeKind {
             ModeKind::Pass => prefixes.pass,
             ModeKind::ProjectPick => prefixes.project_pick,
             ModeKind::Worktree => prefixes.worktree,
+            ModeKind::Source => prefixes.source,
         }
     }
 
@@ -340,6 +348,8 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
         ModeKind::ProjectPick
     } else if c == p.worktree {
         ModeKind::Worktree
+    } else if c == p.source {
+        ModeKind::Source
     } else {
         ModeKind::History
     }
@@ -351,7 +361,7 @@ pub(crate) fn active_mode(app: &App) -> ModeKind {
 /// `Question`. Used by [`mode_kind_by_display_name`] and by
 /// `App::cycle_recent_prefix_modes`'s recency-ordered candidate list
 /// (its fallback order for never-used modes).
-pub(crate) const ALL_MODE_KINDS: [ModeKind; 22] = [
+pub(crate) const ALL_MODE_KINDS: [ModeKind; 23] = [
     ModeKind::History,
     ModeKind::Output,
     ModeKind::Llm,
@@ -374,6 +384,7 @@ pub(crate) const ALL_MODE_KINDS: [ModeKind; 22] = [
     ModeKind::Pass,
     ModeKind::ProjectPick,
     ModeKind::Worktree,
+    ModeKind::Source,
 ];
 
 /// Resolve a `ModeKind` from its `display_name()` string — the
@@ -404,6 +415,7 @@ pub mod prefix_help;
 pub mod query_negation;
 pub mod question;
 pub mod similar;
+pub mod source;
 pub mod tags;
 pub mod todo;
 pub mod worktree;
@@ -461,6 +473,7 @@ pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style>
         ModeKind::Pass => Some(Theme::success()),
         ModeKind::ProjectPick => Some(Theme::accent()),
         ModeKind::Worktree => Some(Theme::success()),
+        ModeKind::Source => Some(Theme::accent()),
         ModeKind::History => None,
     }
 }
@@ -502,6 +515,7 @@ pub(crate) fn input_prompt_title(
         ModeKind::Pass => (")".to_string(), format!(" pass{} ", algo)),
         ModeKind::ProjectPick => (".".to_string(), format!(" project{} ", algo)),
         ModeKind::Worktree => (";".to_string(), format!(" worktree{} ", algo)),
+        ModeKind::Source => ("|".to_string(), format!(" source{} ", algo)),
         ModeKind::History => ("> ".to_string(), format!(" history{} ", algo)),
     }
 }
@@ -720,6 +734,7 @@ pub fn run_all_checks(
             ModeKind::Pass => crate::tui::mode::pass::check(app),
             ModeKind::ProjectPick => crate::tui::mode::project_pick::check(app),
             ModeKind::Worktree => crate::tui::mode::worktree::check(app),
+            ModeKind::Source => crate::tui::mode::source::check(app),
             ModeKind::History | ModeKind::Output | ModeKind::Question => unreachable!(),
         };
         reports.push(report);
@@ -754,6 +769,7 @@ impl ModeKind {
             ModeKind::Pass,
             ModeKind::ProjectPick,
             ModeKind::Worktree,
+            ModeKind::Source,
         ]
     }
 }

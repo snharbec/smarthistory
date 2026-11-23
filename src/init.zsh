@@ -278,6 +278,14 @@ autoload -Uz add-zsh-hook
 add-zsh-hook preexec _smarthistory_preexec
 add-zsh-hook precmd _smarthistory_precmd
 
+# Record source directories (`.git` or `build.xml`) on every directory
+# change. Detached and run directly rather than through the shell
+# server, so a dead network mount can never delay the prompt.
+_smarthistory_chpwd() {
+    command smarthistory record-source </dev/null >/dev/null 2>&1 &!
+}
+add-zsh-hook chpwd _smarthistory_chpwd
+
 # History selection using the smarthistory TUI (Ctrl+R).
 # The TUI draws to stderr (so the user sees the picker) and prints the
 # chosen command to stdout (so $() captures it cleanly).

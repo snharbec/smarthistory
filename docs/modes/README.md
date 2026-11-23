@@ -30,6 +30,7 @@ prefix characters are configurable via `prefix.<mode>=<char>` in
 | Processes   | `%`      | [`processes.md`](processes.md)     | List every running OS process (macOS + Linux, all users); selecting one opens a confirm dialog to send it a signal (SIGTERM by default, cycle to SIGKILL/SIGHUP/SIGINT). |
 | Project     | `.`      | [`project.md`](project.md)         | List `type: project` notes for time tracking; selecting one sets the current project (`smarthistory project select <slug>`). See also `smarthistory project report`.     |
 | Worktree    | `;`      | [`worktree.md`](worktree.md)       | List `git worktree` checkouts for the current repo; selecting one creates a new tmux session / herdr workspace there.                                                    |
+| Source      | `\|`     | [`source.md`](source.md)           | Search visited `.git` / `build.xml` directories; pick a worktree and open it in a tmux session / herdr workspace.                                                        |
 
 ## Cross-cutting topics
 
@@ -73,6 +74,7 @@ The first character of the query decides the mode. Examples:
 | `%nginx`                            | Processes (rows whose name/cmdline, cwd, or executable path contains "nginx").      |
 | `.acme`                             | Project (`type: project` notes matching "acme").                                    |
 | `;login`                            | Worktree (branch name or path containing "login").                                  |
+| `\|api`                             | Source (recorded source directories whose path contains "api").                     |
 
 An empty query (just the prefix) is accepted everywhere; it means "show me
 everything in this view".

@@ -17,6 +17,7 @@ mod paperless;
 mod server;
 #[cfg(unix)]
 mod shell_server;
+mod sources;
 mod tui;
 mod util;
 
@@ -172,6 +173,11 @@ enum Commands {
         #[arg(long)]
         comment: Option<String>,
     },
+    /// Record the current directory if it is a source directory.
+    ///
+    /// Called detached by the shell hooks after a directory change.
+    #[command(hide = true)]
+    RecordSource,
     /// Search history and print matching rows.
     Search {
         /// Substring/pattern to match against the command text.
@@ -1177,6 +1183,9 @@ struct HistoryExport {
     /// paused at export time.
     #[serde(default)]
     project_pause: Option<ProjectPauseExportRow>,
+    /// Every recorded source directory.
+    #[serde(default)]
+    sources: Vec<crate::sources::SourceRecord>,
 }
 
 pub(crate) fn get_db_path() -> PathBuf {
@@ -2046,6 +2055,11 @@ pub struct QueryPrefixes {
     /// Zoxide do (rows are tagged `mode == "directory"`, `source ==
     /// "worktree"`).
     pub worktree: char,
+    /// Prefix for the source mode (default `|`). Lists directories
+    /// containing `.git` or `build.xml` that the shell has visited.
+    /// Selecting one offers its git worktrees, if any, then opens a
+    /// tmux session / herdr workspace there.
+    pub source: char,
     /// Prefix for the meta-prefix mode (default `'`). Not a search
     /// mode itself — typing `'` then a partial mode name (e.g.
     /// `'jir`) and pressing Tab expands to that mode's real prefix
@@ -2081,6 +2095,7 @@ impl Default for QueryPrefixes {
             pass: ')',
             project_pick: '.',
             worktree: ';',
+            source: '|',
             meta: '\'',
         }
     }
@@ -2097,7 +2112,7 @@ impl QueryPrefixes {
     /// (missing `paperless` in two of the three) as fields were
     /// added over time. Add a new prefix field here too when one is
     /// added to the struct.
-    pub(crate) fn all_chars(&self) -> [char; 22] {
+    pub(crate) fn all_chars(&self) -> [char; 23] {
         [
             self.output,
             self.llm,
@@ -2120,6 +2135,7 @@ impl QueryPrefixes {
             self.pass,
             self.project_pick,
             self.worktree,
+            self.source,
             self.meta,
         ]
     }
@@ -4819,7 +4835,7 @@ impl Config {
     const KNOWN_PREFIX_NAMES: &[&str] = &[
         "output", "llm", "question", "notes", "todo", "directories", "panes", "files", "tags",
         "ag", "codegraph", "jira", "segments", "elements", "similar", "paperless", "browser",
-        "zoxide", "processes", "pass", "project", "worktree", "meta",
+        "zoxide", "processes", "pass", "project", "worktree", "source", "meta",
     ];
 
     fn assign_prefix(prefixes: &mut QueryPrefixes, name: &str, value: &str) {
@@ -4855,6 +4871,7 @@ impl Config {
             "pass" => prefixes.pass = c,
             "project" => prefixes.project_pick = c,
             "worktree" => prefixes.worktree = c,
+            "source" => prefixes.source = c,
             "meta" => prefixes.meta = c,
             _ => {}
         }
@@ -6436,6 +6453,9 @@ fn init_db() -> anyhow::Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(&path)?;
+    // Detached `record-source` processes can write at the same moment
+    // as the prompt's `add`, so wait for the lock instead of failing.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY,
@@ -6585,6 +6605,7 @@ fn init_db() -> anyhow::Result<Connection> {
     // `IF NOT EXISTS` makes this a no-op on every subsequent
     // launch.
     ensure_history_performance_indexes(&conn)?;
+    crate::sources::ensure_sources_table(&conn)?;
     Ok(conn)
 }
 
@@ -8803,9 +8824,15 @@ fn run_command(args: Args) -> anyhow::Result<()> {
             anyhow::bail!("shell-server is only supported on Unix");
         }
     }
+    // Handled before `init_db` so a `cd` into an ordinary directory
+    // never opens the database.
+    if matches!(args.command, Commands::RecordSource) {
+        return crate::sources::record_current_directory();
+    }
     let conn = init_db()?;
 
     match args.command {
+        Commands::RecordSource => unreachable!("handled before init_db"),
         Commands::Add {
             command,
             exit_code,
@@ -10204,6 +10231,8 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                 )
                 .optional()?;
 
+            let sources = crate::sources::list_sources(&conn)?;
+
             let export = HistoryExport {
                 version: 2,
                 history,
@@ -10212,17 +10241,19 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                 project_sessions,
                 project_current,
                 project_pause,
+                sources,
             };
 
             let json = serde_json::to_string_pretty(&export)?;
             std::fs::write(&filename, json)?;
             eprintln!(
                 "Exported {} history entries, {} comments, {} file events, {} project \
-                 sessions to {}",
+                 sessions, {} sources to {}",
                 export.history.len(),
                 export.comments.len(),
                 export.file_events.len(),
                 export.project_sessions.len(),
+                export.sources.len(),
                 filename.display()
             );
         }
@@ -10240,15 +10271,17 @@ fn run_command(args: Args) -> anyhow::Result<()> {
             let sessions_imported = import_project_sessions(&conn, &export.project_sessions)?;
             import_project_current(&conn, export.project_current.as_ref())?;
             import_project_pause(&conn, export.project_pause.as_ref())?;
+            let sources_merged = crate::sources::import_sources(&conn, &export.sources)?;
 
             eprintln!(
                 "Imported {} new entries, updated {} existing entries, {} comments, {} new \
-                 file events, {} new project sessions from {}",
+                 file events, {} new project sessions, {} sources from {}",
                 imported,
                 updated,
                 comments_upserted,
                 file_events_imported,
                 sessions_imported,
+                sources_merged,
                 filename.display()
             );
         }
@@ -10555,8 +10588,12 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     }
                 }
             }
+            let sources_rewritten = crate::sources::rewrite_source_paths(&conn, |path| {
+                crate::util::expand_home_with_config(path, cfg.home_map()).into_owned()
+            })?;
             println!(
-                "rewrote {updated} row(s); skipped {skipped}",
+                "rewrote {updated} row(s); skipped {skipped}; rewrote {sources_rewritten} \
+                 source(s)",
                 updated = updated,
                 skipped = skipped
             );

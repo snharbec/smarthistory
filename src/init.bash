@@ -99,8 +99,18 @@ _smarthistory_precmd() {
     _smarthistory_next_index=0
 }
 
+_smarthistory_last_pwd="$PWD"
+
 _smarthistory_precmd_wrapper() {
     local exit_code=$?
+    # Bash has no chpwd hook, so detect directory changes here, before
+    # the command check: TUI-staged `cd`s are space-prefixed and never
+    # recorded as commands. Detached so a dead mount can't delay the
+    # prompt.
+    if [ "$PWD" != "$_smarthistory_last_pwd" ]; then
+        _smarthistory_last_pwd="$PWD"
+        (command smarthistory record-source </dev/null >/dev/null 2>&1 &)
+    fi
     if [ "$_smarthistory_cmd_ran" = "1" ]; then
         _smarthistory_cmd_ran=0
         local hist_line

@@ -2151,6 +2151,11 @@ pub(crate) struct App {
     /// base branch, an optional uncommitted-changes carry-over, and an
     /// optional project assignment, then creates the worktree.
     worktree_create_flow: Option<crate::tui::state::WorktreeCreateFlow>,
+    /// The `|` (source) worktree/opening overlay, while open.
+    source_picker: Option<crate::tui::state::SourcePicker>,
+    /// The overlay's running background step. Dropping it on cancel
+    /// discards a late result.
+    source_job: Option<mpsc::Receiver<crate::tui::mode::source::SourceJobResult>>,
 
     /// Per-pane `last_touched` map (Unix
     /// epoch seconds, keyed by `pane_id`).
@@ -4450,6 +4455,11 @@ enum ConfirmMode {
         directory: String,
         count: usize,
     },
+    /// Remove a `|` (source) row from the list. The directory itself
+    /// and its command history are left alone.
+    DeleteSource {
+        path: String,
+    },
     /// Delete every marked row (`Action::BulkDeleteMarked`). The
     /// count is pre-computed when the dialog opens (same pattern
     /// as `DeleteDirectory`) so the confirmation message can show
@@ -5138,6 +5148,12 @@ impl PrefixPicker {
                 label: "Worktree",
                 description: "list git worktrees for the current repo; Enter stages `cd <path>`",
             },
+            PrefixOption {
+                prefix: Some(prefixes.source),
+                name: "source",
+                label: "Source",
+                description: "search visited source directories (.git or build.xml); Enter picks a worktree and opens a tmux session / herdr workspace",
+            },
         ]
     }
 
@@ -5548,6 +5564,8 @@ impl App {
             worktree_basedir,
             worktree_default_branch,
             worktree_create_flow: None,
+            source_picker: None,
+            source_job: None,
             todo_line_option: String::from("+$LINE"),
             notes_query_error: false,
             notes_date_filter: NotesDateFilter::All,
@@ -6630,6 +6648,7 @@ impl App {
                 return crate::tui::mode::project_pick::fetch(self);
             }
             crate::tui::mode::ModeKind::Worktree => return crate::tui::mode::worktree::fetch(self),
+            crate::tui::mode::ModeKind::Source => return crate::tui::mode::source::fetch(self),
             // Output, LLM, Question, History: all
             // fall through to the SQL `SELECT` below.
             _ => {}
@@ -7179,6 +7198,10 @@ impl App {
             return;
         }
         if self.is_worktree_query() {
+            self.select_for_run_impl();
+            return;
+        }
+        if self.is_source_query() {
             self.select_for_run_impl();
             return;
         }
@@ -12404,6 +12427,7 @@ pub fn run_tui_check(prefix: Option<String>, _exec: bool) -> Result<()> {
             _ if c == query_prefixes.zoxide => Some(ModeKind::Zoxide),
             _ if c == query_prefixes.processes => Some(ModeKind::Processes),
             _ if c == query_prefixes.worktree => Some(ModeKind::Worktree),
+            _ if c == query_prefixes.source => Some(ModeKind::Source),
             _ => None,
         }
     });
@@ -13485,6 +13509,9 @@ fn run_loop(
         // current snapshot.
         app.process_pane_cmdlines();
         app.process_live_panes();
+        if app.process_source_job() {
+            return Ok(());
+        }
 
         // Drain the background host-reachability
         // monitor and (re-)spawn it if the
@@ -14024,6 +14051,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return handle_worktree_create_flow_key(app, key);
     }
 
+    if app.source_picker.is_some() {
+        return handle_source_picker_key(app, key);
+    }
+
     // When prompting for deletion, only allow 'y' or 'n' or Esc/Ctrl+C.
     if let Some(ref mode) = app.confirm_delete {
         return handle_confirm_delete_key(app, key, mode.clone());
@@ -14494,6 +14525,11 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
                         directory: dir,
                         count,
                     });
+                }
+            } else if app.is_source_query() {
+                if let Some(row) = app.selected_row() {
+                    app.confirm_delete =
+                        Some(ConfirmMode::DeleteSource { path: row.directory.clone() });
                 }
             } else {
                 app.confirm_delete = Some(ConfirmMode::DeleteSelected);
@@ -15422,6 +15458,61 @@ fn handle_worktree_create_flow_key(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Keys for the `|` (source) overlay. Cancel works in every phase.
+/// Everything else applies only while the worktree list is showing.
+fn handle_source_picker_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.source_picker = None;
+        app.source_job = None;
+        app.cancelled = true;
+        return true;
+    }
+    if is_cancel_key(&app.bindings, &key) {
+        app.source_picker = None;
+        app.source_job = None;
+        return false;
+    }
+    if key.code == KeyCode::Enter {
+        app.confirm_source_picker();
+        return false;
+    }
+    let Some(picker) = app.source_picker.as_mut() else {
+        return false;
+    };
+    if picker.phase != crate::tui::state::SourcePickerPhase::Pick {
+        return false;
+    }
+    match key.code {
+        KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+        KeyCode::Down => {
+            let len = crate::tui::state::source_picker_filtered(picker).len();
+            picker.selected = (picker.selected + 1).min(len.saturating_sub(1));
+        }
+        KeyCode::Left => picker.cursor = picker.cursor.saturating_sub(1),
+        KeyCode::Right => {
+            picker.cursor = (picker.cursor + 1).min(picker.filter.chars().count());
+        }
+        KeyCode::Home => picker.cursor = 0,
+        KeyCode::End => picker.cursor = picker.filter.chars().count(),
+        KeyCode::Backspace if picker.cursor > 0 => {
+            let byte_idx = char_to_byte_idx(&picker.filter, picker.cursor - 1);
+            picker.filter.remove(byte_idx);
+            picker.cursor -= 1;
+            picker.selected = 0;
+            picker.error = None;
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let byte_idx = char_to_byte_idx(&picker.filter, picker.cursor);
+            picker.filter.insert(byte_idx, c);
+            picker.cursor += 1;
+            picker.selected = 0;
+            picker.error = None;
+        }
+        _ => {}
+    }
+    false
+}
+
 fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) -> bool {
     // The destructive confirmation
     // dialog answers "yes" (`y`)
@@ -15450,6 +15541,13 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent, mode: ConfirmMode) ->
                 ConfirmMode::DeleteDirectory { directory, .. } => {
                     let dir = directory.clone();
                     let _ = app.delete_directory(&dir);
+                }
+                ConfirmMode::DeleteSource { path } => {
+                    let path = path.clone();
+                    app.confirm_delete = None;
+                    if let Err(e) = app.delete_source_row(&path) {
+                        app.set_status_message(format!("could not remove source: {e}"));
+                    }
                 }
                 ConfirmMode::DeleteMarked { .. } => {
                     let _ = app.delete_marked();

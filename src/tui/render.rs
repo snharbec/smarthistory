@@ -283,6 +283,10 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         draw_worktree_create_flow(f, flow);
     }
 
+    if let Some(ref picker) = app.source_picker {
+        draw_source_picker(f, picker);
+    }
+
     if let Some(view) = app.help_view.as_ref() {
         draw_help_view(f, app, view);
     }
@@ -444,6 +448,13 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
                 "This will delete ALL {} history entries in:\n  {}\n\nEvery command ever run in that directory will be removed.",
                 count,
                 crate::util::shorten_home_path(directory, &app.home_list),
+            ),
+        ),
+        ConfirmMode::DeleteSource { path } => (
+            " Remove source ",
+            format!(
+                "Remove this directory from the source list?\n  {}\n\nThe directory and its command history are not changed.",
+                crate::util::shorten_home_path(path, &app.home_list),
             ),
         ),
         ConfirmMode::DeleteMarked { count } => (
@@ -1855,6 +1866,84 @@ fn draw_jira_template_picker(f: &mut Frame, picker: &crate::tui::state::JiraTemp
         .highlight_style(highlight_style)
         .highlight_symbol("▌");
     f.render_stateful_widget(list, inner, &mut list_state);
+}
+
+/// Renders the `|` (source) overlay: a progress line while background
+/// work runs, otherwise a filterable worktree list.
+fn draw_source_picker(f: &mut Frame, picker: &crate::tui::state::SourcePicker) {
+    use crate::tui::state::SourcePickerPhase;
+    use ratatui::widgets::{List, ListItem};
+
+    // The basename keeps the title readable. Full paths are in the list.
+    let name = std::path::Path::new(&picker.source_path)
+        .file_name()
+        .map_or_else(|| picker.source_path.clone(), |n| n.to_string_lossy().into_owned());
+    let title = format!(" Open {name} ");
+    let inner = overlay(f, &title, 70, 50);
+    let error_height = if picker.error.is_some() { 3 } else { 1 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(error_height),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let chars: Vec<char> = picker.filter.chars().collect();
+    let pre: String = chars.iter().take(picker.cursor).collect();
+    let at = chars.get(picker.cursor).map_or_else(|| " ".to_string(), char::to_string);
+    let post: String = chars.iter().skip(picker.cursor + 1).collect();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Theme::dim()),
+            Span::raw(pre),
+            Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(post),
+        ])),
+        chunks[0],
+    );
+    if let Some(error) = picker.error.as_deref() {
+        f.render_widget(
+            Paragraph::new(Span::styled(error, Style::default().fg(Theme::error_color())))
+                .wrap(Wrap { trim: false }),
+            chunks[1],
+        );
+    }
+
+    let progress = match picker.phase {
+        SourcePickerPhase::Loading => Some("Reading worktrees…"),
+        SourcePickerPhase::Opening => Some("Opening session…"),
+        SourcePickerPhase::Pick => None,
+    };
+    if let Some(progress) = progress {
+        f.render_widget(Paragraph::new(Span::styled(progress, Theme::dim())), chunks[2]);
+    } else {
+        let filtered = crate::tui::state::source_picker_filtered(picker);
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .map(|o| {
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{:<24} ", o.label)),
+                    Span::styled(o.path.as_str(), Theme::dim()),
+                ]))
+            })
+            .collect();
+        let selected =
+            if filtered.is_empty() { None } else { Some(picker.selected.min(filtered.len() - 1)) };
+        let mut state = ratatui::widgets::ListState::default().with_selected(selected);
+        let list = List::new(items)
+            .highlight_style(
+                Style::default().bg(Theme::selection_color()).add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▌");
+        f.render_stateful_widget(list, chunks[2], &mut state);
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled("↑/↓ select · Enter open · Esc cancel", Theme::dim())),
+        chunks[3],
+    );
 }
 
 /// Renders the `Action::CreateWorktree` dialog (`WorktreeCreateFlow`).
@@ -3488,6 +3577,12 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
         "worktree",
         qp.worktree.to_string(),
         "list git worktrees for the repo containing the current directory; Enter stages `cd <path>` (same staging as directories mode)",
+    );
+    mode_row(
+        &mut lines,
+        "source",
+        qp.source.to_string(),
+        "search visited directories containing .git or build.xml; Enter offers the repo's worktrees, then opens or reuses a tmux session / herdr workspace there; Delete removes a row from the list",
     );
 
     lines.push(Line::from(""));
@@ -5726,7 +5821,9 @@ pub(crate) fn render_row<'a>(
             | crate::tui::mode::ModeKind::Zoxide
             | crate::tui::mode::ModeKind::Worktree
     );
-    let tmux_span = if !is_directory_flavored_mode {
+    let tmux_span = if active_mode == crate::tui::mode::ModeKind::Source {
+        Span::styled(format!(" {:<5} ", row.source), Theme::dim())
+    } else if !is_directory_flavored_mode {
         Span::raw("")
     } else if row.mode == "directory" && app.directory_tmux_pane_id(&row.directory).is_some() {
         Span::styled(
