@@ -57,6 +57,9 @@ All notable changes to this project will be documented in this file.
 - TUI: the `*` Directories (configured sessions) and the `|` worktree picker
   are sorted by last visit, most recent first; never-visited entries keep their
   original order at the end.
+- TUI: the `*` view's zoxide group is sorted by last visit too, so its 10 rows
+  are the most recently visited zoxide directories rather than zoxide's top
+  frecency ones.
 - TUI: configured session directories (`*` mode) and source directories (`|`
   mode) show when you last ran a command there instead of 1970; rows with no
   time at all (group headers, never-visited directories) show a blank age and

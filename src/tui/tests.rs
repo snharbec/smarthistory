@@ -36490,7 +36490,7 @@ fn panes_directory_rows_show_last_visit() {
         is_bare: false,
     }];
     let mut rows = crate::tui::mode::panes::directory_section_rows(
-        vec!["/tmp".to_string(), "/nonexistent-dir".to_string()],
+        vec!["/nonexistent-dir".to_string(), "/tmp".to_string()],
         worktrees,
         &[],
     );
@@ -36505,6 +36505,10 @@ fn panes_directory_rows_show_last_visit() {
     // Worktree: a command in a subdirectory counts.
     assert!((now - 20 - ts("/usr")).abs() <= 2);
     assert!(rows.iter().filter(|r| r.mode == "workspace").all(|r| r.timestamp == 0));
+    // Zoxide rows re-sorted most recent first, overriding zoxide's rank.
+    let zoxide: Vec<&str> =
+        rows.iter().filter(|r| r.source == "zoxide" && r.mode == "directory").map(|r| r.directory.as_str()).collect();
+    assert_eq!(zoxide, ["/tmp", "/nonexistent-dir"]);
 }
 
 /// The panes view's configured `Directories` rows are listed most
