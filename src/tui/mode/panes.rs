@@ -838,6 +838,7 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
             ..Default::default()
         });
         let mut next_session_id: i64 = -20_000;
+        let first_session = out.len();
         for s in &app.sessions {
             next_session_id -= 1;
             out.push(HistoryRow {
@@ -854,6 +855,9 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
                 ..Default::default()
             });
         }
+        // Most recently visited first; stable, so ties (and the
+        // never-visited `0`s at the end) keep config order.
+        out[first_session..].sort_by_key(|r| std::cmp::Reverse(r.timestamp));
     }
     if !app.hosts.is_empty() {
         out.push(HistoryRow {

@@ -36506,3 +36506,36 @@ fn panes_directory_rows_show_last_visit() {
     assert!((now - 20 - ts("/usr")).abs() <= 2);
     assert!(rows.iter().filter(|r| r.mode == "workspace").all(|r| r.timestamp == 0));
 }
+
+/// The panes view's configured `Directories` rows are listed most
+/// recently visited first; never-visited ones keep config order at
+/// the end.
+#[test]
+fn panes_configured_directories_sorted_by_last_visit() {
+    let mut app = panes_test_app(&[]);
+    for (i, (dir, age)) in [("/usr", 500), ("/tmp", 50)].iter().enumerate() {
+        app.conn
+            .execute(
+                "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                 VALUES (?1, 'ls', ?2, 'sess', 0, strftime('%s','now') - ?3)",
+                rusqlite::params![100 + i as i64, dir, age],
+            )
+            .unwrap();
+    }
+    let session = |name: &str, dir: &str| HistoryRow {
+        command: name.to_string(),
+        directory: dir.to_string(),
+        ..Default::default()
+    };
+    app.sessions = vec![
+        session("never-a", "/nonexistent-a"),
+        session("usr", "/usr"),
+        session("never-b", "/nonexistent-b"),
+        session("tmp", "/tmp"),
+    ];
+    app.query = String::from("*");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let order: Vec<&str> =
+        rows.iter().filter(|r| r.mode == "session").map(|r| r.command.as_str()).collect();
+    assert_eq!(order, ["tmp", "usr", "never-a", "never-b"]);
+}
