@@ -572,9 +572,9 @@ fn ensure_directory_sections(app: &mut App) {
 /// only order `~` / `;` mode; the panes view keeps its own order) with
 /// when the user last worked there: the exact directory for zoxide
 /// rows, the whole worktree (minus nested worktrees) for worktree rows.
-/// Zoxide rows are then re-sorted most recently visited first (stable),
-/// so `limit_zoxide_rows` keeps the most recent ones, not zoxide's
-/// frecency top.
+/// Zoxide and worktree rows are then re-sorted most recently visited
+/// first (stable), so `limit_zoxide_rows` keeps the most recent zoxide
+/// dirs, not zoxide's frecency top.
 pub(crate) fn stamp_directory_visits(app: &App, rows: &mut [HistoryRow]) {
     let worktree_paths: Vec<String> = rows
         .iter()
@@ -590,10 +590,12 @@ pub(crate) fn stamp_directory_visits(app: &App, rows: &mut [HistoryRow]) {
             last_directory_timestamp(app, &row.directory)
         };
     }
-    let is_zoxide = |r: &HistoryRow| r.mode == "directory" && r.source == "zoxide";
-    if let Some(start) = rows.iter().position(is_zoxide) {
-        let len = rows[start..].iter().take_while(|r| is_zoxide(r)).count();
-        rows[start..start + len].sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+    for source in ["zoxide", "worktree"] {
+        let in_group = |r: &HistoryRow| r.mode == "directory" && r.source == source;
+        if let Some(start) = rows.iter().position(in_group) {
+            let len = rows[start..].iter().take_while(|r| in_group(r)).count();
+            rows[start..start + len].sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+        }
     }
 }
 
