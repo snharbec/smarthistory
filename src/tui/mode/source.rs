@@ -172,6 +172,51 @@ fn worktree_options(entries: Vec<WorktreeEntry>) -> Vec<SourceWorktreeOption> {
         .map(|e| SourceWorktreeOption {
             label: e.branch.unwrap_or_else(|| "(detached)".to_string()),
             path: e.path,
+            last_visited: 0,
+        })
+        .collect()
+}
+
+/// For each worktree in `paths`, the newest history entry run in it or
+/// any directory below it — "when did I last work there". `0` when
+/// never. Directories inside another listed worktree nested below it
+/// (e.g. `repo/.worktrees/feat`) count only for that nested one, so
+/// the main checkout doesn't inherit every linked worktree's activity.
+/// The `[root/, root0)` range ('0' sorts right after '/') is an index
+/// range seek on `idx_history_directory_ts`, unlike `LIKE 'root/%'`.
+pub(crate) fn last_worktree_visits(conn: &rusqlite::Connection, paths: &[String]) -> Vec<i64> {
+    let roots: Vec<String> = paths
+        .iter()
+        .map(|p| crate::util::canonicalize_directory(p).trim_end_matches('/').to_string())
+        .collect();
+    let inside = |dir: &str, root: &str| {
+        dir == root || dir.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT directory, MAX(timestamp) FROM history
+         WHERE directory = ?1 OR (directory >= ?1 || '/' AND directory < ?1 || '0')
+         GROUP BY directory",
+    ) else {
+        return vec![0; paths.len()];
+    };
+    roots
+        .iter()
+        .map(|root| {
+            if root.is_empty() {
+                return 0;
+            }
+            let nested: Vec<&String> =
+                roots.iter().filter(|o| *o != root && inside(o, root)).collect();
+            let Ok(rows) = stmt.query_map([root], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            }) else {
+                return 0;
+            };
+            rows.flatten()
+                .filter(|(dir, _)| !nested.iter().any(|n| inside(dir, n)))
+                .filter_map(|(_, ts)| ts)
+                .max()
+                .unwrap_or(0)
         })
         .collect()
 }
@@ -249,6 +294,10 @@ impl App {
         match result {
             SourceJobResult::Worktrees(Ok(entries)) => {
                 let mut options = worktree_options(entries);
+                let paths: Vec<String> = options.iter().map(|o| o.path.clone()).collect();
+                for (option, ts) in options.iter_mut().zip(last_worktree_visits(&self.conn, &paths)) {
+                    option.last_visited = ts;
+                }
                 match options.len() {
                     0 => self.fail_source_picker("no checked-out worktrees found".to_string()),
                     1 => self.start_source_open(options.remove(0).path),
@@ -318,6 +367,22 @@ mod tests {
     }
 
     #[test]
+    fn last_worktree_visits_count_subtree_but_not_nested_worktrees() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (directory TEXT NOT NULL, timestamp INTEGER);
+             INSERT INTO history VALUES ('/r', 100), ('/r/app/src', 300),
+                 ('/r/.worktrees/feat', 900), ('/r/.worktrees/feat/sub', 950),
+                 ('/r2', 990), ('/', 999);",
+        )
+        .unwrap();
+        let paths = ["/r/", "/r/.worktrees/feat", "/nowhere"].map(String::from);
+        // `/r` gets its own subdir (300) but not the nested worktree
+        // (950), the sibling `/r2`, or the parent `/`.
+        assert_eq!(last_worktree_visits(&conn, &paths), vec![300, 950, 0]);
+    }
+
+    #[test]
     fn worktree_options_drop_bare_and_label_detached() {
         let options = worktree_options(vec![
             entry("/repo.git", None, true),
@@ -327,8 +392,16 @@ mod tests {
         assert_eq!(
             options,
             vec![
-                SourceWorktreeOption { path: "/wt/main".to_string(), label: "main".to_string() },
-                SourceWorktreeOption { path: "/wt/fix".to_string(), label: "(detached)".to_string() },
+                SourceWorktreeOption {
+                    path: "/wt/main".to_string(),
+                    label: "main".to_string(),
+                    last_visited: 0,
+                },
+                SourceWorktreeOption {
+                    path: "/wt/fix".to_string(),
+                    label: "(detached)".to_string(),
+                    last_visited: 0,
+                },
             ]
         );
     }

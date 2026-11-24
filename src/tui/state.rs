@@ -1383,6 +1383,8 @@ pub struct SourceWorktreeOption {
     pub path: String,
     /// Branch name, or `(detached)`.
     pub label: String,
+    /// Newest history entry run in `path` or below it; `0` when never.
+    pub last_visited: i64,
 }
 
 /// State of the `|` (source) overlay, open from Enter on a source row
