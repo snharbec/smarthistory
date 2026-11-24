@@ -5408,6 +5408,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             };
             merged.get(data_idx)
         })
+        .filter(|r| r.timestamp > 0)
         .map(|r| format_diff(r.timestamp).chars().count())
         .max()
         .unwrap_or(3)
@@ -5700,7 +5701,8 @@ pub(crate) fn render_row<'a>(
     // mode but the relevant one ever lights up.
     let active_mode = crate::tui::mode::active_mode(app);
 
-    let age = format_diff(row.timestamp);
+    // No timestamp (config-defined rows, group headers): blank age.
+    let age = if row.timestamp > 0 { format_diff(row.timestamp) } else { String::new() };
     let age_padded = format!("{:>age_width$}", age);
     // Color the age column by recency, brightest for "just happened"
     // fading to dim for old entries — a glanceable freshness gradient
@@ -6682,11 +6684,11 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Time ", Theme::dim()),
-            Span::raw(format!(
-                "{} · {}",
-                format_time(row.timestamp),
-                format_diff(row.timestamp),
-            )),
+            Span::raw(if row.timestamp > 0 {
+                format!("{} · {}", format_time(row.timestamp), format_diff(row.timestamp))
+            } else {
+                "never".to_string()
+            }),
         ]),
         Line::from(vec![
             Span::styled("Stat ", Theme::dim()),
