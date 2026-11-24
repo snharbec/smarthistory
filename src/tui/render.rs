@@ -1879,7 +1879,7 @@ fn draw_source_picker(f: &mut Frame, picker: &crate::tui::state::SourcePicker) {
         .file_name()
         .map_or_else(|| picker.source_path.clone(), |n| n.to_string_lossy().into_owned());
     let title = format!(" Open {name} ");
-    let inner = overlay(f, &title, 70, 50);
+    let inner = overlay(f, &title, 90, 50);
     let error_height = if picker.error.is_some() { 3 } else { 1 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1921,12 +1921,19 @@ fn draw_source_picker(f: &mut Frame, picker: &crate::tui::state::SourcePicker) {
         f.render_widget(Paragraph::new(Span::styled(progress, Theme::dim())), chunks[2]);
     } else {
         let filtered = crate::tui::state::source_picker_filtered(picker);
+        // Branch names get the width they need; the rest is the time.
+        let label_width = filtered.iter().map(|o| o.label.chars().count()).max().unwrap_or(0);
         let items: Vec<ListItem> = filtered
             .iter()
             .map(|o| {
+                let when = if o.last_visited > 0 {
+                    format!("{} · {}", format_time(o.last_visited), format_diff(o.last_visited))
+                } else {
+                    "never".to_string()
+                };
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!("{:<24} ", o.label)),
-                    Span::styled(o.path.as_str(), Theme::dim()),
+                    Span::raw(format!("{:<label_width$}   ", o.label)),
+                    Span::styled(when, Theme::dim()),
                 ]))
             })
             .collect();

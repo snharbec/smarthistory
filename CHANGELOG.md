@@ -49,6 +49,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - TUI: timestamps are shown in local time instead of UTC.
+- TUI: the `|` worktree picker is wider and shows when you last worked in each
+  worktree (newest command in it or below it, not counting nested worktrees)
+  instead of its path.
 - TUI: configured session directories (`*` mode) and source directories (`|`
   mode) show when you last ran a command there instead of 1970; rows with no
   time at all (group headers, never-visited directories) show a blank age and
