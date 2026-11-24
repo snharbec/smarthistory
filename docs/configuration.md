@@ -74,6 +74,7 @@ value" so you can confirm what the TUI actually sees.
   - [`dropdown.highlight`](#dropdownhighlight)
   - [`dropdown.matchmode`](#dropdownmatchmode)
   - [`dropdown.boxchars`](#dropdownboxchars)
+  - [`dropdown.historyposition`](#dropdownhistoryposition)
   - [`dropdown.predict`](#dropdownpredict)
 - [Autosuggestions](#autosuggestions)
   - [`autosuggest.enabled`](#autosuggestenabled)
@@ -722,6 +723,31 @@ Read once at shell-init time; it takes a new shell (or re-running
 ```ini
 dropdown.enabled=on
 dropdown.boxchars=unicode
+```
+
+### `dropdown.historyposition`
+
+|                  |                     |
+| ---------------- | ------------------- |
+| **Type**         | `above` \| `below`  |
+| **Default**      | `below`             |
+| **Env override** | —                   |
+
+Where the box Up/Down draws while walking real history goes. `below` (the
+default) draws it under the command line like every other box. `above` draws it
+over the prompt, oldest entry on top and the recalled command right above the
+prompt, so Up moves visually upward through history. The prediction box (Down on
+an empty line, see [`dropdown.predict`](#dropdownpredict)) stays below either
+way.
+
+zle has no slot for text above the prompt, so `above` temporarily prepends the
+box to `PROMPT` and restores it when the walk ends. The prompt moves down while
+the box is open (or the screen scrolls when the prompt is at the bottom).
+
+Read once at shell-init time; it takes a new shell to take effect.
+
+```ini
+dropdown.historyposition=above
 ```
 
 ### `dropdown.predict`
@@ -1876,6 +1902,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `dropdown.highlight`            | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.matchmode`            | `prefix` \| `substring`           | `prefix`                                                         | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.boxchars`             | `ascii` \| `unicode`              | `ascii`                                                          | [Live dropdown completion](#live-dropdown-completion)                     |
+| `dropdown.historyposition`      | `above` \| `below`                | `below`                                                          | [Live dropdown completion](#live-dropdown-completion)                     |
 | `dropdown.predict`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `commentexpand.enabled`         | `on` \| `off`                     | `off`                                                            | [Comment expansion](#comment-expansion)                                   |
 | `globcomplete.enabled`          | `on` \| `off`                     | `off`                                                            | [Glob-triggered Tab file completion](#glob-triggered-tab-file-completion) |

@@ -1825,6 +1825,7 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(f, "  dropdown.matchmode = {}", cfg.dropdown_matchmode);
     let _ = writeln!(f, "  dropdown.boxchars = {}", cfg.dropdown_boxchars);
+    let _ = writeln!(f, "  dropdown.historyposition = {}", cfg.dropdown_historyposition);
     let _ = writeln!(
         f,
         "  dropdown.predict = {}",
@@ -2358,6 +2359,9 @@ pub struct Config {
     /// them as one, so every box line wraps. ASCII is one column
     /// everywhere. Set via `dropdown.boxchars=ascii|unicode`.
     dropdown_boxchars: String,
+    /// Where the Up-arrow history box is drawn: `below` the prompt
+    /// (default) or `above` it. Set via `dropdown.historyposition`.
+    dropdown_historyposition: String,
     /// Whether the dropdown widget shows predicted next commands
     /// when the command line is empty, instead of showing nothing.
     /// Default `false`, opt-in like `dropdown.enabled` above.
@@ -2889,6 +2893,7 @@ impl Config {
             dropdown_highlight: false,
             dropdown_matchmode: "prefix".to_string(),
             dropdown_boxchars: "ascii".to_string(),
+            dropdown_historyposition: "below".to_string(),
             dropdown_predict: false,
             prompt_project_enabled: false,
             shellintegration_osc133_enabled: true,
@@ -3197,6 +3202,15 @@ impl Config {
                     "ascii" | "unicode" => self.dropdown_boxchars = value.trim().to_string(),
                     _ => eprintln!(
                         "warning: dropdown.boxchars={:?} is not one of ascii/unicode; keeping the previous value",
+                        value
+                    ),
+                },
+                "dropdown.historyposition" => match value.trim() {
+                    "above" | "below" => {
+                        self.dropdown_historyposition = value.trim().to_string()
+                    }
+                    _ => eprintln!(
+                        "warning: dropdown.historyposition={:?} is not one of above/below; keeping the previous value",
                         value
                     ),
                 },
@@ -9994,6 +10008,7 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     }
                     "dropdown.matchmode" => println!("{}", cfg.dropdown_matchmode),
                     "dropdown.boxchars" => println!("{}", cfg.dropdown_boxchars),
+                    "dropdown.historyposition" => println!("{}", cfg.dropdown_historyposition),
                     "dropdown.predict" => {
                         println!("{}", if cfg.dropdown_predict { "on" } else { "off" })
                     }
