@@ -36550,3 +36550,35 @@ fn panes_configured_directories_sorted_by_last_visit() {
         rows.iter().filter(|r| r.mode == "session").map(|r| r.command.as_str()).collect();
     assert_eq!(order, ["tmp", "usr", "never-a", "never-b"]);
 }
+
+/// The panes view's `hosts` rows are listed most recently connected
+/// first (never-connected keep config order), and each row keeps the
+/// id that staging decodes back to its `host_defs` position.
+#[test]
+fn panes_hosts_sorted_by_last_connection_keep_ids() {
+    let mut app = panes_test_app(&[]);
+    for (i, (cmd, age)) in [("ssh root@older", 500), ("ssh root@newer", 50)].iter().enumerate() {
+        app.conn
+            .execute(
+                "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \
+                 VALUES (?1, ?2, '/tmp', 'sess', 0, strftime('%s','now') - ?3)",
+                rusqlite::params![200 + i as i64, cmd, age],
+            )
+            .unwrap();
+    }
+    let names = ["never", "older", "newer"];
+    app.hosts = names
+        .iter()
+        .map(|n| HistoryRow { command: n.to_string(), mode: "host".to_string(), ..Default::default() })
+        .collect();
+    app.host_defs = names
+        .iter()
+        .map(|n| HostDef { name: n.to_string(), host: n.to_string(), user: "root".to_string(), ..Default::default() })
+        .collect();
+    app.query = String::from("*");
+    let rows = crate::tui::mode::panes::fetch(&mut app).unwrap();
+    let hosts: Vec<(&str, i64)> =
+        rows.iter().filter(|r| r.mode == "host").map(|r| (r.command.as_str(), r.id)).collect();
+    // id = -25_001 - config position (see `stage_pane_selection`).
+    assert_eq!(hosts, [("newer", -25_003), ("older", -25_002), ("never", -25_001)]);
+}
