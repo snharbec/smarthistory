@@ -48,6 +48,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- TUI: timestamps are shown in local time instead of UTC.
+- TUI: history rows no longer repeat the full timestamp (the age column and the
+  details pane already show it); empty mark/capture columns are blank instead of
+  `[ ]` / `.`; the footer only shows the theme badge when a theme is selected.
 - The shell server checks every 10 s, instead of every minute, whether its
   socket was removed or replaced, and whether its monitor is still running.
 

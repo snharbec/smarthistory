@@ -76,8 +76,9 @@ pub fn unique_slug<'a>(existing: impl Iterator<Item = &'a str>, name: &str, fall
 /// timestamps so that history items with no valid time stamp can still
 /// be displayed and treated as very old.
 pub fn format_time(epoch: i64) -> String {
-    match chrono::DateTime::from_timestamp(epoch, 0) {
-        Some(dt) => dt.naive_utc().format("%d.%b.%Y %H:%M:%S").to_string(),
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_opt(epoch, 0).single() {
+        Some(dt) => dt.format("%d.%b.%Y %H:%M:%S").to_string(),
         None => "(unknown)".to_string(),
     }
 }

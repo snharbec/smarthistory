@@ -11,9 +11,10 @@
         // uses, so this test stays self-documenting. If the format
         // string changes, the test will fail and force the change to
         // be intentional.
-        let expected = chrono::DateTime::from_timestamp(REFERENCE_EPOCH, 0)
+        use chrono::TimeZone;
+        let expected = chrono::Local
+            .timestamp_opt(REFERENCE_EPOCH, 0)
             .unwrap()
-            .naive_utc()
             .format("%d.%b.%Y %H:%M:%S")
             .to_string();
         assert_eq!(format_time(REFERENCE_EPOCH), expected);
@@ -31,9 +32,13 @@
 
     #[test]
     fn format_time_zero_is_unix_epoch() {
-        // Unix epoch 0 is 1970-01-01 00:00:00 UTC. Hardcoded so a
-        // regression in the formatter is caught immediately.
-        assert_eq!(format_time(0), "01.Jan.1970 00:00:00");
+        // Unix epoch 0 is 1970-01-01 00:00:00 UTC; shown in local time,
+        // so only the date (always 31.Dec.1969 or 01.Jan.1970) is fixed.
+        let s = format_time(0);
+        assert!(
+            s.starts_with("01.Jan.1970 ") || s.starts_with("31.Dec.1969 "),
+            "{s}"
+        );
     }
 
     #[test]
