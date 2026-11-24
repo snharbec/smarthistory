@@ -5773,7 +5773,7 @@ pub(crate) fn render_row<'a>(
     };
 
     // Capture indicator. A bright `o ` shows the row has captured
-    // output available (press ^L to view); a dim `. ` is shown
+    // output available (press ^L to view); blank space is shown
     // otherwise so columns stay aligned. Only meaningful in plain
     // history mode (`ModeKind::History`) — every other prefix mode
     // either never populates `row.output` with captured command
@@ -5791,7 +5791,7 @@ pub(crate) fn render_row<'a>(
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled(" . ", Theme::dim())
+        Span::raw("   ")
     };
 
     // Tmux-pane activity marker.
@@ -5800,7 +5800,7 @@ pub(crate) fn render_row<'a>(
     // pane whose cwd matches
     // this row's `directory`
     // (after canonicalization);
-    // a dim `.` keeps the column
+    // blank space keeps the column
     // width stable otherwise.
     // Only fired for directory
     // rows (`row.mode == "directory"`)
@@ -5833,7 +5833,7 @@ pub(crate) fn render_row<'a>(
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled(" . ", Theme::dim())
+        Span::raw("   ")
     };
 
     // LLM preview marker. The
@@ -5925,7 +5925,7 @@ pub(crate) fn render_row<'a>(
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled("[ ]", Theme::dim())
+        Span::raw("   ")
     };
 
     let mut spans = vec![
@@ -6315,10 +6315,9 @@ pub(crate) fn render_row<'a>(
         spans.extend(text_spans);
     }
 
-    spans.push(Span::styled(
-        format!("  · {} ", format_time(row.timestamp)),
-        Theme::dim(),
-    ));
+    // No absolute timestamp here: the age column already says when,
+    // and the details pane shows the full time.
+    spans.push(Span::raw("  "));
 
     // Show a non-empty comment inline for every row, and fall back to
     // a contextual hint on the selected row when there is no
@@ -8377,11 +8376,15 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // The badge shows BOTH the theme name AND the active color
     // scheme (light / dark) so the user always knows which
     // `theme.<scheme>=` config slot is currently active.
-    let theme_label = format!(
-        " theme: {} · {} ",
-        app.theme.display_name(),
-        app.detected_scheme.label()
-    );
+    let theme_label = if app.theme == super::SelectedTheme::None {
+        String::new()
+    } else {
+        format!(
+            " theme: {} · {} ",
+            app.theme.display_name(),
+            app.detected_scheme.label()
+        )
+    };
 
     // Transient feedback (e.g. "Yanked 12 chars") takes
     // precedence over the help hint when present, so the user

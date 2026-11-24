@@ -16616,7 +16616,7 @@ fn indicator_test_row(output: &str) -> HistoryRow {
 
 /// The output-capture column only ever appears in plain history mode
 /// (`ModeKind::History`, i.e. an empty or unprefixed query) — shown
-/// lit (` o `) when the row has captured output, dim (` . `)
+/// lit (` o `) when the row has captured output, blank (`   `)
 /// otherwise. In every other prefix mode it's hidden entirely (an
 /// empty span, not even the dim placeholder).
 #[test]
@@ -16626,12 +16626,12 @@ fn capture_column_only_shown_in_history_mode() {
     let with_output = indicator_test_row("captured text");
     let without_output = indicator_test_row("");
 
-    // History mode (empty query): lit when output present, dim
+    // History mode (empty query): lit when output present, blank
     // placeholder when absent.
     let line = crate::tui::render::render_row(&with_output, &app, false, 3);
     assert_eq!(line.spans[1].content.as_ref(), " o ");
     let line = crate::tui::render::render_row(&without_output, &app, false, 3);
-    assert_eq!(line.spans[1].content.as_ref(), " . ");
+    assert_eq!(line.spans[1].content.as_ref(), "   ");
 
     // Any other prefix mode: hidden entirely, regardless of whether
     // the row happens to carry `output` text (ag mode reuses
@@ -16652,7 +16652,7 @@ fn capture_column_only_shown_in_history_mode() {
 
 /// The tmux-pane column only ever appears in the two modes whose
 /// rows carry `mode == "directory"` — `#` Directories and `~`
-/// Zoxide — shown dim (` . `) when no live pane matches (no
+/// Zoxide — shown blank (`   `) when no live pane matches (no
 /// multiplexer state configured in this test app) and hidden
 /// entirely everywhere else, including `*` Panes mode itself (whose
 /// own rows already ARE the live panes, so the marker would never
@@ -16678,16 +16678,16 @@ fn tmux_column_only_shown_in_directory_flavored_modes() {
     let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
     assert_eq!(
         line.spans[2].content.as_ref(),
-        " . ",
-        "Directories mode must still show the (dim) tmux column"
+        "   ",
+        "Directories mode must still show the (blank) tmux column"
     );
 
     app.query = "~dir".to_string();
     let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
     assert_eq!(
         line.spans[2].content.as_ref(),
-        " . ",
-        "Zoxide mode must still show the (dim) tmux column"
+        "   ",
+        "Zoxide mode must still show the (blank) tmux column"
     );
 
     app.query = String::new();
