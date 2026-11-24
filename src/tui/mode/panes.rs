@@ -563,7 +563,30 @@ fn ensure_directory_sections(app: &mut App) {
     }
     let zoxide_paths = crate::tui::mode::zoxide::query_zoxide_paths();
     let worktrees = crate::tui::mode::worktree::current_repo_worktrees(app);
-    app.panes_directory_rows = Some(directory_section_rows(zoxide_paths, worktrees, &app.home_list));
+    let mut rows = directory_section_rows(zoxide_paths, worktrees, &app.home_list);
+    stamp_directory_visits(app, &mut rows);
+    app.panes_directory_rows = Some(rows);
+}
+
+/// Replace the zoxide/worktree rows' synthetic rank timestamps (they
+/// only order `~` / `;` mode; the panes view keeps its own order) with
+/// when the user last worked there: the exact directory for zoxide
+/// rows, the whole worktree (minus nested worktrees) for worktree rows.
+pub(crate) fn stamp_directory_visits(app: &App, rows: &mut [HistoryRow]) {
+    let worktree_paths: Vec<String> = rows
+        .iter()
+        .filter(|r| r.mode == "directory" && r.source == "worktree")
+        .map(|r| r.directory.clone())
+        .collect();
+    let mut worktree_visits =
+        crate::tui::mode::source::last_worktree_visits(&app.conn, &worktree_paths).into_iter();
+    for row in rows.iter_mut().filter(|r| r.mode == "directory") {
+        row.timestamp = if row.source == "worktree" {
+            worktree_visits.next().unwrap_or(0)
+        } else {
+            last_directory_timestamp(app, &row.directory)
+        };
+    }
 }
 
 /// Build the panes view's `zoxide` and `worktrees` sections: a

@@ -36476,3 +36476,33 @@ fn last_directory_timestamp_uses_latest_history_in_dir() {
     assert_eq!(crate::tui::mode::panes::last_directory_timestamp(&app, "/nonexistent-dir"), 0);
     assert_eq!(crate::tui::mode::panes::last_directory_timestamp(&app, ""), 0);
 }
+
+/// The panes view's zoxide/worktree rows carry synthetic rank
+/// timestamps (1..N, i.e. 1970); `stamp_directory_visits` replaces
+/// them with when the user last ran a command there, and leaves the
+/// section headers at 0 (rendered blank).
+#[test]
+fn panes_directory_rows_show_last_visit() {
+    let app = directories_test_app(&[("ls", "/tmp", 50), ("make", "/usr/lib", 20)]);
+    let worktrees = vec![crate::tui::mode::worktree::WorktreeEntry {
+        path: "/usr".to_string(),
+        branch: Some("main".to_string()),
+        is_bare: false,
+    }];
+    let mut rows = crate::tui::mode::panes::directory_section_rows(
+        vec!["/tmp".to_string(), "/nonexistent-dir".to_string()],
+        worktrees,
+        &[],
+    );
+    crate::tui::mode::panes::stamp_directory_visits(&app, &mut rows);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let ts = |dir: &str| rows.iter().find(|r| r.mode == "directory" && r.directory == dir).unwrap().timestamp;
+    assert!((now - 50 - ts("/tmp")).abs() <= 2);
+    assert_eq!(ts("/nonexistent-dir"), 0);
+    // Worktree: a command in a subdirectory counts.
+    assert!((now - 20 - ts("/usr")).abs() <= 2);
+    assert!(rows.iter().filter(|r| r.mode == "workspace").all(|r| r.timestamp == 0));
+}
