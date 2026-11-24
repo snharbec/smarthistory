@@ -491,6 +491,13 @@ pub trait MultiplexerBackend: Send + Sync {
     /// workspace label).
     fn create_command(&self, dir: &Path, label: &str) -> Option<String>;
 
+    /// Every session/workspace with the directories it is rooted in.
+    /// `None` means the list could not be read, which callers must not
+    /// treat as "no sessions".
+    fn list_sessions(&self) -> Option<Vec<MuxSession>> {
+        None
+    }
+
     /// Stage a command that runs
     /// `body` *inside* the given
     /// pane (used by the
@@ -517,6 +524,34 @@ pub trait MultiplexerBackend: Send + Sync {
     /// messages and the help
     /// overlay ("tmux" / "herdr").
     fn name(&self) -> &'static str;
+}
+
+/// A tmux session or herdr workspace, as needed to decide whether to
+/// reuse it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuxSession {
+    /// Stable target for [`MultiplexerBackend::focus_session`]: tmux
+    /// `$N`, herdr workspace id.
+    pub id: String,
+    /// tmux session name or herdr workspace label.
+    pub name: String,
+    /// tmux: the session's start directory. herdr: every pane's cwd,
+    /// since workspaces carry no directory of their own.
+    pub roots: Vec<String>,
+}
+
+/// Parse `list-sessions -F '#{session_id}\t#{session_name}\t#{session_path}'`.
+fn parse_tmux_sessions(output: &str) -> Vec<MuxSession> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let id = fields.next()?.to_string();
+            let name = fields.next()?.to_string();
+            let root = fields.next()?.to_string();
+            Some(MuxSession { id, name, roots: vec![root] })
+        })
+        .collect()
 }
 
 /// A row in the `*` panes
@@ -1200,6 +1235,12 @@ impl MultiplexerBackend for TmuxBackend {
             quoted_path,
             crate::util::shell_quote(label)
         ))
+    }
+
+    fn list_sessions(&self) -> Option<Vec<MuxSession>> {
+        let output =
+            tmux_run(&["list-sessions", "-F", "#{session_id}\t#{session_name}\t#{session_path}"])?;
+        Some(parse_tmux_sessions(&String::from_utf8_lossy(&output)))
     }
 
     fn send_in_pane_command(&self, pane_id: &str, body: &str) -> Option<String> {
@@ -2546,6 +2587,25 @@ impl MultiplexerBackend for HerdrBackend {
             quoted_path,
             crate::util::shell_quote(label)
         ))
+    }
+
+    fn list_sessions(&self) -> Option<Vec<MuxSession>> {
+        let workspaces = herdr_run_json(&["workspace", "list"])?;
+        let panes = herdr_run_json(&["pane", "list"])?;
+        let panes = parse_herdr_pane_list(&panes);
+        Some(
+            parse_workspace_labels(&workspaces)
+                .into_iter()
+                .map(|(id, name)| {
+                    let roots = panes
+                        .iter()
+                        .filter(|p| p.workspace_id == id)
+                        .map(|p| p.cwd.clone())
+                        .collect();
+                    MuxSession { id, name, roots }
+                })
+                .collect(),
+        )
     }
 
     fn send_in_pane_command(&self, pane_id: &str, body: &str) -> Option<String> {

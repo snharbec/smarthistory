@@ -259,6 +259,12 @@ impl App {
                 // this mode doesn't need.
                 self.stage_directory_selection();
             }
+            crate::tui::mode::ModeKind::Source => {
+                // `|...` queries are source directories. Opens the
+                // worktree overlay, which stages the session itself
+                // once its background work finishes.
+                self.stage_source_selection();
+            }
             // The history / no-prefix mode
             // is the default — it stages
             // the selected history row for

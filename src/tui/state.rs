@@ -1366,6 +1366,56 @@ pub(crate) fn worktree_create_filtered_options(flow: &WorktreeCreateFlow) -> Vec
     }
 }
 
+/// What the `|` (source) overlay is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePickerPhase {
+    /// Waiting for `git worktree list`.
+    Loading,
+    /// Showing worktrees, or an error.
+    Pick,
+    /// Resolving the session to open.
+    Opening,
+}
+
+/// One selectable worktree in [`SourcePicker`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceWorktreeOption {
+    pub path: String,
+    /// Branch name, or `(detached)`.
+    pub label: String,
+}
+
+/// State of the `|` (source) overlay, open from Enter on a source row
+/// until a session is staged or the user cancels.
+#[derive(Debug, Clone)]
+pub struct SourcePicker {
+    pub source_path: String,
+    pub phase: SourcePickerPhase,
+    pub options: Vec<SourceWorktreeOption>,
+    pub filter: String,
+    /// Character index into `filter`.
+    pub cursor: usize,
+    /// Index into the filtered options.
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+/// `picker.options` narrowed by a case-insensitive match on branch or
+/// path. Shared by the key handler and the renderer.
+pub(crate) fn source_picker_filtered(picker: &SourcePicker) -> Vec<SourceWorktreeOption> {
+    let filter = picker.filter.trim().to_lowercase();
+    picker
+        .options
+        .iter()
+        .filter(|o| {
+            filter.is_empty()
+                || o.label.to_lowercase().contains(&filter)
+                || o.path.to_lowercase().contains(&filter)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Short flags — across `ssh`/`scp`/`sftp`/`rsync`/`mosh` — that take
 /// a separate following argument (`-p 2222`, `-i ~/.ssh/id_ed25519`,
 /// …), as opposed to a bare boolean flag (`-4`, `-C`, …) or a flag
