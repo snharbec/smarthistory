@@ -884,6 +884,7 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
             ..Default::default()
         });
         let mut next_host_id: i64 = -25_000;
+        let first_host = out.len();
         for (idx, h) in app.hosts.iter().enumerate() {
             next_host_id -= 1;
             // Show when this host was last actually connected to,
@@ -914,6 +915,10 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
                 ..Default::default()
             });
         }
+        // Most recently connected first; stable, so never-connected
+        // hosts keep config order. Safe to reorder: staging decodes the
+        // `host_defs` position from each row's id, not its position.
+        out[first_host..].sort_by_key(|r| std::cmp::Reverse(r.timestamp));
     }
 }
 

@@ -57,6 +57,8 @@ All notable changes to this project will be documented in this file.
 - TUI: the `*` Directories (configured sessions) and the `|` worktree picker
   are sorted by last visit, most recent first; never-visited entries keep their
   original order at the end.
+- TUI: the `*` view's hosts group is sorted by last connection, most recent
+  first; never-connected hosts keep config order at the end.
 - TUI: the `*` view's zoxide and worktrees groups are sorted by last visit too;
   the zoxide group's 10 rows are now the most recently visited zoxide
   directories rather than zoxide's top frecency ones.
