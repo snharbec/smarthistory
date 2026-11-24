@@ -36484,11 +36484,12 @@ fn last_directory_timestamp_uses_latest_history_in_dir() {
 #[test]
 fn panes_directory_rows_show_last_visit() {
     let app = directories_test_app(&[("ls", "/tmp", 50), ("make", "/usr/lib", 20)]);
-    let worktrees = vec![crate::tui::mode::worktree::WorktreeEntry {
-        path: "/usr".to_string(),
+    let worktree = |path: &str| crate::tui::mode::worktree::WorktreeEntry {
+        path: path.to_string(),
         branch: Some("main".to_string()),
         is_bare: false,
-    }];
+    };
+    let worktrees = vec![worktree("/nonexistent-wt"), worktree("/usr")];
     let mut rows = crate::tui::mode::panes::directory_section_rows(
         vec!["/nonexistent-dir".to_string(), "/tmp".to_string()],
         worktrees,
@@ -36509,6 +36510,12 @@ fn panes_directory_rows_show_last_visit() {
     let zoxide: Vec<&str> =
         rows.iter().filter(|r| r.source == "zoxide" && r.mode == "directory").map(|r| r.directory.as_str()).collect();
     assert_eq!(zoxide, ["/tmp", "/nonexistent-dir"]);
+    let worktree_order: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.source == "worktree" && r.mode == "directory")
+        .map(|r| r.directory.as_str())
+        .collect();
+    assert_eq!(worktree_order, ["/usr", "/nonexistent-wt"]);
 }
 
 /// The panes view's configured `Directories` rows are listed most
