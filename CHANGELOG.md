@@ -49,6 +49,10 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - TUI: timestamps are shown in local time instead of UTC.
+- TUI: configured session directories (`*` mode) and source directories (`|`
+  mode) show when you last ran a command there instead of 1970; rows with no
+  time at all (group headers, never-visited directories) show a blank age and
+  `never` in the details pane.
 - TUI: history rows no longer repeat the full timestamp (the age column and the
   details pane already show it); empty mark/capture columns are blank instead of
   `[ ]` / `.`; the footer only shows the theme badge when a theme is selected.

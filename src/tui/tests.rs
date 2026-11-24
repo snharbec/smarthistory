@@ -36459,3 +36459,20 @@ fn session_shortcut_ignored_outside_panes_mode() {
     assert!(!type_str(&mut app, " ho"));
     assert!(app.selection.is_none());
 }
+
+/// Config-defined session rows and source rows have no timestamp of
+/// their own; they show when the user last ran a command in that
+/// directory. Config dirs like `~/` expand with a trailing slash that
+/// history never stores, so the lookup must canonicalize.
+#[test]
+fn last_directory_timestamp_uses_latest_history_in_dir() {
+    let app = directories_test_app(&[("ls", "/tmp", 500), ("pwd", "/tmp", 100), ("x", "/usr", 10)]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let ts = crate::tui::mode::panes::last_directory_timestamp(&app, "/tmp/");
+    assert!((now - 100 - ts).abs() <= 2, "expected the newest /tmp entry, got {ts}");
+    assert_eq!(crate::tui::mode::panes::last_directory_timestamp(&app, "/nonexistent-dir"), 0);
+    assert_eq!(crate::tui::mode::panes::last_directory_timestamp(&app, ""), 0);
+}

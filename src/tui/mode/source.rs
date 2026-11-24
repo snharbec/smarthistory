@@ -65,11 +65,14 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         if !tokens.iter().all(|t| haystack.contains(t)) {
             continue;
         }
+        let timestamp = source
+            .last_visited
+            .max(crate::tui::mode::panes::last_directory_timestamp(app, &source.path));
         rows.push(HistoryRow {
             id: -(idx as i64) - 1,
             command: crate::util::shorten_home_path(&source.path, &app.home_list).into_owned(),
             directory: source.path,
-            timestamp: source.last_visited,
+            timestamp,
             mode: "directory".to_string(),
             source: marker.to_string(),
             ..Default::default()

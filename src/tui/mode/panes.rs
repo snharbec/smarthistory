@@ -823,7 +823,7 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
                 directory: s.directory.clone(),
                 session_id: s.command.clone(),
                 exit_code: 0,
-                timestamp: 0,
+                timestamp: last_directory_timestamp(app, &s.directory),
                 comment: s.comment.clone(),
                 output: String::new(),
                 mode: "session".to_string(),
@@ -901,6 +901,25 @@ fn configured_sections_into(out: &mut Vec<HistoryRow>, app: &App) {
 /// Returns `0` (the existing "never" sentinel `render_row` already
 /// handles) when there's no matching history — never connected yet, or
 /// the config changed since the last connection.
+/// Most recent history entry run in `dir`, i.e. when the user was last
+/// there; `0` when never. Seeks `idx_history_directory_ts`. `dir` is
+/// canonicalized the same way `add` stores it (`~/` config paths
+/// expand with a trailing slash; history has none).
+pub(crate) fn last_directory_timestamp(app: &App, dir: &str) -> i64 {
+    if dir.is_empty() {
+        return 0;
+    }
+    app.conn
+        .query_row(
+            "SELECT MAX(timestamp) FROM history WHERE directory = ?1",
+            [crate::util::canonicalize_directory(dir)],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
 fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
     app.conn
         .query_row(
