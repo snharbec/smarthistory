@@ -512,6 +512,19 @@ if [[ "$(_smarthistory_run config get dropdown.enabled 2>/dev/null)" == "on" ]];
     [[ "$(_smarthistory_run config get dropdown.predict 2>/dev/null)" == "on" ]] \
         && _smarthistory_dropdown_predict_enabled="1"
 fi
+# `dropdown.historyposition=above` draws the Up-arrow history box ABOVE
+# the prompt (oldest entry on top, the recalled one right above the
+# prompt) instead of below it. Read outside the `dropdown.enabled`
+# block because the history box is drawn either way.
+typeset -g _smarthistory_history_above=0
+[[ "$(_smarthistory_run config get dropdown.historyposition 2>/dev/null)" == "above" ]] \
+    && _smarthistory_history_above=1
+# zle has no "text above the prompt" slot, so the box is drawn by
+# temporarily prepending it to PROMPT (see `_smarthistory_prompt_box_show`).
+# `_saved_prompt` is the user's own prompt, `_box_prompt` the PROMPT we
+# set, `_box_ps` the box's prompt-escaped text.
+typeset -g _smarthistory_saved_prompt="" _smarthistory_box_prompt="" _smarthistory_box_ps=""
+typeset -gi _smarthistory_prompt_boxed=0 _smarthistory_prompt_dirty=0
 # Whether `_smarthistory_precmd` resolves and publishes the current
 # time-tracking project after each command. Off by default: unlike
 # `$_smarthistory_mode`/`$_smarthistory_matchmode` above (already-held
@@ -834,6 +847,7 @@ typeset -g _smarthistory_prediction_index=0
 # unconditionally (e.g. from precmd) even when nothing is showing.
 _smarthistory_dropdown_clear() {
     [[ -n "$POSTDISPLAY" ]] && POSTDISPLAY=""
+    _smarthistory_prompt_box_hide
     # Also drop any `region_highlight` entries the box paint left
     # behind for the POSTDISPLAY region (offsets >= $#BUFFER).
     # Entries below that offset belong to $BUFFER itself (e.g. a
@@ -845,6 +859,102 @@ _smarthistory_dropdown_clear() {
     _smarthistory_walking_history=0
     _smarthistory_dropdown_active_kind=""
     _smarthistory_autosuggest_text=""
+}
+
+# Convert `$1` plus `region_highlight`-style "start end spec" spans
+# (`$3...`, offsets relative to a string `$2` characters before `$1`)
+# into prompt-escaped text in REPLY: `%F{}`/`%K{}`/`%B`/`%U` per
+# segment, literal `%` doubled. Follows zle's merge rule: a later
+# colour-bearing spec replaces the whole fg/bg pair so far.
+_smarthistory_hl_to_prompt() {
+    local text=$1 off=$2
+    shift 2
+    local -a bps ss es specs parts
+    local sp part seg fg bg out=""
+    local -i a b i j bold ul n=$#text
+    for sp in "$@"; do
+        parts=(${=sp})
+        a=$(( parts[1] - off )); b=$(( parts[2] - off ))
+        (( b <= 0 )) && continue
+        (( a < 0 )) && a=0
+        ss+=($a); es+=($b); specs+=("${parts[3]}"); bps+=($a $b)
+    done
+    bps=(0 $n $bps)
+    bps=(${(onu)bps})
+    for (( i = 1; i < ${#bps}; i++ )); do
+        a=${bps[i]}; b=${bps[i+1]}
+        (( a >= n )) && break
+        (( b > n )) && b=n
+        fg="" bg="" bold=0 ul=0
+        for (( j = 1; j <= ${#specs}; j++ )); do
+            (( ss[j] <= a && es[j] >= b )) || continue
+            [[ "${specs[j]}" == *(fg|bg)=* ]] && fg="" bg=""
+            for part in ${(s:,:)specs[j]}; do
+                case $part in
+                    fg=*) fg=${part#fg=} ;;
+                    bg=*) bg=${part#bg=} ;;
+                    bold) bold=1 ;;
+                    underline) ul=1 ;;
+                    none) fg="" bg="" bold=0 ul=0 ;;
+                esac
+            done
+        done
+        seg=${text[a+1,b]}
+        out+='%f%k%b%u'
+        [[ -n "$fg" ]] && out+="%F{$fg}"
+        [[ -n "$bg" ]] && out+="%K{$bg}"
+        (( bold )) && out+='%B'
+        (( ul )) && out+='%U'
+        out+=${seg//\%/%%}
+    done
+    REPLY="$out%f%k%b%u"
+}
+
+# Prepend the box (`$1`, already prompt-escaped) to the user's prompt
+# and mark it for redraw. With PROMPT_SUBST the box goes in by reference so `$`
+# and backticks in recalled commands are never expanded.
+_smarthistory_prompt_box_show() {
+    if (( ! _smarthistory_prompt_boxed )); then
+        _smarthistory_saved_prompt=$PROMPT
+        _smarthistory_prompt_boxed=1
+    fi
+    _smarthistory_box_ps=$1
+    if [[ -o prompt_subst ]]; then
+        PROMPT='${_smarthistory_box_ps}'$'\n'"$_smarthistory_saved_prompt"
+    else
+        PROMPT="$_smarthistory_box_ps"$'\n'"$_smarthistory_saved_prompt"
+    fi
+    _smarthistory_box_prompt=$PROMPT
+    # Immediate: show is always a paint's last step, so this is the
+    # widget's only reset (a preceding hide only marked it dirty).
+    _smarthistory_prompt_dirty=1
+    _smarthistory_prompt_box_flush
+}
+
+# Undo `_smarthistory_prompt_box_show`. Only restores when PROMPT is
+# still the one we set, so a theme that rebuilt PROMPT in its own
+# precmd is never clobbered with the stale copy.
+_smarthistory_prompt_box_hide() {
+    (( _smarthistory_prompt_boxed )) || return 0
+    _smarthistory_prompt_boxed=0
+    [[ "$PROMPT" == "$_smarthistory_box_prompt" ]] && PROMPT=$_smarthistory_saved_prompt
+    _smarthistory_box_ps=""
+    _smarthistory_prompt_dirty=1
+    return 0
+}
+
+# Apply a pending PROMPT change with ONE `zle reset-prompt`. Show/hide
+# only mark it dirty because a widget often does both (clear, then
+# repaint), and two reset-prompts in one widget move the cursor up
+# twice — erasing that many lines of earlier terminal output. Runs from
+# `zle-line-pre-redraw`, and explicitly before accept/abort (so the box
+# is gone before the command's output starts) and before every `zle -M`
+# (a reset deferred past a message eats a line and the message).
+_smarthistory_prompt_box_flush() {
+    (( _smarthistory_prompt_dirty )) || return 0
+    _smarthistory_prompt_dirty=0
+    zle && zle reset-prompt
+    return 0
 }
 
 # Remove every `region_highlight` entry whose start offset falls
@@ -1532,6 +1642,7 @@ _smarthistory_dropdown_paint() {
     done
     if (( ${#rows} == 0 )); then
         POSTDISPLAY=""
+        _smarthistory_prompt_box_hide
         _smarthistory_dropdown_hl_prune
         return
     fi
@@ -1952,6 +2063,17 @@ _smarthistory_dropdown_paint() {
     # stale spans; entries belonging to $BUFFER itself (e.g. a
     # syntax-highlighting plugin's own region_highlight use) are
     # never touched — see `_smarthistory_dropdown_hl_prune`.
+    # `dropdown.historyposition=above`: the history box goes into the
+    # prompt instead; POSTDISPLAY keeps only the (ghost-text) first line.
+    if (( _smarthistory_history_above )) && [[ "$_smarthistory_dropdown_active_kind" == "history" ]]; then
+        local _sm_ghost_line=${out%%$'\n'*}
+        _smarthistory_hl_to_prompt "${out#*$'\n'}" $(( $#_sm_ghost_line + 1 )) "${_hl[@]}"
+        _smarthistory_prompt_box_show "$REPLY"
+        out=$_sm_ghost_line
+        _hl=()
+    else
+        _smarthistory_prompt_box_hide
+    fi
     _smarthistory_dropdown_hl_prune
     if (( ${#_hl} > 0 )); then
         local base=$#BUFFER
@@ -2343,6 +2465,9 @@ _smarthistory_register_hook() {
     local current="${(P)hooks_name}"
     [[ " $current " == *" $hookfn "* ]] || eval "${hooks_name}=\"\${${hooks_name}} ${hookfn}\""
 }
+# Applies the history box's pending PROMPT change once per redraw —
+# see `_smarthistory_prompt_box_flush`.
+_smarthistory_register_hook zle-line-pre-redraw _smarthistory_prompt_box_flush
 # Clear a stray box on any buffer edit, UNCONDITIONALLY — i.e. even
 # when `dropdown.enabled=0` (the default), unlike the render hooks
 # registered just below this block. Up/Down's real-history preview box
@@ -2623,6 +2748,7 @@ if [[ "$_smarthistory_dropdown_enabled" = "1" ]]; then
             BUFFER=$REPLY
             CURSOR=${#BUFFER}
             _smarthistory_reset_state
+            _smarthistory_prompt_box_flush
             zle .accept-line
         fi
     }
@@ -2725,7 +2851,7 @@ _smarthistory_cycle_mode() {
     # no leftover text to clean up. `${(U)_smarthistory_mode}`
     # uppercases via a zsh parameter-expansion flag, matching the
     # SESS/DIR/GLOBAL spelling used elsewhere.
-    zle -M "smarthistory mode set to ${(U)_smarthistory_mode}"
+    _smarthistory_prompt_box_flush; zle -M "smarthistory mode set to ${(U)_smarthistory_mode}"
 }
 
 # Toggle the dropdown's match mode between "prefix" (only commands
@@ -2761,7 +2887,7 @@ _smarthistory_cycle_matchmode() {
     # should always confirm it did something, not just when there's a
     # dropdown to re-render. See `_smarthistory_cycle_mode`'s `zle -M`
     # for why this is transient (no leftover text to clean up).
-    zle -M "smarthistory match set to $_smarthistory_matchmode"
+    _smarthistory_prompt_box_flush; zle -M "smarthistory match set to $_smarthistory_matchmode"
 }
 
 # Populate the match cache for the current (mode, pwd, prefix) triple.
@@ -2997,7 +3123,7 @@ _smarthistory_prediction_next() {
     local n=${#_smarthistory_prediction_lines}
     if (( _smarthistory_prediction_index >= n )); then
         _smarthistory_prediction_walk_paint
-        zle -M "no more suggestions"
+        _smarthistory_prompt_box_flush; zle -M "no more suggestions"
         return
     fi
     _smarthistory_prediction_index=$(( _smarthistory_prediction_index + 1 ))
@@ -3159,7 +3285,7 @@ _smarthistory_up_history() {
     _smarthistory_lines=("${(f)_smarthistory_matches}")
     local n=${#_smarthistory_lines}
     if [ $n -eq 0 ]; then
-        zle -M "no history matches"
+        _smarthistory_prompt_box_flush; zle -M "no history matches"
         return
     fi
     if [ $_smarthistory_index -ge $n ]; then
@@ -3180,7 +3306,7 @@ _smarthistory_up_history() {
         # actual cause is just that the current scope (SESS / DIR /
         # GLOBAL) is exhausted; the fix is to widen the scope with
         # Ctrl-G. Spell it out so the next step is obvious.
-        zle -M "oldest in ${(U)_smarthistory_mode}; Ctrl-G for broader scope"
+        _smarthistory_prompt_box_flush; zle -M "oldest in ${(U)_smarthistory_mode}; Ctrl-G for broader scope"
         _smarthistory_debug_log "up: at end of list (index=$_smarthistory_index/$n), no-op"
         return
     fi
@@ -3250,7 +3376,7 @@ _smarthistory_down_history() {
     _smarthistory_lines=("${(f)_smarthistory_matches}")
     local n=${#_smarthistory_lines}
     if [ $n -eq 0 ]; then
-        zle -M "no history matches"
+        _smarthistory_prompt_box_flush; zle -M "no history matches"
         return
     fi
     # Boundary check is `-le 1`, not `-le 0`: valid array indices are
@@ -3304,7 +3430,7 @@ _smarthistory_down_history() {
         # Mirror the Up boundary's Ctrl-G hint: the user just hit the
         # newest entry in the current scope, and "Ctrl-G for broader
         # scope" is the same way out as the top-of-list case.
-        zle -M "newest in ${(U)_smarthistory_mode} (line cleared); Ctrl-G for broader scope"
+        _smarthistory_prompt_box_flush; zle -M "newest in ${(U)_smarthistory_mode} (line cleared); Ctrl-G for broader scope"
         _smarthistory_debug_log "down: at start of list, cleared BUFFER"
         return
     fi
@@ -3336,7 +3462,7 @@ zle -N _smarthistory_cycle_matchmode
 # command is actually executed (handled in the precmd hook).
 _smarthistory_next_history() {
     if [ -z "$_smarthistory_last_cmd" ]; then
-        zle -M "no previous command yet"
+        _smarthistory_prompt_box_flush; zle -M "no previous command yet"
         return
     fi
     # Fetch the candidate list (freq<TAB>command, one per line,
@@ -3360,7 +3486,7 @@ _smarthistory_next_history() {
     _smarthistory_candidates=("${(f)$(_smarthistory_run next "$_smarthistory_last_cmd" --limit 10 "${_sm_next_scope_args[@]}" 2>/dev/null | cut -f2)}")
     local n=${#_smarthistory_candidates}
     if [ $n -eq 0 ]; then
-        zle -M "no suggestions after '$_smarthistory_last_cmd'"
+        _smarthistory_prompt_box_flush; zle -M "no suggestions after '$_smarthistory_last_cmd'"
         return
     fi
     # Cycle through candidates. Reset on each new command (precmd).
@@ -3626,11 +3752,13 @@ _smarthistory_reset_and_accept() {
     fi
     _smarthistory_debug_log "accept-line: resetting state, BUFFER=[$BUFFER]"
     _smarthistory_reset_state
+    _smarthistory_prompt_box_flush
     zle .accept-line
 }
 _smarthistory_reset_and_break() {
     _smarthistory_debug_log "send-break: resetting state"
     _smarthistory_reset_state
+    _smarthistory_prompt_box_flush
     zle .send-break
 }
 zle -N accept-line _smarthistory_reset_and_accept
@@ -3641,6 +3769,7 @@ zle -N send-break _smarthistory_reset_and_break
 _smarthistory_reset_and_abort_line() {
     _smarthistory_debug_log "ctrl-c: resetting state, BUFFER=[$BUFFER]"
     _smarthistory_reset_state
+    _smarthistory_prompt_box_flush
     zle .kill-whole-line
     zle .send-break
 }

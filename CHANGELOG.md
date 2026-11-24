@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `dropdown.historyposition=above`: draw the Up-arrow history box above the
+  prompt instead of below it. Predictions (Down on an empty line) stay below. See
+  [docs/configuration.md](docs/configuration.md#dropdownhistoryposition).
 - Source mode (`|`, `prefix.source=<char>`): the zsh and bash hooks record every
   visited directory containing `.git` or `build.xml`, and whether it is a git
   source. Selecting a git source with several worktrees offers a picker. The
