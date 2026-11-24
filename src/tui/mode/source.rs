@@ -298,6 +298,9 @@ impl App {
                 for (option, ts) in options.iter_mut().zip(last_worktree_visits(&self.conn, &paths)) {
                     option.last_visited = ts;
                 }
+                // Most recently worked-in first; stable, so never-visited
+                // worktrees keep git's order at the end.
+                options.sort_by_key(|o| std::cmp::Reverse(o.last_visited));
                 match options.len() {
                     0 => self.fail_source_picker("no checked-out worktrees found".to_string()),
                     1 => self.start_source_open(options.remove(0).path),
