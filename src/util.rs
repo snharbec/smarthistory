@@ -834,6 +834,7 @@ fn read_mount_table() -> Vec<(String, String)> {
 /// i.e. field 5 is the mount point and the field right after the ` - `
 /// separator is the filesystem type. Whitespace inside a field is
 /// octal-escaped (`\040` for a space).
+#[cfg(any(target_os = "linux", test))]
 fn parse_mountinfo(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -853,6 +854,7 @@ fn parse_mountinfo(text: &str) -> Vec<(String, String)> {
 
 /// Decode the octal escapes `/proc/self/mountinfo` uses for whitespace
 /// and backslashes in a field (e.g. `\040` for a space).
+#[cfg(any(target_os = "linux", test))]
 fn unescape_mountinfo(field: &str) -> String {
     let bytes = field.as_bytes();
     let mut out = String::with_capacity(field.len());

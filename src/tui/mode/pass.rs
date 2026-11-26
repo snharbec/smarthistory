@@ -101,13 +101,11 @@ fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
         }
         if path.is_dir() {
             walk(root, &path, out);
-        } else if let Ok(rel) = path.strip_prefix(root) {
-            if let Some(name) = rel.to_str() {
-                if let Some(entry_name) = name.strip_suffix(".gpg") {
+        } else if let Ok(rel) = path.strip_prefix(root)
+            && let Some(name) = rel.to_str()
+                && let Some(entry_name) = name.strip_suffix(".gpg") {
                     out.push(entry_name.to_string());
                 }
-            }
-        }
     }
 }
 

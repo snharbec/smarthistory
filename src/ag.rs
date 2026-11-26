@@ -231,7 +231,7 @@ fn file_mtime(path: &str) -> i64 {
 /// `run_ag` as a pure function so the ordering can be unit-tested
 /// without a real filesystem walk.
 fn sort_rows_newest_modified_first(rows: &mut [HistoryRow]) {
-    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
 }
 
 /// A `grep_searcher::Sink` that turns each matched line in one file

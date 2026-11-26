@@ -1682,10 +1682,9 @@ fn resolve_herdr_socket_path(
     }
     let config_home = if let Some(x) = xdg_config_home.filter(|v| !v.is_empty()) {
         std::path::PathBuf::from(x)
-    } else if let Some(h) = home.filter(|v| !v.is_empty()) {
-        std::path::PathBuf::from(h).join(".config")
     } else {
-        return None;
+        let h = home.filter(|v| !v.is_empty())?;
+        std::path::PathBuf::from(h).join(".config")
     };
     let base = config_home.join("herdr");
     Some(match session.filter(|v| !v.is_empty()) {
