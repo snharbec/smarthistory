@@ -171,6 +171,41 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Regression: `WalkQueue::finish` used to drop `pending` to 0 and
+    /// `notify_all` without holding the queue lock, so a worker that had
+    /// just seen `pending == 1` in `pop()` and was about to wait missed
+    /// the wakeup and slept forever — `walk_dir` then never returned.
+    /// The race is timing-dependent, so walk a tree with many small
+    /// directories many times and fail (instead of hanging the suite)
+    /// if any walk takes too long.
+    #[test]
+    fn walk_dir_never_hangs_under_contention() {
+        let dir = std::env::temp_dir().join(format!(
+            "smarthistory_walk_stress_{}",
+            std::process::id()
+        ));
+        for i in 0..6 {
+            let d = dir.join(format!("d{i}")).join("sub");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("f.txt"), "x").unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.clone();
+        std::thread::spawn(move || {
+            let ignore = IgnoreSet::new(&[]);
+            for _ in 0..1500 {
+                let mut rows = Vec::new();
+                let mut next_id = -1;
+                walk_dir(&root, &root, &ignore, &mut next_id, &mut rows);
+                assert_eq!(rows.len(), 18, "6 dirs + 6 subdirs + 6 files");
+            }
+            let _ = tx.send(());
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(done.is_ok(), "walk_dir hung (lost wakeup in WalkQueue)");
+    }
+
     #[test]
     fn walk_dir_skips_artifact_dirs() {
         let dir = std::env::temp_dir().join(format!(

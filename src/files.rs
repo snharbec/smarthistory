@@ -267,11 +267,30 @@ impl WalkQueue {
     /// Mark one previously-popped directory as fully processed
     /// (including having pushed any of its subdirectories first).
     fn finish(&self) {
+        // Hold the queue lock across the decrement and the notify. A
+        // worker in `pop()` checks `pending` and then waits while
+        // holding this lock; decrementing without it could land
+        // between that check and the wait, so the `notify_all` below
+        // would fire before the worker sleeps and be lost — the
+        // worker then waits forever and `parallel_walk` never returns.
+        let _q = self.queue.lock().unwrap();
         if self.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
             // `pending` just reached 0 — wake every thread blocked in
             // `pop()` so they can observe it and exit.
             self.cv.notify_all();
         }
+    }
+}
+
+/// Calls [`WalkQueue::finish`] when dropped, so a directory is marked
+/// done even if processing it panics (a panicking `on_chunk`) —
+/// otherwise `pending` never reaches 0 and every other worker waits
+/// forever instead of the panic surfacing.
+struct FinishOnDrop<'a>(&'a WalkQueue);
+
+impl Drop for FinishOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.finish();
     }
 }
 
@@ -423,11 +442,11 @@ where
             let on_chunk = on_chunk.clone();
             scope.spawn(move || {
                 while let Some(dir) = queue.pop() {
+                    let _done = FinishOnDrop(queue);
                     let rows = walk_one_dir(root, &dir, ignore, next_id, queue);
                     if !rows.is_empty() {
                         on_chunk(rows);
                     }
-                    queue.finish();
                 }
             });
         }
