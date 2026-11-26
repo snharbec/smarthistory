@@ -55,7 +55,10 @@ Selecting a row stages the command to focus that pane / workspace.
   - herdr: the pane's `agent_status` is `idle`, `done` or `blocked`.
   - Rex: the foreground program reported `idle`, `done` or `blocked` through
     Rex's program status (OSC 7501), as Claude Code does. Records left behind
-    by a program that already exited are ignored.
+    by a program that already exited are ignored. pi doesn't report this on
+    its own: install the bundled extension with
+    `cp contrib/pi/rex-status.ts ~/.pi/agent/extensions/` (it stays silent
+    outside Rex).
   - tmux: not detected.
 
 ## Workspace headers
