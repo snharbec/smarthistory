@@ -127,20 +127,21 @@ pub fn escape_field_for_output(s: &str) -> String {
 
 /// Human-readable difference between `epoch` and now, using the largest
 /// non-zero unit. Ladder (with short unit suffixes):
-///   month  -> "1M", 2M, ...
+///   year   -> "1y", 2y, ...
+///   month  -> "1mo", 2mo, ...
 ///   day    -> "1d", 2d, ...
 ///   hour   -> "1h", 2h, ...
 ///   minute -> "1m", 2m, ...
 ///   second -> "1s", 2s, ...
-/// Returns a placeholder "9999M" for non-positive or out-of-range
+/// Returns a placeholder "999y" for non-positive or out-of-range
 /// timestamps so they sort as the oldest possible entries.
 pub fn format_diff(epoch: i64) -> String {
     let now = chrono::Utc::now().naive_utc();
     let Some(then) = chrono::DateTime::from_timestamp(epoch, 0).map(|dt| dt.naive_utc()) else {
-        return "9999M".to_string();
+        return "999y".to_string();
     };
     if epoch <= 0 {
-        return "9999M".to_string();
+        return "999y".to_string();
     }
 
     // Calendar-month diff first, since it's non-uniform in seconds.
@@ -157,8 +158,13 @@ pub fn format_diff(epoch: i64) -> String {
     if now.day() < then.day() {
         months -= 1;
     }
+    // `mo`, not `M`: a lone `M` next to `m` (minutes) read as
+    // "1 minute" at a glance.
+    if months >= 12 {
+        return format!("{}y", months / 12);
+    }
     if months > 0 {
-        return format!("{}M", months);
+        return format!("{}mo", months);
     }
 
     let delta = now - then;

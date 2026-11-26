@@ -2293,6 +2293,23 @@ pub(crate) struct App {
     /// session file / config; every other `App::new` caller gets the
     /// `false` default.
     compact: bool,
+    /// `tui.style=modern` (see `Config::modern`). Implies the compact
+    /// bundle (`App::compact_display`) and adds the modern chrome:
+    /// light pane frames, thin scrollbar, tree connectors, per-mode
+    /// details, hover highlight. Seeded by `run_tui_to_stdout`;
+    /// `false` for every other `App::new` caller (tests render the
+    /// classic layout unless they opt in).
+    modern: bool,
+    /// Data index of the list row under the mouse pointer, for the
+    /// modern style's hover highlight. `None` when the pointer is
+    /// outside the list.
+    hover_row: Option<usize>,
+    /// Data index shown on each content row of the list, top to
+    /// bottom, as of the last frame (`None` for top padding). Filled
+    /// by `render::draw_list`; used to hit-test mouse clicks and
+    /// hover. Content row `k` is at `list_area.y + 1 + k` (the top
+    /// border / rule).
+    pub(crate) list_row_map: Vec<Option<usize>>,
 
     /// Cache of syntax-highlighted spans for `tui_highlight_enabled`,
     /// keyed by `(is_light_theme, cmd_display)` — the light/dark
@@ -2645,6 +2662,18 @@ fn query_mode_char(query: &str, prefixes: &crate::QueryPrefixes) -> char {
 
 impl App {
     /// True if the active match algorithm is Regex.
+    /// A background `*`-view pane snapshot is still running (the
+    /// status bar shows a spinner).
+    pub(crate) fn live_panes_loading(&self) -> bool {
+        self.live_panes_request.is_some()
+    }
+
+    /// The compact bundle is on: explicitly (`tui.compact`) or as
+    /// part of the modern style.
+    pub(crate) fn compact_display(&self) -> bool {
+        self.compact || self.modern
+    }
+
     fn is_regex_query(&self) -> bool {
         self.match_algorithm == MatchAlgorithm::Regex
     }
@@ -5732,6 +5761,9 @@ impl App {
             // invalidated at every `install_palette` call site.
             tui_highlight_enabled: false,
             compact: false,
+            modern: false,
+            hover_row: None,
+            list_row_map: Vec::new(),
             command_highlight_cache: std::collections::HashMap::new(),
         };
         app.recompile_regex();
@@ -12157,6 +12189,22 @@ impl App {
         Ok(())
     }
 
+    /// The data index of the list row drawn at screen cell
+    /// (`column`, `row`), from the last frame's
+    /// [`App::list_row_map`]. `None` outside the list, on its frame,
+    /// or on top padding.
+    pub(crate) fn list_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        if !self
+            .list_area
+            .contains(ratatui::layout::Position::new(column, row))
+        {
+            return None;
+        }
+        let k = row.checked_sub(self.list_area.y + 1)? as usize;
+        let idx = (*self.list_row_map.get(k)?)?;
+        (idx < self.merged_rows().len()).then_some(idx)
+    }
+
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseEventKind, MouseButton};
         match mouse.kind {
@@ -12173,15 +12221,13 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.list_area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
-                    let clicked_row = mouse.row.saturating_sub(self.list_area.y);
-                    let offset = self.list_state.offset();
-                    let new_index = offset + clicked_row as usize;
-                    if new_index < self.merged_rows().len() {
-                        self.list_state.select(Some(new_index));
-                        crate::tui::mode::ensure_selected_context(self);
-                    }
+                if let Some(data_idx) = self.list_row_at(mouse.column, mouse.row) {
+                    self.list_state.select(Some(data_idx));
+                    crate::tui::mode::ensure_selected_context(self);
                 }
+            }
+            MouseEventKind::Moved => {
+                self.hover_row = self.list_row_at(mouse.column, mouse.row);
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.pane_layout == crate::tui::state::PaneLayout::Right {
@@ -12809,6 +12855,7 @@ pub fn run_tui_to_stdout(
     app.pane_layout = initial_pane_layout;
     app.pane_width = initial_pane_width;
     app.compact = initial_compact;
+    app.modern = app_cfg.modern();
     app.segments_min_words = app_cfg.segments_min_words();
     app.tui_highlight_enabled = app_cfg.tui_highlight();
     // `--root <DIR>` overrides the base directory both plain `/`

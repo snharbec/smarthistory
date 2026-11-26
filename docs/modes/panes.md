@@ -61,6 +61,12 @@ Selecting a row stages the command to focus that pane / workspace.
     outside Rex).
   - tmux: not detected.
 
+With [`tui.style=modern`](../configuration.md#tuistyle) (the default) the tree
+is drawn with connectors instead of headings: `▾`/`▸` for the `Sessions` /
+`Directories` / `hosts` groups, `●` for each live session, and `├` / `└` in
+front of its panes. A pane running something keeps its `▶` marker (`⏸` while
+an agent waits for input).
+
 ## Workspace headers
 
 A workspace header row is rendered for every tmux session / herdr workspace that
