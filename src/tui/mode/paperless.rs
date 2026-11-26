@@ -102,6 +102,13 @@ impl App {
         matches(self)
     }
 
+    /// Whether a Paperless server is configured at all. An empty
+    /// result list means "no matches" only when this is true; without
+    /// it the view has nothing to search and says so instead.
+    pub(crate) fn paperless_is_configured(&self) -> bool {
+        self.paperless_config.is_some()
+    }
+
     /// Arm or clear the paperless-mode search debounce. Called
     /// from every keystroke path (co-located with `files_touch`
     /// et al.). Re-arms the timer when the user is still in

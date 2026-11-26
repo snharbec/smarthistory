@@ -318,7 +318,21 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
             continue;
         }
         let line_number = &rest[i..];
-        let display = &rest[..i];
+        // Emacs `etags` writes `<display>\x7f<name>\x01<line>,<off>`
+        // while `ctags` writes a bare name. Everything before the
+        // digits is therefore both halves for an etags line, and
+        // rendering it verbatim printed the text twice
+        // (`## HeadingHeading`). Prefer the explicit `\x01`-delimited
+        // name (the same one Emacs' own xref shows), dropping the
+        // `\x7f` display half; fall back to the whole string for a
+        // ctags line, which has neither separator.
+        let raw = &rest[..i];
+        let display = match raw.split_once('\x7f') {
+            // etags: take the name part, before any `\x01` payload.
+            Some((_, name)) => name.split('\x01').next().unwrap_or(name),
+            // ctags, or a stray `\x01` without a display half.
+            None => raw.split('\x01').next().unwrap_or(raw),
+        };
         if display.is_empty() || line_number.is_empty() {
             continue;
         }

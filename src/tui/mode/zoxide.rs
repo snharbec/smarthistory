@@ -158,7 +158,6 @@ pub(crate) fn build_rows(
     filter_tokens: &[&str],
     home_list: &[String],
 ) -> Vec<HistoryRow> {
-    let total = paths.len() as i64;
     let mut rows: Vec<HistoryRow> = Vec::new();
     for (idx, directory) in paths.into_iter().enumerate() {
         // We intentionally skip checking `is_dir()` here, as a broken network
@@ -178,7 +177,15 @@ pub(crate) fn build_rows(
             directory,
             session_id: String::new(),
             exit_code: 0,
-            timestamp: total - idx as i64,
+            // `zoxide query --list` returns directories in frecency
+            // order and carries NO timestamp, so there is no real
+            // "when" to show. This used to be `total - idx` (a sort
+            // ordinal), which `format_diff` rendered as a
+            // plausible-looking `56y` on every row. Rows are already
+            // ordered by `id`, so the ordinal was never needed for
+            // sorting; `0` makes the age column blank (its documented
+            // "no timestamp" sentinel) instead of lying.
+            timestamp: 0,
             comment: String::new(),
             output: String::new(),
             mode: "directory".to_string(),
