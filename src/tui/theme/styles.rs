@@ -95,6 +95,10 @@ impl Theme {
     pub fn info_color() -> Color {
         PALETTE.with(|c| c.borrow().info)
     }
+    /// Color for an AI agent pane waiting for input (`*` view).
+    pub fn agent_waiting_color() -> Color {
+        PALETTE.with(|c| c.borrow().agent_waiting)
+    }
     pub fn dim_color() -> Color {
         PALETTE.with(|c| c.borrow().dim)
     }

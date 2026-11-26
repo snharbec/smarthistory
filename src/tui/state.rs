@@ -186,6 +186,12 @@ pub struct HistoryRow {
     /// was introduced to fix. Empty for
     /// every non-pane row.
     pub pane_agent: String,
+
+    /// `pane` rows: the agent in the pane waits for input (see
+    /// `CurrentPaneInfo::agent_waiting`). `workspace` rows: at least
+    /// one of the session's panes does. The renderer paints these in
+    /// `Theme::agent_waiting_color`. `false` on every other row.
+    pub agent_waiting: bool,
 }
 
 impl HistoryRow {

@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `*` view: an AI agent pane waiting for input (idle, done, or blocked on a
+  permission / question) shows a `⏸` marker in a dedicated color, and its
+  session header takes that color with an `N waiting` summary. Read from herdr's
+  `agent_status` and Rex's program status (OSC 7501). Set the color with
+  `tuicolor.agentwaiting=`. See [docs/modes/panes.md](docs/modes/panes.md).
 - `multiplexer=rex`: support the Rex terminal next to tmux and herdr. The `*`
   and `#` views list every Rex session, window and block (one `rex do`
   snapshot), and selecting a row focuses that block or session in the Rex app,

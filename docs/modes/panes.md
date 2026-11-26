@@ -45,6 +45,18 @@ Selecting a row stages the command to focus that pane / workspace.
   scanning a long list. An idle pane (just a shell prompt, no `current_command`)
   has nothing to show and stays visually quiet — no marker, no name text
   (there's none to render).
+- An AI agent (Claude, Codex, pi, …) that is **waiting for input** swaps the
+  `▶` for a `⏸` marker and renders in the agent-waiting color
+  ([`tuicolor.agentwaiting`](../configuration.md#tuicolor), default the theme's
+  `warning`). Its session header takes the same color and its summary reads
+  `N waiting`, so a session with an agent that needs you stands out even when
+  collapsed into its header. "Waiting" means idle at its prompt, done with a
+  turn, or blocked on a permission / question:
+  - herdr: the pane's `agent_status` is `idle`, `done` or `blocked`.
+  - Rex: the foreground program reported `idle`, `done` or `blocked` through
+    Rex's program status (OSC 7501), as Claude Code does. Records left behind
+    by a program that already exited are ignored.
+  - tmux: not detected.
 
 ## Workspace headers
 

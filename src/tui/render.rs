@@ -6017,11 +6017,12 @@ pub(crate) fn render_row<'a>(
         // level under the synthetic `# Sessions` header
         // (`insert_sessions_group_header` in `mode/panes.rs`), so
         // it renders as a `## ` sub-heading rather than a
-        // top-level `# ` one.
+        // top-level `# ` one. A session with an agent waiting for
+        // input takes the agent-waiting color instead.
         spans.push(Span::styled(
             "  ## ",
             Style::default()
-                .fg(Theme::info_color())
+                .fg(session_row_color(row))
                 .add_modifier(Modifier::BOLD),
         ));
     } else if row.mode == "workspace" {
@@ -6238,7 +6239,7 @@ pub(crate) fn render_row<'a>(
         spans.push(Span::styled(
             format!("{} ", cmd_display),
             Style::default()
-                .fg(Theme::info_color())
+                .fg(session_row_color(row))
                 .add_modifier(Modifier::BOLD),
         ));
     } else if row.mode == "pane" && !row.command.is_empty() {
@@ -6256,11 +6257,17 @@ pub(crate) fn render_row<'a>(
         // above) rather than layering search-match bolding on top —
         // those helpers have no base-style parameter, and the running
         // marker is the more important signal here.
+        // An agent waiting for input swaps the `▶` for `⏸` and the
+        // highlight color for the agent-waiting color, so the panes
+        // that need the user stand out from the busy ones.
+        let (marker, color) = if row.agent_waiting {
+            ("⏸", Theme::agent_waiting_color())
+        } else {
+            ("▶", Theme::highlight_color())
+        };
         spans.push(Span::styled(
-            format!("▶ {} ", cmd_display),
-            Style::default()
-                .fg(Theme::highlight_color())
-                .add_modifier(Modifier::BOLD),
+            format!("{marker} {} ", cmd_display),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     } else if app.is_regex_query() {
         let mut text_spans = highlight_regex_matches(&cmd_display, app.query_regex.as_ref());
@@ -6785,6 +6792,17 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
 /// the output doesn't have a sequence of
 /// single-character spans (matters for
 /// ratatui's layout pass on long lines).
+/// Heading color for a `workspace` row in the `*` view: the
+/// agent-waiting color when one of the session's agents waits for
+/// input, the info color otherwise.
+fn session_row_color(row: &HistoryRow) -> Color {
+    if row.agent_waiting {
+        Theme::agent_waiting_color()
+    } else {
+        Theme::info_color()
+    }
+}
+
 fn render_preview_line(line: &str) -> Line<'static> {
     // Block-level detection first. A line
     // that starts with `# ` / `## ` / `### `
