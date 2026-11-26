@@ -636,7 +636,133 @@ fn is_color_light(color: Color) -> bool {
     }
 }
 
-fn resolve_color(s: &str) -> Color {
+/// The "dimmer" slot: a step below `dim`, for text that should
+/// recede further (month/year ages, rule labels). Derived by mixing
+/// `fg` toward `bg` so it tracks the theme instead of being a fixed
+/// `DarkGray` — on a light theme a hardcoded dark gray is nearly
+/// invisible, and on any theme it was the one palette slot that
+/// ignored the palette around it.
+pub(crate) fn derive_dimmer(fg: Color, bg: Color) -> Color {
+    match (fg, bg) {
+        (Color::Rgb(fr, fgg, fb), Color::Rgb(br, bgg, bb)) => {
+            // 35% of the way from `fg` to `bg`: still readable, but
+            // clearly quieter than `dim`.
+            let mix = |f: u8, b: u8| -> u8 {
+                let f = u16::from(f);
+                let b = u16::from(b);
+                ((f * 65 + b * 35) / 100) as u8
+            };
+            Color::Rgb(mix(fr, br), mix(fgg, bgg), mix(fb, bb))
+        }
+        // Non-RGB palettes (16-colour themes, `Color::Reset`): stay on
+        // the ANSI ladder, picking the quieter neighbour of `fg`.
+        _ => {
+            if is_color_light(bg) {
+                Color::Gray
+            } else {
+                Color::DarkGray
+            }
+        }
+    }
+}
+
+/// Whether the terminal can actually paint 24-bit color. A theme's
+/// palette is RGB; on a 256-colour terminal (`COLORTERM` unset and a
+/// plain `xterm-256color` TERM — an ssh session, `tmux` without
+/// `terminal-overrides`, a serial console) those RGB values are what
+/// the terminal will *approximate*, badly and differently per
+/// terminal. Quantizing once here means the whole UI degrades to the
+/// nearest palette entry instead of every renderer separately
+/// guessing.
+fn supports_truecolor() -> bool {
+    // Any of these means the terminal advertises 24-bit.
+    if let Ok(ct) = std::env::var("COLORTERM") {
+        let ct = ct.to_ascii_lowercase();
+        if ct.contains("truecolor") || ct.contains("24bit") {
+            return true;
+        }
+    }
+    // Terminals that emit truecolor without setting COLORTERM.
+    if let Ok(term) = std::env::var("TERM") {
+        let term = term.to_ascii_lowercase();
+        if term.contains("direct") || term.contains("truecolor") || term.contains("24bit") {
+            return true;
+        }
+    }
+    // WezTerm / kitty / iTerm2 / Ghostty all set at least one of
+    // these even when the user runs a plain xterm TERM.
+    ["TERM_PROGRAM", "KITTY_WINDOW_ID", "WEZTERM_EXECUTABLE", "GHOSTTY_RESOURCES_DIR"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+}
+
+/// Nearest xterm-256 palette entry for an RGB triple (the standard
+/// 6x6x6 colour cube plus the 24-step gray ramp — the same table
+/// every terminal uses, so the choice is portable).
+pub(crate) fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
+    // Compare against every cube entry and every gray, and take the
+    // closest in simple RGB distance. 240 candidates is cheap and
+    // this runs once per palette slot, not per frame.
+    let mut best = 0u8;
+    let mut best_dist = u32::MAX;
+    let mut consider = |idx: u8, cr: u8, cg: u8, cb: u8| {
+        let d = u32::from(r).abs_diff(u32::from(cr)).pow(2)
+            + u32::from(g).abs_diff(u32::from(cg)).pow(2)
+            + u32::from(b).abs_diff(u32::from(cb)).pow(2);
+        if d < best_dist {
+            best_dist = d;
+            best = idx;
+        }
+    };
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    for (ri, &cr) in LEVELS.iter().enumerate() {
+        for (gi, &cg) in LEVELS.iter().enumerate() {
+            for (bi, &cb) in LEVELS.iter().enumerate() {
+                consider(16 + (36 * ri + 6 * gi + bi) as u8, cr, cg, cb);
+            }
+        }
+    }
+    for i in 0..24u8 {
+        let v = 8 + i * 10;
+        consider(232 + i, v, v, v);
+    }
+    best
+}
+
+/// Downgrade a palette to indexed colour when the terminal can't do
+/// 24-bit. Non-RGB slots (the 16 ANSI names, `Color::Reset`) pass
+/// through untouched — they are already portable.
+fn quantize_for_terminal(p: Palette) -> Palette {
+    if supports_truecolor() {
+        return p;
+    }
+    let q = |c: Color| match c {
+        Color::Rgb(r, g, b) => Color::Indexed(rgb_to_256(r, g, b)),
+        other => other,
+    };
+    Palette {
+        bg: q(p.bg),
+        fg: q(p.fg),
+        accent: q(p.accent),
+        success: q(p.success),
+        error: q(p.error),
+        warning: q(p.warning),
+        dim: q(p.dim),
+        dimmer: q(p.dimmer),
+        highlight: q(p.highlight),
+        info: q(p.info),
+        selection: q(p.selection),
+        badge_fg: q(p.badge_fg),
+        list_bg: q(p.list_bg),
+        details_bg: q(p.details_bg),
+        input_bg: q(p.input_bg),
+        status_bg: q(p.status_bg),
+        agent_waiting: q(p.agent_waiting),
+        is_light_theme: p.is_light_theme,
+    }
+}
+
+pub(crate) fn resolve_color(s: &str) -> Color {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix('#').or_else(|| s.strip_prefix("0x"))
         && hex.len() == 6
@@ -816,15 +942,25 @@ impl Palette {
     /// self-consistent even without any user override).
     fn from_manual(theme: &crate::TuiTheme, _cfg: &Config) -> Self {
         let fallback = Palette::builtin();
+        let bg = if theme.bg.is_empty() { fallback.bg } else { resolve_color(&theme.bg) };
+        let fg = if theme.fg.is_empty() { fallback.fg } else { resolve_color(&theme.fg) };
+        // The user can pin this slot with `tuicolor.dimmer=`; without
+        // an override it follows the theme's own fg/bg instead of a
+        // hardcoded DarkGray.
+        let dimmer = if theme.dimmer.is_empty() {
+            derive_dimmer(fg, bg)
+        } else {
+            resolve_color(&theme.dimmer)
+        };
         Palette {
-            bg: if theme.bg.is_empty() { fallback.bg } else { resolve_color(&theme.bg) },
-            fg: if theme.fg.is_empty() { fallback.fg } else { resolve_color(&theme.fg) },
+            bg,
+            fg,
             accent: if theme.accent.is_empty() { fallback.accent } else { resolve_color(&theme.accent) },
             success: if theme.success.is_empty() { fallback.success } else { resolve_color(&theme.success) },
             error: if theme.error.is_empty() { fallback.error } else { resolve_color(&theme.error) },
             warning: if theme.warning.is_empty() { fallback.warning } else { resolve_color(&theme.warning) },
             dim: if theme.dim.is_empty() { fallback.dim } else { resolve_color(&theme.dim) },
-            dimmer: Color::DarkGray,
+            dimmer,
             highlight: if theme.highlight.is_empty() { fallback.highlight } else { resolve_color(&theme.highlight) },
             info: if theme.info.is_empty() { fallback.info } else { resolve_color(&theme.info) },
             selection: if theme.selection.is_empty() { fallback.selection } else { resolve_color(&theme.selection) },
@@ -898,7 +1034,16 @@ pub fn install_palette(theme: SelectedTheme) {
                 } else {
                     resolve_color(&cfg_theme.dim)
                 },
-                dimmer: Color::DarkGray,
+                // Same derivation as the manual path, from the
+                // fully-resolved fg/bg of this theme.
+                dimmer: if cfg_theme.dimmer.is_empty() {
+                    derive_dimmer(
+                        if cfg_theme.fg.is_empty() { p.fg } else { resolve_color(&cfg_theme.fg) },
+                        if cfg_theme.bg.is_empty() { p.bg } else { resolve_color(&cfg_theme.bg) },
+                    )
+                } else {
+                    resolve_color(&cfg_theme.dimmer)
+                },
                 highlight: if cfg_theme.highlight.is_empty() {
                     // No `tuicolor.highlight=` override.
                     // Use the theme's own `accent` (there's
@@ -973,7 +1118,7 @@ pub fn install_palette(theme: SelectedTheme) {
             }
         }
     };
-    PALETTE.with(|c| *c.borrow_mut() = palette);
+    PALETTE.with(|c| *c.borrow_mut() = quantize_for_terminal(palette));
 }
 
 #[cfg(test)]
@@ -1020,9 +1165,55 @@ mod tests {
         assert!(BuiltinTheme::curated().contains(&BuiltinTheme::Luna));
         assert!(BuiltinTheme::all().contains(&BuiltinTheme::Luna));
     }
+
+    /// The 256-colour quantizer must map pure primaries onto the cube
+    /// entries the xterm palette puts them at, and round-trip a
+    /// non-RGB colour untouched.
+    #[test]
+    fn rgb_to_256_maps_the_cube_and_grays() {
+        // Pure red is cube index 16 + 36*5 = 196.
+        assert_eq!(rgb_to_256(255, 0, 0), 196);
+        // Pure green: 16 + 6*5 = 46.
+        assert_eq!(rgb_to_256(0, 255, 0), 46);
+        // Pure blue: 16 + 5 = 21.
+        assert_eq!(rgb_to_256(0, 0, 255), 21);
+        // Near-black gray falls in the 24-step ramp, not the cube.
+        let blackish = rgb_to_256(8, 8, 8);
+        assert!(
+            (232..=255).contains(&blackish),
+            "near-black belongs to the gray ramp, got {blackish}"
+        );
+        // A mid gray is a ramp entry too.
+        let mid = rgb_to_256(128, 128, 128);
+        assert!((232..=255).contains(&mid), "got {mid}");
+    }
+
+    /// `derive_dimmer` moves toward the background and stays distinct
+    /// from `fg`, so light themes get a readable quiet colour instead
+    /// of a hardcoded dark gray.
+    #[test]
+    fn dimmer_is_derived_between_fg_and_bg() {
+        let white = Color::Rgb(255, 255, 255);
+        let black = Color::Rgb(0, 0, 0);
+        // Light theme: fg is black-ish on white -> dimmer sits between.
+        let light = derive_dimmer(Color::Rgb(0, 0, 0), white);
+        match light {
+            Color::Rgb(r, _, _) => {
+                assert!(r > 0 && r < 255, "dimmer must be between fg and bg, got {r}");
+            }
+            other => panic!("expected RGB, got {other:?}"),
+        }
+        // Dark theme too.
+        let dark = derive_dimmer(white, black);
+        match dark {
+            Color::Rgb(r, _, _) => assert!(r < 255 && r > 0, "got {r}"),
+            other => panic!("expected RGB, got {other:?}"),
+        }
+    }
 }
 
 mod curated;
+pub mod glyphs;
 pub mod palette_storage;
 mod picker;
 mod styles;

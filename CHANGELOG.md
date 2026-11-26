@@ -21,6 +21,22 @@ All notable changes to this project will be documented in this file.
 - TUI: `*` view session summaries ended in a stray comma; a failed command's
   `Stat` line was drawn in the success color.
 - Ages over a month now read `2mo` / `1y` instead of `2M`.
+- TUI: the output-preview pane could scroll one line past the end of its
+  content — its scroll bound assumed two border rows even in the modern
+  style, which draws only a top rule.
+- TUI: a query longer than the prompt row was clipped, and the cursor was
+  pinned to the rightmost cell — you could not see the text you were typing.
+  The prompt now scrolls horizontally to keep the cursor visible.
+- TUI: on terminals narrower than 90 columns, a row with captured output lost
+  its **Details** pane entirely (only the preview was drawn), so the command,
+  directory and exit status disappeared. The two now stack: Details above the
+  output.
+- TUI: a zero-result list was a blank rectangle. It now names the query and the
+  active match algorithm and offers the keys that change them.
+- TUI: `dimmer` (month/year ages, rule labels) was a hardcoded `DarkGray`, the
+  one palette slot that ignored the theme — nearly invisible on light themes.
+  It is now derived from the theme's `fg`/`bg`, and overridable with
+  `tuicolor.dimmer=`.
 
 ### Added
 
@@ -30,6 +46,48 @@ All notable changes to this project will be documented in this file.
   in the `*` view, key hints and a loading spinner in the status bar, and hover
   highlight. `tui.style=classic` keeps the previous layout. See
   [docs/configuration.md](docs/configuration.md#tuistyle).
+
+- TUI modern style, second pass — the row layout and the chrome underneath it:
+
+  - **row gutter collapsed**: indicators take two cells each and only paint
+    when they carry information, so a plain history row's command starts
+    around column 10 instead of column 16 (the classic layout reserved
+    `[ ] o  16m   ✓  ` on every row). The age column stays aligned.
+  - **Details is two rows, not five**: the command plus one dim meta rail
+    (`~/repo · 14:03:41 · 12m · 995fecaa · ✓`), with the comment as an
+    optional third row. The meta rail grows the pane only when it has content.
+  - the mode strip no longer repeats the scope sentence
+    (`current directory only · last only`) that its own `DIR` / `LAST` chips
+    already state three cells to the left.
+  - the status bar's key hints are **mode-aware** — `C-o output` in history
+    mode, `1-9 jump` in `*`, `C-] open` in files/tags/codegraph/JIRA — with the
+    global hints after them, all resolved from your own bindings.
+  - the mode picker (`F1`) lists **modes used this session first**, marked
+    `recent`, instead of always in declaration order.
+  - selected rows drop the underline (it cut through syntax highlighting); the
+    `▌` bar and the selection background carry the emphasis.
+  - markdown **pipe tables** in a preview render as boxed rows instead of
+    literal `| a | b |` text — JIRA issues, notes and Paperless documents all
+    use them.
+  - all dialogs go through one `popup(min_w, min_h, …)` primitive, so a popup
+    keeps its content floor on a narrow terminal instead of shrinking until
+    the text wraps. This replaces the per-dialog `max(76, …)` / `max(44, …)`
+    patches the palette and mode picker had each grown.
+  - `Chrome` replaces the `app.modern` boolean threaded through 25 render
+    branches: `classic` is now a property of the chrome, and it is **frozen**
+    (its geometry does not change; new features are `modern`-only).
+
+- `tui.glyphs=unicode|ascii` (default `unicode`): swap every TUI marker (the
+  selection bar, captured-output marker, tree connectors, scrollbar, disclosure
+  triangles, pane status markers, exit status, ellipsis, rules) for a
+  single-column ASCII character. The Unicode set is all East-Asian Width =
+  Ambiguous, so terminals that render ambiguous characters double-width shift
+  every rule and connector by a column. The TUI's equivalent of
+  `dropdown.boxchars`. See
+  [docs/configuration.md](docs/configuration.md#tuiglyphs).
+- The TUI quantizes its palette to the nearest xterm-256 entry when the
+  terminal does not advertise 24-bit colour, so an `ssh` session into a
+  256-colour terminal degrades once, portably, instead of per-slot.
 
 - `contrib/pi/rex-status.ts`: a pi extension that reports pi's state to Rex
   (OSC 7501: `working`, `idle`, `blocked` on a UI prompt), so a pi pane waiting

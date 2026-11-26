@@ -4915,6 +4915,13 @@ struct PrefixPicker {
     /// the user can never navigate past
     /// the last entry.
     selected: usize,
+    /// Modes used this session, newest first — the same ordering
+    /// `Action::CycleRecentPrefixes` cycles through. The picker shows
+    /// a `recent` marker on these and sorts them first (after
+    /// History), so the twenty-odd single-character prefixes stop
+    /// being a memory test: the modes you actually use float to the
+    /// top of the list.
+    recent: Vec<crate::tui::mode::ModeKind>,
     /// `true` when this picker was opened by the meta-prefix mode
     /// (`'` + Tab, ambiguous match) rather than by `PickPrefix`
     /// (F1). Read by `handle_prefix_picker_key`'s `Enter` arm to
@@ -5185,8 +5192,24 @@ impl PrefixPicker {
         ]
     }
 
-    fn new(prefixes: &QueryPrefixes, current_prefix: Option<char>) -> Self {
-        let options = Self::build_options(prefixes);
+    fn new(
+        prefixes: &QueryPrefixes,
+        current_prefix: Option<char>,
+        recent: &[crate::tui::mode::ModeKind],
+    ) -> Self {
+        let mut options = Self::build_options(prefixes);
+        // Stable reorder: History (no prefix) stays pinned first,
+        // then the modes in most-recently-used order, then the rest
+        // in their declared order.
+        let rank = |o: &PrefixOption| -> usize {
+            if o.prefix.is_none() {
+                return 0;
+            }
+            crate::tui::mode::mode_kind_by_display_name(o.name)
+                .and_then(|m| recent.iter().position(|r| *r == m))
+                .map_or(usize::MAX, |i| i + 1)
+        };
+        options.sort_by_key(rank);
         // Pre-select the row
         // matching the current
         // prefix. If the current
@@ -5201,7 +5224,12 @@ impl PrefixPicker {
         let selected = current_prefix
             .and_then(|c| options.iter().position(|o| o.prefix == Some(c)))
             .unwrap_or(0);
-        PrefixPicker { options, selected, activate_only: false }
+        PrefixPicker {
+            options,
+            selected,
+            recent: recent.to_vec(),
+            activate_only: false,
+        }
     }
 
     /// Build a picker pre-filtered to entries whose `name` starts
@@ -5218,7 +5246,12 @@ impl PrefixPicker {
             .into_iter()
             .filter(|o| filter.is_empty() || o.name.starts_with(filter.as_str()))
             .collect();
-        PrefixPicker { options, selected: 0, activate_only: true }
+        PrefixPicker {
+            options,
+            selected: 0,
+            recent: Vec::new(),
+            activate_only: true,
+        }
     }
 
     /// Highlighted entry, or `None` if the
@@ -9168,7 +9201,13 @@ impl App {
         let first = self.query.chars().next();
         let current =
             first.and_then(|c| self.query_prefixes.all_chars().contains(&c).then_some(c));
-        self.prefix_picker = Some(PrefixPicker::new(&self.query_prefixes, current));
+        // Newest-first, matching `cycle_recent_prefix_modes`.
+        let mut recent: Vec<crate::tui::mode::ModeKind> =
+            self.mode_use_generation.keys().copied().collect();
+        recent.sort_by_key(|m| {
+            std::cmp::Reverse(self.mode_use_generation.get(m).copied().unwrap_or(0))
+        });
+        self.prefix_picker = Some(PrefixPicker::new(&self.query_prefixes, current, &recent));
     }
 
     fn close_prefix_picker(&mut self) {
@@ -12856,6 +12895,11 @@ pub fn run_tui_to_stdout(
     app.pane_width = initial_pane_width;
     app.compact = initial_compact;
     app.modern = app_cfg.modern();
+    // Glyph set has to be installed before the first frame, and it is
+    // process-wide (a thread-local, like PALETTE) rather than a field
+    // on `App`, since every render helper would otherwise need a new
+    // parameter for what is one startup choice.
+    crate::tui::theme::glyphs::install_glyphs(app_cfg.ascii_glyphs());
     app.segments_min_words = app_cfg.segments_min_words();
     app.tui_highlight_enabled = app_cfg.tui_highlight();
     // `--root <DIR>` overrides the base directory both plain `/`

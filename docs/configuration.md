@@ -63,6 +63,7 @@ value" so you can confirm what the TUI actually sees.
   - [`panes.shortcutprefix`](#panesshortcutprefix)
 - [Compact display](#compact-display)
   - [`tui.compact`](#tuicompact)
+  - [`tui.glyphs`](#tuiglyphs)
   - [`tui.style`](#tuistyle)
 - [Shell server](#shell-server)
   - [`shellserver.enabled`](#shellserverenabled)
@@ -503,12 +504,29 @@ The TUI's visual style. `modern` (the default) includes the whole
   instead of the `#` / `##` headings;
 - outside shell history, a row's secondary text is plain dim text, not a
   `# comment`;
-- the **status bar** shows key hints (key in the accent color), a spinner while
-  the live pane snapshot loads, and no theme name;
+- the **status bar** shows key hints (key in the accent color) — the ones for
+  the active mode first (`C-o output` in history, `1-9 jump` in `*`, …) — a
+  spinner while the live pane snapshot loads, and no theme name;
 - **hover**: the row under the mouse pointer is tinted;
-- on terminals narrower than 90 columns, a captured output takes the whole
-  detail row instead of a cramped Details | Output split;
-- `≡` marks a history row with captured output (classic: `o`).
+- on terminals narrower than 90 columns, Details is **stacked above** the
+  captured output instead of the two being squeezed side by side (the command,
+  directory and exit status stay visible);
+- `≡` marks a history row with captured output (classic: `o`);
+- the row gutter is **two cells per indicator and only when it has something to
+  say**, so a plain history row's command starts around column 10 instead of
+  column 16;
+- **Details is two rows, not five**: the command, then one dim meta rail
+  (`~/repo · 14:03:41 · 12m · 995fecaa · ✓`). It grows a third row only when
+  the entry has a comment;
+- selected rows are bold on the `selection` background with the `▌` bar, and
+  are **not underlined** (the underline cut through syntax highlighting);
+- an **empty result list explains itself**: the query, the active match
+  algorithm, and the keys that change it (`C-f` algorithm, `C-u` clear,
+  `F1` view);
+- **markdown pipe tables** in a preview render as boxed rows instead of literal
+  `| a | b |` text (JIRA issues, notes and Paperless documents all use them);
+- the mode picker (`F1`) lists **modes you have used this session first**, with
+  a `recent` marker.
 
 ```ini
 tui.style=classic   # the historical boxed layout
@@ -516,6 +534,46 @@ tui.style=classic   # the historical boxed layout
 
 Row ages read `5s`, `3m`, `2h`, `4d`, `2mo`, `1y` in both styles (months used to
 be `M`, which was easy to misread as minutes).
+
+The `classic` style is frozen: it keeps its exact historical geometry so an
+existing setup does not shift under it. New chrome features are `modern`-only.
+
+### `tui.glyphs`
+
+|           |                        |
+| --------- | ---------------------- |
+| **Type**  | `unicode` \| `ascii` |
+| **Default** | `unicode`            |
+
+Which glyph set the TUI draws its markers with: the selection bar, the captured
+output marker, tree connectors, the scrollbar, disclosure triangles, the live /
+busy / waiting pane markers, the exit status markers, the ellipsis and the pane
+rules.
+
+`ascii` replaces each with a single-column ASCII character (`>` `o` `+` `` ` ``
+`|` `#` `>` `v` `*` `>` `!` `+` `x` `.` `-`).
+
+Reach for it when the box-drawing glyphs render wrongly: `▌ ├ └ ● ▸ ▾ ▶ ≡ ✓ ✗ ┃
+│` are all East-Asian Width = **Ambiguous**, so a terminal that renders
+ambiguous characters double-width (iTerm2 with "ambiguous characters are
+double-width" under a CJK locale, and some Windows terminals) counts them as
+two cells while the layout counts one — every rule, connector and badge then
+shifts by a column. This is the TUI's equivalent of
+[`dropdown.boxchars`](#dropdownboxchars).
+
+```ini
+tui.glyphs=ascii
+```
+
+### Colors on non-truecolor terminals
+
+The TUI quantizes its palette to the nearest xterm-256 entry when the terminal
+does not advertise 24-bit colour (`COLORTERM` contains `truecolor` / `24bit`,
+or `TERM` contains `direct`, or one of `TERM_PROGRAM`, `KITTY_WINDOW_ID`,
+`WEZTERM_EXECUTABLE`, `GHOSTTY_RESOURCES_DIR` is set). This matters over `ssh`
+into a terminal that only claims 256 colours: without it each RGB slot is
+approximated by the terminal, differently per terminal, instead of once in a
+portable way.
 
 ---
 
@@ -1105,6 +1163,7 @@ darkgray selection, etc.).
 | `tuicolor.error`      | `error`      | Error / exit-nonzero indicators.                                                                                                                          |
 | `tuicolor.warning`    | `warning`    | Warning indicators.                                                                                                                                       |
 | `tuicolor.dim`        | `dim`        | Secondary text (timestamps, secondary metadata).                                                                                                          |
+| `tuicolor.dimmer`     | `dimmer`     | A step quieter than `dim`, for month/year ages and rule labels. Empty by default: the TUI derives it from the theme's own `fg` mixed 35% toward `bg`, so light themes get a readable quiet colour instead of a hardcoded dark gray. |
 | `tuicolor.highlight`  | `highlight`  | Selected row's left-edge bar (the `▌` glyph) and the `highlight` slot for picked cells. Falls back to `accent` when unset.                                |
 | `tuicolor.info`       | `info`       | Foreground tint for the `+` (output search) mode badge.                                                                                                   |
 | `tuicolor.selection`  | `selection`  | Background of the currently-selected row in the history list — and of the live dropdown's highlighted row, which draws that row as a full-width band.     |
@@ -1935,6 +1994,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `panes.layout`                  | `bottom` \| `right`               | `bottom`                                                         | [Detail panes](#detail-panes)                                             |
 | `tui.compact`                   | `on` \| `off`                     | `off`                                                            | [Compact display](#compact-display)                                       |
 | `tui.style`                     | `modern` \| `classic`             | `modern`                                                         | [Compact display](#tuistyle)                                              |
+| `tui.glyphs`                    | `unicode` \| `ascii`              | `unicode`                                                        | [`tui.glyphs`](#tuiglyphs)                                                |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `autosuggest.enabled`           | `on` \| `off`                     | `off`                                                            | [Autosuggestions](#autosuggestions)                                       |
 | `dropdown.limit`                | positive int                      | `6`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |
@@ -1953,6 +2013,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `tuicolor.error`                | color                             | theme's `error`                                                  | [Theme](#theme)                                                           |
 | `tuicolor.warning`              | color                             | theme's `warning`                                                | [Theme](#theme)                                                           |
 | `tuicolor.dim`                  | color                             | theme's `muted`                                                  | [Theme](#theme)                                                           |
+| `tuicolor.dimmer`               | color                             | derived from `fg`/`bg`                                           | [Theme](#theme)                                                           |
 | `tuicolor.highlight`            | color                             | theme's `accent`                                                 | [Theme](#theme)                                                           |
 | `tuicolor.info`                 | color                             | theme's `info`                                                   | [Theme](#theme)                                                           |
 | `tuicolor.selection`            | color                             | theme's `selection`                                              | [Theme](#theme)                                                           |

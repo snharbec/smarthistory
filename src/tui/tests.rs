@@ -1211,7 +1211,7 @@ fn prefix_help_f3_from_open_picker_uses_highlighted_row_and_leaves_picker_open()
         .iter()
         .position(|o| o.name == "paperless")
         .expect("paperless option must exist in the picker");
-    app.prefix_picker = Some(crate::tui::PrefixPicker { options, selected: idx, activate_only: false });
+    app.prefix_picker = Some(crate::tui::PrefixPicker { options, selected: idx, recent: Vec::new(), activate_only: false });
     assert!(app.is_prefix_picker_open());
 
     let f3 = KeyEvent::new(KeyCode::F(3), KeyModifiers::empty());
@@ -1235,7 +1235,7 @@ fn prefix_help_f3_from_open_picker_uses_highlighted_row_and_leaves_picker_open()
 fn prefix_help_esc_closes_help_and_returns_to_the_still_open_picker() {
     let mut app = global_test_app(&[("a", 1)]);
     let options = crate::tui::PrefixPicker::build_options(&app.query_prefixes);
-    app.prefix_picker = Some(crate::tui::PrefixPicker { options, selected: 0, activate_only: false });
+    app.prefix_picker = Some(crate::tui::PrefixPicker { options, selected: 0, recent: Vec::new(), activate_only: false });
     app.open_prefix_help(Some(crate::tui::mode::ModeKind::Notes));
     assert!(app.is_prefix_help_viewing());
 
@@ -15958,23 +15958,27 @@ fn compact_display_bundles_the_space_saving_behaviours() {
         "compact shows panes as soon as there's room; got: {shown_text:?}"
     );
 
-    // (c) redundant trailing scope · duplicate text dropped. The test
-    // app is in GLOBAL scope, whose trailing text reads "all history ·
-    // all entries"; only the trailing text spells out the scope this
-    // way (the chip is just "GLOBAL").
-    let mut app = directories_test_app(&[]);
-    app.compact = false;
-    let default_text = render_rows(&mut app, 140, 20).join("\n");
-    assert!(
-        default_text.contains("all history"),
-        "default shows the trailing scope text; got: {default_text:?}"
-    );
-    app.compact = true;
-    let compact_text = render_rows(&mut app, 140, 20).join("\n");
-    assert!(
-        !compact_text.contains("all history"),
-        "compact drops the redundant trailing text; got: {compact_text:?}"
-    );
+    // (c) the redundant trailing scope · duplicate sentence is gone in
+    // BOTH displays: it restated the GLOBAL / ALL chips three cells to
+    // its left and cost the right edge of the strip on narrow
+    // terminals. The chips themselves must still be there.
+    for compact in [false, true] {
+        let mut app = directories_test_app(&[]);
+        app.compact = compact;
+        let text = render_rows(&mut app, 140, 20).join("\n");
+        assert!(
+            !text.contains("all history"),
+            "the duplicate scope sentence must not be rendered (compact={compact}); got: {text:?}"
+        );
+        assert!(
+            text.contains("GLOBAL"),
+            "the scope chip still names the scope (compact={compact}); got: {text:?}"
+        );
+        assert!(
+            text.contains("ALL"),
+            "the duplicate-filter chip survives (compact={compact}); got: {text:?}"
+        );
+    }
 }
 
 // --- processes mode (`%` prefix) ----
@@ -28071,7 +28075,7 @@ fn f12_dispatches_cycle_recent_prefix_modes() {
 #[test]
 fn prefix_picker_new_preselects_none_for_plain_query() {
     let app = global_test_app(&[("hello", 1)]);
-    let picker = PrefixPicker::new(&app.query_prefixes, None);
+    let picker = PrefixPicker::new(&app.query_prefixes, None, &[]);
     assert_eq!(picker.selected, 0);
     assert_eq!(picker.options[0].label, "History");
     assert_eq!(picker.options[0].prefix, None);
@@ -28082,7 +28086,7 @@ fn prefix_picker_new_preselects_jira_for_dash_query() {
     let mut app = global_test_app(&[("jira", 1)]);
     app.query = "-jira".to_string();
     let first = app.query.chars().next();
-    let picker = PrefixPicker::new(&app.query_prefixes, first);
+    let picker = PrefixPicker::new(&app.query_prefixes, first, &[]);
     let idx = picker.selected;
     assert_eq!(picker.options[idx].label, "JIRA");
 }
@@ -28092,13 +28096,13 @@ fn prefix_picker_new_falls_back_to_history_for_unknown_prefix() {
     let mut app = global_test_app(&[("unknown", 1)]);
     app.query = "Xunknown".to_string();
     let first = app.query.chars().next();
-    let picker = PrefixPicker::new(&app.query_prefixes, first);
+    let picker = PrefixPicker::new(&app.query_prefixes, first, &[]);
     assert_eq!(picker.selected, 0);
 }
 
 #[test]
 fn prefix_picker_has_twentythree_entries() {
-    let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None);
+    let picker = PrefixPicker::new(&crate::QueryPrefixes::default(), None, &[]);
     assert_eq!(picker.options.len(), 23);
 }
 
@@ -36754,7 +36758,10 @@ fn mouse_click_selects_the_row_under_the_pointer() {
     assert_eq!(app.list_state.selected(), Some(2), "clicked the oldest row");
 }
 
-/// Modern Details for a non-history row: no `Stat` / `Sess` filler.
+/// Modern Details for a non-history row: the item text plus only the
+/// fields that row actually has — no `Stat ✓ success`, no `never`
+/// filler for a zero timestamp, and none of the classic labelled rows
+/// (`Cmd`/`Dir`/`Sess`/`Time`/`Stat`), which the meta rail replaced.
 #[test]
 fn modern_details_hide_history_only_fields_for_other_rows() {
     let mut app = panes_test_app(&[]);
@@ -36770,7 +36777,201 @@ fn modern_details_hide_history_only_fields_for_other_rows() {
     app.query = "*".to_string();
     app.refresh();
     let text = buffer_text(&draw_to_buffer(&mut app, 100, 30));
-    assert!(text.contains("Item"), "{text}");
-    assert!(!text.contains("Stat"));
-    assert!(!text.contains("never"));
+    assert!(text.contains("Work"), "{text}");
+    assert!(!text.contains("Stat"), "no exit-status filler on a pane row");
+    assert!(!text.contains("never"), "no zero-timestamp filler");
+    // `Sess ` with the trailing space: the pane tree's own
+    // `Sessions` header legitimately contains the bare word.
+    for label in ["Cmd  ", "Sess "] {
+        assert!(
+            !text.contains(label),
+            "the meta rail must not reintroduce the `{label}` label: {text}"
+        );
+    }
+}
+
+/// Modern history Details is the command plus one meta rail line, not
+/// the classic five labelled rows.
+#[test]
+fn modern_details_use_a_single_meta_rail() {
+    let mut app = global_test_app(&[("git status", 10)]);
+    app.modern = true;
+    app.refresh();
+    let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+    assert!(text.contains("git status"), "{text}");
+    for label in ["Cmd  ", "Dir  ", "Sess ", "Stat "] {
+        assert!(
+            !text.contains(label),
+            "labelled row `{label}` must be gone in the modern style: {text}"
+        );
+    }
+    // The rail separates fields with the same middle dot the rest of
+    // the modern chrome uses.
+    assert!(text.contains(" · "), "meta rail joins fields with ` · `: {text}");
+}
+
+// --- tui.glyphs / empty state / popups / tables / input scroll ----
+
+/// `tui.glyphs=ascii` swaps every marker for a single-column ASCII
+/// character, and the selection bar in particular must not survive as
+/// the Unicode block glyph.
+#[test]
+fn ascii_glyph_set_replaces_markers_onscreen() {
+    use crate::tui::theme::glyphs::{install_glyphs, Glyphs};
+
+    let mut app = global_test_app(&[("git status", 10), ("cargo build", 20)]);
+    app.modern = true;
+    app.refresh();
+
+    // Unicode (the default) first.
+    install_glyphs(false);
+    let unicode_text = buffer_text(&draw_to_buffer(&mut app, 100, 30));
+    assert!(
+        unicode_text.contains(Glyphs::unicode().selection_bar),
+        "default renders the Unicode selection bar: {unicode_text:?}"
+    );
+
+    install_glyphs(true);
+    let ascii_text = buffer_text(&draw_to_buffer(&mut app, 100, 30));
+    assert!(
+        !ascii_text.contains(Glyphs::unicode().selection_bar),
+        "ascii mode must not draw the Unicode selection bar: {ascii_text:?}"
+    );
+    assert!(
+        !ascii_text.contains(Glyphs::unicode().ok),
+        "ascii mode must not draw the Unicode success marker: {ascii_text:?}"
+    );
+    assert!(
+        ascii_text.contains(Glyphs::ascii().selection_bar),
+        "ascii selection bar present: {ascii_text:?}"
+    );
+
+    // Restore the process-wide default so later tests (which run in
+    // the same thread pool) see the shipped behaviour.
+    install_glyphs(false);
+}
+
+/// A zero-result list explains itself instead of drawing a blank
+/// rectangle: the empty state names the query, the match algorithm and
+/// the keys that change either.
+#[test]
+fn empty_list_shows_query_algorithm_and_keys() {
+    let mut app = global_test_app(&[("git status", 10)]);
+    app.modern = true;
+    app.query = "no-such-command-anywhere".to_string();
+    app.match_algorithm = crate::tui::state::MatchAlgorithm::Fuzzy;
+    app.refresh();
+    assert!(app.merged_rows.is_empty(), "precondition: nothing matches");
+
+    let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+    assert!(text.contains("no matches"), "empty state headline: {text:?}");
+    assert!(
+        text.contains("no-such-command-anywhere"),
+        "empty state echoes the query: {text:?}"
+    );
+    assert!(
+        text.contains("fuzzy"),
+        "empty state names the active algorithm: {text:?}"
+    );
+    // The algorithm key comes from the live bindings, so it is `C-f`
+    // unless the user rebound `toggle-search-mode`.
+    let keys = crate::tui::bindings::format_key_specs(
+        app.bindings
+            .specs(crate::tui::bindings::Action::ToggleSearchMode),
+    );
+    assert!(
+        text.contains(&keys),
+        "empty state offers the bound algorithm key {keys:?}: {text:?}"
+    );
+}
+
+/// A popup keeps its content floor on a small terminal instead of
+/// shrinking until the content wraps.
+#[test]
+fn popup_keeps_a_content_floor_on_a_small_terminal() {
+    let screen = ratatui::layout::Rect::new(0, 0, 60, 16);
+    let area = crate::tui::render::popup_for_test(76, 16, 70, 70, screen);
+    assert!(
+        area.width >= 58 && area.height >= 14,
+        "popup must stay near its content floor inside a 60x16 screen, got {area:?}"
+    );
+    // And it never escapes the frame.
+    assert!(area.width <= screen.width && area.height <= screen.height);
+    assert!(area.x + area.width <= screen.width);
+    assert!(area.y + area.height <= screen.height);
+}
+
+/// A pipe table in a preview renders as box-drawing rows, not as
+/// literal `| a | b |` text.
+#[test]
+fn markdown_pipe_table_renders_as_rows() {
+    let md = "| Name | Status |\n|---|---|\n| alpha | ok |\n| beta | failed |\n";
+    let lines = crate::tui::render::render_markdown_for_test(md);
+    let joined: Vec<String> = lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    let text = joined.join("\n");
+    assert!(
+        !text.contains("|---|"),
+        "the separator row must not be printed literally: {text}"
+    );
+    assert!(text.contains("Name"), "header survives: {text}");
+    assert!(text.contains("alpha") && text.contains("failed"), "{text}");
+    // Two body rows + header + top rule + divider + bottom rule.
+    assert_eq!(joined.len(), 6, "expected a boxed 2-row table: {joined:?}");
+}
+
+/// A lone `|` line is prose, not a table.
+#[test]
+fn markdown_single_pipe_line_is_not_a_table() {
+    let lines = crate::tui::render::render_markdown_for_test("see | this | line");
+    assert_eq!(lines.len(), 1);
+    let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(!text.contains('┌'), "must not box a prose line: {text}");
+}
+
+/// The input scroll window keeps the caret visible in a long query
+/// rather than pinning it to the rightmost cell.
+#[test]
+fn input_scroll_window_follows_the_caret() {
+    use crate::tui::render::input_scroll_start;
+    // Text that fits: no scroll, the caret sits where it is.
+    assert_eq!(input_scroll_start(5, 10, 20), 0);
+    // Caret past the window: the window slides so the caret is at its
+    // right edge (width - 1).
+    assert_eq!(input_scroll_start(100, 120, 20), 81);
+    // Caret at the very end of the buffer.
+    assert_eq!(input_scroll_start(120, 120, 20), 101);
+    // Degenerate widths must not panic or produce a bogus offset.
+    assert_eq!(input_scroll_start(5, 10, 0), 0);
+}
+
+/// End-to-end: a markdown table inside a row's captured output shows
+/// up boxed in the real preview pane (not just through
+/// `render_markdown` directly).
+#[test]
+fn preview_pane_boxes_a_markdown_table() {
+    let mut app = global_test_app(&[("show table", 10)]);
+    app.modern = true;
+    app.refresh();
+    // Plant the table as the selected row's captured output on BOTH
+    // the raw and merged lists: the preview reads the merged one.
+    let table = "| Component | State |\n|---|---|\n| parser | ok |";
+    for list in [&mut app.rows, &mut app.merged_rows] {
+        list[0].output = table.to_string();
+    }
+    let text = buffer_text(&draw_to_buffer(&mut app, 120, 40));
+    assert!(
+        text.contains("Component"),
+        "table header must reach the preview pane: {text:?}"
+    );
+    assert!(
+        !text.contains("|---|"),
+        "the separator row must not be printed literally: {text:?}"
+    );
+    assert!(
+        text.contains('┌') && text.contains('┘'),
+        "table must be boxed in the preview: {text:?}"
+    );
 }
