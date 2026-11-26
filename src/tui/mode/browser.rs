@@ -119,6 +119,13 @@ impl App {
         matches(self)
     }
 
+    /// Whether at least one browser profile could be resolved. An
+    /// empty result list is "no matches" only when this is true;
+    /// otherwise there is no bookmarks/history source to read.
+    pub(crate) fn browser_has_sources(&self) -> bool {
+        !crate::browser::resolve_configured().is_empty()
+    }
+
     /// Arm or clear the browser-mode search debounce. Called from
     /// every keystroke path (co-located with `files_touch` /
     /// `paperless_touch`). Re-arms the timer when the user is still

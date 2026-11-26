@@ -2755,27 +2755,20 @@ impl App {
     /// after the `=`/`?`. This is the canonical body that
     /// `query_matches_text` and `recompile_regex` operate
     /// on regardless of the active match algorithm.
+    ///
+    /// The prefix set comes from `QueryPrefixes::all_chars`, never a
+    /// hand-written list: the old version enumerated 11 of the 23
+    /// prefixes by hand, so `&`, `:`, `"`, `^`, `~`, `%`, `.`, `` ` ``,
+    /// `|` and `<` leaked into the body. A newly added mode silently
+    /// joined that leak, and the symptom (the prefix character shown
+    /// as the query, and match highlighting welded onto the first
+    /// word) pointed at the mode rather than at this function.
     fn search_body(&self) -> &str {
         if self.query.is_empty() {
             return "";
         }
-        let p = &self.query_prefixes;
         let c = self.query.chars().next().unwrap_or('\0');
-        // Strip one prefix char if the query starts with a
-        // known prefix-mode character. The match algorithm
-        // (substring/fuzzy/regex) operates on what's LEFT.
-        if c == p.output
-            || c == p.llm
-            || c == p.question
-            || c == p.notes
-            || c == p.todo
-            || c == p.directories
-            || c == p.panes
-            || c == p.jira
-            || c == p.files
-            || c == p.tags
-            || c == p.ag
-        {
+        if self.query_prefixes.all_chars().contains(&c) {
             &self.query[c.len_utf8()..]
         } else {
             self.query.as_str()
@@ -6648,6 +6641,11 @@ impl App {
     /// group's ranking is independent of how
     /// often the same command appears in the main
     /// history.
+    #[cfg(test)]
+    pub(crate) fn sort_partition_for_test(&self, partition: &mut Vec<HistoryRow>) {
+        self.sort_partition(partition);
+    }
+
     fn sort_partition(&self, partition: &mut Vec<HistoryRow>) {
         match self.sort_order {
             SortOrder::Age => {

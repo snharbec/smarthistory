@@ -37,6 +37,23 @@ All notable changes to this project will be documented in this file.
   one palette slot that ignored the theme — nearly invisible on light themes.
   It is now derived from the theme's `fg`/`bg`, and overridable with
   `tuicolor.dimmer=`.
+- TUI: the search body stripped only 11 of the 23 prefix characters, so `&`,
+  `:`, `"`, `^`, `~`, `%`, `.`, `` ` ``, `|` and `<` leaked into the query —
+  the prefix then showed up as the search text in the empty state and was
+  welded onto the first word in match highlighting. The prefix set now comes
+  from `QueryPrefixes::all_chars`, so a new mode can't be forgotten.
+- TUI `~` (Zoxide): every row showed a fabricated age (`56y`) because the sort
+  ordinal was reused as a timestamp. Zoxide carries no timestamp, so the age
+  column is now blank; the ranking still survives, since the timestamp sort is
+  stable.
+- TUI `$` (Tags): emacs `etags` lines render their text once instead of twice
+  (`## HeadingHeading`) — the `\x7f` display half and the `\x01` name half are
+  no longer both printed.
+- TUI: an empty list now distinguishes "no matches" from "not configured" and
+  "nothing here yet". A mode whose source isn't set up (`<` Paperless without
+  credentials, `^` Browser without a profile, `,` Ag, `&` CodeGraph) says so
+  instead of reporting a failed search, and a configured mode with an empty
+  query no longer claims "no matches".
 
 ### Added
 
@@ -69,6 +86,9 @@ All notable changes to this project will be documented in this file.
   - markdown **pipe tables** in a preview render as boxed rows instead of
     literal `| a | b |` text — JIRA issues, notes and Paperless documents all
     use them.
+  - the empty-state list offers the active mode's own affordances, which exist
+    nowhere else in the UI: `@new` in notes, `!@new` in todo, `#<dir>` in
+    directories, `/<name>` in files.
   - all dialogs go through one `popup(min_w, min_h, …)` primitive, so a popup
     keeps its content floor on a narrow terminal instead of shrinking until
     the text wraps. This replaces the per-dialog `max(76, …)` / `max(44, …)`

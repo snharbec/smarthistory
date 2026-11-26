@@ -13725,10 +13725,15 @@ fn zoxide_matches_and_pattern() {
     assert_eq!(app.zoxide_pattern(), "proj");
 }
 
-/// `build_rows` preserves zoxide's own highest-score-first order via
-/// a descending synthetic `timestamp` — so the list's default
-/// (timestamp-DESC) sort matches zoxide's ranking without smarthistory
-/// needing to know the real score.
+/// `build_rows` preserves zoxide's own highest-score-first order.
+///
+/// It does so by emitting rows in zoxide's order and giving them no
+/// timestamp at all: the list's default (timestamp-DESC) sort is
+/// stable, so equal keys keep zoxide's ranking. This used to be
+/// carried by a descending synthetic `timestamp` instead, which had
+/// the side effect of rendering a fabricated age (`56y`) on every
+/// row — so the assertion is on the ORDER (the user-visible contract),
+/// not on the timestamps that happened to produce it.
 #[test]
 fn zoxide_build_rows_preserves_zoxide_rank_order() {
     let a = zoxide_test_dir("a");
@@ -13743,10 +13748,31 @@ fn zoxide_build_rows_preserves_zoxide_rank_order() {
     assert_eq!(rows[0].directory, a);
     assert_eq!(rows[1].directory, b);
     assert_eq!(rows[2].directory, c);
-    assert!(
-        rows[0].timestamp > rows[1].timestamp && rows[1].timestamp > rows[2].timestamp,
-        "synthetic timestamps must descend in zoxide's own rank order: {:?}",
-        rows.iter().map(|r| r.timestamp).collect::<Vec<_>>()
+}
+
+/// The rank order survives the list's own sort. `sort_partition` sorts
+/// timestamp-DESC with a STABLE sort, so zero timestamps keep the
+/// order `build_rows` emitted — this is what makes dropping the
+/// synthetic ordinal safe.
+#[test]
+fn zoxide_rank_order_survives_the_age_sort() {
+    let a = zoxide_test_dir("a");
+    let b = zoxide_test_dir("b");
+    let c = zoxide_test_dir("c");
+    let mut rows = crate::tui::mode::zoxide::build_rows(
+        vec![a.clone(), b.clone(), c.clone()],
+        &[],
+        &[],
+    );
+    // Exercise the exact sort `build_merged_rows` applies (Age is the
+    // default, and the sort is stable), without spawning zoxide.
+    let app = directories_test_app(&[]);
+    app.sort_partition_for_test(&mut rows);
+    let dirs: Vec<&str> = rows.iter().map(|r| r.directory.as_str()).collect();
+    assert_eq!(
+        dirs,
+        vec![a.as_str(), b.as_str(), c.as_str()],
+        "zoxide's own ranking must survive the timestamp-DESC sort"
     );
 }
 
@@ -13799,6 +13825,25 @@ fn zoxide_build_rows_tags_mode_directory() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].mode, "directory");
     assert_eq!(rows[0].source, "zoxide");
+}
+
+/// `zoxide query --list` carries no timestamp, so a zoxide row must
+/// have `timestamp: 0` — the documented "no age" sentinel. It used to
+/// be set to the row's sort ordinal, which `format_diff` rendered as a
+/// plausible-looking `56y` on every row.
+#[test]
+fn zoxide_rows_carry_no_timestamp_so_no_fake_age() {
+    let a = zoxide_test_dir("aaa");
+    let b = zoxide_test_dir("bbb");
+    let rows = crate::tui::mode::zoxide::build_rows(vec![a, b], &[], &[]);
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            row.timestamp, 0,
+            "zoxide rows have no real timestamp; got {}",
+            row.timestamp
+        );
+    }
 }
 
 /// `ModeKind::Zoxide` is dedup-eligible (same treatment as
@@ -36974,4 +37019,137 @@ fn preview_pane_boxes_a_markdown_table() {
         text.contains('┌') && text.contains('┘'),
         "table must be boxed in the preview: {text:?}"
     );
+}
+
+// --- mode-row defects: prefix stripping, etags, empty states ----
+
+/// `search_body` must strip EVERY configured prefix, not a
+/// hand-maintained subset. The old list covered 11 of 23, so `&`, `:`,
+/// `"`, `^`, `~`, `%`, `.`, `` ` ``, `|` and `<` leaked into the
+/// matching body — the prefix then showed up as the query in the empty
+/// state and welded itself onto the first word in match highlighting.
+#[test]
+fn search_body_strips_every_configured_prefix() {
+    let mut app = directories_test_app(&[]);
+    let prefixes = crate::QueryPrefixes::default();
+    let cases: [char; 23] = prefixes.all_chars();
+    for c in cases {
+        app.query = format!("{c}body");
+        assert_eq!(
+            app.search_body(),
+            "body",
+            "prefix {c:?} must be stripped from the search body"
+        );
+        // And the prefix alone leaves an empty body rather than
+        // echoing the prefix character back as a query.
+        app.query = c.to_string();
+        assert_eq!(app.search_body(), "", "prefix {c:?} alone has an empty body");
+    }
+    // A char that is not a prefix stays part of the body.
+    app.query = "plain query".to_string();
+    assert_eq!(app.search_body(), "plain query");
+}
+
+/// Emacs `etags` writes `<display>\x7f<name>\x01<line>,<off>`. The
+/// parser kept everything before the trailing digits, so both halves
+/// rendered — `## HeadingHeading` on every tag row.
+#[test]
+fn etags_line_renders_the_name_once_not_the_display_plus_name() {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let _g = lock_or_recover(&CWD_LOCK);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("smarthistory_etags_{pid}_{n}"));
+    fs::create_dir_all(&dir).expect("mkdir temp");
+    // One etags line: display `## Heading`, name also `## Heading`.
+    let tags_contents = "README.md,1\n\
+## Heading\x7f## Heading\x0110,0\n";
+    fs::write(dir.join("TAGS"), tags_contents).expect("write TAGS");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&dir).expect("chdir");
+    let result = std::panic::catch_unwind(|| {
+        let mut app = directories_test_app(&[]);
+        app.query = String::from("$");
+        app.refresh();
+        let rows = crate::tui::mode::tags::fetch(&mut app).unwrap();
+        assert_eq!(rows.len(), 1, "expected exactly one etags entry");
+        assert_eq!(
+            rows[0].command, "## Heading",
+            "the display and name halves must not both be rendered"
+        );
+    });
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+    let _ = fs::remove_dir_all(&dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// An unconfigured external mode says so instead of claiming "no
+/// matches": rendering `no matches / query <` for a mode that has
+/// nothing to search reads as a broken search, not a missing setting.
+#[test]
+fn unconfigured_modes_report_not_configured() {
+    // Ag and CodeGraph are unconditional: their tool/index may simply
+    // not be there.
+    for (query, expect) in [
+        (",", "install `ag`"),
+        ("&", "CodeGraph index"),
+    ] {
+        let mut app = global_test_app(&[]);
+        app.modern = true;
+        app.query = query.to_string();
+        app.refresh();
+        let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+        assert!(
+            text.contains("not configured"),
+            "{query} with no body must report `not configured`: {text:?}"
+        );
+        assert!(
+            text.contains(expect),
+            "{query} must say what is missing ({expect}): {text:?}"
+        );
+        assert!(
+            !text.contains("no matches"),
+            "{query} must not claim `no matches` when nothing was searched: {text:?}"
+        );
+    }
+}
+
+/// A configured mode with an empty body is "nothing here yet", not
+/// "no matches" — the user hasn't asked anything.
+#[test]
+fn empty_body_in_a_configured_mode_is_not_no_matches() {
+    let mut app = global_test_app(&[]);
+    app.modern = true;
+    app.query = "@".to_string();
+    app.refresh();
+    let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+    assert!(
+        !text.contains("no matches"),
+        "an empty notes query is not a failed search: {text:?}"
+    );
+    assert!(
+        text.contains("nothing here yet") || text.contains("Notes — 0"),
+        "expected an empty-state headline: {text:?}"
+    );
+}
+
+/// The empty state offers the mode's own creation shortcut, which
+/// exists nowhere else in the UI (`@new`, `!@new`).
+#[test]
+fn empty_state_offers_mode_specific_creation_hints() {
+    for (query, hint) in [("@zzzznothing", "@new"), ("!zzzznothing", "!@new")] {
+        let mut app = global_test_app(&[]);
+        app.modern = true;
+        app.query = query.to_string();
+        app.refresh();
+        let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
+        assert!(
+            text.contains(hint),
+            "{query} empty state must offer `{hint}`: {text:?}"
+        );
+    }
 }

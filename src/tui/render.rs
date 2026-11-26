@@ -5993,6 +5993,99 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 /// Names the active query and match algorithm (the usual reason a
 /// query that once matched now doesn't), and the keys that change
 /// either of them, using the user's own bindings.
+/// Why an empty list is empty. "No matches" is only one of the
+/// reasons, and the wrong one for a mode that isn't set up yet —
+/// rendering `no matches / query <` for an unconfigured Paperless
+/// server reads as a broken search rather than a missing setting.
+enum EmptyReason {
+    /// A query was typed and matched nothing.
+    NoMatches,
+    /// The view has nothing *yet*: no query, nothing stored, or a
+    /// background fetch still running.
+    NothingYet,
+    /// The mode needs configuration before it can return anything.
+    NotConfigured(&'static str),
+}
+
+/// Classify an empty result list for the active mode. Modes whose
+/// sources are external (Paperless, Browser, Ag, CodeGraph, JIRA)
+/// know both whether they are configured and whether a fetch is in
+/// flight; the rest only ever distinguish "nothing stored" from "no
+/// matches".
+fn empty_reason(app: &App) -> EmptyReason {
+    use crate::tui::mode::ModeKind;
+    let body = app.search_body().trim();
+    // Configuration and in-flight state decide whether the *source* is
+    // usable; the body decides whether the user actually asked a
+    // question. "No matches" is only honest when both are true — an
+    // empty body in a configured mode is "you haven't typed anything
+    // yet", not "your search found nothing".
+    let configured = match crate::tui::mode::active_mode(app) {
+        ModeKind::Paperless => {
+            if app.paperless_is_configured() {
+                None
+            } else {
+                Some("set paperless.url and paperless.token in your config")
+            }
+        }
+        ModeKind::Browser => {
+            if app.browser_has_sources() {
+                None
+            } else {
+                Some("no browser profile was found (see docs/modes/browser.md)")
+            }
+        }
+        // Ag and CodeGraph shell out to a tool that may not be
+        // installed; an empty list with no query is the "not set up"
+        // case far more often than a genuine zero-result search.
+        ModeKind::Ag => Some("type a pattern, or install `ag` (the silver searcher)"),
+        ModeKind::Codegraph => Some("type a symbol name (needs a CodeGraph index)"),
+        _ => None,
+    };
+    // Only the two modes whose help text is unconditional (Ag /
+    // CodeGraph) should claim "not configured" once the user has
+    // typed something; for Paperless and Browser a real search that
+    // returned nothing is genuinely "no matches".
+    let unconditional_help = matches!(
+        crate::tui::mode::active_mode(app),
+        ModeKind::Ag | ModeKind::Codegraph
+    );
+    if let Some(what) = configured
+        && (body.is_empty() || unconditional_help)
+    {
+        return EmptyReason::NotConfigured(what);
+    }
+    if !body.is_empty() {
+        return EmptyReason::NoMatches;
+    }
+    EmptyReason::NothingYet
+}
+
+/// Mode-specific actions that only exist as a prefix (`@new`, `!@new`),
+/// so the empty list is the one place a user is likely to discover them.
+fn empty_state_mode_hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    use crate::tui::mode::ModeKind;
+    let p = &app.query_prefixes;
+    match crate::tui::mode::active_mode(app) {
+        ModeKind::Notes => vec![(
+            "@new <text>",
+            "create a note without leaving the picker",
+        )],
+        ModeKind::Todo => vec![("!@new <text>", "create a todo item")],
+        ModeKind::Directories => vec![(
+            "#<dir>",
+            "filter by path; Enter jumps there",
+        )],
+        ModeKind::Panes => vec![("*<name>", "filter panes across every session")],
+        ModeKind::Files => vec![("/<name>", "search files under the current directory")],
+        // Keep `p` referenced for modes that may grow a hint later.
+        _ => {
+            let _ = p;
+            Vec::new()
+        }
+    }
+}
+
 fn draw_empty_state(f: &mut Frame, app: &App, area: Rect) {
     let inner = area.inner(ratatui::layout::Margin::new(
         2,
@@ -6008,11 +6101,32 @@ fn draw_empty_state(f: &mut Frame, app: &App, area: Rect) {
         crate::tui::state::MatchAlgorithm::Fuzzy => "fuzzy",
         crate::tui::state::MatchAlgorithm::Regex => "regex",
     };
-    let mut lines = vec![
-        Line::from(Span::styled("no matches", Theme::dim())),
-        Line::from(""),
-    ];
-    if !body.is_empty() {
+    let reason = empty_reason(app);
+    let mut lines = match reason {
+        EmptyReason::NoMatches => vec![
+            Line::from(Span::styled("no matches", Theme::dim())),
+            Line::from(""),
+        ],
+        EmptyReason::NothingYet => vec![
+            Line::from(Span::styled(
+                if body.is_empty() {
+                    "nothing here yet"
+                } else {
+                    "searching…"
+                },
+                Theme::dim(),
+            )),
+            Line::from(""),
+        ],
+        EmptyReason::NotConfigured(what) => vec![
+            Line::from(Span::styled("not configured", Theme::warning())),
+            Line::from(""),
+            Line::from(Span::styled(what.to_string(), Theme::default())),
+            Line::from(""),
+        ],
+    };
+
+    if matches!(reason, EmptyReason::NoMatches) {
         lines.push(Line::from(vec![
             Span::styled("query    ", Theme::dim()),
             Span::styled(body.to_string(), Theme::default()),
@@ -6021,22 +6135,31 @@ fn draw_empty_state(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("matching ", Theme::dim()),
             Span::styled(algo.to_string(), Theme::accent()),
         ]));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "this view has nothing to show",
-            Theme::dim(),
-        )));
+    }
+
+    // Mode-specific affordances first: they are the reason this view
+    // exists, and an empty list is where they are discoverable.
+    let mode_hints = empty_state_mode_hints(app);
+    if !mode_hints.is_empty() {
+        lines.push(Line::from(""));
+        for (keys, word) in mode_hints {
+            lines.push(Line::from(vec![
+                Span::styled(keys, Theme::accent()),
+                Span::styled(format!(" {word}"), Theme::dim()),
+            ]));
+        }
     }
 
     // Only advertise keys that are actually bound, so a user who
     // rebound or unbound an action doesn't get a lying hint.
     let mut hints: Vec<(String, &str)> = Vec::new();
-    for (action, word) in [
-        (Action::ToggleSearchMode, "change algorithm"),
-        (Action::ClearQuery, "clear"),
-        (Action::PickPrefix, "switch view"),
-        (Action::OpenHelp, "help"),
-    ] {
+    let mut wanted: Vec<(Action, &str)> = vec![(Action::ClearQuery, "clear")];
+    if matches!(reason, EmptyReason::NoMatches) {
+        wanted.insert(0, (Action::ToggleSearchMode, "change algorithm"));
+    }
+    wanted.push((Action::PickPrefix, "switch view"));
+    wanted.push((Action::OpenHelp, "help"));
+    for (action, word) in wanted {
         let keys = format_key_specs(app.bindings.specs(action));
         if !keys.is_empty() {
             hints.push((keys, word));

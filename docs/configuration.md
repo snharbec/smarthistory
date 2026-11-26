@@ -520,9 +520,15 @@ The TUI's visual style. `modern` (the default) includes the whole
   the entry has a comment;
 - selected rows are bold on the `selection` background with the `▌` bar, and
   are **not underlined** (the underline cut through syntax highlighting);
-- an **empty result list explains itself**: the query, the active match
-  algorithm, and the keys that change it (`C-f` algorithm, `C-u` clear,
-  `F1` view);
+- an **empty result list explains itself**, and distinguishes the three reasons
+  it can be empty: **no matches** (names the query, the active match algorithm
+  and the keys that change them — `C-f` algorithm, `C-u` clear, `F1` view),
+  **nothing here yet** (a configured mode with no query, or a search still in
+  flight), and **not configured** (e.g. `<` Paperless without credentials, `,`
+  Ag without the tool, `&` CodeGraph without an index), which says what is
+  missing instead of reporting a failed search. It also offers the active
+  mode's own shortcuts, which exist nowhere else in the UI: `@new` in notes,
+  `!@new` in todo, `#<dir>` in directories, `/<name>` in files;
 - **markdown pipe tables** in a preview render as boxed rows instead of literal
   `| a | b |` text (JIRA issues, notes and Paperless documents all use them);
 - the mode picker (`F1`) lists **modes you have used this session first**, with
