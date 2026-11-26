@@ -313,9 +313,21 @@ fn rex_checked(args: &[&str]) -> Result<String, String> {
 }
 
 /// Make the Rex app show `session_id` (optionally at `window_id`).
+///
+/// `session.select` is a client action. With more than one Rex app
+/// connected (say a desktop and a laptop on the same server), `rex do`
+/// refuses to guess ("client target default is ambiguous"), and the
+/// block focus that already ran is left behind in a session nobody is
+/// looking at. So name the client explicitly: the one the user is
+/// typing into, see [`caller_client`].
 fn select_session(session_id: &str, window_id: Option<&str>) -> Result<(), String> {
     let sid = format!("session_id={session_id}");
-    let mut args = vec!["do", "session.select", sid.as_str()];
+    let client = caller_client();
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(c) = client.as_deref() {
+        args.extend(["-C", c]);
+    }
+    args.extend(["do", "session.select", sid.as_str()]);
     let wid;
     if let Some(w) = window_id.filter(|w| !w.is_empty()) {
         wid = format!("window_id={w}");
@@ -336,6 +348,13 @@ pub fn rex_focus_pane(block_id: &str) -> Result<(), String> {
         .find(|b| b.block_id == block_id)
         .ok_or_else(|| format!("rex block {block_id} not found"))?;
     rex_checked(&["focus", "-s", &block.session_id, block_id])?;
+    // `rex focus` is server state: it already made the block's window
+    // active. Only a jump to another session needs the app to switch,
+    // and that client action needs Remote Control in the app, so skip
+    // it when the app already shows the target session.
+    if caller_session().as_deref() == Some(block.session_id.as_str()) {
+        return Ok(());
+    }
     select_session(&block.session_id, Some(&block.window_id))
 }
 
@@ -377,13 +396,37 @@ pub fn rex_new(label: &str, dir: &str) -> Result<(), String> {
     select_session(sid, None)
 }
 
-/// The session holding `$REX_BLOCK` (the terminal this runs in), if
-/// any.
-fn caller_session() -> Option<String> {
+/// `rex block inspect $REX_BLOCK --json` (the terminal this runs in),
+/// if it runs inside Rex.
+fn inspect_caller_block() -> Option<serde_json::Value> {
     let block = std::env::var("REX_BLOCK").ok().filter(|b| !b.is_empty())?;
     let out = rex_checked(&["block", "inspect", &block, "--json"]).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&out).ok()?;
-    v.get("session_id")?.as_str().map(str::to_string)
+    serde_json::from_str(&out).ok()
+}
+
+/// The session holding `$REX_BLOCK`, if any.
+fn caller_session() -> Option<String> {
+    inspect_caller_block()?.get("session_id")?.as_str().map(str::to_string)
+}
+
+/// The client that client actions should go to: `$REX_CLIENT` when
+/// set, otherwise the owner of `$REX_BLOCK` — the app the user typed
+/// the selection into. `None` leaves the choice to `rex` (fine when
+/// exactly one app is connected).
+fn caller_client() -> Option<String> {
+    if let Some(c) = std::env::var("REX_CLIENT").ok().filter(|c| !c.is_empty()) {
+        return Some(c);
+    }
+    parse_block_owner(&inspect_caller_block()?)
+}
+
+/// The owning client id from a `rex block inspect --json` reply.
+pub(crate) fn parse_block_owner(v: &serde_json::Value) -> Option<String> {
+    v.get("block")?
+        .get("owner")?
+        .as_str()
+        .filter(|o| !o.is_empty())
+        .map(str::to_string)
 }
 
 /// What `focus_history.reverse` answered, when it moved focus.
@@ -503,6 +546,19 @@ mod tests {
         assert_eq!(rows[0].cwd, "/tmp");
         assert_eq!(rows[0].command, "nvim");
         assert!(rows[0].focused);
+    }
+
+    #[test]
+    fn parse_block_owner_reads_owning_client() {
+        let v = serde_json::json!({
+            "session_id": "session:a",
+            "block": {"block_id": "block:x", "owner": "client:laptop"}
+        });
+        assert_eq!(parse_block_owner(&v).as_deref(), Some("client:laptop"));
+        let unowned = serde_json::json!({"block": {"block_id": "block:x"}});
+        assert_eq!(parse_block_owner(&unowned), None);
+        let empty = serde_json::json!({"block": {"owner": ""}});
+        assert_eq!(parse_block_owner(&empty), None);
     }
 
     #[test]
