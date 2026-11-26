@@ -28731,7 +28731,7 @@ fn backspacing_prefix_records_into_old_mode_history() {
     // After three backspaces: query is `&`. Cursor at 1.
     assert_eq!(app.query, "&");
     assert!(
-            app.mode_query_history.get(&codegraph).is_none(),
+            !app.mode_query_history.contains_key(&codegraph),
             "backspacing within the same mode must NOT record (the query is non-empty but the mode is unchanged)"
         );
 
@@ -28783,7 +28783,7 @@ fn select_for_run_records_current_query_into_active_mode() {
     app.query = "&getSymbol".to_string();
     app.query_cursor = app.query.chars().count();
     app.list_state.select(Some(0));
-    let _ = app.select_for_run();
+    app.select_for_run();
     let entries = app
         .mode_query_history
         .get(&codegraph)
@@ -36466,7 +36466,10 @@ fn session_shortcut_ignored_outside_panes_mode() {
 /// history never stores, so the lookup must canonicalize.
 #[test]
 fn last_directory_timestamp_uses_latest_history_in_dir() {
-    let app = directories_test_app(&[("ls", "/tmp", 500), ("pwd", "/tmp", 100), ("x", "/usr", 10)]);
+    // History stores canonical directories; on macOS `/tmp` is a
+    // symlink to `/private/tmp`, so insert what the hook would store.
+    let tmp = crate::util::canonicalize_directory("/tmp");
+    let app = directories_test_app(&[("ls", &tmp, 500), ("pwd", &tmp, 100), ("x", "/usr", 10)]);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -36483,7 +36486,9 @@ fn last_directory_timestamp_uses_latest_history_in_dir() {
 /// section headers at 0 (rendered blank).
 #[test]
 fn panes_directory_rows_show_last_visit() {
-    let app = directories_test_app(&[("ls", "/tmp", 50), ("make", "/usr/lib", 20)]);
+    // History stores canonical directories (`/tmp` is a symlink on macOS).
+    let tmp = crate::util::canonicalize_directory("/tmp");
+    let app = directories_test_app(&[("ls", &tmp, 50), ("make", "/usr/lib", 20)]);
     let worktree = |path: &str| crate::tui::mode::worktree::WorktreeEntry {
         path: path.to_string(),
         branch: Some("main".to_string()),
@@ -36524,7 +36529,9 @@ fn panes_directory_rows_show_last_visit() {
 #[test]
 fn panes_configured_directories_sorted_by_last_visit() {
     let mut app = panes_test_app(&[]);
-    for (i, (dir, age)) in [("/usr", 500), ("/tmp", 50)].iter().enumerate() {
+    // History stores canonical directories (`/tmp` is a symlink on macOS).
+    let tmp = crate::util::canonicalize_directory("/tmp");
+    for (i, (dir, age)) in [("/usr", 500), (tmp.as_str(), 50)].iter().enumerate() {
         app.conn
             .execute(
                 "INSERT INTO history (id, command, directory, session_id, exit_code, timestamp) \

@@ -1034,13 +1034,12 @@ fn wrap_chars_to_rows(chars: &[char], width: usize) -> Vec<(String, usize)> {
     let mut start = 0usize;
     while start < chars.len() {
         let end = (start + width).min(chars.len());
-        if end < chars.len() {
-            if let Some(ws) = (start..end).rev().find(|&i| chars[i].is_whitespace()) {
+        if end < chars.len()
+            && let Some(ws) = (start..end).rev().find(|&i| chars[i].is_whitespace()) {
                 rows.push((chars[start..ws].iter().collect(), start));
                 start = ws + 1; // drop the whitespace itself — it's the break point
                 continue;
             }
-        }
         rows.push((chars[start..end].iter().collect(), start));
         start = end;
     }

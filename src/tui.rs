@@ -193,29 +193,28 @@ pub(crate) struct TuiSession {
 /// `false` otherwise. The mapping is:
 ///
 /// - `mode`         ↔ `--mode <SCOPE>`, `$SMARTHISTORY_TUI_MODE`,
-///                  `$SMARTHISTORY_MODE`, `initialmode=...` in the
-///                  config file. When `true`, the session's
-///                  `mode=` line is NOT written on exit (so the
-///                  next plain launch falls back to the
-///                  config-file default rather than the
-///                  scope the user picked on the CLI).
+///   `$SMARTHISTORY_MODE`, `initialmode=...` in the
+///   config file. When `true`, the session's
+///   `mode=` line is NOT written on exit (so the
+///   next plain launch falls back to the
+///   config-file default rather than the
+///   scope the user picked on the CLI).
 /// - `query`        ↔ `--prefix <char>` or a positional
-///                  `--query <text>`. When `true`, the session's
-///                  `query=` line is NOT written — the user
-///                  explicitly asked for a specific starting
-///                  query this launch and shouldn't force it
-///                  on the next launch.
-/// - `pane_visibility`
-///                 ↔ `--pane <LAYOUT>`. When `true`, the
-///                  session's `panevisibility=` line is NOT
-///                  written for the same reason.
+///   `--query <text>`. When `true`, the session's
+///   `query=` line is NOT written — the user
+///   explicitly asked for a specific starting
+///   query this launch and shouldn't force it
+///   on the next launch.
+/// - `pane_visibility` ↔ `--pane <LAYOUT>`. When `true`, the
+///   session's `panevisibility=` line is NOT
+///   written for the same reason.
 /// - `panes_filter` ↔ `--panes-filter <FILTER>`. Currently
-///                  not persisted in the session file at all
-///                  (the field is reset to its default on every
-///                  launch), so this flag is informational —
-///                  it's tracked for symmetry / future-proofing
-///                  and so the TUI's documentation accurately
-///                  lists all four flags as "one-off".
+///   not persisted in the session file at all
+///   (the field is reset to its default on every
+///   launch), so this flag is informational —
+///   it's tracked for symmetry / future-proofing
+///   and so the TUI's documentation accurately
+///   lists all four flags as "one-off".
 ///
 /// Fields NOT covered by this struct (`theme`, `sort_order`,
 /// `exit_filter`, `duplicate_filter`, `directory_source`,
@@ -10894,9 +10893,7 @@ impl App {
     /// message) on any validation failure — callers should return
     /// `false` in that case, same as before this was split out.
     fn note_create_build_body(&mut self) -> Option<String> {
-        let Some(ref dialog) = self.note_create else {
-            return None;
-        };
+        let dialog = self.note_create.as_ref()?;
         let Some(body) = crate::tui::state::build_note_body(&dialog.title, &dialog.content) else {
             self.set_status_message("Nothing to save — both fields are empty".to_string());
             return None;
@@ -11116,8 +11113,8 @@ impl App {
             ("[[", rest)
         } else if let Some(rest) = word.strip_prefix('@') {
             ("@", rest)
-        } else if word.starts_with('#') {
-            ("#", &word[1..])
+        } else if let Some(rest) = word.strip_prefix('#') {
+            ("#", rest)
         } else {
             return false;
         };
@@ -11182,8 +11179,10 @@ impl App {
         let service = note_search::database_service::DatabaseService::new(
             &db_path.display().to_string(),
         );
-        let mut criteria = note_search::SearchCriteria::default();
-        criteria.list_only = true;
+        let mut criteria = note_search::SearchCriteria {
+            list_only: true,
+            ..Default::default()
+        };
         match prefix {
             // `AttributePair` (the `criteria.attributes` field) is an
             // equality filter: the query builder emits `... WHERE

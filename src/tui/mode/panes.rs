@@ -1216,10 +1216,8 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
         // without a second map lookup.
         use std::collections::BTreeMap;
         let mut order: Vec<String> = Vec::new();
-        let mut grouped: BTreeMap<
-            String,
-            Vec<(crate::multiplexer::CurrentPaneInfo, String, String, i64, i64)>,
-        > = BTreeMap::new();
+        type GroupedPane = (crate::multiplexer::CurrentPaneInfo, String, String, i64, i64);
+        let mut grouped: BTreeMap<String, Vec<GroupedPane>> = BTreeMap::new();
         // Decreasing synthetic ids so
         // the rows sort consistently
         // under any timestamp-DESC sort.
@@ -1583,8 +1581,8 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
         // Stable so the
         // first-seen order is the
         // tiebreaker.
-        for (_, entries) in grouped.iter_mut() {
-            entries.sort_by(|a, b| b.4.cmp(&a.4));
+        for entries in grouped.values_mut() {
+            entries.sort_by_key(|a| std::cmp::Reverse(a.4));
         }
 
         let mut panes: Vec<HistoryRow> = Vec::new();
