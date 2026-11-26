@@ -1881,6 +1881,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(
         f,
+        "  tui.glyphs = {}",
+        if cfg.tui_ascii_glyphs { "ascii" } else { "unicode" }
+    );
+    let _ = writeln!(
+        f,
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
@@ -2464,6 +2469,16 @@ pub struct Config {
     /// connectors in the `*` view, per-mode details and hover
     /// highlight. Classic is the historical boxed layout.
     modern: bool,
+    /// Glyph set for the TUI's box-drawing and status markers, from
+    /// `tui.glyphs=unicode|ascii` (default `unicode`). `ascii` swaps
+    /// every non-ASCII glyph (the selection bar, tree connectors,
+    /// scrollbar, disclosure triangles, status markers, ellipsis) for
+    /// a single-column ASCII character. Needed because those glyphs
+    /// are East-Asian Width = Ambiguous: terminals that render
+    /// ambiguous characters double-width (iTerm2 under a CJK locale)
+    /// shift every rule and connector by one cell. Mirrors the zsh
+    /// dropdown's `dropdown.boxchars=ascii|unicode`.
+    tui_ascii_glyphs: bool,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -2860,6 +2875,11 @@ pub struct TuiTheme {
     error: String,
     warning: String,
     dim: String,
+    /// A step quieter than `dim`, used for month/year ages and rule
+    /// labels. Empty by default — the TUI then derives it from the
+    /// theme's own fg/bg instead of hardcoding a gray, so it stays
+    /// readable on light themes. Override with `tuicolor.dimmer=`.
+    dimmer: String,
     highlight: String,
     /// Foreground color used for the "output search" mode
     /// tint (the `+...` query prefix). Defaults to blue so
@@ -2948,6 +2968,7 @@ impl Config {
             tui_highlight: false,
             compact: false,
             modern: true,
+            tui_ascii_glyphs: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -3280,6 +3301,9 @@ impl Config {
                 }
                 "tui.style" => {
                     self.modern = !value.trim().eq_ignore_ascii_case("classic");
+                }
+                "tui.glyphs" => {
+                    self.tui_ascii_glyphs = value.trim().eq_ignore_ascii_case("ascii");
                 }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
@@ -4280,8 +4304,27 @@ impl Config {
             SelectedTheme::Builtin(b) => Some(b.palette()),
             SelectedTheme::None => None,
         };
-        let mut out: Vec<(&'static str, String)> = Vec::with_capacity(14);
+        let mut out: Vec<(&'static str, String)> = Vec::with_capacity(15);
         let cfg_theme = &self.theme;
+        // No `dimmer` slot on `ThemePalette`; the TUI derives it from
+        // fg/bg when the user hasn't pinned one. Report the same
+        // resolved value here so the dropdown widget agrees with the
+        // TUI instead of inventing a second rule.
+        let dimmer_css = if !cfg_theme.dimmer.is_empty() {
+            cfg_theme.dimmer.clone()
+        } else {
+            let fg = if !cfg_theme.fg.is_empty() {
+                crate::tui::theme::resolve_color(&cfg_theme.fg)
+            } else {
+                builtin.map_or(ratatui::style::Color::Gray, |p| p.fg)
+            };
+            let bg = if !cfg_theme.bg.is_empty() {
+                crate::tui::theme::resolve_color(&cfg_theme.bg)
+            } else {
+                builtin.map_or(ratatui::style::Color::Black, |p| p.bg)
+            };
+            crate::tui::theme::color_to_css(crate::tui::theme::derive_dimmer(fg, bg))
+        };
         // Helper: emit `<key>=<value>` with the user's
         // `tuicolor.<key>=` value when set, else the built-in
         // theme's CSS conversion, else the default CSS name.
@@ -4390,6 +4433,9 @@ impl Config {
             builtin.map(|p| p.warning),
             "magenta",
         );
+        // Pushed after every `push` call above, since the closure
+        // holds the only mutable borrow of `out` until here.
+        out.push(("dimmer", dimmer_css));
         out
     }
 
@@ -4517,6 +4563,11 @@ impl Config {
     /// `tui.style=modern` (the default) — see the `modern` field.
     pub fn modern(&self) -> bool {
         self.modern
+    }
+
+    /// `tui.glyphs=ascii` — see the `tui_ascii_glyphs` field.
+    pub fn ascii_glyphs(&self) -> bool {
+        self.tui_ascii_glyphs
     }
 
     /// The user-defined JQL fragments loaded from
@@ -4881,6 +4932,7 @@ impl Config {
             "error" => theme.error = value,
             "warning" => theme.warning = value,
             "dim" => theme.dim = value,
+            "dimmer" => theme.dimmer = value,
             "highlight" => theme.highlight = value,
             "info" => theme.info = value,
             "selection" => theme.selection = value,
@@ -10106,6 +10158,9 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     }
                     "tui.style" => {
                         println!("{}", if cfg.modern { "modern" } else { "classic" })
+                    }
+                    "tui.glyphs" => {
+                        println!("{}", if cfg.tui_ascii_glyphs { "ascii" } else { "unicode" })
                     }
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })

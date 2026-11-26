@@ -17,6 +17,7 @@ use super::state::{
     ExitFilter, HistoryRow, KeyBindingsEditor, Mode, NoteComposeDialog, NoteCreateDialog,
     NoteCreateField, SortOrder,
 };
+use super::theme::glyphs::glyphs;
 use super::theme::palette_storage::PALETTE;
 use super::theme::{Theme, ThemePicker};
 use super::{
@@ -26,10 +27,19 @@ use super::{
 use super::CodeGraphRelationsPicker;
 use regex::Regex;
 
-/// Tree connectors for the modern `*` view: a child row gets
-/// [`TREE_MID`], the last child of its group [`TREE_LAST`].
-const TREE_MID: &str = "├";
-const TREE_LAST: &str = "└";
+/// Tree connectors for the modern `*` view: a child row gets the
+/// "middle" connector, the last child of its group the "last" one.
+/// Both come from the glyph table so `tui.glyphs=ascii` can swap
+/// them (see [`glyphs`]).
+#[inline]
+fn tree_mid() -> &'static str {
+    glyphs().tree_mid
+}
+
+#[inline]
+fn tree_last() -> &'static str {
+    glyphs().tree_last
+}
 
 /// Below this many columns the modern style stops splitting the
 /// detail row into Details | Output side by side.
@@ -204,14 +214,30 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
                         // leaving half of it for an empty Output pane.
                         draw_details(f, app, rows[1]);
                         details_elapsed = details_start.elapsed();
-                    } else if app.modern && rows[1].width < NARROW_SPLIT_WIDTH {
+                    } else if Chrome::for_app(app) == Chrome::Modern && rows[1].width < NARROW_SPLIT_WIDTH {
                         // Modern, narrow terminal, output captured: a
-                        // 60/40 split leaves both panes too thin to
-                        // read. The output is what's new here (the
-                        // list row already shows the command), so it
-                        // gets the full width.
+                        // 60/40 side-by-side split leaves both panes too
+                        // thin to read, so stack them instead of
+                        // dropping one. Details keeps the height its
+                        // content needs (capped at 60% of the row) and
+                        // the preview takes the rest — the command,
+                        // directory and exit status must stay visible
+                        // next to the output they describe.
+                        let needed = details_natural_height(app, rows[1].width);
+                        let split = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints(
+                                [
+                                    Constraint::Length(needed.min(rows[1].height * 6 / 10)),
+                                    Constraint::Fill(1),
+                                ]
+                                .as_ref(),
+                            )
+                            .split(rows[1]);
+                        draw_details(f, app, split[0]);
+                        details_elapsed = details_start.elapsed();
                         let output_preview_start = std::time::Instant::now();
-                        draw_output_preview(f, app, rows[1]);
+                        draw_output_preview(f, app, split[1]);
                         output_preview_elapsed = output_preview_start.elapsed();
                     } else {
                         let detail_chunks = Layout::default()
@@ -445,7 +471,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
-    let area = centered_rect(60, 25, f.area());
+    let area = popup(46, 10, 60, 25, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let (title, message) = match mode {
@@ -566,7 +592,7 @@ fn draw_confirm_delete(f: &mut Frame, app: &App, mode: &ConfirmMode) {
 /// (`handle_confirm_signal_key`) updates the displayed text on the
 /// very next render with no extra plumbing.
 fn draw_confirm_signal(f: &mut Frame, app: &App, signal: &crate::tui::SignalConfirm) {
-    let area = centered_rect(60, 25, f.area());
+    let area = popup(46, 10, 60, 25, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let title = " Send signal to process ";
@@ -629,7 +655,7 @@ fn draw_confirm_signal(f: &mut Frame, app: &App, signal: &crate::tui::SignalConf
 /// user's typed Title/Content stay visible underneath while they
 /// decide.
 fn draw_note_create_confirm(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 18, f.area());
+    let area = popup(40, 9, 50, 18, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -685,7 +711,7 @@ fn draw_zoxide_save_prompt(
     app: &App,
     prompt: &crate::tui::state::ZoxideSavePrompt,
 ) {
-    let area = centered_rect(60, 22, f.area());
+    let area = popup(44, 9, 60, 22, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -738,7 +764,7 @@ fn draw_project_since_prompt(
     app: &App,
     prompt: &crate::tui::state::ProjectSincePrompt,
 ) {
-    let area = centered_rect(60, 22, f.area());
+    let area = popup(44, 9, 60, 22, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -815,7 +841,7 @@ fn draw_template_name_prompt(
     app: &App,
     prompt: &crate::tui::state::TemplateNamePrompt,
 ) {
-    let area = centered_rect(60, 22, f.area());
+    let area = popup(44, 9, 60, 22, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -944,7 +970,7 @@ pub(crate) fn truncate_line_with_ellipsis(line: &mut Line<'_>, width: usize) {
         }
         break;
     }
-    out.push(Span::styled("…", last_style));
+    out.push(Span::styled(glyphs().ellipsis, last_style));
     line.spans = out;
 }
 
@@ -953,20 +979,7 @@ pub(crate) fn truncate_line_with_ellipsis(line: &mut Line<'_>, width: usize) {
 /// carrying the title — lighter, and it gives the content back the
 /// side and bottom border cells.
 fn pane_block(app: &App, title: String, bg: Color) -> Block<'static> {
-    let block = if app.modern {
-        Block::default()
-            .borders(Borders::TOP)
-            .border_type(ratatui::widgets::BorderType::Plain)
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-    };
-    block
-        .title(title)
-        .title_style(Theme::accent())
-        .border_style(Theme::dim())
-        .style(Style::default().bg(bg))
+    Chrome::for_app(app).block(title, bg)
 }
 
 /// A centered popup of `width` x `height` cells, clamped to the
@@ -974,6 +987,29 @@ fn pane_block(app: &App, title: String, bg: Color) -> Block<'static> {
 /// [`centered_rect`]'s percentages, this keeps a popup readable on
 /// a narrow terminal instead of shrinking its content until it
 /// wraps or truncates.
+/// A dialog rectangle sized to its *content*: at least `min_w` x
+/// `min_h` cells, grown to the frame's percentage-based box when that
+/// is bigger, and always clamped inside the frame. Every dialog goes
+/// through this so "the popup shrank until it wrapped" can only be a
+/// content-size mistake, never a per-dialog sizing rule — the palette
+/// and the mode picker had each grown their own `max(76, ...)` /
+/// `max(44, ...)` fudge for exactly that bug.
+#[cfg(test)]
+pub(crate) fn popup_for_test(
+    min_w: u16,
+    min_h: u16,
+    percent_x: u16,
+    percent_y: u16,
+    r: Rect,
+) -> Rect {
+    popup(min_w, min_h, percent_x, percent_y, r)
+}
+
+fn popup(min_w: u16, min_h: u16, percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let pct = centered_rect(percent_x, percent_y, r);
+    centered_fixed(pct.width.max(min_w), pct.height.max(min_h), r)
+}
+
 fn centered_fixed(width: u16, height: u16, r: Rect) -> Rect {
     let w = width.min(r.width.saturating_sub(2).max(1)).min(r.width);
     let h = height.min(r.height.saturating_sub(2).max(1)).min(r.height);
@@ -994,7 +1030,7 @@ fn centered_fixed(width: u16, height: u16, r: Rect) -> Rect {
 /// A simple bottom-anchored auto-scroll keeps the cursor's line
 /// visible when the buffer grows taller than the box.
 fn draw_note_compose(f: &mut Frame, app: &App, dialog: &NoteComposeDialog) {
-    let area = centered_rect(70, 60, f.area());
+    let area = popup(50, 12, 70, 60, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let title = if dialog.todo {
@@ -1180,7 +1216,7 @@ fn draw_note_create(
     // for a
     // paragraph
     // or two.
-    let area = centered_rect(70, 75, f.area());
+    let area = popup(56, 14, 70, 75, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let outer_block = Block::default()
@@ -1543,7 +1579,11 @@ fn draw_note_create(
                     } else {
                         Style::default().fg(Theme::dim_color())
                     };
-                    let marker = if idx == menu.selected { "▸ " } else { "  " };
+                    let marker = if idx == menu.selected {
+                        format!("{} ", glyphs().disclosure_closed)
+                    } else {
+                        "  ".to_string()
+                    };
                     ListItem::new(Line::from(Span::styled(
                         format!("{marker}{candidate}"),
                         style,
@@ -1567,7 +1607,7 @@ fn draw_note_create(
                     .fg(PALETTE.with(|p| p.borrow().fg))
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("▌")
+            .highlight_symbol(glyphs().selection_bar)
             .repeat_highlight_symbol(true);
         // The
         // menu
@@ -1612,10 +1652,12 @@ fn draw_note_create(
 fn overlay(
     f: &mut Frame,
     title: &str,
+    min_w: u16,
+    min_h: u16,
     percent_x: u16,
     percent_y: u16,
 ) -> Rect {
-    let area = centered_rect(percent_x, percent_y, f.area());
+    let area = popup(min_w, min_h, percent_x, percent_y, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let bg = PALETTE.with(|p| p.borrow().bg);
@@ -1658,7 +1700,7 @@ fn draw_add_entry_dialog(f: &mut Frame, app: &App, dialog: &AddEntryDialog) {
     // transient overlay).
     let needed = (dialog.fields.len() as u16) + 5;
     let pct = ((needed * 100) / f.area().height.max(1)).min(80);
-    let area = centered_rect(70, pct, f.area());
+    let area = popup(48, needed + 2, 70, pct, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let title = dialog
@@ -1944,7 +1986,7 @@ fn dialog_field_line_inner<'a>(
 fn draw_jira_template_picker(f: &mut Frame, picker: &crate::tui::state::JiraTemplatePicker) {
     use ratatui::widgets::{List, ListItem};
 
-    let inner = overlay(f, " Create JIRA issue from template — ↑/↓ select, Enter open, Esc cancel ", 50, 60);
+    let inner = overlay(f, " Create JIRA issue from template — ↑/↓ select, Enter open, Esc cancel ", 50, 8, 50, 60);
 
     let items: Vec<ListItem> = picker
         .entries
@@ -1957,7 +1999,7 @@ fn draw_jira_template_picker(f: &mut Frame, picker: &crate::tui::state::JiraTemp
     let mut list_state = ratatui::widgets::ListState::default().with_selected(Some(picker.selected));
     let list = List::new(items)
         .highlight_style(highlight_style)
-        .highlight_symbol("▌");
+        .highlight_symbol(glyphs().selection_bar);
     f.render_stateful_widget(list, inner, &mut list_state);
 }
 
@@ -1972,7 +2014,7 @@ fn draw_source_picker(f: &mut Frame, picker: &crate::tui::state::SourcePicker) {
         .file_name()
         .map_or_else(|| picker.source_path.clone(), |n| n.to_string_lossy().into_owned());
     let title = format!(" Open {name} ");
-    let inner = overlay(f, &title, 90, 50);
+    let inner = overlay(f, &title, 60, 10, 90, 50);
     let error_height = if picker.error.is_some() { 3 } else { 1 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2037,7 +2079,7 @@ fn draw_source_picker(f: &mut Frame, picker: &crate::tui::state::SourcePicker) {
             .highlight_style(
                 Style::default().bg(Theme::selection_color()).add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("▌");
+            .highlight_symbol(glyphs().selection_bar);
         f.render_stateful_widget(list, chunks[2], &mut state);
     }
     f.render_widget(
@@ -2064,7 +2106,7 @@ fn draw_worktree_create_flow(f: &mut Frame, flow: &crate::tui::state::WorktreeCr
         WorktreeCreateStep::PickLocation => " Create worktree — where? ",
         WorktreeCreateStep::PickProject => " Create worktree — assign to a project (optional) ",
     };
-    let inner = overlay(f, title, 60, 60);
+    let inner = overlay(f, title, 50, 12, 60, 60);
 
     if flow.step == WorktreeCreateStep::ConfirmCarryOver {
         let text = vec![
@@ -2178,7 +2220,7 @@ fn draw_worktree_create_flow(f: &mut Frame, flow: &crate::tui::state::WorktreeCr
         let highlight_style = Style::default().bg(Theme::selection_color()).add_modifier(Modifier::BOLD);
         let selected = if filtered.is_empty() { None } else { Some(flow.selected.min(filtered.len() - 1)) };
         let mut list_state = ratatui::widgets::ListState::default().with_selected(selected);
-        let list = List::new(items).highlight_style(highlight_style).highlight_symbol("▌");
+        let list = List::new(items).highlight_style(highlight_style).highlight_symbol(glyphs().selection_bar);
         f.render_stateful_widget(list, chunks[next_idx], &mut list_state);
         next_idx += 1;
     }
@@ -2206,7 +2248,10 @@ fn selector_line<'a>(name: &'a str, value: &'a str, is_focused: bool) -> Line<'a
         Span::styled(format!("{name}: "), label_style),
         Span::styled(if is_focused { "◂ " } else { "  " }, Theme::dim()),
         Span::styled(value.to_string(), style),
-        Span::styled(if is_focused { " ▸" } else { "  " }, Theme::dim()),
+        Span::styled(
+            if is_focused { format!(" {}", glyphs().disclosure_closed) } else { "  ".to_string() },
+            Theme::dim(),
+        ),
     ])
 }
 
@@ -2223,7 +2268,7 @@ fn draw_create_jira_issue_dialog(f: &mut Frame, dialog: &crate::tui::state::Crea
     // for the same reason (leave the underlying TUI visible as a cue
     // this is a transient overlay).
     let has_error = dialog.error.is_some();
-    let area = centered_rect(70, 75, f.area());
+    let area = popup(56, 16, 70, 75, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -3836,6 +3881,7 @@ pub(super) fn build_help_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
+    let chrome = Chrome::for_app(app);
     let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
     let title = if cancel_keys.is_empty() {
         String::from(" Command palette ")
@@ -3845,8 +3891,9 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     // 70% of the frame, but never narrower than 76 columns (clamped
     // to the frame), so action names don't wrap on an 80-column
     // terminal.
-    let pct = centered_rect(70, 70, f.area());
-    let area = centered_fixed(pct.width.max(76), pct.height.max(16), f.area());
+    // 76 columns is where an action name plus its key binding stop
+    // wrapping; the primitive applies that floor.
+    let area = popup(76, 16, 70, 70, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
     let inner = {
         let bg = PALETTE.with(|p| p.borrow().bg);
@@ -3933,9 +3980,9 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     let accent_style = Theme::accent();
     let warning_style = Style::default().fg(Theme::warning_color());
 
-    fn key_text(app: &App, action: Action) -> String {
+    fn key_text(app: &App, chrome: Chrome, action: Action) -> String {
         if app.bindings.is_unbound(action) {
-            if app.modern { "—".to_string() } else { "unbound".to_string() }
+            if chrome.is_modern() { "—".to_string() } else { "unbound".to_string() }
         } else {
             let specs = app.bindings.specs(action);
             if specs.is_empty() {
@@ -3948,7 +3995,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
 
     let key_width = ALL_ACTIONS
         .iter()
-        .map(|a| key_text(app, *a).chars().count())
+        .map(|a| key_text(app, chrome, *a).chars().count())
         .max()
         .unwrap_or(0)
         .max("key".len());
@@ -3971,8 +4018,8 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     let mut rows: Vec<Row> = Vec::new();
     for &idx in &filtered {
         let action = menu.actions[idx];
-        let key = key_text(app, action);
-        let key_style = if app.bindings.is_unbound(action) { if app.modern { dim_style } else { warning_style } } else { accent_style };
+        let key = key_text(app, chrome, action);
+        let key_style = if app.bindings.is_unbound(action) { if chrome.is_modern() { dim_style } else { warning_style } } else { accent_style };
 
         let desc_chars: Vec<char> = action.display_name().chars().collect();
         let wrapped = wrap_chars_to_rows(&desc_chars, desc_width);
@@ -3982,7 +4029,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         let mut name_lines: Vec<Line> = vec![Line::styled(action.config_key(), dim_style)];
         let mut desc_lines: Vec<Line> = Vec::new();
         for (text, _) in &wrapped {
-            if app.modern && !menu.query.is_empty() {
+            if chrome.is_modern() && !menu.query.is_empty() {
                 // Show which characters the filter matched.
                 desc_lines.push(Line::from(highlight_fuzzy_matches(text, &menu.query)));
             } else {
@@ -4166,6 +4213,18 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
                 },
             ),
         ];
+        // `recent` marker: this mode has been used this session, and
+        // the list is sorted by that recency. Cheaper and more honest
+        // than per-mode row counts, which for half the modes would
+        // mean a query, a subprocess or a REST call just to size a
+        // picker row.
+        let mut spans = spans;
+        if !is_selected
+            && crate::tui::mode::mode_kind_by_display_name(opt.name)
+                .is_some_and(|m| picker.recent.contains(&m))
+        {
+            spans.push(Span::styled("recent", dim_style));
+        }
         // "(current)" marker when
         // the row matches the
         // query's actual leading
@@ -4183,7 +4242,7 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("▌")
+        .highlight_symbol(glyphs().selection_bar)
         .repeat_highlight_symbol(false);
     let mut list_state = ListState::default();
     if end > start {
@@ -4206,7 +4265,7 @@ fn draw_codegraph_relations_picker(
 
     // Wider than the prefix picker so the qualified names and
     // `@file_path:line` suffix are readable.
-    let area = centered_rect(80, 60, f.area());
+    let area = popup(60, 12, 80, 60, f.area());
     f.render_widget(ratatui::widgets::Clear, area);
 
     let enter_keys = format_key_specs(app.bindings.specs(Action::Run));
@@ -4296,7 +4355,7 @@ fn draw_codegraph_relations_picker(
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("▌")
+        .highlight_symbol(glyphs().selection_bar)
         .repeat_highlight_symbol(false);
     f.render_widget(list, inner);
 }
@@ -4311,7 +4370,7 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
     //   [0] the list of themes (55% of width)
     //   [1] a preview pane (45% of width) showing the live
     //       palette in action.
-    let outer = centered_rect(75, 70, f.area());
+    let outer = popup(64, 18, 75, 70, f.area());
     f.render_widget(ratatui::widgets::Clear, outer);
 
     // Use the user's actual
@@ -4455,7 +4514,7 @@ fn draw_theme_picker(f: &mut Frame, app: &App, picker: &ThemePicker) {
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("▌")
+        .highlight_symbol(glyphs().selection_bar)
         .repeat_highlight_symbol(false);
     let mut list_state = ListState::default();
     if end > start {
@@ -4547,7 +4606,7 @@ fn draw_key_bindings_editor(f: &mut Frame, app: &App, editor: &KeyBindingsEditor
     } else {
         format!(" Key bindings editor — {} to close ", cancel_keys)
     };
-    let inner = overlay(f, &title, 75, 75);
+    let inner = overlay(f, &title, 60, 18, 75, 75);
 
     let bg = PALETTE.with(|p| p.borrow().bg);
     let fg = PALETTE.with(|p| p.borrow().fg);
@@ -4730,7 +4789,7 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
     // is short (typically 2-10
     // candidates) so a 50%
     // × 40% popup is plenty.
-    let outer = centered_rect(50, 40, f.area());
+    let outer = popup(40, 8, 50, 40, f.area());
     f.render_widget(ratatui::widgets::Clear, outer);
 
     // The title shows the
@@ -4837,7 +4896,7 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
     let list = List::new(items)
         .style(Style::default().bg(bg))
         .highlight_style(highlight_style)
-        .highlight_symbol("▌")
+        .highlight_symbol(glyphs().selection_bar)
         .repeat_highlight_symbol(false);
     let mut list_state = ListState::default();
     if end > start {
@@ -4855,13 +4914,106 @@ fn draw_completion_menu(f: &mut Frame, app: &App, menu: &super::CompletionMenu) 
     f.render_widget(footer_para, chunks[1]);
 }
 
+/// The frame's visual language, resolved once per draw from the
+/// user's `tui.style` choice. Replaces the `app.modern` boolean that
+/// used to be re-tested at every chrome decision (25 sites): panes,
+/// selection, scrollbar, popups and the status bar all ask this one
+/// value instead, so "classic" is a property of the chrome rather
+/// than a `if !modern { ...historical... }` branch scattered through
+/// the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Chrome {
+    /// Rounded boxes, full borders, `·`-separated status segments.
+    /// Frozen: kept for `tui.style=classic` so an existing setup
+    /// keeps its exact historical layout.
+    Classic,
+    /// Single top rules, no side/bottom borders, chips, thin
+    /// scrollbar, key-hint status bar.
+    Modern,
+}
+
+impl Chrome {
+    pub(crate) fn for_app(app: &App) -> Self {
+        if app.modern { Chrome::Modern } else { Chrome::Classic }
+    }
+
+    fn is_modern(self) -> bool {
+        matches!(self, Chrome::Modern)
+    }
+
+    /// Pane frame: one dim top rule carrying the title, or the
+    /// historical rounded box.
+    fn block(self, title: String, bg: Color) -> Block<'static> {
+        let block = if self.is_modern() {
+            Block::default()
+                .borders(Borders::TOP)
+                .border_type(ratatui::widgets::BorderType::Plain)
+        } else {
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+        };
+        block
+            .title(title)
+            .title_style(Theme::accent())
+            .border_style(Theme::dim())
+            .style(Style::default().bg(bg))
+    }
+
+    /// How many rows the block's frame consumes. The list and the
+    /// preview both need this to compute their inner height, and
+    /// hardcoding `2` for both was how the preview's scroll bound
+    /// drifted one line past the end of its content.
+    fn frame_rows(self) -> u16 {
+        if self.is_modern() { 1 } else { 2 }
+    }
+}
+
+/// The key hints at the right of the status bar, shared by both
+/// chrome styles so the classic and modern bars can never disagree
+/// about what is bound. Mode-specific entries come first.
+fn status_hints(app: &App) -> Vec<(String, &'static str)> {
+    use crate::tui::mode::ModeKind;
+    let mut hints: Vec<(String, &'static str)> = Vec::new();
+    let mode = crate::tui::mode::active_mode(app);
+    // Mode-specific hints first: they answer "what can I do *here*",
+    // which is the question a status bar should answer now that the
+    // global ones are one keypress away in the palette. Each is only
+    // shown when the action is actually bound.
+    let push = |action: Action, word: &'static str, hints: &mut Vec<_>| {
+        let keys = format_key_specs(app.bindings.specs(action));
+        if !keys.is_empty() {
+            hints.push((keys, word));
+        }
+    };
+    match mode {
+        ModeKind::Panes => hints.push(("1-9".to_string(), "jump")),
+        ModeKind::History | ModeKind::Output => {
+            push(Action::ShowOutput, "output", &mut hints);
+        }
+        ModeKind::Llm | ModeKind::Question => {
+            push(Action::Describe, "describe", &mut hints);
+        }
+        ModeKind::Files | ModeKind::Tags | ModeKind::Codegraph => {
+            push(Action::SmartOpen, "open", &mut hints);
+        }
+        ModeKind::Jira => {
+            push(Action::SmartOpen, "open", &mut hints);
+        }
+        _ => {}
+    }
+    for (action, word) in [
+        (Action::OpenHelp, "help"),
+        (Action::CommandAction, "palette"),
+        (Action::ClearQuery, "clear"),
+    ] {
+        push(action, word, &mut hints);
+    }
+    hints
+}
+
 fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
     let bg = PALETTE.with(|p| p.borrow().bg);
-    let dup_label = if app.duplicate_filter {
-        "last only"
-    } else {
-        "all entries"
-    };
     // Exit-filter chip is hidden entirely when the filter is at
     // its default (`All`). Showing it always would be visual
     // noise — the All/OK/ERR distinction only matters once the
@@ -5045,26 +5197,15 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     } else {
-        // Default display: append every chip, then the trailing
-        // scope · duplicate text (the historical layout; `Paragraph`
-        // clips whatever overflows).
+        // Default display: append every chip. The trailing
+        // `current directory only · last only` sentence is gone — it
+        // restated the scope and duplicate badges three cells to its
+        // left, and cost the right edge of the strip on narrow
+        // terminals. `Paragraph` clips whatever still overflows.
         for chip in optional_chips.into_iter().flatten() {
             spans.push(Span::styled("  ", Theme::default()));
             spans.push(chip);
         }
-        spans.push(Span::styled(
-            format!(
-                "  {} · {} ",
-                match app.mode {
-                    Mode::Sess => "current session only",
-                    Mode::Dir => "current directory only",
-                    Mode::Global => "all history",
-                    Mode::Stats => "predicted next + newest",
-                },
-                dup_label,
-            ),
-            Theme::dim(),
-        ));
     }
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(bg));
@@ -5414,6 +5555,7 @@ fn list_visible_window(
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let chrome = Chrome::for_app(app);
     let merged = app.merged_rows();
 
     // Rows are stored newest-first; for display we want oldest at
@@ -5446,7 +5588,9 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // (header at the top, indentation underneath).
     // Classic: a full box (top + bottom border). Modern: a single
     // top rule carrying the title, so one more content row.
-    let visible_height = area.height.saturating_sub(if app.modern { 1 } else { 2 }) as usize;
+    let visible_height = area
+        .height
+        .saturating_sub(Chrome::for_app(app).frame_rows()) as usize;
     let pad = if is_panes {
         0
     } else {
@@ -5582,11 +5726,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             }
         })
         .collect();
-    let hover_row = if app.modern { app.hover_row } else { None };
+    let hover_row = if chrome.is_modern() { app.hover_row } else { None };
     // Modern: cut overflowing rows with `…` instead of letting the
     // widget clip them mid-word. Width = the frame minus the
     // selection bar (1) and the scrollbar column when it shows.
-    let row_width = if app.modern {
+    let row_width = if chrome.is_modern() {
         (area.width as usize)
             .saturating_sub(1)
             .saturating_sub(usize::from(real_count > visible_height))
@@ -5633,16 +5777,16 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                     };
                     line.spans.insert(0, Span::styled(badge, style));
                 }
-                if app.modern && is_panes && r.mode != "workspace" {
+                if chrome.is_modern() && is_panes && r.mode != "workspace" {
                     // Last child of its group: the next row is a
                     // header (or there is none), so close the branch.
                     let next_is_child = merged
                         .get(data_idx + 1)
                         .is_some_and(|n| n.mode != "workspace");
                     if !next_is_child
-                        && let Some(sp) = line.spans.iter_mut().find(|sp| sp.content.contains(TREE_MID))
+                        && let Some(sp) = line.spans.iter_mut().find(|sp| sp.content.contains(tree_mid()))
                     {
-                        sp.content = sp.content.replace(TREE_MID, TREE_LAST).into();
+                        sp.content = sp.content.replace(tree_mid(), tree_last()).into();
                     }
                 }
                 if row_width > 0 {
@@ -5720,7 +5864,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let list_block = pane_block(app, title, PALETTE.with(|p| p.borrow().list_bg))
         // Modern: no right border, so keep one column clear for the
         // scrollbar instead of drawing it over row text.
-        .padding(ratatui::widgets::Padding::right(if app.modern && scrolls { 1 } else { 0 }));
+        .padding(ratatui::widgets::Padding::right(if chrome.is_modern() && scrolls { 1 } else { 0 }));
     let list = List::new(items)
         .block(list_block)
         .highlight_style(
@@ -5728,17 +5872,25 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             // for the background, the theme's own `fg` color
             // (not `highlight_color`) for the foreground so
             // the text always has maximum contrast with the
-            // theme-designed selection background. Bold +
-            // underline + the `▌` left-edge bar add
-            // visual weight without relying on color
-            // contrast alone (important on light themes
-            // where the selection background is close to
-            // the app background).
-            Style::default()
-                .bg(Theme::selection_color())
-                .fg(PALETTE.with(|p| p.borrow().fg))
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED),
+            // theme-designed selection background. Bold + the
+            // left-edge bar add visual weight without relying on
+            // color contrast alone (important on light themes where
+            // the selection background is close to the app
+            // background). The modern style drops the underline: it
+            // cut through syntax highlighting on every selected row
+            // and added nothing the bar and background don't already
+            // say. Classic keeps it — that layout is frozen.
+            {
+                let base = Style::default()
+                    .bg(Theme::selection_color())
+                    .fg(PALETTE.with(|p| p.borrow().fg))
+                    .add_modifier(Modifier::BOLD);
+                if chrome.is_modern() {
+                    base
+                } else {
+                    base.add_modifier(Modifier::UNDERLINED)
+                }
+            }
         )
         // A solid left-half block character
         // (▌) repeated across the symbol
@@ -5749,7 +5901,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         // the accent-background highlight
         // style above to make the row
         // unmissable.
-        .highlight_symbol("▌")
+        .highlight_symbol(glyphs().selection_bar)
         .repeat_highlight_symbol(true);
 
     f.render_stateful_widget(list, area, &mut render_state);
@@ -5770,7 +5922,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             ratatui::widgets::ScrollbarOrientation::VerticalRight,
         )
         .style(Theme::dim());
-        if app.modern {
+        if chrome.is_modern() {
             // Thin track + heavier thumb, no arrow caps, below the
             // top rule.
             let bar_area = Rect {
@@ -5782,8 +5934,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 scrollbar
                     .begin_symbol(None)
                     .end_symbol(None)
-                    .track_symbol(Some("│"))
-                    .thumb_symbol("┃")
+                    .track_symbol(Some(glyphs().scrollbar_track))
+                    .thumb_symbol(glyphs().scrollbar_thumb)
                     .thumb_style(Style::default().fg(Theme::accent_color())),
                 bar_area,
                 &mut scrollbar_state,
@@ -5831,6 +5983,81 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     if is_panes {
         app.panes_visible = (first_visible, last_visible);
     }
+
+    if real_count == 0 {
+        draw_empty_state(f, app, area);
+    }
+}
+
+/// What a zero-result list says instead of leaving a blank rectangle.
+/// Names the active query and match algorithm (the usual reason a
+/// query that once matched now doesn't), and the keys that change
+/// either of them, using the user's own bindings.
+fn draw_empty_state(f: &mut Frame, app: &App, area: Rect) {
+    let inner = area.inner(ratatui::layout::Margin::new(
+        2,
+        Chrome::for_app(app).frame_rows(),
+    ));
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let body = app.search_body().trim();
+    let algo = match app.match_algorithm {
+        crate::tui::state::MatchAlgorithm::Substring => "substring",
+        crate::tui::state::MatchAlgorithm::Fuzzy => "fuzzy",
+        crate::tui::state::MatchAlgorithm::Regex => "regex",
+    };
+    let mut lines = vec![
+        Line::from(Span::styled("no matches", Theme::dim())),
+        Line::from(""),
+    ];
+    if !body.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("query    ", Theme::dim()),
+            Span::styled(body.to_string(), Theme::default()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("matching ", Theme::dim()),
+            Span::styled(algo.to_string(), Theme::accent()),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "this view has nothing to show",
+            Theme::dim(),
+        )));
+    }
+
+    // Only advertise keys that are actually bound, so a user who
+    // rebound or unbound an action doesn't get a lying hint.
+    let mut hints: Vec<(String, &str)> = Vec::new();
+    for (action, word) in [
+        (Action::ToggleSearchMode, "change algorithm"),
+        (Action::ClearQuery, "clear"),
+        (Action::PickPrefix, "switch view"),
+        (Action::OpenHelp, "help"),
+    ] {
+        let keys = format_key_specs(app.bindings.specs(action));
+        if !keys.is_empty() {
+            hints.push((keys, word));
+        }
+    }
+    if !hints.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            hints
+                .into_iter()
+                .flat_map(|(keys, word)| {
+                    [
+                        Span::styled(keys, Theme::accent()),
+                        Span::styled(format!(" {word}   "), Theme::dim()),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// The active color scheme's light/dark classification, read from
@@ -5902,6 +6129,7 @@ pub(crate) fn render_row<'a>(
     is_selected: bool,
     age_width: usize,
 ) -> Line<'a> {
+    let chrome = Chrome::for_app(app);
     // Which prefix mode is active — used below to hide the two
     // fixed-width indicator columns (capture / tmux-pane) in modes
     // where they never carry any information, rather than always
@@ -5977,9 +6205,9 @@ pub(crate) fn render_row<'a>(
     let (exit_marker, exit_style) = if row.is_llm_preview() {
         ("~", Theme::accent())
     } else if row.exit_code == 0 {
-        ("✓", Theme::success())
+        (glyphs().ok, Theme::success())
     } else {
-        ("✗", Theme::error())
+        (glyphs().failed, Theme::error())
     };
 
     // Capture indicator. A bright `o ` shows the row has captured
@@ -5997,7 +6225,7 @@ pub(crate) fn render_row<'a>(
         Span::styled(
             // Modern: `≡` (lines of output) reads as "has output"
             // where a bare `o` didn't.
-            if app.modern { " ≡ " } else { " o " },
+            if chrome.is_modern() { format!("{} ", glyphs().capture) } else { " o ".to_string() },
             Style::default()
                 .fg(Theme::highlight_color())
                 .add_modifier(Modifier::BOLD),
@@ -6140,17 +6368,51 @@ pub(crate) fn render_row<'a>(
         Span::raw("   ")
     };
 
-    let mut spans = vec![
-        mark_span,
-        capture_span,
-        tmux_span,
-        llm_preview_span,
-        Span::styled(format!(" {} ", age_padded), age_style),
-    ];
-    if show_exit_marker {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(format!(" {} ", exit_marker), exit_style));
-        spans.push(Span::raw(" "));
+    // Modern gutter: every indicator sits in one 2-cell slot and only
+    // paints when it has something to say, so a plain history row
+    // starts at column 3 instead of column 16 (the classic layout
+    // reserves `[ ] o  16m   ✓  ` on every row whether or not any of
+    // it is meaningful). Order is status → capture → mark → age,
+    // reading outward from the text.
+    let mut spans = Vec::with_capacity(8);
+    if chrome.is_modern() {
+        // Age first, so it forms one aligned column down the list
+        // (the reason the classic layout pinned it too). The
+        // indicators after it are what vary per row.
+        spans.push(Span::styled(format!("{age_padded:>age_width$}  "), age_style));
+        if show_exit_marker {
+            spans.push(Span::styled(format!("{exit_marker} "), exit_style));
+        }
+        if active_mode == crate::tui::mode::ModeKind::History && !row.output.is_empty() {
+            spans.push(capture_span);
+        }
+        if marking_has_effect && app.marked_ids.contains(&mark_key(row)) {
+            spans.push(Span::styled(
+                format!("{}x] ", glyphs().selection_bar),
+                Style::default()
+                    .fg(Theme::highlight_color())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if row.is_llm_preview() {
+            spans.push(llm_preview_span);
+        }
+        if active_mode == crate::tui::mode::ModeKind::Source {
+            spans.push(tmux_span);
+        }
+    } else {
+        spans.extend([
+            mark_span,
+            capture_span,
+            tmux_span,
+            llm_preview_span,
+            Span::styled(format!(" {} ", age_padded), age_style),
+        ]);
+        if show_exit_marker {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(format!(" {} ", exit_marker), exit_style));
+            spans.push(Span::raw(" "));
+        }
     }
 
     // The `*`-mode list now has a
@@ -6204,23 +6466,27 @@ pub(crate) fn render_row<'a>(
     //     `host` rows: `  · ` to
     //     indent them under
     //     their parent.
-    if app.modern && app.is_panes_query() && row.mode != "workspace" && row.mode != "pane"
+    if chrome.is_modern() && app.is_panes_query() && row.mode != "workspace" && row.mode != "pane"
         && (row.mode == "session" || row.mode == "host" || row.mode == "directory")
     {
         // Modern tree: a child of a `Directories` / `hosts` header.
         // `├` here; `draw_list` turns the last child's into `└`.
-        spans.push(Span::styled(format!("  {TREE_MID} "), Theme::dim()));
-    } else if app.modern && row.mode == "pane" {
-        spans.push(Span::styled(format!("    {TREE_MID} "), Theme::dim()));
-    } else if app.modern && row.mode == "workspace" && row.source == "workspace" {
+        spans.push(Span::styled(format!("  {} ", tree_mid()), Theme::dim()));
+    } else if chrome.is_modern() && row.mode == "pane" {
+        spans.push(Span::styled(format!("    {} ", tree_mid()), Theme::dim()));
+    } else if chrome.is_modern() && row.mode == "workspace" && row.source == "workspace" {
         // A live session: a filled dot under the `Sessions` header,
         // in the agent-waiting color when an agent there waits.
         spans.push(Span::styled(
-            "  ● ",
+            format!("  {} ", glyphs().live),
             Style::default().fg(session_row_color(row)).add_modifier(Modifier::BOLD),
         ));
-    } else if app.modern && row.mode == "workspace" {
-        let disclosure = if app.collapsed_pane_groups.contains(&row.command) { "▸ " } else { "▾ " };
+    } else if chrome.is_modern() && row.mode == "workspace" {
+        let disclosure = if app.collapsed_pane_groups.contains(&row.command) {
+            format!("{} ", glyphs().disclosure_closed)
+        } else {
+            format!("{} ", glyphs().disclosure_open)
+        };
         spans.push(Span::styled(
             disclosure,
             Style::default().fg(Theme::info_color()).add_modifier(Modifier::BOLD),
@@ -6264,9 +6530,9 @@ pub(crate) fn render_row<'a>(
         // themes, making a busy pane's `▶` marker blend into its
         // workspace header instead of standing out from it.
         let disclosure = if app.collapsed_pane_groups.contains(&row.command) {
-            "▸ # "
+            format!("{} # ", glyphs().disclosure_closed)
         } else {
-            "▾ # "
+            format!("{} # ", glyphs().disclosure_open)
         };
         spans.push(Span::styled(
             disclosure,
@@ -6285,9 +6551,9 @@ pub(crate) fn render_row<'a>(
     // configured display name (`HostDef::name`) — see `Config::hosts`.
     if row.mode == "host" {
         let (glyph, style) = match app.host_reachable.get(&row.command) {
-            Some(true) => ("● ", Theme::success()),
-            Some(false) => ("● ", Theme::error()),
-            None => ("○ ", Theme::dim()),
+            Some(true) => (format!("{} ", glyphs().live), Theme::success()),
+            Some(false) => (format!("{} ", glyphs().live), Theme::error()),
+            None => ("o ".to_string(), Theme::dim()),
         };
         spans.push(Span::styled(glyph, style));
     }
@@ -6486,9 +6752,9 @@ pub(crate) fn render_row<'a>(
         // highlight color for the agent-waiting color, so the panes
         // that need the user stand out from the busy ones.
         let (marker, color) = if row.agent_waiting {
-            ("⏸", Theme::agent_waiting_color())
+            (glyphs().waiting, Theme::agent_waiting_color())
         } else {
-            ("▶", Theme::highlight_color())
+            (glyphs().running, Theme::highlight_color())
         };
         spans.push(Span::styled(
             format!("{marker} {} ", cmd_display),
@@ -6581,7 +6847,7 @@ pub(crate) fn render_row<'a>(
         // we just display the
         // string verbatim.
         let comment_display = row.comment.clone();
-        if app.modern && !is_history_row(row) {
+        if chrome.is_modern() && !is_history_row(row) {
             // Modern: outside shell history the secondary text isn't a
             // shell comment (a pane count, a note title, the last
             // command run in a directory), so no `# ` and no warning
@@ -6596,7 +6862,7 @@ pub(crate) fn render_row<'a>(
             ));
         }
     } else if row.mode != "ag" && is_selected
-        && !(app.modern && (row.mode == "workspace" || row.directory.is_empty() && row.mode != "directory"))
+        && !(chrome.is_modern() && (row.mode == "workspace" || row.directory.is_empty() && row.mode != "directory"))
     {
         // Selected-row fallback:
         // the primary text is
@@ -6863,62 +7129,103 @@ fn is_history_row(row: &HistoryRow) -> bool {
 /// (notes, panes, directories, ...) show their item, and directory /
 /// time only when set — no `Stat ✓ success` or `Time never` filler.
 fn modern_detail_lines(row: &HistoryRow, cmd_visible: String) -> Vec<Line<'static>> {
-    let label = |t: &str| Span::styled(format!("{t:<5}"), Theme::dim());
+    // Two lines instead of the classic five labelled rows
+    // (`Cmd` / `Dir` / `Sess` / `Time` / `Stat`). At 60 columns the
+    // labelled form spent more than half the pane on labels and left
+    // the preview cramped; the same facts as one dim meta rail cost
+    // one row and leave the rest to the content.
+    //
+    //   <command, bold>
+    //   <dir> · <time> · <age> · <session> · <exit>
     let history = is_history_row(row);
-    let mut lines = vec![Line::from(vec![
-        label(if history { "Cmd" } else { "Item" }),
-        Span::styled(cmd_visible, Style::default().add_modifier(Modifier::BOLD)),
-    ])];
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(Span::styled(cmd_visible, bold))];
+
+    // The rail: only the fields this row kind actually has, joined by
+    // dim separators, so a note or a pane row never shows the history
+    // filler the old per-mode filter existed to hide.
+    let mut rail: Vec<Span<'static>> = Vec::new();
+    let push_field = |rail: &mut Vec<Span<'static>>, span: Span<'static>| {
+        if !rail.is_empty() {
+            rail.push(Span::styled(" · ", Theme::dim()));
+        }
+        rail.push(span);
+    };
     if !row.directory.is_empty() {
-        lines.push(Line::from(vec![
-            label("Dir"),
+        push_field(
+            &mut rail,
             Span::raw(crate::util::expand_home(&row.directory).into_owned()),
-        ]));
-    }
-    if history && !row.session_id.is_empty() {
-        // The full UUID is noise; its first block identifies it.
-        let short: String = row.session_id.chars().take(8).collect();
-        lines.push(Line::from(vec![label("Sess"), Span::styled(short, Theme::dim())]));
+        );
     }
     if row.timestamp > 0 {
-        lines.push(Line::from(vec![
-            label("Time"),
-            Span::raw(format!(
-                "{} · {}",
-                format_time(row.timestamp),
-                format_diff(row.timestamp)
-            )),
-        ]));
+        push_field(&mut rail, Span::raw(format_time(row.timestamp)));
+        push_field(&mut rail, Span::styled(format_diff(row.timestamp), Theme::dim()));
+    }
+    if history && !row.session_id.is_empty() {
+        // The full UUID is noise; its first block identifies it. The
+        // whole thing is still reachable from the output view.
+        push_field(
+            &mut rail,
+            Span::styled(row.session_id.chars().take(8).collect::<String>(), Theme::dim()),
+        );
     }
     if history {
         let (text, style) = if row.exit_code == 0 {
-            ("✓ success".to_string(), Theme::success())
+            (glyphs().ok.to_string(), Theme::success())
         } else {
-            (format!("✗ exit {}", row.exit_code), Theme::error())
+            (format!("{} exit {}", glyphs().failed, row.exit_code), Theme::error())
         };
-        lines.push(Line::from(vec![label("Stat"), Span::styled(text, style)]));
+        push_field(&mut rail, Span::styled(text, style));
+    }
+    if !rail.is_empty() {
+        lines.push(Line::from(rail));
     }
     if !row.comment.is_empty() {
-        lines.push(Line::from(vec![
-            label("Rem"),
-            Span::styled(
-                row.comment.clone(),
-                Style::default()
-                    .fg(Theme::warning_color())
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ]));
+        lines.push(Line::from(Span::styled(
+            row.comment.clone(),
+            Style::default()
+                .fg(Theme::warning_color())
+                .add_modifier(Modifier::ITALIC),
+        )));
     }
     lines
 }
 
+/// How many rows the modern Details pane needs for the selected row
+/// at `width` columns, plus its one-row top rule. Used to stack
+/// Details over the output preview on a narrow terminal: the pane
+/// should take exactly the space its content needs, not half the
+/// row.
+///
+/// The meta rail wraps (a deep path plus a timestamp exceeds 88
+/// columns), so this measures display width rather than counting
+/// lines — counting lines under-allocated the pane by the wrapped
+/// rows and the content was clipped out entirely.
+fn details_natural_height(app: &App, width: u16) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let Some(row) = app.selected_row() else {
+        return 2;
+    };
+    let cmd = row.command.replace('\n', "↵").replace('\r', "");
+    let avail = width.saturating_sub(1).max(1) as usize; // left rule
+    let mut rows = 0u16;
+    for line in modern_detail_lines(row, cmd) {
+        let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        // A zero-width line still occupies one row.
+        let used = w.max(1).div_ceil(avail) as u16;
+        rows = rows.saturating_add(used.max(1));
+    }
+    rows.saturating_add(1)
+}
+
 fn draw_details(f: &mut Frame, app: &App, area: Rect) {
+    let chrome = Chrome::for_app(app);
     let mut block = pane_block(
         app,
         " Details ".to_string(),
         PALETTE.with(|p| p.borrow().details_bg),
     );
-    if app.modern && app.pane_layout == crate::tui::state::PaneLayout::Right {
+    if chrome.is_modern() && app.pane_layout == crate::tui::state::PaneLayout::Right {
         // Right column: a left rule divides it from the list, which
         // has no right border in the modern style.
         block = block.borders(Borders::TOP | Borders::LEFT);
@@ -6934,7 +7241,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let exit_marker = if row.exit_code == 0 { "✓" } else { "✗" };
+    let exit_marker = if row.exit_code == 0 { glyphs().ok } else { glyphs().failed };
     let exit_text = if row.exit_code == 0 {
         "success".to_string()
     } else {
@@ -6964,7 +7271,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     let cmd_single_line = row.command.replace('\n', "↵").replace('\r', "");
     let cmd_visible = truncate_cmd_for_details_pane(&cmd_single_line, area.width as usize);
 
-    if app.modern {
+    if chrome.is_modern() {
         let lines = modern_detail_lines(row, cmd_visible);
         f.render_widget(
             Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
@@ -7115,6 +7422,163 @@ fn session_row_color(row: &HistoryRow) -> Color {
 /// the output doesn't have a sequence of
 /// single-character spans (matters for
 /// ratatui's layout pass on long lines).
+/// Render a plain-text preview as markdown, handling the one block
+/// kind that needs lookahead: pipe tables. A table is a run of `|`
+/// lines whose second line is a `|---|:--:|` separator; those become
+/// box-drawing rows, everything else goes through the line-at-a-time
+/// [`render_preview_line`] path.
+///
+/// Tables matter here because notes, JIRA issues and Paperless
+/// documents all use them, and without this they rendered as literal
+/// `| a | b |` pipe soup in the preview pane.
+#[cfg(test)]
+pub(crate) fn render_markdown_for_test(text: &str) -> Vec<Line<'static>> {
+    render_markdown(text)
+}
+
+fn render_markdown(text: &str) -> Vec<Line<'static>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some((table, consumed)) = parse_table(&lines[i..]) {
+            out.extend(render_table(table));
+            i += consumed;
+        } else {
+            out.push(render_preview_line(lines[i]));
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A parsed pipe table: the header row's cells plus the body rows'.
+struct MdTable {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+/// Detect a pipe table at the start of `lines`, returning it and how
+/// many lines it consumed. Requires at least a header, a separator
+/// and one body row — a lone `|` line is prose, not a table.
+fn parse_table(lines: &[&str]) -> Option<(MdTable, usize)> {
+    let is_row = |l: &str| {
+        let t = l.trim();
+        t.len() >= 2 && t.starts_with('|')
+    };
+    if lines.len() < 3 || !is_row(lines[0]) || !is_row(lines[1]) {
+        return None;
+    }
+    if !is_separator_row(lines[1]) {
+        return None;
+    }
+    let header = split_row(lines[0]);
+    let mut rows = Vec::new();
+    let mut consumed = 2;
+    for line in &lines[2..] {
+        if !is_row(line) {
+            break;
+        }
+        // A second separator is malformed; stop rather than swallow
+        // the rest of the document.
+        if is_separator_row(line) {
+            break;
+        }
+        rows.push(split_row(line));
+        consumed += 1;
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    Some((MdTable { header, rows }, consumed))
+}
+
+/// `|---|:--:|` style separator: every cell made only of `-`, `:` and
+/// spaces, with at least one `-`.
+fn is_separator_row(line: &str) -> bool {
+    let t = line.trim();
+    if !t.starts_with('|') {
+        return false;
+    }
+    let cells = split_row(t);
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let c = c.trim();
+            !c.is_empty() && c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':'))
+        })
+}
+
+/// Split `| a | b |` into `["a", "b"]`, dropping the leading and
+/// trailing empty cells the outer pipes produce.
+fn split_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// Draw a [`MdTable`] as box-drawing rows: a `┌─┬─┐` top rule, the
+/// bold header, a `├─┼─┤` divider, then one row per body line.
+fn render_table(table: MdTable) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let cols = table
+        .header
+        .len()
+        .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+    // Column widths come from display width so CJK cells line up.
+    let mut widths = vec![0usize; cols];
+    for (i, cell) in table.header.iter().enumerate() {
+        if i < cols {
+            widths[i] = cell.width();
+        }
+    }
+    for row in &table.rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < cols {
+                widths[i] = widths[i].max(cell.width());
+            }
+        }
+    }
+    let rule = |left: &str, mid: &str, right: &str| -> Line<'static> {
+        let mut s = String::from(left);
+        for (i, w) in widths.iter().enumerate() {
+            if i > 0 {
+                s.push_str(mid);
+            }
+            s.push_str(&glyphs().rule.repeat(w + 2));
+        }
+        s.push_str(right);
+        Line::from(Span::styled(s, Theme::dim()))
+    };
+    let row_line = |cells: &[String], style: Style| -> Line<'static> {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled("│", Theme::dim()));
+        for (i, w) in widths.iter().enumerate() {
+            let cell = cells.get(i).map(String::as_str).unwrap_or("");
+            // Pad to the column width using display width, then one
+            // space of padding on each side.
+            let pad = w.saturating_sub(cell.width());
+            spans.push(Span::styled(format!(" {cell}{} ", " ".repeat(pad)), style));
+            spans.push(Span::styled("│", Theme::dim()));
+        }
+        Line::from(spans)
+    };
+
+    let mut out = vec![rule("┌", "┬", "┐")];
+    out.push(row_line(
+        &table.header,
+        Style::default()
+            .fg(Theme::accent_color())
+            .add_modifier(Modifier::BOLD),
+    ));
+    out.push(rule("├", "┼", "┤"));
+    for row in &table.rows {
+        out.push(row_line(row, Theme::default()));
+    }
+    out.push(rule("└", "┴", "┘"));
+    out
+}
+
 fn render_preview_line(line: &str) -> Line<'static> {
     // Block-level detection first. A line
     // that starts with `# ` / `## ` / `### `
@@ -7365,7 +7829,7 @@ fn render_block(block: MdBlock) -> Line<'static> {
             // visual anchor that H2
             // (the existing `## ` style)
             // lacks.
-            let marker = Span::styled("▸ ", Theme::success());
+            let marker = Span::styled(format!("{} ", glyphs().disclosure_closed), Theme::success());
             let text = Span::styled(text, Theme::success().add_modifier(Modifier::BOLD));
             Line::from(vec![marker, text])
         }
@@ -8302,12 +8766,13 @@ fn xterm256_to_rgb(n: u8) -> (u8, u8, u8) {
 }
 
 fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
+    let chrome = Chrome::for_app(app);
     let mut block = pane_block(
         app,
-        if app.modern { " Preview " } else { " Output Preview " }.to_string(),
+        if chrome.is_modern() { " Preview " } else { " Output Preview " }.to_string(),
         PALETTE.with(|p| p.borrow().details_bg),
     );
-    if app.modern {
+    if chrome.is_modern() {
         // A left rule divides it from Details (Bottom layout) or the
         // list (Right layout, Details hidden).
         block = block.borders(Borders::TOP | Borders::LEFT);
@@ -8422,10 +8887,7 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
             .map(Line::from)
             .collect()
     } else {
-        preview_text
-            .lines()
-            .map(render_preview_line)
-            .collect()
+        render_markdown(preview_text)
     };
 
     // Render without `Wrap` so lines wider than the preview
@@ -8457,7 +8919,11 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     // bottom of the loaded content (e.g. when the file
     // has fewer than 50 lines, or the matched line is
     // near the end of the file).
-    let visible_height = area.height.saturating_sub(2) as usize;
+    // Inner height comes from the block itself rather than
+    // `area.height - 2`: the modern chrome draws only a top rule
+    // (plus a left rule in the right-hand column), so hardcoding
+    // two border rows let `max_scroll` run one line past the end.
+    let visible_height = block.inner(area).height as usize;
     let total_lines = preview_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
     let scroll = (row.preview_scroll as usize).min(max_scroll);
@@ -8468,7 +8934,29 @@ fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+/// First visible character of a single-line input after horizontal
+/// scrolling. Keeps `cursor` inside `[start, start + width - 1]`
+/// and pins the window to the left while the text still fits, so a
+/// query longer than the terminal shows the part being edited
+/// instead of scrolling the caret to the rightmost cell.
+pub(crate) fn input_scroll_start(cursor: usize, total: usize, width: usize) -> usize {
+    if width == 0 || total <= width {
+        return 0;
+    }
+    cursor.min(total).saturating_sub(width - 1)
+}
+
+/// The byte offset of character `chars` into `text` (clamped to the
+/// end), for slicing a substring at a char index without allocating
+/// a `Vec<char>`.
+fn char_boundary(text: &str, chars: usize) -> usize {
+    text.char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(i, _)| i)
+}
+
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    let chrome = Chrome::for_app(app);
     // The input border's prompt character and title
     // change based on the active query mode. We
     // compute all the predicates up front so the
@@ -8582,7 +9070,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         // Modern style: the mode name as a filled chip in front of
         // the prompt (`▌history▐ > query`), so the input still says
         // which view it searches without the classic box title.
-        let chip = if app.modern {
+        let chip = if chrome.is_modern() {
             format!(" {} ", title.trim())
         } else {
             String::new()
@@ -8602,28 +9090,59 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         // The chip already names the mode, and the query carries its
         // own prefix char, so the per-mode prompt (`* `, `@ `) would
         // only double it (`**`): use a neutral `› ` instead.
-        let shown_prompt = if app.modern && app.comment_edit.is_none() {
+        let shown_prompt = if chrome.is_modern() && app.comment_edit.is_none() {
             "› ".to_string()
         } else {
             prompt.clone()
         };
         let shown_prompt_width = shown_prompt.chars().count() as u16;
+        // Horizontal scroll for a query longer than the prompt row:
+        // show the window that contains the caret instead of rendering
+        // the whole query (which the 1-row area clips) and pinning the
+        // caret to the rightmost cell.
+        let text_width = (area.width as usize)
+            .saturating_sub(chip_width as usize)
+            .saturating_sub(shown_prompt_width as usize);
+        let content_chars = content.chars().count();
+        let scroll = input_scroll_start(cursor_offset as usize, content_chars, text_width);
+        let visible_content = if scroll == 0 {
+            content
+        } else {
+            &content[char_boundary(content, scroll)..]
+        };
         spans.push(Span::styled(shown_prompt, Theme::accent()));
-        spans.push(Span::raw(content));
+        spans.push(Span::raw(visible_content));
         let input = Paragraph::new(Line::from(spans))
             .style(Style::default().bg(PALETTE.with(|p| p.borrow().input_bg)))
             .wrap(Wrap { trim: false });
         f.render_widget(input, area);
-        let cursor_x = area.x + chip_width + shown_prompt_width + cursor_offset;
+        let cursor_x = area.x
+            + chip_width
+            + shown_prompt_width
+            + (cursor_offset.saturating_sub(scroll as u16));
         f.set_cursor_position((
             cursor_x.min(area.x.saturating_add(area.width).saturating_sub(1)),
             area.y,
         ));
         return;
     }
+    // Same horizontal scroll as the compact path: the classic box has
+    // one column of border on each side, so the usable text width is
+    // `width - 2` minus the prompt.
+    let classic_text_width = (area.width as usize)
+        .saturating_sub(2)
+        .saturating_sub(prompt_width as usize);
+    let content_chars = content.chars().count();
+    let classic_scroll =
+        input_scroll_start(cursor_offset as usize, content_chars, classic_text_width);
+    let visible_content = if classic_scroll == 0 {
+        content
+    } else {
+        &content[char_boundary(content, classic_scroll)..]
+    };
     let input = Paragraph::new(Line::from(vec![
         Span::styled(prompt.clone(), Theme::accent()),
-        Span::raw(content),
+        Span::raw(visible_content),
     ]))
     .block(
         Block::default()
@@ -8706,7 +9225,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     // the prompt and `query_cursor` cells into the buffer.
     // `prompt_width` / `cursor_offset` are computed once above
     // (shared with the compact, border-less path).
-    let cursor_x = area.x + 1 + prompt_width + cursor_offset;
+    let cursor_x =
+        area.x + 1 + prompt_width + (cursor_offset.saturating_sub(classic_scroll as u16));
     let cursor_y = area.y + 1;
     f.set_cursor_position((
         cursor_x.min(area.x.saturating_add(area.width).saturating_sub(2)),
@@ -8715,6 +9235,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let chrome = Chrome::for_app(app);
     // Count what the list actually shows (after the duplicate
     // filter and labeled-row merge), so it agrees with the list
     // title's `pos/total`; `app.rows` is the raw pre-dedup fetch.
@@ -8779,7 +9300,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    if app.modern {
+    if chrome.is_modern() {
         draw_status_modern(f, app, area, count, status);
         return;
     }
@@ -8834,21 +9355,7 @@ fn draw_status_modern(
             spans.push(Span::styled("asking the LLM…", Theme::warning()));
         }
         None => {
-            let mut hints: Vec<(String, &str)> = Vec::new();
-            if app.is_panes_query() {
-                hints.push(("1-9".to_string(), "jump"));
-            }
-            for (action, word) in [
-                (Action::OpenHelp, "help"),
-                (Action::CommandAction, "palette"),
-                (Action::ClearQuery, "clear"),
-            ] {
-                let keys = format_key_specs(app.bindings.specs(action));
-                if !keys.is_empty() {
-                    hints.push((keys, word));
-                }
-            }
-            for (keys, word) in hints {
+            for (keys, word) in status_hints(app) {
                 spans.push(Span::styled(keys, Theme::accent()));
                 spans.push(Span::styled(format!(" {word}  "), Theme::dim()));
             }
@@ -8867,6 +9374,7 @@ mod tests {
         content_display_position, list_display_position, truncate_cmd_for_details_pane,
         wrap_chars_to_rows,
     };
+    use crate::tui::theme::glyphs::glyphs;
 
     /// History-mode (non-panes) rows are stored newest-first
     /// (data index 0 = newest), but the list DISPLAYS them
@@ -9504,7 +10012,7 @@ mod tests {
         let line = render_preview_line("# Big Title");
         // Two spans: marker + text.
         assert_eq!(line.spans.len(), 2);
-        assert_eq!(line.spans[0].content, "▸ ");
+        assert_eq!(line.spans[0].content, format!("{} ", glyphs().disclosure_closed));
         assert_eq!(line.spans[1].content, "Big Title");
         // Both spans are bold; the
         // text uses the success color.
