@@ -1637,8 +1637,12 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
                 .iter()
                 .filter(|(pr, _, _, _, _)| !pr.current_command.is_empty())
                 .count();
+            let waiting_count = entries
+                .iter()
+                .filter(|(pr, _, _, _, _)| pr.agent_waiting)
+                .count();
             let summary = format!(
-                "{} pane{}{}, ",
+                "{} pane{}{}{}, ",
                 entries.len(),
                 if entries.len() == 1 { "" } else { "s" },
                 if agent_count > 0 {
@@ -1647,6 +1651,11 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
                         agent_count,
                         if agent_count == 1 { "" } else { "s" }
                     )
+                } else {
+                    String::new()
+                },
+                if waiting_count > 0 {
+                    format!(", {waiting_count} waiting")
                 } else {
                     String::new()
                 }
@@ -1684,6 +1693,7 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
                 output: String::new(),
                 mode: "workspace".to_string(),
                 source: "workspace".to_string(),
+                agent_waiting: waiting_count > 0,
 
                 ..Default::default()
             });
@@ -1701,6 +1711,7 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
             // it to `focus_pane`.
             for (pr, short_dir, full_path, id, _touched) in entries {
                 let agent = pr.current_command.clone();
+                let agent_waiting = pr.agent_waiting;
                 panes.push(HistoryRow {
                     id,
                     command: agent.clone(),
@@ -1724,6 +1735,7 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
                     // doc for the full
                     // reasoning.
                     pane_agent: agent,
+                    agent_waiting,
 
                     ..Default::default()
                 });

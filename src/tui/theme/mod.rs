@@ -770,6 +770,9 @@ pub struct Palette {
     pub(crate) input_bg: Color,
     /// Background color for the status bar.
     pub(crate) status_bg: Color,
+    /// Foreground color for an AI agent pane waiting for input in
+    /// the `*` view (`tuicolor.agentwaiting=`).
+    pub(crate) agent_waiting: Color,
     /// Whether the active theme is a light theme (for the
     /// `syntect` theme-variant selection in the Rust-side
     /// color-highlighting paths, and the zsh dropdown's
@@ -802,6 +805,7 @@ impl Palette {
             details_bg: Color::Black,
             input_bg: Color::Black,
             status_bg: Color::Black,
+            agent_waiting: Color::Magenta,
             is_light_theme: false,
         }
     }
@@ -829,6 +833,7 @@ impl Palette {
             details_bg: if theme.details_bg.is_empty() { fallback.details_bg } else { resolve_color(&theme.details_bg) },
             input_bg: if theme.input_bg.is_empty() { fallback.input_bg } else { resolve_color(&theme.input_bg) },
             status_bg: if theme.status_bg.is_empty() { fallback.status_bg } else { resolve_color(&theme.status_bg) },
+            agent_waiting: if theme.agent_waiting.is_empty() { fallback.agent_waiting } else { resolve_color(&theme.agent_waiting) },
             is_light_theme: is_color_light(
                 if theme.bg.is_empty() { fallback.bg } else { resolve_color(&theme.bg) }
             ),
@@ -949,6 +954,11 @@ pub fn install_palette(theme: SelectedTheme) {
                     p.bg
                 } else {
                     resolve_color(&cfg_theme.status_bg)
+                },
+                agent_waiting: if cfg_theme.agent_waiting.is_empty() {
+                    p.warning
+                } else {
+                    resolve_color(&cfg_theme.agent_waiting)
                 },
                 // Use `ThemePalette::is_light()` for the built-in
                 // theme (the crate supplies the classification).

@@ -3943,6 +3943,7 @@ fn session_row_in_panes_mode_focuses_existing_herdr_workspace() {
                     path: String::from("/tmp"),
                     current_command: String::from("zsh"),
                     is_last: false,
+                    agent_waiting: false,
                 }]
             }
             fn focus_command(&self, pane_id: &str) -> Option<String> {
@@ -4517,6 +4518,7 @@ fn host_row_in_panes_mode_focuses_existing_herdr_workspace() {
                     path: String::new(),
                     current_command: String::from("zsh"),
                     is_last: false,
+                    agent_waiting: false,
                 }]
             }
             fn focus_command(&self, pane_id: &str) -> Option<String> {
@@ -19978,6 +19980,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             preview: String::new(),
             pane_agent: String::new(),
             preview_scroll: 0,
+            agent_waiting: false,
         },
         HistoryRow {
             id: -2,
@@ -19995,6 +19998,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             preview: String::new(),
             pane_agent: "zsh".to_string(),
             preview_scroll: 0,
+            agent_waiting: false,
         },
         HistoryRow {
             id: -3,
@@ -20012,6 +20016,7 @@ fn fetch_panes_workspace_label_match_keeps_whole_group() {
             preview: String::new(),
             pane_agent: "vim".to_string(),
             preview_scroll: 0,
+            agent_waiting: false,
         },
     ];
     app.query = String::from("*SmartHistory");
@@ -20193,6 +20198,64 @@ fn pane_name_renders_bold_regardless_of_agent() {
     );
 }
 
+/// An agent pane waiting for input renders with the `⏸` marker in
+/// the agent-waiting color, and its session header takes that color
+/// too; a busy agent keeps the `▶` highlight marker.
+#[test]
+fn waiting_agent_pane_and_session_use_agent_waiting_color() {
+    let mut app = panes_test_app(&[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let pane = |id: i64, cmd: &str, waiting: bool| HistoryRow {
+        id,
+        command: cmd.to_string(),
+        session_id: format!("%{id}"),
+        timestamp: now,
+        mode: "pane".to_string(),
+        source: "pane".to_string(),
+        workspace_label: "Work".to_string(),
+        pane_agent: cmd.to_string(),
+        agent_waiting: waiting,
+        ..Default::default()
+    };
+    app.session_panes = vec![
+        HistoryRow {
+            id: -1,
+            command: "Work".to_string(),
+            timestamp: now,
+            mode: "workspace".to_string(),
+            source: "workspace".to_string(),
+            workspace_label: "Work".to_string(),
+            agent_waiting: true,
+            ..Default::default()
+        },
+        pane(-2, "claude", true),
+        pane(-3, "codex", false),
+    ];
+    app.query = "*".to_string();
+    app.refresh();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let waiting = crate::tui::theme::Theme::agent_waiting_color();
+    let fg_of = |sym: &str| {
+        buffer
+            .content
+            .iter()
+            .find(|c| c.symbol() == sym)
+            .map(|c| c.fg)
+    };
+    assert_eq!(fg_of("⏸"), Some(waiting), "waiting pane marker");
+    assert_eq!(fg_of("▶"), Some(crate::tui::theme::Theme::highlight_color()));
+    assert_eq!(fg_of("W"), Some(waiting), "session header of a waiting agent");
+}
+
 /// Live workspaces render nested under a `# Sessions` heading:
 /// `# ` for the synthetic group header, `## ` (indented) for each
 /// individual live workspace. Renders through the real
@@ -20300,6 +20363,7 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
             preview: String::new(),
             pane_agent: String::new(),
             preview_scroll: 0,
+            agent_waiting: false,
         },
         HistoryRow {
             id: -2,
@@ -20317,6 +20381,7 @@ fn fetch_panes_pane_match_keeps_parent_workspace_header() {
             preview: String::new(),
             pane_agent: "vim".to_string(),
             preview_scroll: 0,
+            agent_waiting: false,
         },
     ];
     // `*vim` matches the pane's command; the
@@ -29700,6 +29765,7 @@ fn panes_sort_test_app(
                         path: path.to_string(),
                         current_command: current_command.to_string(),
                         is_last: *is_last,
+                        agent_waiting: false,
                     }
                 },
             )

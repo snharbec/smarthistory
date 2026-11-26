@@ -2877,6 +2877,10 @@ pub struct TuiTheme {
     /// Background color for the status bar. Falls back to `bg`
     /// when unset.
     status_bg: String,
+    /// Foreground color for an AI agent pane (and its session
+    /// header) in the `*` view that is waiting for input. Falls back
+    /// to the theme's `warning` color (magenta without a theme).
+    agent_waiting: String,
 }
 
 
@@ -4365,6 +4369,12 @@ impl Config {
             builtin.map(|p| p.bg),
             "black",
         );
+        push(
+            "agentwaiting",
+            &cfg_theme.agent_waiting,
+            builtin.map(|p| p.warning),
+            "magenta",
+        );
         out
     }
 
@@ -4859,6 +4869,7 @@ impl Config {
             "detailsbg" | "details_bg" => theme.details_bg = value,
             "inputbg" | "input_bg" => theme.input_bg = value,
             "statusbg" | "status_bg" => theme.status_bg = value,
+            "agentwaiting" | "agent_waiting" => theme.agent_waiting = value,
             _ => {}
         }
     }

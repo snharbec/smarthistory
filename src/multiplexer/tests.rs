@@ -327,6 +327,30 @@
 
     #[cfg(feature = "herdr")]
     #[test]
+    fn herdr_pane_list_marks_agents_waiting_for_input() {
+        let pane = |id: &str, agent: &str, status: &str| {
+            serde_json::json!({
+                "pane_id": id, "workspace_id": "wA", "cwd": "/tmp",
+                "agent": agent, "agent_status": status
+            })
+        };
+        let json = serde_json::json!({"result": {"panes": [
+            pane("wA:p1", "claude", "idle"),
+            pane("wA:p2", "claude", "working"),
+            pane("wA:p3", "codex", "blocked"),
+            pane("wA:p4", "pi", "done"),
+            pane("wA:p5", "claude", "unknown"),
+            pane("wA:p6", "", "idle"),
+        ]}});
+        let waiting: Vec<bool> = parse_herdr_pane_list(&json)
+            .iter()
+            .map(|r| r.agent_waiting)
+            .collect();
+        assert_eq!(waiting, [true, false, true, true, false, false]);
+    }
+
+    #[cfg(feature = "herdr")]
+    #[test]
     fn herdr_pane_list_skips_empty_or_missing_cwd() {
         // Pane records
         // without a
@@ -1125,6 +1149,7 @@
             path: "/tmp".to_string(),
             current_command: String::new(),
             is_last: last,
+            agent_waiting: false,
         }
     }
 

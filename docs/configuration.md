@@ -1075,6 +1075,7 @@ darkgray selection, etc.).
 | `tuicolor.details_bg` | `details_bg` | Background of the details pane.                                                                                                                           |
 | `tuicolor.input_bg`   | `input_bg`   | Background of the search / comment input.                                                                                                                 |
 | `tuicolor.status_bg`  | `status_bg`  | Background of the status bar.                                                                                                                             |
+| `tuicolor.agentwaiting` | `agent_waiting` | `*` view: an AI agent pane waiting for input (its `⏸` marker and name) and its session header. Falls back to the theme's `warning`, or magenta without a theme. |
 
 ```ini
 # Tweak Leuven (a light theme) so the selected row is less aggressive:

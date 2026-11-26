@@ -686,6 +686,21 @@ pub struct CurrentPaneInfo {
     /// back to where the user
     /// just was.
     pub is_last: bool,
+    /// True when an AI agent (Claude, Codex, pi, …) runs in the pane
+    /// and is waiting for the user: idle at its prompt, done with a
+    /// turn, or blocked on a permission / question. herdr: the pane's
+    /// `agent_status`; Rex: the `program_status` records (OSC 7501)
+    /// the foreground program reports; tmux: never set.
+    #[serde(default)]
+    pub agent_waiting: bool,
+}
+
+/// Whether a herdr `agent_status` / Rex `program_status` state means
+/// the agent is waiting for the user. `idle` and `done` sit at the
+/// prompt, `blocked` waits on an approval or question; `working`,
+/// `error`, `unknown` and anything new don't count.
+pub(crate) fn agent_state_is_waiting(state: &str) -> bool {
+    matches!(state, "idle" | "done" | "blocked")
 }
 
 /// Construct the right backend
@@ -937,6 +952,7 @@ fn tmux_list_panes_parse(stdout: &[u8], current_pane: &str) -> Vec<CurrentPaneIn
             path,
             current_command,
             is_last,
+            agent_waiting: false,
         });
     }
     out
@@ -1500,6 +1516,9 @@ struct HerdrPaneRecord {
     /// detected an agent
     /// in this pane.
     agent: String,
+    /// The agent is waiting for input (`agent_status` is `idle`,
+    /// `done` or `blocked`, and herdr detected an agent).
+    agent_waiting: bool,
 }
 
 /// Look up the running process's command line inside a
@@ -2134,6 +2153,10 @@ fn parse_herdr_pane_list(json: &serde_json::Value) -> Vec<HerdrPaneRecord> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let agent_waiting = !agent.is_empty()
+            && agent_state_is_waiting(
+                p.get("agent_status").and_then(|v| v.as_str()).unwrap_or(""),
+            );
         // The tab id (`wA:t1`) —
         // used by the herdr
         // `focus_pane` method
@@ -2181,6 +2204,7 @@ fn parse_herdr_pane_list(json: &serde_json::Value) -> Vec<HerdrPaneRecord> {
             tab_id,
             cwd: effective_cwd,
             agent,
+            agent_waiting,
         });
     }
     out
@@ -2445,6 +2469,7 @@ impl MultiplexerBackend for HerdrBackend {
                     // Caller-relative for herdr; set by
                     // `panes_for_caller`.
                     is_last: false,
+                    agent_waiting: r.agent_waiting,
                 }
             })
             .collect()

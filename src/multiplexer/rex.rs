@@ -52,6 +52,20 @@ for _, s in ipairs(listed.sessions or {}) do
                 if a.cwd and a.cwd ~= "" then cwd = a.cwd break end
               end
             end
+            -- Status records (OSC 7501) the foreground program itself
+            -- reported: an agent like Claude Code says working / idle /
+            -- blocked. Records from programs that already exited
+            -- (owner pid differs) are stale and skipped.
+            local states = {}
+            local okst, st = pcall(rex.call, "block.method",
+              {session_id = s.session_id, block_id = b.block_id, method = "program_status"})
+            if okst and st and fg.pid then
+              for _, r in ipairs(st.records or {}) do
+                if r.owner and r.owner.pid == fg.pid and r.state then
+                  table.insert(states, r.state)
+                end
+              end
+            end
             table.insert(rows, rex.json.encode({
               session_id = s.session_id,
               session_label = s.label or "",
@@ -61,6 +75,7 @@ for _, s in ipairs(listed.sessions or {}) do
               focused = (w.focused_block_id == b.block_id),
               cwd = cwd,
               command = fg.argv0 or fg.name or "",
+              agent_states = table.concat(states, ","),
             }))
           end
         end
@@ -87,6 +102,27 @@ pub(crate) struct RexBlock {
     pub cwd: String,
     #[serde(default)]
     pub command: String,
+    /// Comma-separated `program_status` states the foreground program
+    /// reported (e.g. `working`, `idle`). Empty when it reported none.
+    #[serde(default)]
+    pub agent_states: String,
+}
+
+impl RexBlock {
+    /// The foreground program reported a status and none of its
+    /// records is still busy: it waits for the user. A `blocked`
+    /// record (permission / question) always counts.
+    pub(crate) fn agent_waiting(&self) -> bool {
+        let states: Vec<&str> = self
+            .agent_states
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        states.contains(&"blocked")
+            || (!states.is_empty()
+                && states.iter().all(|s| super::agent_state_is_waiting(s)))
+    }
 }
 
 /// Parse `rex do`'s output for [`SNAPSHOT_LUA`]: the script returns a
@@ -127,6 +163,7 @@ fn snapshot_blocks() -> Vec<RexBlock> {
 }
 
 fn block_to_pane(b: RexBlock) -> CurrentPaneInfo {
+    let agent_waiting = b.agent_waiting();
     CurrentPaneInfo {
         pane_id: b.block_id,
         // The workspace-row focus target (see `focus_session`): the
@@ -137,6 +174,7 @@ fn block_to_pane(b: RexBlock) -> CurrentPaneInfo {
         path: b.cwd,
         current_command: b.command,
         is_last: false,
+        agent_waiting,
     }
 }
 
@@ -422,7 +460,34 @@ mod tests {
             focused: false,
             cwd: cwd.into(),
             command: "zsh".into(),
+            agent_states: String::new(),
         }
+    }
+
+    #[test]
+    fn agent_waiting_follows_program_status() {
+        let mut b = block("session:a", "work", "window:1", "block:x", "/tmp");
+        assert!(!b.agent_waiting(), "no status reported: plain shell");
+        b.agent_states = "working".into();
+        assert!(!b.agent_waiting());
+        b.agent_states = "idle".into();
+        assert!(b.agent_waiting());
+        b.agent_states = "done".into();
+        assert!(b.agent_waiting());
+        b.agent_states = "working,blocked".into();
+        assert!(b.agent_waiting(), "blocked always waits on the user");
+        b.agent_states = "idle,working".into();
+        assert!(!b.agent_waiting(), "a busy child record keeps it working");
+        b.agent_states = "error".into();
+        assert!(!b.agent_waiting());
+    }
+
+    #[test]
+    fn parse_snapshot_reads_agent_states() {
+        let row = r#"{"session_id":"session:a","window_id":"window:1","block_id":"block:x","command":"claude","agent_states":"idle"}"#;
+        let rows = parse_snapshot(&serde_json::to_string(row).unwrap());
+        assert_eq!(rows[0].agent_states, "idle");
+        assert!(block_to_pane(rows[0].clone()).agent_waiting);
     }
 
     #[test]
