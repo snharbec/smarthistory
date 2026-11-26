@@ -36655,3 +36655,23 @@ fn panes_hosts_sorted_by_last_connection_keep_ids() {
     // id = -25_001 - config position (see `stage_pane_selection`).
     assert_eq!(hosts, [("newer", -25_003), ("older", -25_002), ("never", -25_001)]);
 }
+
+/// Backspacing out of a prefix mode back to an empty query must show
+/// the history rows again, not the rows of the mode just left.
+#[test]
+fn leaving_prefix_mode_to_empty_query_restores_history_rows() {
+    let mut app = global_test_app(&[("git status", 10), ("cargo build", 20)]);
+    app.refresh();
+    assert!(app.merged_rows.iter().all(|r| r.mode == "command"));
+    app.push_char('#');
+    assert!(
+        app.merged_rows.iter().all(|r| r.mode != "command"),
+        "# shows directory rows"
+    );
+    app.backspace();
+    let modes: Vec<&str> = app.merged_rows.iter().map(|r| r.mode.as_str()).collect();
+    assert!(
+        !modes.is_empty() && modes.iter().all(|m| *m == "command"),
+        "back in history after clearing the prefix, got {modes:?}"
+    );
+}

@@ -891,6 +891,22 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// A centered popup of `width` x `height` cells, clamped to the
+/// frame (leaving a 1-cell margin when there's room). Unlike
+/// [`centered_rect`]'s percentages, this keeps a popup readable on
+/// a narrow terminal instead of shrinking its content until it
+/// wraps or truncates.
+fn centered_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let w = width.min(r.width.saturating_sub(2).max(1)).min(r.width);
+    let h = height.min(r.height.saturating_sub(2).max(1)).min(r.height);
+    Rect {
+        x: r.x + (r.width - w) / 2,
+        y: r.y + (r.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
 /// Draw the multi-line note/todo compose overlay
 /// (`Action::ComposeNoteEntry`). The buffer is rendered as
 /// literal lines split on `'\n'` — no soft-wrap — so long
@@ -3748,7 +3764,25 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     } else {
         format!(" Command palette — {} to close ", cancel_keys)
     };
-    let inner = overlay(f, &title, 70, 70);
+    // 70% of the frame, but never narrower than 76 columns (clamped
+    // to the frame), so action names don't wrap on an 80-column
+    // terminal.
+    let pct = centered_rect(70, 70, f.area());
+    let area = centered_fixed(pct.width.max(76), pct.height.max(16), f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+    let inner = {
+        let bg = PALETTE.with(|p| p.borrow().bg);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(title.to_string())
+            .title_style(Theme::accent())
+            .border_style(Theme::dim())
+            .style(Style::default().bg(bg));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        inner
+    };
 
     let bg = PALETTE.with(|p| p.borrow().bg);
     let fg = PALETTE.with(|p| p.borrow().fg);
@@ -3847,9 +3881,13 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         .unwrap_or(0)
         .max("action".len());
     // 2 gaps (description↔key, key↔name) at 1 column each —
-    // `Table`'s default column spacing.
+    // `Table`'s default column spacing. The config-name column is
+    // the first to go when space is short: it's reference
+    // information, while a wrapped description is hard to scan.
+    let show_name = (chunks[1].width as usize) >= key_width + name_width + 2 + 28;
+    let name_width = if show_name { name_width } else { 0 };
     let desc_width = (chunks[1].width as usize)
-        .saturating_sub(key_width + name_width + 2)
+        .saturating_sub(key_width + name_width + if show_name { 2 } else { 1 })
         .max(1);
 
     let mut rows: Vec<Row> = Vec::new();
@@ -3892,6 +3930,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         rows,
         [Constraint::Length(desc_width as u16), Constraint::Length(key_width as u16), Constraint::Length(name_width as u16)],
     )
+    .column_spacing(1)
     .style(Style::default().bg(bg))
     .row_highlight_style(highlight_style);
 
@@ -3927,7 +3966,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
             format!(" {}/{} actions", filtered.len(), menu.actions.len()),
             dim_style,
         ),
-        Span::raw(format!("  up/down move  Enter run  {} ", close_hint)),
+        Span::styled(format!("  ↑↓ move · Enter run · {} ", close_hint), dim_style),
     ]);
     let footer_para = Paragraph::new(footer).style(Style::default().bg(bg));
     f.render_widget(footer_para, chunks[2]);
@@ -3944,7 +3983,20 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
     // list has only 12
     // entries so it doesn't
     // need to be huge.
-    let area = centered_rect(60, 40, f.area());
+    // Size to the content: marker (3) + label (14) + prefix (4) +
+    // the longest description + padding and borders, clamped to the
+    // frame, so descriptions aren't cut off at 60% of the width.
+    let desc_w = picker
+        .options
+        .iter()
+        .map(|o| o.description.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let area = centered_fixed(
+        (3 + 14 + 4 + desc_w + 4).max(44),
+        picker.options.len() as u16 + 2,
+        f.area(),
+    );
     f.render_widget(ratatui::widgets::Clear, area);
 
     let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
@@ -8372,7 +8424,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let n = app.rows.len();
+    // Count what the list actually shows (after the duplicate
+    // filter and labeled-row merge), so it agrees with the list
+    // title's `pos/total`; `app.rows` is the raw pre-dedup fetch.
+    let n = app.merged_rows.len();
     let mut count = match n {
         0 => "0 matches".to_string(),
         1 => "1 match".to_string(),

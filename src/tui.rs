@@ -6016,6 +6016,13 @@ impl App {
             crate::tui::mode::directories::ensure_multiplexer_snapshot(self);
         }
         let fetch_start = std::time::Instant::now();
+        // Only the history SQL fetch records a fresh
+        // `last_fetch_key`. Drop the old one first, or a mode
+        // that doesn't record one (`#`, `@`, …) would leave the
+        // previous history key in place, and backspacing back to
+        // that same history query would hit the cache and keep
+        // showing this mode's rows under the History title.
+        self.last_fetch_key = None;
         self.rows = self.fetch().unwrap_or_default();
         let fetch_elapsed = fetch_start.elapsed();
         // Apply the algorithm-aware post-filter only for modes that
