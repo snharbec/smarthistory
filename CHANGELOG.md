@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The parallel file walker (`/` files mode, `walk_dir`) could hang forever: a
+  worker could miss the "walk finished" wakeup because the pending counter was
+  dropped to zero without holding the queue lock. A panic while processing a
+  directory no longer hangs the other workers either.
 - TUI: leaving a prefix mode (`#`, `@`, …) back to the previous history query
   kept showing that mode's rows under the History title.
 - TUI: clicking a list row selected a different row (the click ignored the
