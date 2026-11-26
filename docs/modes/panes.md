@@ -244,7 +244,7 @@ The panes view is built from two queries run once at TUI start:
    `session_name`).
 2. `herdr workspace list` + `herdr pane list` for herdr.
 
-The multiplexer is selected via `multiplexer=tmux|herdr` in the config (default `tmux`). The snapshot is
+The multiplexer is selected via `multiplexer=tmux|herdr|rex` in the config (default `tmux`). The snapshot is
 cached for the session and not refreshed on navigation.
 
 ## `--panes-filter` initial filter

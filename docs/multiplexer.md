@@ -1,13 +1,13 @@
-# Multiplexer support (tmux + herdr)
+# Multiplexer support (tmux + herdr + Rex)
 
 The TUI's directory-switching (`#` mode), pane-switching (`*` mode), and
 host-bootstrapping flows all need to talk to a terminal multiplexer: to discover
 which directories are currently active, to focus an existing pane or workspace,
 and to create a new one rooted at a given directory. The integration is
-abstracted behind a `MultiplexerBackend` trait with **two implementations** —
-[tmux](https://github.com/tmux/tmux) (default, always available) and
+abstracted behind a `MultiplexerBackend` trait with **three implementations** —
+[tmux](https://github.com/tmux/tmux) (default, always available),
 [herdr](https://herdr.dev) (opt-in via the `herdr` Cargo feature, enabled by
-default).
+default) and the Rex terminal (always available; see [Rex](#rex)).
 
 This page documents:
 
@@ -15,6 +15,7 @@ This page documents:
 - [Picking a backend](#picking-a-backend)
 - [Building with herdr support](#building-with-herdr-support)
 - [How the integration works](#how-the-integration-works)
+- [Rex](#rex)
 - [What flows use the backend](#what-flows-use-the-backend)
 - [Output capture](#output-capture)
 - [Setup guides](#setup-guides)
@@ -26,6 +27,7 @@ This page documents:
 | ------------------------------------ | ------------------------ | ------------------------------------------ | -------------------------------- | ----------------- |
 | [tmux](https://github.com/tmux/tmux) | yes                      | `%N` (globally unique on the local server) | session name                     | `tmux` on `PATH`  |
 | [herdr](https://herdr.dev)           | opt-in (default feature) | `w1:p1` (workspace-scoped)                 | positional integer (`1`, `2`, …) | `herdr` on `PATH` |
+| Rex                                  | opt-in                   | `block:<uuid>` (a Rex block)               | `session:<uuid>`                 | `rex` on `PATH`   |
 
 Both backends produce the same data model (an "active context" = a pane with a
 `cwd`); the differences are in id conventions and in which CLI commands do the
@@ -37,7 +39,7 @@ The active backend is selected via a single config key:
 
 ```ini
 # ~/.config/smarthistory/config
-multiplexer=herdr   # default: tmux
+multiplexer=herdr   # default: tmux; also: rex
 ```
 
 The same key is also accepted from the `SMARTHISTORY_MULTIPLEXER` environment
@@ -48,7 +50,7 @@ directory switching:
 
 ```
 $ SMARTHISTORY_MULTIPLEXER=foo smarthistory tui
-smarthistory: ignoring invalid SMARTHISTORY_MULTIPLEXER="foo" (expected `tmux` or `herdr`)
+smarthistory: ignoring invalid SMARTHISTORY_MULTIPLEXER="foo" (expected `tmux`, `herdr` or `rex`)
 ```
 
 A successful `smarthistory config check` prints the active backend in the
@@ -99,6 +101,35 @@ Both backends are silent on failure: `tmux` / `herdr` missing from `PATH`, no
 server running, or a subprocess hanging past `TMUX_PANE_PROBE_TIMEOUT_MS`
 (default 1000 ms) all leave the snapshot empty and the marker invisible. The TUI
 never blocks on the multiplexer for more than that.
+
+## Rex
+
+Set `multiplexer=rex` to drive the Rex terminal through its `rex` CLI. Rex's
+model maps one to one: a Rex **session** is a tmux session, a **window** is a
+tab, a **block** is a pane. The backend lives in
+[`src/multiplexer/rex.rs`](../src/multiplexer/rex.rs).
+
+| Method                           | Rex backend                                                                        |
+| -------------------------------- | ---------------------------------------------------------------------------------- |
+| `snapshot()` / panes             | one `rex do -e <lua>` call: every session → window → terminal block, with its `process` (cwd + foreground program) |
+| `focus_pane(id)`                 | `smarthistory rex focus-pane <block>`                                              |
+| `focus_session(id)`              | `smarthistory rex focus-session <session>`                                         |
+| `create_command(dir, label)`     | `smarthistory rex new <label> <dir>`                                               |
+| `send_in_pane_command(id, body)` | `rex send -b <block> <body> && rex send-key -b <block> enter`                      |
+| `read_pane(id, n)`               | `rex capture -b <block> --trim`, last `n` lines                                    |
+
+Switching what the Rex app shows is a client action (`session.select`) that
+needs real session and window ids, so the staged commands go through small
+`smarthistory rex ...` helpers that resolve them first: `focus-pane` focuses the
+block inside its session (`rex focus`) and then shows that session and window;
+`focus-session` accepts an id or a label; `new` runs `rex new --json` and shows
+the created session.
+
+Your own pane (`$REX_BLOCK`, which Rex sets in every terminal) is left out of the
+`*` view. The snapshot times out after `REX_PROBE_TIMEOUT_MS` (default 2000 ms).
+
+Not supported yet: output capture from Rex panes (commands are still recorded,
+without output).
 
 ## What flows use the backend
 
@@ -168,8 +199,8 @@ workspace is up.
 
 ## Switching back: `smarthistory last-session`
 
-`smarthistory last-session` switches to the previously active tmux session or
-herdr workspace. Run it twice to toggle between two, like `cd -`.
+`smarthistory last-session` switches to the previously active tmux session,
+herdr workspace or Rex session. Run it twice to toggle between two, like `cd -`.
 `--print` only prints the name.
 
 - **tmux**: runs `tmux switch-client -l`. tmux tracks the last session per
@@ -180,9 +211,16 @@ herdr workspace. Run it twice to toggle between two, like `cd -`.
   focuses the most recent workspace that still exists, skipping closed ones.
   Without the monitor (`shellserver.enabled=off` or `shellserver.monitor=off`)
   it only knows the switches it made itself.
+- **Rex**: the Rex server keeps a focus history itself. `last-session` asks it
+  (`focus_history.reverse`) for the last place focus was in another session than
+  the one holding `$REX_BLOCK`, then shows that session and window in the app.
+  Nothing needs recording. `--print` can't peek at the history: it still moves
+  that session's own focus to its last pane, but the app keeps showing the
+  current session.
 
 It acts on the multiplexer the shell runs inside (`$HERDR_PANE_ID` /
-`$HERDR_SOCKET_PATH`, then `$TMUX`), else on the configured `multiplexer=`.
+`$HERDR_SOCKET_PATH`, then `$TMUX`, then `$REX_BLOCK`), else on the configured
+`multiplexer=`.
 Bind it to a key:
 
 ```bash
