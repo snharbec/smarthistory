@@ -442,42 +442,6 @@ pub(crate) fn ensure_selected_context(app: &mut App) {
     crate::tui::mode::processes::ensure_selected_context(app);
 }
 
-/// The colour used to tint the input border / title for a given
-/// prefix mode. The history / no-prefix mode is a `None` (the
-/// caller falls back to its own default). Implemented as a
-/// per-mode lookup rather than a giant `match` in the renderer so
-/// the colour rules are documented in one place per mode and the
-/// renderer stays a flat dispatch.
-pub(crate) fn input_title_style(mode: ModeKind) -> Option<ratatui::style::Style> {
-    use crate::tui::theme::Theme;
-
-    match mode {
-        ModeKind::Output => Some(Theme::info()),
-        ModeKind::Llm => Some(Theme::accent()),
-        ModeKind::Question => Some(Theme::info()),
-        ModeKind::Notes => Some(Theme::accent()),
-        ModeKind::Todo => Some(Theme::warning()),
-        ModeKind::Directories => Some(Theme::accent()),
-        ModeKind::Panes => Some(Theme::success()),
-        ModeKind::Files => Some(Theme::success()),
-        ModeKind::Tags => Some(Theme::success()),
-        ModeKind::Codegraph => Some(Theme::accent()),
-        ModeKind::Ag => Some(Theme::warning()),
-        ModeKind::Jira => Some(Theme::info()),
-        ModeKind::Segments => Some(Theme::accent()),
-        ModeKind::Similar => Some(Theme::accent()),
-        ModeKind::Paperless => Some(Theme::info()),
-        ModeKind::Browser => Some(Theme::success()),
-        ModeKind::Zoxide => Some(Theme::accent()),
-        ModeKind::Processes => Some(Theme::warning()),
-        ModeKind::Pass => Some(Theme::success()),
-        ModeKind::ProjectPick => Some(Theme::accent()),
-        ModeKind::Worktree => Some(Theme::success()),
-        ModeKind::Source => Some(Theme::accent()),
-        ModeKind::History => None,
-    }
-}
-
 /// Build the `(prompt, title)` pair shown in the input border
 /// for a given prefix mode. The `algo` string is the match-
 /// algorithm suffix (e.g. " · fuzzy"). The `jql_last` argument

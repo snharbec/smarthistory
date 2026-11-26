@@ -62,9 +62,7 @@ value" so you can confirm what the TUI actually sees.
   - [`panes.layout`](#paneslayout)
   - [`panes.shortcutprefix`](#panesshortcutprefix)
 - [Compact display](#compact-display)
-  - [`tui.compact`](#tuicompact)
   - [`tui.glyphs`](#tuiglyphs)
-  - [`tui.style`](#tuistyle)
 - [Shell server](#shell-server)
   - [`shellserver.enabled`](#shellserverenabled)
   - [`shellserver.monitor`](#shellservermonitor)
@@ -413,9 +411,10 @@ panes.layout=bottom  # historical: detail row below the list (default)
 *Which* panes are visible is separate — that's `F10`
 (`Action::TogglePaneVisibility`): `BOTH` fills the docked area with both,
 `Details` / `Output` put just one pane there, and `Hidden` removes the panes
-entirely (the list reclaims the space). Below 20 terminal lines both panes are
-hidden automatically regardless — unless [`tui.compact`](#tuicompact) is on,
-which lowers that cutoff to "as soon as a one-line pane fits".
+entirely (the list reclaims the space). The panes appear as soon as the
+terminal has room for a one-line pane — the chrome plus the rows the list
+always keeps — rather than at a fixed cutoff (9 rows for the `bottom` layout,
+8 for `right`).
 
 The placement can also be flipped at runtime with `Action::TogglePaneLayout`,
 which ships **unbound**; set `key.toggle-pane-layout=<spec>` to bind it (or open
@@ -446,103 +445,52 @@ See [docs/modes/panes.md](modes/panes.md#session-shortcuts).
 
 ---
 
-## Compact display
+## The TUI layout
 
-### `tui.compact`
+The TUI has one layout. It used to offer a boxed `classic` style and an
+optional `tui.compact` bundle; both were removed, and the space-saving
+behaviours `compact` used to switch on are now always on:
 
-|                     |               |
-| ------------------- | ------------- |
-| **Type**            | `on` \| `off` |
-| **Default**         | `off`         |
-| **Session key**     | `compact=`    |
-| **Toggle action**   | `toggle-compact-display` (unbound) |
-
-A single switch for a bundle of space-saving behaviours that give rows and
-columns back to the history list:
-
-- the query prompt collapses to **one line** (no border box), freeing two rows;
-- an **empty Output Preview** pane is collapsed in the `BOTH` layout, handing
-  the space to Details;
-- the **mode strip** drops the redundant trailing `scope · duplicate` text and,
-  on narrow terminals, drops the lowest-priority chips instead of clipping one
-  mid-glyph;
-- the detail panes appear **as soon as there is room** for a one-line pane
-  (chrome + minimum list rows + one line) instead of at the fixed 20-line
-  cutoff.
-
-```ini
-tui.compact=on    # reclaim rows/columns for the list
-tui.compact=off   # historical spacious layout (default)
-```
-
-The bundle can be flipped at runtime with `Action::ToggleCompactDisplay`, which
-ships **unbound**; set `key.toggle-compact-display=<spec>` (or open it from the
-command palette, `Ctrl-Q`). The last choice is remembered in the session file
-(`compact=on` / `compact=off`) and takes precedence over `tui.compact` on the
-next launch.
-
-### `tui.style`
-
-|              |                        |
-| ------------ | ---------------------- |
-| **Type**     | `modern` \| `classic` |
-| **Default**  | `modern`               |
-
-The TUI's visual style. `modern` (the default) includes the whole
-[compact display](#tuicompact) bundle, plus:
-
+- the query **prompt is one line** (no border box), freeing two rows;
+- an **empty preview** pane is collapsed in the `BOTH` layout, handing the
+  space to Details;
 - **light frames**: each pane gets one dim top rule carrying its title instead
   of a rounded box, and side-by-side panes are divided by a single rule;
 - the **prompt** shows the view as a filled chip (`history`, `notes`, …)
   followed by `› `;
 - a **thin scrollbar** (track `│`, thumb `┃`, no arrows);
 - long rows end in `…` instead of being cut mid-word;
-- **per-mode Details**: history rows show command, directory, a short session
-  id, time and exit status; other rows show only the fields they have (no
+- a **compact row gutter**: each indicator (exit status, captured output, mark,
+  LLM preview, source) takes a small slot and only paints when it has something
+  to say, with the age first so it forms one aligned column;
+- **Details is two rows**: the command, then one dim meta rail
+  (`~/repo · 14:03:41 · 12m · 995fecaa · ✓`);
+- **per-mode Details**: other row kinds show only the fields they have (no
   `Stat ✓ success` or `Time never` on a note or a pane);
-- in the `*` view, **tree connectors** (`├` / `└`, `●` for a live session)
-  instead of the `#` / `##` headings;
+- in the `*` view, **tree connectors** (`├` / `└`, `●` for a live session);
 - outside shell history, a row's secondary text is plain dim text, not a
   `# comment`;
-- the **status bar** shows key hints (key in the accent color) — the ones for
-  the active mode first (`C-o output` in history, `1-9 jump` in `*`, …) — a
-  spinner while the live pane snapshot loads, and no theme name;
+- the **status bar** shows the active mode's key hints (key in the accent
+  color), a spinner while a live pane snapshot loads, and no theme name;
 - **hover**: the row under the mouse pointer is tinted;
-- on terminals narrower than 90 columns, Details is **stacked above** the
-  captured output instead of the two being squeezed side by side (the command,
-  directory and exit status stay visible);
-- `≡` marks a history row with captured output (classic: `o`);
-- the row gutter is **two cells per indicator and only when it has something to
-  say**, so a plain history row's command starts around column 10 instead of
-  column 16;
-- **Details is two rows, not five**: the command, then one dim meta rail
-  (`~/repo · 14:03:41 · 12m · 995fecaa · ✓`). It grows a third row only when
-  the entry has a comment;
-- selected rows are bold on the `selection` background with the `▌` bar, and
-  are **not underlined** (the underline cut through syntax highlighting);
-- an **empty result list explains itself**, and distinguishes the three reasons
-  it can be empty: **no matches** (names the query, the active match algorithm
-  and the keys that change them — `C-f` algorithm, `C-u` clear, `F1` view),
-  **nothing here yet** (a configured mode with no query, or a search still in
-  flight), and **not configured** (e.g. `<` Paperless without credentials, `,`
-  Ag without the tool, `&` CodeGraph without an index), which says what is
-  missing instead of reporting a failed search. It also offers the active
-  mode's own shortcuts, which exist nowhere else in the UI: `@new` in notes,
-  `!@new` in todo, `#<dir>` in directories, `/<name>` in files;
-- **markdown pipe tables** in a preview render as boxed rows instead of literal
-  `| a | b |` text (JIRA issues, notes and Paperless documents all use them);
-- the mode picker (`F1`) lists **modes you have used this session first**, with
-  a `recent` marker.
+- below 90 columns, Details is **stacked above** captured output;
+- `≡` marks a history row with captured output;
+- the selected row is bold on the `selection` background with a `▌` bar, and is
+  not underlined;
+- an **empty list explains itself**: `no matches` (with the query, the active
+  match algorithm and the keys that change them), `nothing here yet`, or
+  `not configured` — plus the active mode's own shortcuts (`@new`, `!@new`,
+  `#<dir>`, `/<name>`);
+- **markdown pipe tables** in a preview render as boxed rows;
+- the mode picker (`F1`) lists modes used this session first, marked `recent`.
 
-```ini
-tui.style=classic   # the historical boxed layout
-```
+Row ages read `5s`, `3m`, `2h`, `4d`, `2mo`, `1y`. Ages over a month used to be
+`2M`, which was easy to misread as minutes.
 
-Row ages read `5s`, `3m`, `2h`, `4d`, `2mo`, `1y` in both styles (months used to
-be `M`, which was easy to misread as minutes).
-
-The `classic` style is frozen: it keeps its exact historical geometry so an
-existing setup does not shift under it. New chrome features are `modern`-only.
+The `tui.style` and `tui.compact` keys are **retired**. They still parse
+harmlessly (so an existing config file doesn't start failing validation) and are
+ignored; `smarthistory config get tui.style` reports `modern`. The
+`toggle-compact-display` action is likewise a no-op that says so.
 
 ### `tui.glyphs`
 
@@ -1998,8 +1946,6 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `segments.minwords`             | non-negative int                  | `5`                                                              | [History list & filtering](#history-list--filtering)                      |
 | `tui.highlight`                 | `on` \| `off`                     | `off`                                                            | [History list & filtering](#history-list--filtering)                      |
 | `panes.layout`                  | `bottom` \| `right`               | `bottom`                                                         | [Detail panes](#detail-panes)                                             |
-| `tui.compact`                   | `on` \| `off`                     | `off`                                                            | [Compact display](#compact-display)                                       |
-| `tui.style`                     | `modern` \| `classic`             | `modern`                                                         | [Compact display](#tuistyle)                                              |
 | `tui.glyphs`                    | `unicode` \| `ascii`              | `unicode`                                                        | [`tui.glyphs`](#tuiglyphs)                                                |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `autosuggest.enabled`           | `on` \| `off`                     | `off`                                                            | [Autosuggestions](#autosuggestions)                                       |

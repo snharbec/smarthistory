@@ -6730,7 +6730,6 @@ fn session_round_trips_sort_order() {
         pane_height: None,
         pane_layout: None,
         pane_width: None,
-        compact: None,
         scheme: None,
         pane_last_touched: std::collections::HashMap::new(),
         command_menu_recent: Vec::new(),
@@ -7534,16 +7533,23 @@ fn pane_size_keys_resize_height_in_bottom_and_width_in_right() {
     assert_ne!(PaneHeight::default(), PaneHeight::default().decrease());
 }
 
-/// `Action::ToggleCompactDisplay` flips the single compact-display flag
-/// that gates the space saving bundle.
+/// `Action::ToggleCompactDisplay` is retired: the compact bundle is the
+/// only display now. It stays a recognised action (a config that still
+/// binds `key.toggle-compact-display=` must keep parsing) and explains
+/// itself instead of silently doing nothing.
 #[test]
-fn toggle_compact_display_flips_the_flag() {
+fn toggle_compact_display_is_a_noop_with_a_message() {
     let mut app = global_test_app(&[("a", 1)]);
-    assert!(!app.compact, "compact defaults off");
     assert!(!dispatch_action(&mut app, Action::ToggleCompactDisplay));
-    assert!(app.compact);
-    assert!(!dispatch_action(&mut app, Action::ToggleCompactDisplay));
-    assert!(!app.compact);
+    let msg = app
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("tui.compact"),
+        "the retired toggle should say why it does nothing, got {msg:?}"
+    );
 }
 
 /// Actions the user has
@@ -15836,62 +15842,45 @@ fn output_preview_shows_more_than_four_lines_when_pane_is_tall_enough() {
     );
 }
 
-/// Below 20 terminal lines, `ui()` hides both the Details and Output
-/// Preview panes entirely (rather than squeezing them into an
-/// unreadable sliver) and gives that space back to the list — neither
-/// pane's block title should appear onscreen at all.
+/// Panes are shown exactly when the terminal has room for the smallest
+/// useful one — the chrome (5 rows) plus the rows the list always keeps
+/// (3) plus one pane line. There is no fixed 20-line cutoff any more
+/// (that was the `classic` layout's rule, and the `compact` bundle's
+/// relaxed version is now the only behaviour). For the `Bottom` layout
+/// the threshold is therefore 9 rows.
 #[test]
-fn details_and_output_preview_hidden_below_20_lines() {
-    let mut app = directories_test_app(&[]);
+fn panes_hidden_below_the_minimum_useful_height() {
+    use crate::tui::state::PaneHeight;
+    let threshold = PaneHeight::MIN_PAGE_SIZE_BOTTOM;
+    assert_eq!(threshold, 9, "chrome 5 + list 3 + one pane line");
 
-    let backend = ratatui::backend::TestBackend::new(80, 19);
-    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|f| crate::tui::render::ui(f, &mut app))
-        .expect("draw");
-    let text = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|c| c.symbol())
-        .collect::<String>();
+    // One row short: no panes at all, and the list gets the space back.
+    let mut app = directories_test_app(&[]);
+    let text = render_rows(&mut app, 80, threshold - 1).join("\n");
     assert!(
         !text.contains("Details"),
-        "Details pane must be hidden below 20 lines, got: {text:?}"
+        "no room for a pane line at {threshold} lines - 1; got: {text:?}"
     );
+
+    // At the threshold itself, a one-line pane fits.
+    let mut app = directories_test_app(&[]);
+    let text = render_rows(&mut app, 80, threshold).join("\n");
     assert!(
-        !text.contains("Output Preview"),
-        "Output Preview pane must be hidden below 20 lines, got: {text:?}"
+        text.contains("Details"),
+        "a one-line pane still fits at the threshold; got: {text:?}"
     );
 }
 
-/// At exactly 20 terminal lines (the threshold itself), both panes
-/// are shown as usual — the cutoff in `details_and_output_preview_hidden_below_20_lines`
-/// is a strict `<`, not `<=`.
+/// A terminal well below the old 20-line cutoff still shows panes, as
+/// long as there is room for one line of one — that is the behaviour
+/// the removed `compact` bundle used to opt into.
 #[test]
-fn details_and_output_preview_shown_at_20_lines() {
+fn panes_shown_below_the_old_twenty_line_cutoff() {
     let mut app = directories_test_app(&[]);
-
-    let backend = ratatui::backend::TestBackend::new(80, 20);
-    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|f| crate::tui::render::ui(f, &mut app))
-        .expect("draw");
-    let text = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|c| c.symbol())
-        .collect::<String>();
+    let text = render_rows(&mut app, 100, 12).join("\n");
     assert!(
         text.contains("Details"),
-        "Details pane should be shown at 20 lines, got: {text:?}"
-    );
-    assert!(
-        text.contains("Output Preview"),
-        "Output Preview pane should be shown at 20 lines, got: {text:?}"
+        "12 rows is enough for chrome + list + a pane line; got: {text:?}"
     );
 }
 
@@ -15912,27 +15901,44 @@ fn render_rows(app: &mut crate::tui::App, width: u16, height: u16) -> Vec<String
 }
 
 /// `PaneLayout::Right` docks the panes to the right of the list, with
-/// Details on top and Output Preview below it (stacked vertically,
-/// not side-by-side). At a normal terminal size both titles must be
-/// onscreen, and Details must be the upper of the two.
+/// Details on top and the preview below it (stacked vertically, not
+/// side-by-side). Both titles must be onscreen, Details the upper one.
+///
+/// The preview's title is `Preview`, not `Output Preview`: the pane is
+/// narrow in this layout and the long form was the only reason it ever
+/// needed two words.
 #[test]
-fn right_layout_stacks_details_over_output_preview() {
+fn right_layout_stacks_details_over_the_preview() {
     use crate::tui::state::PaneLayout;
     let mut app = directories_test_app(&[]);
     app.pane_layout = PaneLayout::Right;
+    // A captured-output row, so the preview pane is actually drawn
+    // (an empty one collapses). `directories_test_app(&[])` seeds no
+    // rows, so build one on both lists.
+    let row = crate::tui::state::HistoryRow {
+        id: 1,
+        command: "ls".to_string(),
+        directory: "/tmp".to_string(),
+        output: "captured".to_string(),
+        mode: "command".to_string(),
+        ..Default::default()
+    };
+    app.rows = vec![row.clone()];
+    app.merged_rows = vec![row];
+    app.list_state.select(Some(0));
 
     let rows = render_rows(&mut app, 120, 40);
     let details_row = rows
         .iter()
         .position(|l| l.contains("Details"))
         .expect("Details pane title onscreen in right layout");
-    let output_row = rows
+    let preview_row = rows
         .iter()
-        .position(|l| l.contains("Output Preview"))
-        .expect("Output Preview pane title onscreen in right layout");
+        .position(|l| l.contains("Preview"))
+        .expect("preview pane title onscreen in right layout");
     assert!(
-        details_row < output_row,
-        "in right layout Details must sit ABOVE Output Preview (details row {details_row}, output row {output_row})"
+        details_row < preview_row,
+        "in right layout Details must sit ABOVE the preview (details row {details_row}, preview row {preview_row})"
     );
 }
 
@@ -15958,72 +15964,54 @@ fn hidden_visibility_hides_both_panes_on_a_tall_terminal() {
     );
 }
 
-/// The compact display bundles several space-saving behaviours behind
-/// one flag. This checks three of them at the render level:
+/// The space-saving behaviours that used to be the optional `compact`
+/// bundle are now the only layout. This pins them so a future layout
+/// change has to be deliberate:
 /// (a) an empty Output pane is collapsed, (b) panes appear on a
-/// terminal shorter than the default 20-line cutoff, and (c) the
-/// redundant trailing scope · duplicate text is dropped.
+/// terminal shorter than the old 20-line cutoff, and (c) the redundant
+/// scope · duplicate sentence is gone while its chips remain.
 #[test]
-fn compact_display_bundles_the_space_saving_behaviours() {
+fn single_layout_keeps_the_space_saving_behaviours() {
     use crate::tui::state::PaneVisibility;
 
     // (a) empty Output collapse.
     let mut app = directories_test_app(&[]);
     app.pane_visibility = PaneVisibility::Both;
-    app.compact = false;
-    let default_text = render_rows(&mut app, 120, 40).join("\n");
+    let text = render_rows(&mut app, 120, 40).join("\n");
     assert!(
-        default_text.contains("Output Preview"),
-        "default keeps the (empty) Output pane; got: {default_text:?}"
-    );
-    app.compact = true;
-    let compact_text = render_rows(&mut app, 120, 40).join("\n");
-    assert!(
-        !compact_text.contains("Output Preview"),
-        "compact must collapse the empty Output pane; got: {compact_text:?}"
+        !text.contains("Output Preview"),
+        "an empty Output pane must collapse; got: {text:?}"
     );
     assert!(
-        compact_text.contains("Details"),
-        "compact still shows the Details pane; got: {compact_text:?}"
+        text.contains("Details"),
+        "Details stays visible; got: {text:?}"
     );
 
-    // (b) relaxed cutoff: at 12 rows the default hides the panes, the
-    // compact bundle shows them (chrome 3 + list 3 + pane line).
+    // (b) relaxed cutoff: at 12 rows the panes still show, because
+    // they're sized to what's available rather than a fixed 20.
     let mut app = directories_test_app(&[]);
-    app.compact = false;
-    let hidden_text = render_rows(&mut app, 100, 12).join("\n");
+    let text = render_rows(&mut app, 100, 12).join("\n");
     assert!(
-        !hidden_text.contains("Details"),
-        "default hides panes below 20 lines; got: {hidden_text:?}"
-    );
-    app.compact = true;
-    let shown_text = render_rows(&mut app, 100, 12).join("\n");
-    assert!(
-        shown_text.contains("Details"),
-        "compact shows panes as soon as there's room; got: {shown_text:?}"
+        text.contains("Details"),
+        "panes show as soon as there's room; got: {text:?}"
     );
 
-    // (c) the redundant trailing scope · duplicate sentence is gone in
-    // BOTH displays: it restated the GLOBAL / ALL chips three cells to
-    // its left and cost the right edge of the strip on narrow
-    // terminals. The chips themselves must still be there.
-    for compact in [false, true] {
-        let mut app = directories_test_app(&[]);
-        app.compact = compact;
-        let text = render_rows(&mut app, 140, 20).join("\n");
-        assert!(
-            !text.contains("all history"),
-            "the duplicate scope sentence must not be rendered (compact={compact}); got: {text:?}"
-        );
-        assert!(
-            text.contains("GLOBAL"),
-            "the scope chip still names the scope (compact={compact}); got: {text:?}"
-        );
-        assert!(
-            text.contains("ALL"),
-            "the duplicate-filter chip survives (compact={compact}); got: {text:?}"
-        );
-    }
+    // (c) the redundant trailing scope · duplicate sentence is gone;
+    // the chips that state the same thing stay.
+    let mut app = directories_test_app(&[]);
+    let text = render_rows(&mut app, 140, 20).join("\n");
+    assert!(
+        !text.contains("all history"),
+        "the duplicate scope sentence must not be rendered; got: {text:?}"
+    );
+    assert!(
+        text.contains("GLOBAL"),
+        "the scope chip still names the scope; got: {text:?}"
+    );
+    assert!(
+        text.contains("ALL"),
+        "the duplicate-filter chip survives; got: {text:?}"
+    );
 }
 
 // --- processes mode (`%` prefix) ----
@@ -16665,51 +16653,57 @@ fn indicator_test_row(output: &str) -> HistoryRow {
     }
 }
 
-/// The output-capture column only ever appears in plain history mode
-/// (`ModeKind::History`, i.e. an empty or unprefixed query) — shown
-/// lit (` o `) when the row has captured output, blank (`   `)
-/// otherwise. In every other prefix mode it's hidden entirely (an
-/// empty span, not even the dim placeholder).
+/// The captured-output marker appears only in plain history mode
+/// (`ModeKind::History`), and only on rows that actually have output.
+/// In any other prefix mode it's absent entirely, even when the row's
+/// `output` field is populated — `,` (ag) reuses that field for its
+/// source-context preview, so the marker there would be misleading,
+/// not merely superfluous.
+///
+/// The gutter no longer reserves blank placeholders, so this asserts on
+/// the rendered text rather than a fixed span index.
 #[test]
-fn capture_column_only_shown_in_history_mode() {
+fn capture_marker_only_shown_in_history_mode() {
+    let capture = crate::tui::theme::glyphs::glyphs().capture;
     let app = directories_test_app(&[]);
 
     let with_output = indicator_test_row("captured text");
     let without_output = indicator_test_row("");
 
-    // History mode (empty query): lit when output present, blank
-    // placeholder when absent.
-    let line = crate::tui::render::render_row(&with_output, &app, false, 3);
-    assert_eq!(line.spans[1].content.as_ref(), " o ");
-    let line = crate::tui::render::render_row(&without_output, &app, false, 3);
-    assert_eq!(line.spans[1].content.as_ref(), "   ");
+    let text_of = |row: &HistoryRow, app: &crate::tui::App| -> String {
+        crate::tui::render::render_row(row, app, false, 3)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
 
-    // Any other prefix mode: hidden entirely, regardless of whether
-    // the row happens to carry `output` text (ag mode reuses
-    // `output` for its own source-context preview, unrelated to
-    // "captured shell output" — the column would be actively
-    // misleading there, not just superfluous).
+    // History mode: present with output, absent without.
+    assert!(
+        text_of(&with_output, &app).contains(capture),
+        "history row with captured output shows the marker"
+    );
+    assert!(
+        !text_of(&without_output, &app).contains(capture),
+        "history row without output must not reserve the marker"
+    );
+
+    // Any other prefix mode: gone, regardless of the row's `output`.
     let mut app = app;
     app.query = ",pattern".to_string();
-    let line = crate::tui::render::render_row(&with_output, &app, false, 3);
-    assert_eq!(
-        line.spans[1].content.as_ref(),
-        "",
-        "capture column must be hidden outside history mode, even with non-empty output"
+    assert!(
+        !text_of(&with_output, &app).contains(capture),
+        "capture marker must be hidden outside history mode, even with non-empty output"
     );
-    let line = crate::tui::render::render_row(&without_output, &app, false, 3);
-    assert_eq!(line.spans[1].content.as_ref(), "");
 }
 
-/// The tmux-pane column only ever appears in the two modes whose
-/// rows carry `mode == "directory"` — `#` Directories and `~`
-/// Zoxide — shown blank (`   `) when no live pane matches (no
-/// multiplexer state configured in this test app) and hidden
-/// entirely everywhere else, including `*` Panes mode itself (whose
-/// own rows already ARE the live panes, so the marker would never
-/// have anything to report there either).
+/// The multiplexer `T` marker only ever appears on directory-flavoured
+/// rows in the modes that can show them (`#` Directories / `~` Zoxide /
+/// `|` Source), and never in history or `*` Panes mode (whose rows ARE
+/// the live panes). Asserted on rendered text, since the gutter no
+/// longer reserves a blank column for it.
 #[test]
-fn tmux_column_only_shown_in_directory_flavored_modes() {
+fn tmux_marker_only_shown_in_directory_flavored_modes() {
     let mut app = directories_test_app(&[]);
     let dir_row = HistoryRow {
         id: 1,
@@ -16725,36 +16719,40 @@ fn tmux_column_only_shown_in_directory_flavored_modes() {
         ..Default::default()
     };
 
-    app.query = "#dir".to_string();
-    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
-    assert_eq!(
-        line.spans[2].content.as_ref(),
-        "   ",
-        "Directories mode must still show the (blank) tmux column"
-    );
+    let has_marker = |app: &crate::tui::App| -> bool {
+        crate::tui::render::render_row(&dir_row, app, false, 3)
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == " T ")
+    };
 
-    app.query = "~dir".to_string();
-    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
-    assert_eq!(
-        line.spans[2].content.as_ref(),
-        "   ",
-        "Zoxide mode must still show the (blank) tmux column"
+    // No multiplexer state is configured in this test app, so the
+    // marker is absent either way — what's under test is that the
+    // *code path* is reserved for these modes and skipped elsewhere,
+    // which the non-directory row below distinguishes.
+    app.query = "#dir".to_string();
+    assert!(!has_marker(&app), "no live pane matches, so no marker");
+
+    let mut history_row = dir_row.clone();
+    history_row.mode = "command".to_string();
+    let marker_on_history = |app: &crate::tui::App| -> bool {
+        crate::tui::render::render_row(&history_row, app, false, 3)
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == " T ")
+    };
+    app.query = "#dir".to_string();
+    assert!(
+        !marker_on_history(&app),
+        "a non-directory row never gets the multiplexer marker, even in # mode"
     );
 
     app.query = String::new();
-    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
-    assert_eq!(
-        line.spans[2].content.as_ref(),
-        "",
-        "history mode must hide the tmux column"
-    );
-
+    assert!(!has_marker(&app), "history mode does not consult panes");
     app.query = "*pane".to_string();
-    let line = crate::tui::render::render_row(&dir_row, &app, false, 3);
-    assert_eq!(
-        line.spans[2].content.as_ref(),
-        "",
-        "panes mode must hide the tmux column too — its own rows already ARE the live panes"
+    assert!(
+        !has_marker(&app),
+        "panes mode must not add a marker — its rows ARE the live panes"
     );
 }
 
@@ -16790,13 +16788,6 @@ fn command_highlight_cache_key_for_test(cmd: &str) -> (bool, String) {
     (is_light, cmd.to_string())
 }
 
-/// The core `tui.highlight` behavior: with the feature enabled, no
-/// active search query, and a `mode = "command"` row whose text is
-/// already cached, `render_row` must use the CACHED spans rather
-/// than the plain/matched-substring `highlight_matches` path. Proven
-/// by injecting a cache entry with a distinctive, unmistakable style
-/// (`Modifier::UNDERLINED`, which nothing else in this code path
-/// ever sets) and asserting it survives into the rendered line.
 #[test]
 fn render_row_uses_syntax_highlight_cache_when_enabled_and_no_query() {
     let mut app = directories_test_app(&[]);
@@ -17147,23 +17138,27 @@ fn mark_column_scoped_to_modes_where_marking_has_an_effect() {
         ("-JIRA", "jira"),
     ] {
         app.query = prefix.to_string();
-        let line = crate::tui::render::render_row(&row, &app, false, 3);
-        assert_eq!(
-            line.spans[0].content.as_ref(),
-            "[x]",
-            "{mode_name} mode must show the mark column for a marked row, got: {:?}",
-            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        let texts: Vec<String> = crate::tui::render::render_row(&row, &app, false, 3)
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.trim_start().starts_with("[x]")),
+            "{mode_name} mode must show the mark for a marked row, got: {texts:?}"
         );
     }
 
     for prefix in ["#dir", "*pane", ",pattern", "@note", "~zox", "&sym"] {
         app.query = prefix.to_string();
-        let line = crate::tui::render::render_row(&row, &app, false, 3);
-        assert_eq!(
-            line.spans[0].content.as_ref(),
-            "",
-            "prefix {prefix:?} must hide the mark column — marking has no effect there, got: {:?}",
-            line.spans.iter().map(|s| s.content.to_string()).collect::<Vec<_>>()
+        let texts: Vec<String> = crate::tui::render::render_row(&row, &app, false, 3)
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            !texts.iter().any(|t| t.contains("[x]")),
+            "prefix {prefix:?} must hide the mark — marking has no effect there, got: {texts:?}"
         );
     }
 }
@@ -17197,11 +17192,9 @@ fn files_row(command: &str) -> HistoryRow {
 /// The age column's color follows a recency gradient — brightest for
 /// "just happened", dimming as the row gets older — reading the
 /// bucket straight off `format_diff`'s own unit-ladder suffix
-/// (s/m/h/d/M) rather than re-deriving elapsed time. The age span is
-/// always `spans[4]` (mark/capture/tmux/llm-preview, then age),
-/// regardless of which of those precede it are hidden for the
-/// current mode — they stay as empty placeholders in the vec, not
-/// removed.
+/// (s/m/h/d/M) rather than re-deriving elapsed time. The age is the
+/// gutter's FIRST span: putting it first is what keeps it in one
+/// aligned column while the indicators after it come and go.
 #[test]
 fn age_column_color_follows_recency_gradient() {
     let app = directories_test_app(&[]);
@@ -17209,7 +17202,7 @@ fn age_column_color_follows_recency_gradient() {
     let seconds_row = aged_row(5);
     let line = crate::tui::render::render_row(&seconds_row, &app, false, 3);
     assert_eq!(
-        line.spans[4].style.fg,
+        line.spans[0].style.fg,
         Some(crate::tui::theme::Theme::highlight_color()),
         "a few seconds old must use the brightest (highlight) color"
     );
@@ -17217,7 +17210,7 @@ fn age_column_color_follows_recency_gradient() {
     let minutes_row = aged_row(5 * 60);
     let line = crate::tui::render::render_row(&minutes_row, &app, false, 3);
     assert_eq!(
-        line.spans[4].style.fg,
+        line.spans[0].style.fg,
         Some(crate::tui::theme::Theme::success_color()),
         "a few minutes old must use the success color"
     );
@@ -17225,7 +17218,7 @@ fn age_column_color_follows_recency_gradient() {
     let hours_row = aged_row(5 * 3600);
     let line = crate::tui::render::render_row(&hours_row, &app, false, 3);
     assert_eq!(
-        line.spans[4].style.fg,
+        line.spans[0].style.fg,
         Some(crate::tui::theme::Theme::accent_color()),
         "a few hours old must use the accent color (the previous flat default)"
     );
@@ -17233,7 +17226,7 @@ fn age_column_color_follows_recency_gradient() {
     let days_row = aged_row(5 * 86_400);
     let line = crate::tui::render::render_row(&days_row, &app, false, 3);
     assert_eq!(
-        line.spans[4].style.fg,
+        line.spans[0].style.fg,
         Some(crate::tui::theme::Theme::dim_color()),
         "a few days old must use the dim color"
     );
@@ -17242,7 +17235,7 @@ fn age_column_color_follows_recency_gradient() {
     let months_row = aged_row(200 * 86_400);
     let line = crate::tui::render::render_row(&months_row, &app, false, 3);
     assert_eq!(
-        line.spans[4].style.fg,
+        line.spans[0].style.fg,
         Some(crate::tui::theme::Theme::dimmer_color()),
         "months old must use the dimmest color"
     );
@@ -17255,7 +17248,7 @@ fn age_column_color_follows_recency_gradient() {
     zero_row.timestamp = 0;
     let line = crate::tui::render::render_row(&zero_row, &app, false, 3);
     assert_eq!(
-        line.spans[4].style.fg,
+        line.spans[0].style.fg,
         Some(crate::tui::theme::Theme::dimmer_color()),
         "the timestamp: 0 sentinel must also use the dimmest color"
     );
@@ -20377,9 +20370,18 @@ fn live_workspaces_render_nested_under_sessions_heading() {
     assert!(text.contains("Sessions"), "got: {text:?}");
     assert!(text.contains("Smarthistory"), "got: {text:?}");
     assert!(text.contains("Home"), "got: {text:?}");
+    // Individual live workspaces no longer render as `## ` sub-headings:
+    // they are a filled dot (the `live` glyph) with the workspace name,
+    // nested one level under the synthetic `Sessions` header. Assert on
+    // the name sitting on its own line after `Sessions`.
+    let live = crate::tui::theme::glyphs::glyphs().live;
     assert!(
-        text.contains("## Smarthistory") || text.contains("##Smarthistory"),
-        "individual live workspaces must render as `## ` sub-headings, got: {text:?}"
+        text.contains(live),
+        "a live workspace is marked with the `live` glyph, got: {text:?}"
+    );
+    assert!(
+        !text.contains("##"),
+        "the old `## ` sub-heading form must be gone, got: {text:?}"
     );
 }
 
@@ -36738,29 +36740,25 @@ fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
     buf.content.iter().map(|c| c.symbol()).collect()
 }
 
-/// `tui.style=modern`: no rounded boxes, the mode chip in the prompt,
-/// and no theme name in the status bar.
+/// The chrome: no rounded boxes anywhere, the view as a chip in the
+/// one-line prompt, and a neutral `›` instead of the per-mode prefix
+/// character (the chip already names the mode).
 #[test]
-fn modern_style_drops_boxes_and_shows_mode_chip() {
+fn chrome_draws_no_boxes_and_shows_the_mode_chip() {
     let mut app = global_test_app(&[("git status", 10), ("cargo build", 20)]);
-    app.modern = true;
     app.refresh();
     let text = buffer_text(&draw_to_buffer(&mut app, 100, 30));
-    assert!(!text.contains('╭'), "modern style draws no rounded corners");
+    assert!(!text.contains('╭'), "the chrome draws no rounded corners");
+    assert!(!text.contains('╰'), "the chrome draws no rounded corners");
     assert!(text.contains(" history "), "mode chip names the view");
     assert!(text.contains("› "), "neutral prompt");
-
-    let mut classic = global_test_app(&[("git status", 10)]);
-    classic.refresh();
-    assert!(buffer_text(&draw_to_buffer(&mut classic, 100, 30)).contains('╭'));
 }
 
-/// Modern rows that overflow end in `…` instead of a hard cut.
+/// Rows that overflow end in `…` instead of a hard cut.
 #[test]
-fn modern_style_ellipsizes_long_rows() {
+fn overflowing_rows_end_in_an_ellipsis() {
     let long = format!("echo {}", "x".repeat(200));
     let mut app = global_test_app(&[(long.as_str(), 10)]);
-    app.modern = true;
     app.refresh();
     let buf = draw_to_buffer(&mut app, 60, 30);
     assert!(buffer_text(&buf).contains('…'));
@@ -36810,7 +36808,6 @@ fn mouse_click_selects_the_row_under_the_pointer() {
 #[test]
 fn modern_details_hide_history_only_fields_for_other_rows() {
     let mut app = panes_test_app(&[]);
-    app.modern = true;
     app.session_panes = vec![HistoryRow {
         id: -1,
         command: "Work".to_string(),
@@ -36840,7 +36837,6 @@ fn modern_details_hide_history_only_fields_for_other_rows() {
 #[test]
 fn modern_details_use_a_single_meta_rail() {
     let mut app = global_test_app(&[("git status", 10)]);
-    app.modern = true;
     app.refresh();
     let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
     assert!(text.contains("git status"), "{text}");
@@ -36865,7 +36861,6 @@ fn ascii_glyph_set_replaces_markers_onscreen() {
     use crate::tui::theme::glyphs::{install_glyphs, Glyphs};
 
     let mut app = global_test_app(&[("git status", 10), ("cargo build", 20)]);
-    app.modern = true;
     app.refresh();
 
     // Unicode (the default) first.
@@ -36902,7 +36897,6 @@ fn ascii_glyph_set_replaces_markers_onscreen() {
 #[test]
 fn empty_list_shows_query_algorithm_and_keys() {
     let mut app = global_test_app(&[("git status", 10)]);
-    app.modern = true;
     app.query = "no-such-command-anywhere".to_string();
     app.match_algorithm = crate::tui::state::MatchAlgorithm::Fuzzy;
     app.refresh();
@@ -36998,7 +36992,6 @@ fn input_scroll_window_follows_the_caret() {
 #[test]
 fn preview_pane_boxes_a_markdown_table() {
     let mut app = global_test_app(&[("show table", 10)]);
-    app.modern = true;
     app.refresh();
     // Plant the table as the selected row's captured output on BOTH
     // the raw and merged lists: the preview reads the merged one.
@@ -37099,7 +37092,6 @@ fn unconfigured_modes_report_not_configured() {
         ("&", "CodeGraph index"),
     ] {
         let mut app = global_test_app(&[]);
-        app.modern = true;
         app.query = query.to_string();
         app.refresh();
         let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
@@ -37123,7 +37115,6 @@ fn unconfigured_modes_report_not_configured() {
 #[test]
 fn empty_body_in_a_configured_mode_is_not_no_matches() {
     let mut app = global_test_app(&[]);
-    app.modern = true;
     app.query = "@".to_string();
     app.refresh();
     let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));
@@ -37143,7 +37134,6 @@ fn empty_body_in_a_configured_mode_is_not_no_matches() {
 fn empty_state_offers_mode_specific_creation_hints() {
     for (query, hint) in [("@zzzznothing", "@new"), ("!zzzznothing", "!@new")] {
         let mut app = global_test_app(&[]);
-        app.modern = true;
         app.query = query.to_string();
         app.refresh();
         let text = buffer_text(&draw_to_buffer(&mut app, 120, 30));

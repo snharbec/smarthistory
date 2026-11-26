@@ -127,11 +127,6 @@ pub(crate) struct TuiSession {
     /// `PaneWidth::default()` (40). Values outside `PaneWidth`'s
     /// `MIN..=MAX` range are clamped on load.
     pane_width: Option<String>,
-    /// Last compact-display state, persisted as `on` / `off`. `None`
-    /// means "no preference" and falls back to the `tui.compact=`
-    /// config value (then `false`). Same `Option<bool>` shape as
-    /// `duplicate_filter`.
-    compact: Option<bool>,
     /// The active color scheme (`"light"` /
     /// `"dark"`) at the end of the last
     /// session, toggled via
@@ -452,9 +447,6 @@ impl TuiSession {
                         s.pane_width =
                             Some(value.to_string());
                     }
-                // `on` / `off` (or any `parse_bool` alias), same shape
-                // as `duplicatefilter` above.
-                "compact" => s.compact = Some(crate::util::parse_bool(value, false)),
                 // Same pattern as the other session
                 // fields: only accept values that
                 // `ColorScheme::parse` recognises
@@ -574,9 +566,6 @@ impl TuiSession {
         }
         if let Some(ref pw) = self.pane_width {
             out.push_str(&format!("panewidth={}\n", pw));
-        }
-        if let Some(c) = self.compact {
-            out.push_str(&format!("compact={}\n", if c { "on" } else { "off" }));
         }
         if let Some(ref sc) = self.scheme {
             out.push_str(&format!("colorscheme={}\n", sc));
@@ -2285,24 +2274,8 @@ pub(crate) struct App {
     /// safe `false` default.
     tui_highlight_enabled: bool,
 
-    /// Compact display bundle (`tui.compact=on|off` + the
-    /// `Action::ToggleCompactDisplay` toggle). When set, the renderer
-    /// uses a one-line query prompt, auto-collapses an empty Output
-    /// Preview pane, a width-aware mode strip, and the relaxed
-    /// pane-visibility cutoff. Seeded by `run_tui_to_stdout` from the
-    /// session file / config; every other `App::new` caller gets the
-    /// `false` default.
-    compact: bool,
-    /// `tui.style=modern` (see `Config::modern`). Implies the compact
-    /// bundle (`App::compact_display`) and adds the modern chrome:
-    /// light pane frames, thin scrollbar, tree connectors, per-mode
-    /// details, hover highlight. Seeded by `run_tui_to_stdout`;
-    /// `false` for every other `App::new` caller (tests render the
-    /// classic layout unless they opt in).
-    modern: bool,
     /// Data index of the list row under the mouse pointer, for the
-    /// modern style's hover highlight. `None` when the pointer is
-    /// outside the list.
+    /// hover highlight. `None` when the pointer is outside the list.
     hover_row: Option<usize>,
     /// Data index shown on each content row of the list, top to
     /// bottom, as of the last frame (`None` for top padding). Filled
@@ -2668,10 +2641,13 @@ impl App {
         self.live_panes_request.is_some()
     }
 
-    /// The compact bundle is on: explicitly (`tui.compact`) or as
-    /// part of the modern style.
+    /// One-line prompt, auto-collapsed empty Output pane, width-aware
+    /// mode strip and the relaxed pane cutoff are now the only display
+    /// there is — the boxed/`classic` layout and `tui.compact` were
+    /// removed with it. Kept as a named predicate so the many layout
+    /// call sites keep reading as a decision rather than a literal.
     pub(crate) fn compact_display(&self) -> bool {
-        self.compact || self.modern
+        true
     }
 
     fn is_regex_query(&self) -> bool {
@@ -5786,8 +5762,6 @@ impl App {
             // new scheme instead of needing to be explicitly
             // invalidated at every `install_palette` call site.
             tui_highlight_enabled: false,
-            compact: false,
-            modern: false,
             hover_row: None,
             list_row_map: Vec::new(),
             command_highlight_cache: std::collections::HashMap::new(),
@@ -12825,10 +12799,6 @@ pub fn run_tui_to_stdout(
         .as_deref()
         .and_then(crate::tui::state::PaneWidth::parse)
         .unwrap_or_default();
-    // Compact-display precedence: the session file's last in-TUI
-    // toggle wins, else `tui.compact=`, else `false` — same shape as
-    // `duplicate_filter` above.
-    let initial_compact = session.compact.unwrap_or_else(|| app_cfg.compact());
     let home_list = build_home_list(&app_cfg);
     // The `sessiondirs=...` walk is deliberately NOT computed here
     // (unlike `home_list` above). It used to run unconditionally on
@@ -12891,8 +12861,6 @@ pub fn run_tui_to_stdout(
     // entry-point override, mirroring `directory_source` etc.
     app.pane_layout = initial_pane_layout;
     app.pane_width = initial_pane_width;
-    app.compact = initial_compact;
-    app.modern = app_cfg.modern();
     // Glyph set has to be installed before the first frame, and it is
     // process-wide (a thread-local, like PALETTE) rather than a field
     // on `App`, since every render helper would otherwise need a new
@@ -13308,11 +13276,6 @@ pub fn run_tui_to_stdout(
         } else {
             Some(app.pane_width.as_str())
         },
-        // Always persisted as `on` / `off` — same shape as
-        // `duplicate_filter`. Writing it even at `false` means an
-        // in-TUI toggle-off overrides a `tui.compact=on` config default
-        // on the next launch (rather than silently reverting to it).
-        compact: Some(app.compact),
         // Persist only when the user has toggled away
         // from the default (`Dark`) — same
         // persist-only-if-non-default policy as
@@ -15033,15 +14996,14 @@ fn dispatch_action(app: &mut App, action: Action) -> bool {
             false
         }
         Action::ToggleCompactDisplay => {
-            // One switch for the whole space-saving bundle (compact
-            // prompt, empty-Output collapse, width-aware mode strip,
-            // relaxed pane cutoff). Refreshes so the new chrome height
-            // is reflected immediately.
-            app.compact = !app.compact;
-            app.set_status_message(format!(
-                "Compact display: {}",
-                if app.compact { "on" } else { "off" }
-            ));
+            // Retired: the compact bundle is the only display now, so
+            // there is nothing to toggle. Kept as a no-op (with a
+            // message) rather than an unknown action, because an
+            // existing `key.toggle-compact-display=` binding in a
+            // user's config would otherwise stop being recognised.
+            app.set_status_message(
+                "compact display is always on now (tui.compact was removed)".to_string(),
+            );
             false
         }
         Action::JiraFieldComplete => {
@@ -18690,7 +18652,6 @@ mod tui_session_tests {
             pane_height: Some("20".to_string()),
             pane_layout: Some("right".to_string()),
             pane_width: Some("55".to_string()),
-            compact: Some(true),
             scheme: Some("light".to_string()),
             pane_last_touched: {
                 let mut m = std::collections::HashMap::new();
@@ -18718,7 +18679,6 @@ mod tui_session_tests {
         assert_eq!(loaded.pane_height.as_deref(), Some("20"));
         assert_eq!(loaded.pane_layout.as_deref(), Some("right"));
         assert_eq!(loaded.pane_width.as_deref(), Some("55"));
-        assert_eq!(loaded.compact, Some(true));
         assert_eq!(loaded.scheme.as_deref(), Some("light"));
         assert_eq!(
             loaded.pane_last_touched.get("wB:p1").copied(),
@@ -19066,7 +19026,6 @@ mod tui_session_tests {
             // that here with the default (`None`).
             pane_layout: None,
             pane_width: None,
-            compact: None,
             scheme: None,
             pane_last_touched: std::collections::HashMap::new(),
             command_menu_recent: Vec::new(),

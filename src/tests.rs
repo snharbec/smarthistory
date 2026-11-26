@@ -1461,16 +1461,28 @@ tmuxpaneoutputdir=~/custom-tmux
         assert_eq!(cfg.pane_layout(), PaneLayout::Bottom);
     }
 
-    /// `tui.compact=on|off` selects the initial state of the compact
-    /// display bundle. Default `off`.
+    /// `tui.compact` and `tui.style` are retired: there is only one
+    /// layout now. They must still parse cleanly (an untouched config
+    /// file should not become invalid), and — the part worth pinning —
+    /// they must not swallow or reorder the lines around them.
     #[test]
-    fn config_parses_tui_compact_key() {
+    fn retired_tui_style_keys_parse_without_disturbing_neighbours() {
         let mut cfg = Config::default();
-        assert!(!cfg.compact());
-        cfg.parse("tui.compact=on\n");
-        assert!(cfg.compact());
-        cfg.parse("tui.compact=off\n");
-        assert!(!cfg.compact());
+        cfg.parse(
+            "tui.compact=on\n\
+             tui.style=classic\n\
+             tui.glyphs=ascii\n\
+             initialmode=GLOBAL\n",
+        );
+        assert!(
+            cfg.ascii_glyphs(),
+            "the line after the retired keys must still be applied"
+        );
+        assert_eq!(
+            cfg.initial_mode(),
+            "GLOBAL",
+            "parsing must continue past the retired keys"
+        );
     }
 
     /// Regression test for

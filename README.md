@@ -286,9 +286,9 @@ multi-select actions: `key.clear-marks=...` and `key.bulk-delete-marked=...`
 (delete every marked row, with confirmation), for the detail-pane placement
 toggle (`key.toggle-pane-layout=...`, which docks the details + output panes to
 the right of the list instead of below it — see [`panes.layout`](#key-settings)),
-and for the compact-display toggle (`key.toggle-compact-display=...`, which
-switches the whole space-saving bundle on/off — see
-[`tui.compact`](#key-settings)).
+and for the retired compact-display toggle
+(`key.toggle-compact-display=...`, kept only so an existing binding still
+parses — the space-saving layout is now the only one).
 
 All keybindings are user-configurable via `key.<action>=<spec>` in the config
 file. See [docs/actions.md](docs/actions.md) for the full reference (all 48
@@ -616,12 +616,12 @@ starting with `#` are comments; blank lines are ignored.
 | -------------------------------- | ------------------------------------------------------------ | ---------------------------------------------- |
 | `multiplexer=tmux\|herdr`        | Which multiplexer backend to use for `#` and `*` modes.      | `tmux`                                         |
 | `panes.layout=bottom\|right`     | Dock the detail panes below the list or in a right column (Details over Output Preview). | `bottom`                                       |
-| `tui.compact=on\|off`            | Compact display bundle: 1-line prompt, collapse empty Output, width-aware mode strip, relaxed pane cutoff. Toggled live by `key.toggle-compact-display=...`. | `off`                                          |
 | `tmuxpaneoutputdir=~/path`       | Directory containing per-pane tmux logs.                     | `~/.cache/tmux-history`                        |
 | `ignorecapture=cmd1 cmd2 ...`    | Commands whose output is never captured.                     | `vi nvim vim top htop emacs more less lazygit` |
 | `capturelines=N` or `=ALL`       | Default number of captured output lines.                     | `20`                                           |
 | `capturelines.<cmd>=N` or `=ALL` | Per-command override.                                        | inherits `capturelines`                        |
 | `initialmode=SESS\|DIR\|GLOBAL`  | Initial TUI scope.                                           | `SESS`                                         |
+| `tui.glyphs=unicode\|ascii`     | Glyph set for every TUI marker (ambiguous-width terminals need `ascii`). | `unicode`                          |
 | `ollama.url=http://host:port`    | URL of a local ollama instance for LLM features.             | (disabled)                                     |
 | `ollama.model=<name>`            | ollama model name.                                           | (disabled)                                     |
 | `notes.database=~/path`          | Path to the note_search SQLite database.                     | (disabled)                                     |
