@@ -750,6 +750,16 @@ enum Commands {
         #[command(subcommand)]
         action: HerdrAction,
     },
+    /// Rex terminal helpers.
+    ///
+    /// Small wrappers the TUI stages into the user's shell when the
+    /// multiplexer is `rex`: switching what the Rex app shows needs
+    /// real session/window ids, which these resolve first. Not
+    /// normally invoked by hand.
+    Rex {
+        #[command(subcommand)]
+        action: RexAction,
+    },
     /// Export all history and time-tracking data to a JSON file.
     ///
     /// The file contains every history entry with its captured
@@ -886,6 +896,29 @@ enum HerdrAction {
     FocusPane {
         /// The pane to focus, e.g. `w3S:p2`.
         pane_id: String,
+    },
+}
+
+/// Sub-commands of `smarthistory rex`: the helpers the TUI stages
+/// when the multiplexer is `rex`.
+#[derive(clap::Subcommand, Debug)]
+enum RexAction {
+    /// Focus a Rex block (pane) and show its session and window.
+    FocusPane {
+        /// The block to focus, e.g. `block:01a2...`.
+        block_id: String,
+    },
+    /// Show a Rex session, given by id or label.
+    FocusSession {
+        /// Session id (`session:...`) or label.
+        session: String,
+    },
+    /// Create a Rex session rooted at a directory and show it.
+    New {
+        /// Label for the new session.
+        label: String,
+        /// Working directory for its first terminal.
+        dir: String,
     },
 }
 
@@ -2688,7 +2721,7 @@ pub struct Config {
     /// status message.
     ///
     /// Configurable via
-    /// `multiplexer=tmux|herdr`
+    /// `multiplexer=tmux|herdr|rex`
     /// in the config file, or
     /// the
     /// `SMARTHISTORY_MULTIPLEXER`
@@ -3053,7 +3086,7 @@ impl Config {
                 None => eprintln!(
                     "smarthistory: ignoring invalid \
                      SMARTHISTORY_MULTIPLEXER={:?} \
-                     (expected `tmux` or `herdr`)",
+                     (expected `tmux`, `herdr` or `rex`)",
                     raw
                 ),
             }
@@ -3243,7 +3276,7 @@ impl Config {
                     None => eprintln!(
                         "smarthistory: ignoring invalid \
                              multiplexer={:?} (expected \
-                             `tmux` or `herdr`); using \
+                             `tmux`, `herdr` or `rex`); using \
                              default",
                         value
                     ),
@@ -9711,6 +9744,19 @@ fn run_command(args: Args) -> anyhow::Result<()> {
             track_project_for_pwd(&conn, &cfg, &pwd)?;
             let history_id = upsert_history_row(&conn, &command, &pwd, &session_id, exit_code)?;
             store_output(&conn, history_id, &output)?;
+        }
+        Commands::Rex { action } => {
+            let result = match action {
+                RexAction::FocusPane { block_id } => crate::multiplexer::rex::rex_focus_pane(&block_id),
+                RexAction::FocusSession { session } => {
+                    crate::multiplexer::rex::rex_focus_session(&session)
+                }
+                RexAction::New { label, dir } => crate::multiplexer::rex::rex_new(&label, &dir),
+            };
+            if let Err(e) = result {
+                eprintln!("smarthistory: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Herdr { action } => match action {
             HerdrAction::FocusPane { pane_id } => {

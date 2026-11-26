@@ -204,6 +204,8 @@ fn detect_kind(configured: MultiplexerKind) -> MultiplexerKind {
         MultiplexerKind::Herdr
     } else if set("TMUX") {
         MultiplexerKind::Tmux
+    } else if set("REX_BLOCK") {
+        MultiplexerKind::Rex
     } else {
         configured
     }
@@ -215,6 +217,7 @@ pub(crate) fn last_session_cli(configured: MultiplexerKind, print: bool) -> Resu
     match detect_kind(configured) {
         MultiplexerKind::Tmux => tmux_last_session(print),
         MultiplexerKind::Herdr => herdr_last_session(print),
+        MultiplexerKind::Rex => crate::multiplexer::rex::rex_last_session(print),
     }
 }
 

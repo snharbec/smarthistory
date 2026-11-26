@@ -80,6 +80,8 @@ use std::path::Path;
 #[cfg(feature = "herdr")]
 use crate::tui::herdr_snapshot_debug_log;
 
+pub mod rex;
+
 /// Which multiplexer the TUI should
 /// target for directory switching.
 ///
@@ -112,6 +114,11 @@ pub enum MultiplexerKind {
     /// feature instead of staging
     /// a command.
     Herdr,
+    /// Rex (the terminal). The TUI shells out to `rex do` (one Lua
+    /// snapshot of every session/window/block) and stages
+    /// `smarthistory rex ...` helpers that end in the app's
+    /// `session.select` action. See [`rex`].
+    Rex,
 }
 
 impl MultiplexerKind {
@@ -126,6 +133,7 @@ impl MultiplexerKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "tmux" | "" => Some(MultiplexerKind::Tmux),
             "herdr" => Some(MultiplexerKind::Herdr),
+            "rex" => Some(MultiplexerKind::Rex),
             _ => None,
         }
     }
@@ -139,6 +147,7 @@ impl MultiplexerKind {
         match self {
             MultiplexerKind::Tmux => "tmux",
             MultiplexerKind::Herdr => "herdr",
+            MultiplexerKind::Rex => "rex",
         }
     }
 
@@ -703,6 +712,7 @@ pub fn backend_for(kind: MultiplexerKind) -> Box<dyn MultiplexerBackend> {
         MultiplexerKind::Herdr => Box::new(HerdrBackend),
         #[cfg(not(feature = "herdr"))]
         MultiplexerKind::Herdr => Box::new(TmuxBackend),
+        MultiplexerKind::Rex => Box::new(rex::RexBackend),
     }
 }
 
@@ -725,6 +735,16 @@ pub fn panes_for_caller(
             .into_iter()
             .filter(|r| current_pane.is_empty() || r.pane_id != current_pane)
             .collect(),
+        // Rex injects `$REX_BLOCK` into every terminal it opens.
+        MultiplexerKind::Rex => {
+            let me = std::env::var("REX_BLOCK")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| current_pane.to_string());
+            rows.into_iter()
+                .filter(|r| me.is_empty() || r.pane_id != me)
+                .collect()
+        }
         MultiplexerKind::Herdr => {
             let me = std::env::var("HERDR_PANE_ID")
                 .ok()
@@ -1014,13 +1034,20 @@ fn set_nonblocking(fd: std::os::fd::RawFd) {
 }
 
 fn tmux_run(args: &[&str]) -> Option<Vec<u8>> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
     let timeout_ms: u64 = std::env::var("TMUX_PANE_PROBE_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
-    let mut child = match Command::new("tmux")
+    run_bounded("tmux", args, timeout_ms)
+}
+
+/// Run `program args...`, collecting stdout, killing it after
+/// `timeout_ms`. `None` on spawn failure or timeout. Shared by the
+/// tmux and Rex backends.
+fn run_bounded(program: &str, args: &[&str], timeout_ms: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = match Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

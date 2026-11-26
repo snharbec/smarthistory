@@ -40,20 +40,23 @@ pub(crate) fn check(app: &App) -> CheckReport {
     let backend = app.multiplexer.name();
     let in_tmux = std::env::var("TMUX").is_ok();
     let in_herdr = std::env::var("HERDR_PANE_ID").is_ok();
+    let in_rex = std::env::var("REX_BLOCK").is_ok();
     let current_pane_env = if in_tmux {
         std::env::var("TMUX_PANE").ok()
     } else if in_herdr {
         std::env::var("HERDR_PANE_ID").ok()
+    } else if in_rex {
+        std::env::var("REX_BLOCK").ok()
     } else {
         None
     };
 
     // 2. Inside a multiplexer session?
-    if !in_tmux && !in_herdr {
+    if !in_tmux && !in_herdr && !in_rex {
         return CheckReport::warn(
             mode,
             format!(
-                "multiplexer backend is `{backend}` but you are not inside a multiplexer session ($TMUX / $HERDR_PANE_ID both unset); the `*` mode will show an empty list"
+                "multiplexer backend is `{backend}` but you are not inside a multiplexer session ($TMUX / $HERDR_PANE_ID / $REX_BLOCK all unset); the `*` mode will show an empty list"
             ),
         );
     }
@@ -63,7 +66,7 @@ pub(crate) fn check(app: &App) -> CheckReport {
         return CheckReport::warn(
             mode,
             format!(
-                "inside a `{backend}` session but the pane-id env var ($TMUX_PANE / $HERDR_PANE_ID) is not set; the `*` mode cannot exclude your own pane"
+                "inside a `{backend}` session but the pane-id env var ($TMUX_PANE / $HERDR_PANE_ID / $REX_BLOCK) is not set; the `*` mode cannot exclude your own pane"
             ),
         );
     };
@@ -1080,6 +1083,12 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
             .filter(|s| !s.is_empty())
             .or_else(|| {
                 std::env::var("HERDR_PANE_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                // Rex sets `$REX_BLOCK` in every terminal it opens.
+                std::env::var("REX_BLOCK")
                     .ok()
                     .filter(|s| !s.is_empty())
             })

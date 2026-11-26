@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `multiplexer=rex`: support the Rex terminal next to tmux and herdr. The `*`
+  and `#` views list every Rex session, window and block (one `rex do`
+  snapshot), and selecting a row focuses that block or session in the Rex app,
+  or creates a new session rooted at the directory. `last-session` switches to
+  the previous Rex session using the server's own focus history. Output capture
+  is not supported for Rex yet. See
+  [docs/multiplexer.md](docs/multiplexer.md#rex).
 - `dropdown.historyposition=above`: draw the Up-arrow history box above the
   prompt instead of below it. Predictions (Down on an empty line) stay below. See
   [docs/configuration.md](docs/configuration.md#dropdownhistoryposition).
