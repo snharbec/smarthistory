@@ -12973,9 +12973,19 @@ pub fn run_tui_to_stdout(
     app.load_mode_history_from_disk();
     app.load_global_history_from_disk();
 
-    let mut render = std::io::stderr();
+    // Buffer the TUI's output. Stderr is unbuffered, so without this
+    // every escape sequence and text run of a frame became its own
+    // `write()` (~3000 for a full first paint) and the terminal painted
+    // the frame piecemeal, which showed up as a flicker right after
+    // C-r. Ratatui flushes the backend at the end of every `draw`, so
+    // each frame still reaches the terminal promptly, in one go.
+    let mut render = std::io::BufWriter::with_capacity(1 << 16, std::io::stderr());
     crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
+    // `queue!`, not `execute!`: the alternate-screen switch stays in
+    // the buffer and goes out together with the first frame, so the
+    // user never sees a blank alternate screen while that frame is
+    // being computed.
+    crossterm::queue!(
         render,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::cursor::Hide,
@@ -13256,7 +13266,7 @@ pub fn run_tui_to_stdout(
 }
 
 fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::BufWriter<std::io::Stderr>>>,
     app: &mut App,
 ) -> Result<()> {
     let page_size = terminal
@@ -13273,7 +13283,13 @@ fn run_loop(
         crate::tui::mode::ensure_selected_context(app);
         let context_elapsed = context_start.elapsed();
         let draw_start = std::time::Instant::now();
-        if let Err(e) = terminal.draw(|f| render::ui(f, app)) {
+        // Synchronized update (DEC mode 2026): terminals that support
+        // it hold the screen until the end marker, so a frame is shown
+        // whole rather than torn mid-paint. Others ignore the markers.
+        let _ = crossterm::queue!(terminal.backend_mut(), crossterm::terminal::BeginSynchronizedUpdate);
+        let drawn = terminal.draw(|f| render::ui(f, app)).map(|_| ());
+        let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EndSynchronizedUpdate);
+        if let Err(e) = drawn {
             return Err(anyhow::anyhow!("terminal draw failed: {}", e));
         }
         let draw_elapsed = draw_start.elapsed();
