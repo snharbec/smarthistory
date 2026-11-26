@@ -1490,12 +1490,12 @@ set to) goes back to the history list, which always keeps priority. This is
 the explicit, terminal-size-independent way to see as many rows as possible;
 the layout chip shows `HIDDEN` so the state is visible.
 
-Below 20 terminal lines, both panes are hidden automatically regardless of this
-setting — there isn't room for a details row without squeezing the history list
-itself down to almost nothing, so the space goes back to the list instead. (When
-[`ToggleCompactDisplay`](#togglecompactdisplay) is on, the cutoff is relaxed to
-"as soon as a one-line pane fits".) The setting is remembered as-is; the panes
-reappear on their own once the terminal is tall enough again, no action needed.
+The panes are hidden automatically once the terminal is too short to fit a
+one-line pane — the chrome plus the rows the list always keeps (9 rows for the
+`bottom` layout, 8 for `right`) — because there isn't room for a details row
+without squeezing the history list down to almost nothing, so the space goes
+back to the list instead. The setting is remembered as-is; the panes reappear on
+their own once the terminal is tall enough again, no action needed.
 
 ### `IncreasePaneHeight`
 
@@ -1575,23 +1575,12 @@ any in-TUI toggle.
 | Default key  | (unbound)               |
 | Category     | layout                  |
 
-One switch for the whole space-saving bundle that reclaims rows and columns for
-the history list. When **on**:
-
-- the query prompt collapses to a single line (no border box);
-- an empty Output Preview pane is collapsed in the `BOTH` layout (Details takes
-  the space);
-- the mode strip drops the redundant trailing `scope · duplicate` text and, on
-  narrow terminals, drops the lowest-priority chips instead of clipping one
-  mid-glyph;
-- the detail panes appear as soon as the layout's own arithmetic says there's
-  room for a one-line pane, instead of at the fixed 20-line cutoff.
-
-Ships **unbound** — opt in with `key.toggle-compact-display=<spec>` in the
-config, or open it from the command palette (`Ctrl-Q`). The state is persisted
-in the session file (`compact=on` / `compact=off`) and restored on the next
-launch; the config key [`tui.compact`](configuration.md#tuicompact) sets the
-initial default before any in-TUI toggle.
+**Retired.** The space-saving bundle this action used to toggle — one-line
+prompt, collapsed empty preview, width-aware mode strip, relaxed pane cutoff —
+is now the only layout, so there is nothing to switch. The action stays
+registered (an existing `key.toggle-compact-display=` binding keeps parsing and
+will not be reported as an unknown action) and reports that on the status bar
+instead of silently doing nothing.
 
 ---
 

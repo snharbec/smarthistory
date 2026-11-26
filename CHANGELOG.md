@@ -33,6 +33,9 @@ All notable changes to this project will be documented in this file.
   output.
 - TUI: a zero-result list was a blank rectangle. It now names the query and the
   active match algorithm and offers the keys that change them.
+- TUI: a marked row rendered a mangled `▌x] ` instead of a `[x]` checkbox —
+  the indicator interpolated the selection bar and dropped its opening
+  bracket.
 - TUI: `dimmer` (month/year ages, rule labels) was a hardcoded `DarkGray`, the
   one palette slot that ignored the theme — nearly invisible on light themes.
   It is now derived from the theme's `fg`/`bg`, and overridable with
@@ -54,6 +57,21 @@ All notable changes to this project will be documented in this file.
   credentials, `^` Browser without a profile, `,` Ag, `&` CodeGraph) says so
   instead of reporting a failed search, and a configured mode with an empty
   query no longer claims "no matches".
+
+### Removed
+
+- `tui.style=classic` and the historical boxed layout are gone: there is one
+  TUI. `tui.compact` goes with it — the space-saving bundle it switched on
+  (one-line prompt, collapsed empty preview, width-aware mode strip, relaxed
+  pane cutoff) is now always on. Both keys still **parse** (a config file the
+  user hasn't touched must not start failing validation) and are ignored;
+  `config get tui.style` reports `modern`. `Action::ToggleCompactDisplay`
+  stays registered as a no-op that says so, so an existing
+  `key.toggle-compact-display=` binding keeps working. The session file's
+  `compact=` line is no longer written. See
+  [docs/configuration.md](docs/configuration.md#the-tui-layout).
+- The `Chrome` enum (`Modern` / `Classic`) collapses to a single
+  `Chrome` value: with one style there were no decisions left behind it.
 
 ### Added
 

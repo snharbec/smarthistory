@@ -1871,16 +1871,6 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(
         f,
-        "  tui.compact = {}",
-        if cfg.compact { "on" } else { "off" }
-    );
-    let _ = writeln!(
-        f,
-        "  tui.style = {}",
-        if cfg.modern { "modern" } else { "classic" }
-    );
-    let _ = writeln!(
-        f,
         "  tui.glyphs = {}",
         if cfg.tui_ascii_glyphs { "ascii" } else { "unicode" }
     );
@@ -2455,20 +2445,6 @@ pub struct Config {
     /// the more useful signal while actively searching. Set via
     /// `tui.highlight=on|off`.
     tui_highlight: bool,
-    /// Compact display bundle, from `tui.compact=on|off` (default
-    /// `off`). When on: a one-line query prompt (no border box),
-    /// auto-collapsing an empty Output Preview pane, a width-aware mode
-    /// strip, and the relaxed pane-visibility cutoff — all reclaiming
-    /// rows for the list. Toggled at runtime by
-    /// `Action::ToggleCompactDisplay`; the session file remembers the
-    /// last choice (session overrides this config default).
-    compact: bool,
-    /// Visual style, from `tui.style=modern|classic` (default
-    /// `modern`). Modern: light single-line pane frames instead of
-    /// rounded boxes, the compact bundle, a thin scrollbar, tree
-    /// connectors in the `*` view, per-mode details and hover
-    /// highlight. Classic is the historical boxed layout.
-    modern: bool,
     /// Glyph set for the TUI's box-drawing and status markers, from
     /// `tui.glyphs=unicode|ascii` (default `unicode`). `ascii` swaps
     /// every non-ASCII glyph (the selection bar, tree connectors,
@@ -2966,8 +2942,6 @@ impl Config {
             prompt_project_enabled: false,
             shellintegration_osc133_enabled: true,
             tui_highlight: false,
-            compact: false,
-            modern: true,
             tui_ascii_glyphs: false,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
@@ -3296,11 +3270,16 @@ impl Config {
                 "tui.highlight" => {
                     self.tui_highlight = crate::util::parse_bool(value, false);
                 }
-                "tui.compact" => {
-                    self.compact = crate::util::parse_bool(value, false);
-                }
-                "tui.style" => {
-                    self.modern = !value.trim().eq_ignore_ascii_case("classic");
+                // `tui.compact` and `tui.style` are retired: there
+                // is no longer a second layout to switch to, so the
+                // keys parse as no-ops that say so once, rather than
+                // failing config validation for a file the user
+                // hasn't touched yet.
+                "tui.compact" | "tui.style" => {
+                    eprintln!(
+                        "smarthistory: `{key}` is no longer used - the modern TUI is the only style",
+                        key = key
+                    );
                 }
                 "tui.glyphs" => {
                     self.tui_ascii_glyphs = value.trim().eq_ignore_ascii_case("ascii");
@@ -4551,18 +4530,6 @@ impl Config {
     /// comment. Default `false`.
     pub fn tui_highlight(&self) -> bool {
         self.tui_highlight
-    }
-
-    /// Whether the compact display bundle is enabled by default — see
-    /// `tui.compact` / the `compact` field doc comment. Default
-    /// `false`. The session file's last in-TUI toggle overrides this.
-    pub fn compact(&self) -> bool {
-        self.compact
-    }
-
-    /// `tui.style=modern` (the default) — see the `modern` field.
-    pub fn modern(&self) -> bool {
-        self.modern
     }
 
     /// `tui.glyphs=ascii` — see the `tui_ascii_glyphs` field.
@@ -10153,11 +10120,12 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     "tui.highlight" => {
                         println!("{}", if cfg.tui_highlight { "on" } else { "off" })
                     }
-                    "tui.compact" => {
-                        println!("{}", if cfg.compact { "on" } else { "off" })
-                    }
-                    "tui.style" => {
-                        println!("{}", if cfg.modern { "modern" } else { "classic" })
+                    "tui.compact" | "tui.style" => {
+                        // Retired; kept so an existing script's
+                        // `config get` doesn't hard-fail. `classic`
+                        // was removed with the second layout, so
+                        // report the only style there is.
+                        println!("modern")
                     }
                     "tui.glyphs" => {
                         println!("{}", if cfg.tui_ascii_glyphs { "ascii" } else { "unicode" })
