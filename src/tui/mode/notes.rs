@@ -201,6 +201,19 @@ pub(crate) fn pattern(app: &App) -> &str {
 ///    `app.notes_query_error = true` (the
 ///    renderer tints the input border red) and
 ///    return an empty list.
+/// The secondary text of a note row: the note's title, unless it
+/// only repeats the filename (`note_search` falls back to the path
+/// without `.md` for an untitled note), in which case nothing — the
+/// filename is already the row's primary text.
+pub(crate) fn note_row_comment(title: &str, filename: &str) -> String {
+    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    if title.is_empty() || title == stem || title == filename {
+        String::new()
+    } else {
+        title.to_string()
+    }
+}
+
 pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
     let Some(ref db_path) = app.notes_database else {
         return Ok(Vec::new());
@@ -317,12 +330,8 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
                 })
                 .filter(|note| !excluded.contains(&note.filename))
                 .map(|note| {
-                    let title = note.title.as_deref().unwrap_or("");
-                    let comment = if title.is_empty() {
-                        note.filename.clone()
-                    } else {
-                        format!("{} — {}", title, note.filename)
-                    };
+                    let comment =
+                        note_row_comment(note.title.as_deref().unwrap_or(""), &note.filename);
                     let ts = note.updated.or(note.created).unwrap_or(0);
                     HistoryRow {
                         id: 0,
@@ -396,12 +405,8 @@ fn fetch_recent_with_filter(
                 })
                 .filter(|note| !excluded.contains(&note.filename))
                 .map(|note| {
-                    let title = note.title.as_deref().unwrap_or("");
-                    let comment = if title.is_empty() {
-                        note.filename.clone()
-                    } else {
-                        format!("{} — {}", title, note.filename)
-                    };
+                    let comment =
+                        note_row_comment(note.title.as_deref().unwrap_or(""), &note.filename);
                     let ts = note.updated.or(note.created).unwrap_or(0);
                     HistoryRow {
                         id: 0,
@@ -454,7 +459,7 @@ fn excluded_note_filenames(
 /// `fetch_todos` to populate the
 /// Details-pane age column with a real
 /// timestamp instead of the
-/// `9999M` placeholder that
+/// `999y` placeholder that
 /// `format_diff(0)` would produce. The
 /// query is `WHERE filename IN (?, ?, …)`
 /// so it's O(unique-files), not
@@ -1065,5 +1070,17 @@ impl App {
         if completion.ends_with(' ') {
             self.set_status_message(format!("expanded {} `{}`", kind, completion.trim_end()));
         }
+    }
+}
+
+#[cfg(test)]
+mod note_row_comment_tests {
+    use super::note_row_comment;
+
+    #[test]
+    fn title_repeating_the_filename_is_dropped() {
+        assert_eq!(note_row_comment("daily/2026-08-03", "daily/2026-08-03.md"), "");
+        assert_eq!(note_row_comment("", "a.md"), "");
+        assert_eq!(note_row_comment("Bike repair", "project/fahrrad.md"), "Bike repair");
     }
 }

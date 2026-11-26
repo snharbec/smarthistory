@@ -63,6 +63,7 @@ value" so you can confirm what the TUI actually sees.
   - [`panes.shortcutprefix`](#panesshortcutprefix)
 - [Compact display](#compact-display)
   - [`tui.compact`](#tuicompact)
+  - [`tui.style`](#tuistyle)
 - [Shell server](#shell-server)
   - [`shellserver.enabled`](#shellserverenabled)
   - [`shellserver.monitor`](#shellservermonitor)
@@ -478,6 +479,43 @@ ships **unbound**; set `key.toggle-compact-display=<spec>` (or open it from the
 command palette, `Ctrl-Q`). The last choice is remembered in the session file
 (`compact=on` / `compact=off`) and takes precedence over `tui.compact` on the
 next launch.
+
+### `tui.style`
+
+|              |                        |
+| ------------ | ---------------------- |
+| **Type**     | `modern` \| `classic` |
+| **Default**  | `modern`               |
+
+The TUI's visual style. `modern` (the default) includes the whole
+[compact display](#tuicompact) bundle, plus:
+
+- **light frames**: each pane gets one dim top rule carrying its title instead
+  of a rounded box, and side-by-side panes are divided by a single rule;
+- the **prompt** shows the view as a filled chip (`history`, `notes`, …)
+  followed by `› `;
+- a **thin scrollbar** (track `│`, thumb `┃`, no arrows);
+- long rows end in `…` instead of being cut mid-word;
+- **per-mode Details**: history rows show command, directory, a short session
+  id, time and exit status; other rows show only the fields they have (no
+  `Stat ✓ success` or `Time never` on a note or a pane);
+- in the `*` view, **tree connectors** (`├` / `└`, `●` for a live session)
+  instead of the `#` / `##` headings;
+- outside shell history, a row's secondary text is plain dim text, not a
+  `# comment`;
+- the **status bar** shows key hints (key in the accent color), a spinner while
+  the live pane snapshot loads, and no theme name;
+- **hover**: the row under the mouse pointer is tinted;
+- on terminals narrower than 90 columns, a captured output takes the whole
+  detail row instead of a cramped Details | Output split;
+- `≡` marks a history row with captured output (classic: `o`).
+
+```ini
+tui.style=classic   # the historical boxed layout
+```
+
+Row ages read `5s`, `3m`, `2h`, `4d`, `2mo`, `1y` in both styles (months used to
+be `M`, which was easy to misread as minutes).
 
 ---
 
@@ -1896,6 +1934,7 @@ exist?" reference; the sections above are the long-form per-key docs.
 | `tui.highlight`                 | `on` \| `off`                     | `off`                                                            | [History list & filtering](#history-list--filtering)                      |
 | `panes.layout`                  | `bottom` \| `right`               | `bottom`                                                         | [Detail panes](#detail-panes)                                             |
 | `tui.compact`                   | `on` \| `off`                     | `off`                                                            | [Compact display](#compact-display)                                       |
+| `tui.style`                     | `modern` \| `classic`             | `modern`                                                         | [Compact display](#tuistyle)                                              |
 | `dropdown.enabled`              | `on` \| `off`                     | `off`                                                            | [Live dropdown completion](#live-dropdown-completion)                     |
 | `autosuggest.enabled`           | `on` \| `off`                     | `off`                                                            | [Autosuggestions](#autosuggestions)                                       |
 | `dropdown.limit`                | positive int                      | `6`                                                              | [Live dropdown completion](#live-dropdown-completion)                     |

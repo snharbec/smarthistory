@@ -4,7 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- TUI: leaving a prefix mode (`#`, `@`, …) back to the previous history query
+  kept showing that mode's rows under the History title.
+- TUI: clicking a list row selected a different row (the click ignored the
+  frame and the bottom-up order).
+- TUI: the status bar's match count disagreed with the list title (it counted
+  rows before the duplicate filter).
+- TUI: the command palette wrapped action names on 80 columns, and the mode
+  picker cut its descriptions off.
+- TUI: `*` view session summaries ended in a stray comma; a failed command's
+  `Stat` line was drawn in the success color.
+- Ages over a month now read `2mo` / `1y` instead of `2M`.
+
 ### Added
+
+- `tui.style=modern|classic` (default `modern`): a lighter TUI. Single top
+  rules instead of rounded boxes, the view as a chip in a one-line prompt, a
+  thin scrollbar, `…` for overflowing rows, per-mode Details, tree connectors
+  in the `*` view, key hints and a loading spinner in the status bar, and hover
+  highlight. `tui.style=classic` keeps the previous layout. See
+  [docs/configuration.md](docs/configuration.md#tuistyle).
 
 - `contrib/pi/rex-status.ts`: a pi extension that reports pi's state to Rex
   (OSC 7501: `working`, `idle`, `blocked` on a UI prompt), so a pi pane waiting

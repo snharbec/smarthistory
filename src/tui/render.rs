@@ -26,6 +26,15 @@ use super::{
 use super::CodeGraphRelationsPicker;
 use regex::Regex;
 
+/// Tree connectors for the modern `*` view: a child row gets
+/// [`TREE_MID`], the last child of its group [`TREE_LAST`].
+const TREE_MID: &str = "├";
+const TREE_LAST: &str = "└";
+
+/// Below this many columns the modern style stops splitting the
+/// detail row into Details | Output side by side.
+const NARROW_SPLIT_WIDTH: u16 = 90;
+
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
     if let Some(ref view) = app.output_view {
         draw_output_view(f, app, view);
@@ -56,7 +65,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     // starving the list. The user can also hide both panes explicitly
     // on any terminal size via `F10` (`PaneVisibility::Hidden`); in
     // that case the space is reclaimed by the list too.
-    let min_page_size = if app.compact {
+    let min_page_size = if app.compact_display() {
         match app.pane_layout {
             crate::tui::state::PaneLayout::Right => {
                 crate::tui::state::PaneHeight::MIN_PAGE_SIZE_RIGHT
@@ -103,7 +112,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
                 Constraint::Fill(1),   // list (+ panes)
                 // Compact display uses a single-line prompt (no border
                 // box), reclaiming two rows for the list.
-                Constraint::Length(if app.compact { 1 } else { 3 }), // input
+                Constraint::Length(if app.compact_display() { 1 } else { 3 }), // input
                 Constraint::Length(1), // status
             ]
             .as_ref(),
@@ -140,7 +149,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         match app.pane_visibility {
             crate::tui::state::PaneVisibility::Both => {
                 let details_start = std::time::Instant::now();
-                if app.compact && !selected_has_output {
+                if app.compact_display() && !selected_has_output {
                     // Compact display, no captured output: give the
                     // whole column to Details instead of reserving half
                     // for an empty "No output captured" pane.
@@ -189,12 +198,21 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
             match app.pane_visibility {
                 crate::tui::state::PaneVisibility::Both => {
                     let details_start = std::time::Instant::now();
-                    if app.compact && !selected_has_output {
+                    if app.compact_display() && !selected_has_output {
                         // Compact display, no captured output: Details
                         // takes the full detail-row width instead of
                         // leaving half of it for an empty Output pane.
                         draw_details(f, app, rows[1]);
                         details_elapsed = details_start.elapsed();
+                    } else if app.modern && rows[1].width < NARROW_SPLIT_WIDTH {
+                        // Modern, narrow terminal, output captured: a
+                        // 60/40 split leaves both panes too thin to
+                        // read. The output is what's new here (the
+                        // list row already shows the command), so it
+                        // gets the full width.
+                        let output_preview_start = std::time::Instant::now();
+                        draw_output_preview(f, app, rows[1]);
+                        output_preview_elapsed = output_preview_start.elapsed();
                     } else {
                         let detail_chunks = Layout::default()
                             .direction(Direction::Horizontal)
@@ -889,6 +907,82 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             .as_ref(),
         )
         .split(popup_layout[1])[1]
+}
+
+/// Shorten `line` to at most `width` terminal cells, replacing the
+/// cut tail with `…` (styled like the span it cuts into). Uses
+/// display width, so wide glyphs (CJK, emoji) count as two.
+pub(crate) fn truncate_line_with_ellipsis(line: &mut Line<'_>, width: usize) {
+    use unicode_width::UnicodeWidthStr;
+    let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+    if total <= width || width == 0 {
+        return;
+    }
+    let budget = width - 1; // room for `…`
+    let mut used = 0;
+    let mut out: Vec<Span<'_>> = Vec::new();
+    let mut last_style = Style::default();
+    for span in line.spans.drain(..) {
+        let w = span.content.width();
+        last_style = span.style;
+        if used + w <= budget {
+            used += w;
+            out.push(span);
+            continue;
+        }
+        let mut cut = String::new();
+        for ch in span.content.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cw > budget {
+                break;
+            }
+            used += cw;
+            cut.push(ch);
+        }
+        if !cut.is_empty() {
+            out.push(Span::styled(cut, span.style));
+        }
+        break;
+    }
+    out.push(Span::styled("…", last_style));
+    line.spans = out;
+}
+
+/// The frame around a main pane (list, details, output preview).
+/// Classic: the historical rounded box. Modern: one dim top rule
+/// carrying the title — lighter, and it gives the content back the
+/// side and bottom border cells.
+fn pane_block(app: &App, title: String, bg: Color) -> Block<'static> {
+    let block = if app.modern {
+        Block::default()
+            .borders(Borders::TOP)
+            .border_type(ratatui::widgets::BorderType::Plain)
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+    };
+    block
+        .title(title)
+        .title_style(Theme::accent())
+        .border_style(Theme::dim())
+        .style(Style::default().bg(bg))
+}
+
+/// A centered popup of `width` x `height` cells, clamped to the
+/// frame (leaving a 1-cell margin when there's room). Unlike
+/// [`centered_rect`]'s percentages, this keeps a popup readable on
+/// a narrow terminal instead of shrinking its content until it
+/// wraps or truncates.
+fn centered_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let w = width.min(r.width.saturating_sub(2).max(1)).min(r.width);
+    let h = height.min(r.height.saturating_sub(2).max(1)).min(r.height);
+    Rect {
+        x: r.x + (r.width - w) / 2,
+        y: r.y + (r.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 /// Draw the multi-line note/todo compose overlay
@@ -3748,7 +3842,25 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
     } else {
         format!(" Command palette — {} to close ", cancel_keys)
     };
-    let inner = overlay(f, &title, 70, 70);
+    // 70% of the frame, but never narrower than 76 columns (clamped
+    // to the frame), so action names don't wrap on an 80-column
+    // terminal.
+    let pct = centered_rect(70, 70, f.area());
+    let area = centered_fixed(pct.width.max(76), pct.height.max(16), f.area());
+    f.render_widget(ratatui::widgets::Clear, area);
+    let inner = {
+        let bg = PALETTE.with(|p| p.borrow().bg);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(title.to_string())
+            .title_style(Theme::accent())
+            .border_style(Theme::dim())
+            .style(Style::default().bg(bg));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        inner
+    };
 
     let bg = PALETTE.with(|p| p.borrow().bg);
     let fg = PALETTE.with(|p| p.borrow().fg);
@@ -3823,7 +3935,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
 
     fn key_text(app: &App, action: Action) -> String {
         if app.bindings.is_unbound(action) {
-            "unbound".to_string()
+            if app.modern { "—".to_string() } else { "unbound".to_string() }
         } else {
             let specs = app.bindings.specs(action);
             if specs.is_empty() {
@@ -3847,16 +3959,20 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         .unwrap_or(0)
         .max("action".len());
     // 2 gaps (description↔key, key↔name) at 1 column each —
-    // `Table`'s default column spacing.
+    // `Table`'s default column spacing. The config-name column is
+    // the first to go when space is short: it's reference
+    // information, while a wrapped description is hard to scan.
+    let show_name = (chunks[1].width as usize) >= key_width + name_width + 2 + 28;
+    let name_width = if show_name { name_width } else { 0 };
     let desc_width = (chunks[1].width as usize)
-        .saturating_sub(key_width + name_width + 2)
+        .saturating_sub(key_width + name_width + if show_name { 2 } else { 1 })
         .max(1);
 
     let mut rows: Vec<Row> = Vec::new();
     for &idx in &filtered {
         let action = menu.actions[idx];
         let key = key_text(app, action);
-        let key_style = if app.bindings.is_unbound(action) { warning_style } else { accent_style };
+        let key_style = if app.bindings.is_unbound(action) { if app.modern { dim_style } else { warning_style } } else { accent_style };
 
         let desc_chars: Vec<char> = action.display_name().chars().collect();
         let wrapped = wrap_chars_to_rows(&desc_chars, desc_width);
@@ -3866,7 +3982,12 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         let mut name_lines: Vec<Line> = vec![Line::styled(action.config_key(), dim_style)];
         let mut desc_lines: Vec<Line> = Vec::new();
         for (text, _) in &wrapped {
-            desc_lines.push(Line::raw(text.clone()));
+            if app.modern && !menu.query.is_empty() {
+                // Show which characters the filter matched.
+                desc_lines.push(Line::from(highlight_fuzzy_matches(text, &menu.query)));
+            } else {
+                desc_lines.push(Line::raw(text.clone()));
+            }
         }
         while key_lines.len() < row_height {
             key_lines.push(Line::raw(""));
@@ -3892,6 +4013,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
         rows,
         [Constraint::Length(desc_width as u16), Constraint::Length(key_width as u16), Constraint::Length(name_width as u16)],
     )
+    .column_spacing(1)
     .style(Style::default().bg(bg))
     .row_highlight_style(highlight_style);
 
@@ -3927,7 +4049,7 @@ fn draw_command_menu(f: &mut Frame, app: &App, menu: &CommandMenu) {
             format!(" {}/{} actions", filtered.len(), menu.actions.len()),
             dim_style,
         ),
-        Span::raw(format!("  up/down move  Enter run  {} ", close_hint)),
+        Span::styled(format!("  ↑↓ move · Enter run · {} ", close_hint), dim_style),
     ]);
     let footer_para = Paragraph::new(footer).style(Style::default().bg(bg));
     f.render_widget(footer_para, chunks[2]);
@@ -3944,7 +4066,20 @@ fn draw_prefix_picker(f: &mut Frame, app: &App, picker: &PrefixPicker) {
     // list has only 12
     // entries so it doesn't
     // need to be huge.
-    let area = centered_rect(60, 40, f.area());
+    // Size to the content: marker (3) + label (14) + prefix (4) +
+    // the longest description + padding and borders, clamped to the
+    // frame, so descriptions aren't cut off at 60% of the width.
+    let desc_w = picker
+        .options
+        .iter()
+        .map(|o| o.description.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let area = centered_fixed(
+        (3 + 14 + 4 + desc_w + 4).max(44),
+        picker.options.len() as u16 + 2,
+        f.area(),
+    );
     f.render_widget(ratatui::widgets::Clear, area);
 
     let cancel_keys = format_key_specs(app.bindings.specs(Action::Cancel));
@@ -4891,7 +5026,7 @@ fn draw_mode_strip(f: &mut Frame, app: &App, area: Rect) {
         pane_layout_chip,
         match_algorithm_badge(app.match_algorithm),
     ];
-    if app.compact {
+    if app.compact_display() {
         // Compact display: append chips only while they fit the strip.
         // Each chip and its 2-space separator is atomic, so a narrow
         // terminal drops the lowest-priority chips entirely rather than
@@ -5309,7 +5444,9 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // the top — the rows sit at the top of the widget instead. The
     // behavior matches the user's mental model of a tree view
     // (header at the top, indentation underneath).
-    let visible_height = area.height.saturating_sub(2) as usize;
+    // Classic: a full box (top + bottom border). Modern: a single
+    // top rule carrying the title, so one more content row.
+    let visible_height = area.height.saturating_sub(if app.modern { 1 } else { 2 }) as usize;
     let pad = if is_panes {
         0
     } else {
@@ -5432,6 +5569,30 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(s, _)| s.chars().count())
         .max()
         .unwrap_or(0);
+    // Screen row (inside the frame) -> data index, for mouse
+    // click / hover hit-testing in `App::handle_mouse_event`.
+    let row_map: Vec<Option<usize>> = (first_visible..last_visible)
+        .map(|i| {
+            if i < pad {
+                None
+            } else if is_panes {
+                Some(i - pad)
+            } else {
+                Some(real_count.saturating_sub(1) - (i - pad))
+            }
+        })
+        .collect();
+    let hover_row = if app.modern { app.hover_row } else { None };
+    // Modern: cut overflowing rows with `…` instead of letting the
+    // widget clip them mid-word. Width = the frame minus the
+    // selection bar (1) and the scrollbar column when it shows.
+    let row_width = if app.modern {
+        (area.width as usize)
+            .saturating_sub(1)
+            .saturating_sub(usize::from(real_count > visible_height))
+    } else {
+        0
+    };
     let items: Vec<ListItem> = (first_visible..last_visible)
         .map(|i| {
             if i < pad {
@@ -5472,7 +5633,30 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                     };
                     line.spans.insert(0, Span::styled(badge, style));
                 }
-                ListItem::new(line)
+                if app.modern && is_panes && r.mode != "workspace" {
+                    // Last child of its group: the next row is a
+                    // header (or there is none), so close the branch.
+                    let next_is_child = merged
+                        .get(data_idx + 1)
+                        .is_some_and(|n| n.mode != "workspace");
+                    if !next_is_child
+                        && let Some(sp) = line.spans.iter_mut().find(|sp| sp.content.contains(TREE_MID))
+                    {
+                        sp.content = sp.content.replace(TREE_MID, TREE_LAST).into();
+                    }
+                }
+                if row_width > 0 {
+                    truncate_line_with_ellipsis(&mut line, row_width);
+                }
+                if hover_row == Some(data_idx) && !is_selected {
+                    // Modern style: the row under the mouse pointer
+                    // gets the selection background without the
+                    // selection's bar / bold, so it reads as "this is
+                    // where a click lands", not as the selection.
+                    ListItem::new(line).style(Style::default().bg(Theme::selection_color()))
+                } else {
+                    ListItem::new(line)
+                }
             }
         })
         .collect();
@@ -5532,16 +5716,13 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             merged.len()
         ),
     };
+    let scrolls = real_count > visible_height;
+    let list_block = pane_block(app, title, PALETTE.with(|p| p.borrow().list_bg))
+        // Modern: no right border, so keep one column clear for the
+        // scrollbar instead of drawing it over row text.
+        .padding(ratatui::widgets::Padding::right(if app.modern && scrolls { 1 } else { 0 }));
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(title)
-                .title_style(Theme::accent())
-                .border_style(Theme::dim())
-                .style(Style::default().bg(PALETTE.with(|p| p.borrow().list_bg))),
-        )
+        .block(list_block)
         .highlight_style(
             // Selected row: the theme's `selection` color
             // for the background, the theme's own `fg` color
@@ -5581,7 +5762,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     // reversed coordinates for history mode — see the comment on
     // `selected_display_pos` above), so the thumb position always
     // agrees with the title.
-    if real_count > visible_height {
+    if scrolls {
         let mut scrollbar_state = ratatui::widgets::ScrollbarState::new(real_count)
             .position(selected_display_pos.map(|p| p - 1).unwrap_or(0))
             .viewport_content_length(visible_height);
@@ -5589,12 +5770,33 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             ratatui::widgets::ScrollbarOrientation::VerticalRight,
         )
         .style(Theme::dim());
-        f.render_stateful_widget(
-            scrollbar,
-            area.inner(ratatui::layout::Margin::new(0, 1)),
-            &mut scrollbar_state,
-        );
+        if app.modern {
+            // Thin track + heavier thumb, no arrow caps, below the
+            // top rule.
+            let bar_area = Rect {
+                y: area.y + 1,
+                height: area.height.saturating_sub(1),
+                ..area
+            };
+            f.render_stateful_widget(
+                scrollbar
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_symbol(Some("│"))
+                    .thumb_symbol("┃")
+                    .thumb_style(Style::default().fg(Theme::accent_color())),
+                bar_area,
+                &mut scrollbar_state,
+            );
+        } else {
+            f.render_stateful_widget(
+                scrollbar,
+                area.inner(ratatui::layout::Margin::new(0, 1)),
+                &mut scrollbar_state,
+            );
+        }
     }
+    app.list_row_map = row_map;
 
     // Map the (pre-render, full conceptual-coordinate) selection
     // back into app.list_state in data coordinates. `rendered_idx`
@@ -5718,7 +5920,7 @@ pub(crate) fn render_row<'a>(
     // largest non-zero unit wins) already IS a bucket boundary, so
     // reading the trailing unit letter off the already-computed
     // `age` string is enough — no need to re-derive elapsed time
-    // from `row.timestamp` a second time. The "9999M" sentinel
+    // from `row.timestamp` a second time. The "999y" sentinel
     // (`format_diff`'s placeholder for a zero/invalid/out-of-range
     // timestamp — synthetic rows like a `directory`/`session` entry
     // with `timestamp: 0`) falls into the same 'M' (months) bucket
@@ -5729,7 +5931,7 @@ pub(crate) fn render_row<'a>(
         Some('m') => Theme::success(),   // < 1 hour
         Some('h') => Theme::accent(),    // < 1 day (previous flat default)
         Some('d') => Theme::dim(),       // < 1 month
-        _ => Theme::dimmer(),            // 1+ months, or the "9999M" sentinel
+        _ => Theme::dimmer(),            // `mo` / `y`, or the "999y" sentinel
     };
 
     // The LLM preview row has `exit_code == -1` (the
@@ -5793,7 +5995,9 @@ pub(crate) fn render_row<'a>(
         Span::raw("")
     } else if !row.output.is_empty() {
         Span::styled(
-            " o ",
+            // Modern: `≡` (lines of output) reads as "has output"
+            // where a bare `o` didn't.
+            if app.modern { " ≡ " } else { " o " },
             Style::default()
                 .fg(Theme::highlight_color())
                 .add_modifier(Modifier::BOLD),
@@ -6000,7 +6204,28 @@ pub(crate) fn render_row<'a>(
     //     `host` rows: `  · ` to
     //     indent them under
     //     their parent.
-    if row.mode == "pane" {
+    if app.modern && app.is_panes_query() && row.mode != "workspace" && row.mode != "pane"
+        && (row.mode == "session" || row.mode == "host" || row.mode == "directory")
+    {
+        // Modern tree: a child of a `Directories` / `hosts` header.
+        // `├` here; `draw_list` turns the last child's into `└`.
+        spans.push(Span::styled(format!("  {TREE_MID} "), Theme::dim()));
+    } else if app.modern && row.mode == "pane" {
+        spans.push(Span::styled(format!("    {TREE_MID} "), Theme::dim()));
+    } else if app.modern && row.mode == "workspace" && row.source == "workspace" {
+        // A live session: a filled dot under the `Sessions` header,
+        // in the agent-waiting color when an agent there waits.
+        spans.push(Span::styled(
+            "  ● ",
+            Style::default().fg(session_row_color(row)).add_modifier(Modifier::BOLD),
+        ));
+    } else if app.modern && row.mode == "workspace" {
+        let disclosure = if app.collapsed_pane_groups.contains(&row.command) { "▸ " } else { "▾ " };
+        spans.push(Span::styled(
+            disclosure,
+            Style::default().fg(Theme::info_color()).add_modifier(Modifier::BOLD),
+        ));
+    } else if row.mode == "pane" {
         // Live panes are two levels deep now: `# Sessions` ->
         // `## <workspace>` -> pane. Deeper indent than
         // `session`/`host` rows below, which sit directly under
@@ -6356,13 +6581,23 @@ pub(crate) fn render_row<'a>(
         // we just display the
         // string verbatim.
         let comment_display = row.comment.clone();
-        spans.push(Span::styled(
-            format!("# {} ", comment_display),
-            Style::default()
-                .fg(Theme::warning_color())
-                .add_modifier(Modifier::ITALIC),
-        ));
-    } else if row.mode != "ag" && is_selected {
+        if app.modern && !is_history_row(row) {
+            // Modern: outside shell history the secondary text isn't a
+            // shell comment (a pane count, a note title, the last
+            // command run in a directory), so no `# ` and no warning
+            // color — just dim text.
+            spans.push(Span::styled(format!(" {} ", comment_display), Theme::dim()));
+        } else {
+            spans.push(Span::styled(
+                format!("# {} ", comment_display),
+                Style::default()
+                    .fg(Theme::warning_color())
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+    } else if row.mode != "ag" && is_selected
+        && !(app.modern && (row.mode == "workspace" || row.directory.is_empty() && row.mode != "directory"))
+    {
         // Selected-row fallback:
         // the primary text is
         // already the directory
@@ -6615,14 +6850,79 @@ fn truncate_cmd_for_details_pane(cmd: &str, pane_width: usize) -> String {
     }
 }
 
+/// Whether `row` is a shell-history entry (a command, LLM-generated
+/// command or question): the only rows whose session id and exit
+/// status mean anything.
+fn is_history_row(row: &HistoryRow) -> bool {
+    matches!(row.mode.as_str(), "" | "command" | "llm" | "question")
+}
+
+/// The modern style's Details lines: only fields that carry
+/// information for this kind of row. History rows show command,
+/// directory, a short session id, time and exit status; other modes
+/// (notes, panes, directories, ...) show their item, and directory /
+/// time only when set — no `Stat ✓ success` or `Time never` filler.
+fn modern_detail_lines(row: &HistoryRow, cmd_visible: String) -> Vec<Line<'static>> {
+    let label = |t: &str| Span::styled(format!("{t:<5}"), Theme::dim());
+    let history = is_history_row(row);
+    let mut lines = vec![Line::from(vec![
+        label(if history { "Cmd" } else { "Item" }),
+        Span::styled(cmd_visible, Style::default().add_modifier(Modifier::BOLD)),
+    ])];
+    if !row.directory.is_empty() {
+        lines.push(Line::from(vec![
+            label("Dir"),
+            Span::raw(crate::util::expand_home(&row.directory).into_owned()),
+        ]));
+    }
+    if history && !row.session_id.is_empty() {
+        // The full UUID is noise; its first block identifies it.
+        let short: String = row.session_id.chars().take(8).collect();
+        lines.push(Line::from(vec![label("Sess"), Span::styled(short, Theme::dim())]));
+    }
+    if row.timestamp > 0 {
+        lines.push(Line::from(vec![
+            label("Time"),
+            Span::raw(format!(
+                "{} · {}",
+                format_time(row.timestamp),
+                format_diff(row.timestamp)
+            )),
+        ]));
+    }
+    if history {
+        let (text, style) = if row.exit_code == 0 {
+            ("✓ success".to_string(), Theme::success())
+        } else {
+            (format!("✗ exit {}", row.exit_code), Theme::error())
+        };
+        lines.push(Line::from(vec![label("Stat"), Span::styled(text, style)]));
+    }
+    if !row.comment.is_empty() {
+        lines.push(Line::from(vec![
+            label("Rem"),
+            Span::styled(
+                row.comment.clone(),
+                Style::default()
+                    .fg(Theme::warning_color())
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+    lines
+}
+
 fn draw_details(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Details ")
-        .title_style(Theme::accent())
-        .border_style(Theme::dim())
-        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)));
+    let mut block = pane_block(
+        app,
+        " Details ".to_string(),
+        PALETTE.with(|p| p.borrow().details_bg),
+    );
+    if app.modern && app.pane_layout == crate::tui::state::PaneLayout::Right {
+        // Right column: a left rule divides it from the list, which
+        // has no right border in the modern style.
+        block = block.borders(Borders::TOP | Borders::LEFT);
+    }
 
     let Some(row) = app.selected_row() else {
         let empty = Paragraph::new(Line::from(vec![Span::styled(
@@ -6663,6 +6963,15 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     // they need the rest.
     let cmd_single_line = row.command.replace('\n', "↵").replace('\r', "");
     let cmd_visible = truncate_cmd_for_details_pane(&cmd_single_line, area.width as usize);
+
+    if app.modern {
+        let lines = modern_detail_lines(row, cmd_visible);
+        f.render_widget(
+            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
 
     let mut lines = vec![
         Line::from(vec![
@@ -6705,7 +7014,10 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Stat ", Theme::dim()),
-            Span::styled(format!("{} {}", exit_marker, exit_text), Theme::success()),
+            Span::styled(
+                format!("{} {}", exit_marker, exit_text),
+                if row.exit_code == 0 { Theme::success() } else { Theme::error() },
+            ),
         ]),
     ];
 
@@ -6726,6 +7038,17 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         .block(block)
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+/// Heading color for a `workspace` row in the `*` view: the
+/// agent-waiting color when one of the session's agents waits for
+/// input, the info color otherwise.
+fn session_row_color(row: &HistoryRow) -> Color {
+    if row.agent_waiting {
+        Theme::agent_waiting_color()
+    } else {
+        Theme::info_color()
+    }
 }
 
 /// Render a single preview line as styled
@@ -6792,17 +7115,6 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
 /// the output doesn't have a sequence of
 /// single-character spans (matters for
 /// ratatui's layout pass on long lines).
-/// Heading color for a `workspace` row in the `*` view: the
-/// agent-waiting color when one of the session's agents waits for
-/// input, the info color otherwise.
-fn session_row_color(row: &HistoryRow) -> Color {
-    if row.agent_waiting {
-        Theme::agent_waiting_color()
-    } else {
-        Theme::info_color()
-    }
-}
-
 fn render_preview_line(line: &str) -> Line<'static> {
     // Block-level detection first. A line
     // that starts with `# ` / `## ` / `### `
@@ -7990,13 +8302,16 @@ fn xterm256_to_rgb(n: u8) -> (u8, u8, u8) {
 }
 
 fn draw_output_preview(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Output Preview ")
-        .title_style(Theme::accent())
-        .border_style(Theme::dim())
-        .style(Style::default().bg(PALETTE.with(|p| p.borrow().details_bg)));
+    let mut block = pane_block(
+        app,
+        if app.modern { " Preview " } else { " Output Preview " }.to_string(),
+        PALETTE.with(|p| p.borrow().details_bg),
+    );
+    if app.modern {
+        // A left rule divides it from Details (Bottom layout) or the
+        // list (Right layout, Details hidden).
+        block = block.borders(Borders::TOP | Borders::LEFT);
+    }
 
     let Some(row) = app.selected_row() else {
         f.render_widget(
@@ -8258,20 +8573,48 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     } else {
         app.query_cursor as u16
     };
-    if app.compact {
+    if app.compact_display() {
         // Compact display: a single-line prompt with no border box (the
         // mode is already announced by the mode-strip badge and the
         // prefix character). The border's title/style are dropped, but
         // the prompt keeps the accent colour so the input still reads as
         // the input.
-        let input = Paragraph::new(Line::from(vec![
-            Span::styled(prompt.clone(), Theme::accent()),
-            Span::raw(content),
-        ]))
-        .style(Style::default().bg(PALETTE.with(|p| p.borrow().input_bg)))
-        .wrap(Wrap { trim: false });
+        // Modern style: the mode name as a filled chip in front of
+        // the prompt (`▌history▐ > query`), so the input still says
+        // which view it searches without the classic box title.
+        let chip = if app.modern {
+            format!(" {} ", title.trim())
+        } else {
+            String::new()
+        };
+        let chip_width = if chip.is_empty() { 0 } else { chip.chars().count() as u16 + 1 };
+        let mut spans = Vec::new();
+        if !chip.is_empty() {
+            spans.push(Span::styled(
+                chip,
+                Style::default()
+                    .fg(PALETTE.with(|p| p.borrow().badge_fg))
+                    .bg(Theme::accent_color())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        // The chip already names the mode, and the query carries its
+        // own prefix char, so the per-mode prompt (`* `, `@ `) would
+        // only double it (`**`): use a neutral `› ` instead.
+        let shown_prompt = if app.modern && app.comment_edit.is_none() {
+            "› ".to_string()
+        } else {
+            prompt.clone()
+        };
+        let shown_prompt_width = shown_prompt.chars().count() as u16;
+        spans.push(Span::styled(shown_prompt, Theme::accent()));
+        spans.push(Span::raw(content));
+        let input = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(PALETTE.with(|p| p.borrow().input_bg)))
+            .wrap(Wrap { trim: false });
         f.render_widget(input, area);
-        let cursor_x = area.x + prompt_width + cursor_offset;
+        let cursor_x = area.x + chip_width + shown_prompt_width + cursor_offset;
         f.set_cursor_position((
             cursor_x.min(area.x.saturating_add(area.width).saturating_sub(1)),
             area.y,
@@ -8372,7 +8715,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let n = app.rows.len();
+    // Count what the list actually shows (after the duplicate
+    // filter and labeled-row merge), so it agrees with the list
+    // title's `pos/total`; `app.rows` is the raw pre-dedup fetch.
+    let n = app.merged_rows.len();
     let mut count = match n {
         0 => "0 matches".to_string(),
         1 => "1 match".to_string(),
@@ -8433,6 +8779,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
+    if app.modern {
+        draw_status_modern(f, app, area, count, status);
+        return;
+    }
+
     let line = Line::from(vec![
         Span::styled(format!(" {}  ", count), Theme::highlight()),
         Span::styled(middle_text, middle_style),
@@ -8440,6 +8791,72 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     ]);
     f.render_widget(
         Paragraph::new(line).style(Style::default().bg(PALETTE.with(|p| p.borrow().status_bg))),
+        area,
+    );
+}
+
+/// Braille spinner frame for "something is loading", advancing every
+/// 100 ms (the render tick).
+fn spinner_frame() -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    FRAMES[(ms / 100 % FRAMES.len() as u128) as usize]
+}
+
+/// The modern status bar: count on the left, then either the status
+/// message or key hints (key in the accent color, word dimmed, no
+/// `·` separators), and a spinner while a background fetch runs. No
+/// theme name — that belongs in the theme picker, not on every frame.
+fn draw_status_modern(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    count: String,
+    status: Option<&str>,
+) {
+    let mut spans = Vec::new();
+    let busy = app.llm_in_flight || app.live_panes_loading();
+    if busy {
+        spans.push(Span::styled(format!(" {} ", spinner_frame()), Theme::accent()));
+    } else {
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(format!("{count}   "), Theme::highlight()));
+    match status {
+        Some(m) => {
+            let style = if m.starts_with("Yank failed") { Theme::error() } else { Theme::success() };
+            spans.push(Span::styled(m.to_string(), style));
+        }
+        None if app.llm_in_flight => {
+            spans.push(Span::styled("asking the LLM…", Theme::warning()));
+        }
+        None => {
+            let mut hints: Vec<(String, &str)> = Vec::new();
+            if app.is_panes_query() {
+                hints.push(("1-9".to_string(), "jump"));
+            }
+            for (action, word) in [
+                (Action::OpenHelp, "help"),
+                (Action::CommandAction, "palette"),
+                (Action::ClearQuery, "clear"),
+            ] {
+                let keys = format_key_specs(app.bindings.specs(action));
+                if !keys.is_empty() {
+                    hints.push((keys, word));
+                }
+            }
+            for (keys, word) in hints {
+                spans.push(Span::styled(keys, Theme::accent()));
+                spans.push(Span::styled(format!(" {word}  "), Theme::dim()));
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(PALETTE.with(|p| p.borrow().status_bg))),
         area,
     );
 }

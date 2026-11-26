@@ -10629,7 +10629,7 @@ fn todo_restriction_shows_only_matching_type() {
 /// `updated` timestamp from the
 /// `markdown_data` table, so the
 /// Details pane can show a real age
-/// instead of the `9999M`
+/// instead of the `999y`
 /// placeholder that `format_diff(0)`
 /// would produce. We verify the
 /// timestamp is non-zero after the
@@ -17199,7 +17199,7 @@ fn age_column_color_follows_recency_gradient() {
     );
 
     // The `timestamp: 0` sentinel `format_diff` treats as invalid
-    // (falls back to its "9999M" placeholder, e.g. a `directory` row
+    // (falls back to its "999y" placeholder, e.g. a `directory` row
     // that has no meaningful timestamp) lands in the same dimmest
     // bucket as a genuinely old row.
     let mut zero_row = aged_row(0);
@@ -36654,4 +36654,123 @@ fn panes_hosts_sorted_by_last_connection_keep_ids() {
         rows.iter().filter(|r| r.mode == "host").map(|r| (r.command.as_str(), r.id)).collect();
     // id = -25_001 - config position (see `stage_pane_selection`).
     assert_eq!(hosts, [("newer", -25_003), ("older", -25_002), ("never", -25_001)]);
+}
+
+/// Backspacing out of a prefix mode back to an empty query must show
+/// the history rows again, not the rows of the mode just left.
+#[test]
+fn leaving_prefix_mode_to_empty_query_restores_history_rows() {
+    let mut app = global_test_app(&[("git status", 10), ("cargo build", 20)]);
+    app.refresh();
+    assert!(app.merged_rows.iter().all(|r| r.mode == "command"));
+    app.push_char('#');
+    assert!(
+        app.merged_rows.iter().all(|r| r.mode != "command"),
+        "# shows directory rows"
+    );
+    app.backspace();
+    let modes: Vec<&str> = app.merged_rows.iter().map(|r| r.mode.as_str()).collect();
+    assert!(
+        !modes.is_empty() && modes.iter().all(|m| *m == "command"),
+        "back in history after clearing the prefix, got {modes:?}"
+    );
+}
+
+fn draw_to_buffer(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| crate::tui::render::ui(f, app))
+        .expect("draw");
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+    buf.content.iter().map(|c| c.symbol()).collect()
+}
+
+/// `tui.style=modern`: no rounded boxes, the mode chip in the prompt,
+/// and no theme name in the status bar.
+#[test]
+fn modern_style_drops_boxes_and_shows_mode_chip() {
+    let mut app = global_test_app(&[("git status", 10), ("cargo build", 20)]);
+    app.modern = true;
+    app.refresh();
+    let text = buffer_text(&draw_to_buffer(&mut app, 100, 30));
+    assert!(!text.contains('╭'), "modern style draws no rounded corners");
+    assert!(text.contains(" history "), "mode chip names the view");
+    assert!(text.contains("› "), "neutral prompt");
+
+    let mut classic = global_test_app(&[("git status", 10)]);
+    classic.refresh();
+    assert!(buffer_text(&draw_to_buffer(&mut classic, 100, 30)).contains('╭'));
+}
+
+/// Modern rows that overflow end in `…` instead of a hard cut.
+#[test]
+fn modern_style_ellipsizes_long_rows() {
+    let long = format!("echo {}", "x".repeat(200));
+    let mut app = global_test_app(&[(long.as_str(), 10)]);
+    app.modern = true;
+    app.refresh();
+    let buf = draw_to_buffer(&mut app, 60, 30);
+    assert!(buffer_text(&buf).contains('…'));
+}
+
+#[test]
+fn truncate_line_with_ellipsis_respects_display_width() {
+    use ratatui::text::{Line, Span};
+    let mut line = Line::from(vec![Span::raw("ab"), Span::raw("界界界")]);
+    crate::tui::render::truncate_line_with_ellipsis(&mut line, 5);
+    let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(s, "ab界…", "a wide glyph counts as two cells");
+    let mut short = Line::from("fits");
+    crate::tui::render::truncate_line_with_ellipsis(&mut short, 10);
+    assert_eq!(short.spans[0].content, "fits");
+}
+
+/// A click on a list row selects the row drawn there. History lists
+/// newest at the bottom (reversed and bottom-padded), so the click
+/// must go through the frame's row map, not `offset + y`.
+#[test]
+fn mouse_click_selects_the_row_under_the_pointer() {
+    let mut app = global_test_app(&[("newest", 10), ("middle", 20), ("oldest", 30)]);
+    app.refresh();
+    draw_to_buffer(&mut app, 100, 30);
+    let area = app.list_area;
+    // Bottom-aligned: the last content row is the newest (data 0),
+    // the one above it data 1.
+    let content_rows = app.list_row_map.len() as u16;
+    let y_newest = area.y + content_rows; // content row k is at y + 1 + k
+    assert_eq!(app.list_row_at(area.x + 5, y_newest), Some(0));
+    assert_eq!(app.list_row_at(area.x + 5, y_newest - 1), Some(1));
+    assert_eq!(app.list_row_at(area.x + 5, area.y), None, "the frame itself");
+    app.handle_mouse_event(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: area.x + 5,
+        row: y_newest - 2,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    });
+    assert_eq!(app.list_state.selected(), Some(2), "clicked the oldest row");
+}
+
+/// Modern Details for a non-history row: no `Stat` / `Sess` filler.
+#[test]
+fn modern_details_hide_history_only_fields_for_other_rows() {
+    let mut app = panes_test_app(&[]);
+    app.modern = true;
+    app.session_panes = vec![HistoryRow {
+        id: -1,
+        command: "Work".to_string(),
+        mode: "workspace".to_string(),
+        source: "workspace".to_string(),
+        workspace_label: "Work".to_string(),
+        ..Default::default()
+    }];
+    app.query = "*".to_string();
+    app.refresh();
+    let text = buffer_text(&draw_to_buffer(&mut app, 100, 30));
+    assert!(text.contains("Item"), "{text}");
+    assert!(!text.contains("Stat"));
+    assert!(!text.contains("never"));
 }

@@ -1642,7 +1642,7 @@ fn last_ssh_connection_timestamp(app: &App, ssh_command: &str) -> i64 {
                 .filter(|(pr, _, _, _, _)| pr.agent_waiting)
                 .count();
             let summary = format!(
-                "{} pane{}{}{}, ",
+                "{} pane{}{}{}",
                 entries.len(),
                 if entries.len() == 1 { "" } else { "s" },
                 if agent_count > 0 {

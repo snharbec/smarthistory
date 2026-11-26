@@ -1876,6 +1876,11 @@ fn print_config_list<W: std::fmt::Write>(f: &mut W, cfg: &Config) {
     );
     let _ = writeln!(
         f,
+        "  tui.style = {}",
+        if cfg.modern { "modern" } else { "classic" }
+    );
+    let _ = writeln!(
+        f,
         "  commentexpand.enabled = {}",
         if cfg.commentexpand_enabled { "on" } else { "off" }
     );
@@ -2453,6 +2458,12 @@ pub struct Config {
     /// `Action::ToggleCompactDisplay`; the session file remembers the
     /// last choice (session overrides this config default).
     compact: bool,
+    /// Visual style, from `tui.style=modern|classic` (default
+    /// `modern`). Modern: light single-line pane frames instead of
+    /// rounded boxes, the compact bundle, a thin scrollbar, tree
+    /// connectors in the `*` view, per-mode details and hover
+    /// highlight. Classic is the historical boxed layout.
+    modern: bool,
     /// Whether the space-triggered comment-expansion zsh widget
     /// (typing a comment's text at the start of the line, then a
     /// space, expands it to the most recently used command carrying
@@ -2936,6 +2947,7 @@ impl Config {
             shellintegration_osc133_enabled: true,
             tui_highlight: false,
             compact: false,
+            modern: true,
             commentexpand_enabled: false,
             globcomplete_enabled: false,
             zsh_default_mode: "sess".to_string(),
@@ -3265,6 +3277,9 @@ impl Config {
                 }
                 "tui.compact" => {
                     self.compact = crate::util::parse_bool(value, false);
+                }
+                "tui.style" => {
+                    self.modern = !value.trim().eq_ignore_ascii_case("classic");
                 }
                 "initialmode" => {
                     let upper = value.trim().to_ascii_uppercase();
@@ -4497,6 +4512,11 @@ impl Config {
     /// `false`. The session file's last in-TUI toggle overrides this.
     pub fn compact(&self) -> bool {
         self.compact
+    }
+
+    /// `tui.style=modern` (the default) — see the `modern` field.
+    pub fn modern(&self) -> bool {
+        self.modern
     }
 
     /// The user-defined JQL fragments loaded from
@@ -10083,6 +10103,9 @@ fn run_command(args: Args) -> anyhow::Result<()> {
                     }
                     "tui.compact" => {
                         println!("{}", if cfg.compact { "on" } else { "off" })
+                    }
+                    "tui.style" => {
+                        println!("{}", if cfg.modern { "modern" } else { "classic" })
                     }
                     "commentexpand.enabled" => {
                         println!("{}", if cfg.commentexpand_enabled { "on" } else { "off" })

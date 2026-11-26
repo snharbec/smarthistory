@@ -205,7 +205,7 @@ pub(crate) fn pattern(app: &App) -> &str {
 ///    `markdown_data` for the unique
 ///    filenames, then a per-row lookup) so
 ///    the details pane shows a real age
-///    instead of the `9999M` placeholder.
+///    instead of the `999y` placeholder.
 /// 6. Apply the date-filter alias (if any)
 ///    post-sort. Rows with `timestamp = 0`
 ///    (transient — the library never gave us
@@ -386,7 +386,7 @@ pub(crate) fn fetch(app: &mut App) -> Result<Vec<HistoryRow>> {
         // `markdown_data` table so the
         // details pane can show a real
         // age instead of the
-        // `9999M` placeholder. The
+        // `999y` placeholder. The
         // library's `TodoResult` doesn't
         // expose `updated` (only the
         // note's `header_fields`), so we

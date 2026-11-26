@@ -10,6 +10,13 @@
     }
 
     #[test]
+    fn format_diff_months_and_years_are_unambiguous() {
+        let days = |d: i64| (chrono::Utc::now() - chrono::Duration::days(d)).timestamp();
+        assert_eq!(format_diff(days(70)), "2mo");
+        assert_eq!(format_diff(days(800)), "2y");
+    }
+
+    #[test]
     fn format_diff_minutes() {
         let three_min_ago = chrono::Utc::now() - chrono::Duration::minutes(3);
         assert_eq!(format_diff(three_min_ago.timestamp()), "3m");
@@ -31,8 +38,8 @@
     fn format_diff_zero_or_negative_is_na() {
         // 0 and negative timestamps are treated as missing data and
         // sort as the oldest possible entries (9999 months).
-        assert_eq!(format_diff(0), "9999M");
-        assert_eq!(format_diff(-1), "9999M");
+        assert_eq!(format_diff(0), "999y");
+        assert_eq!(format_diff(-1), "999y");
     }
 
     /// `qualify_field` must reject any name outside the known
