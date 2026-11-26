@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `contrib/pi/rex-status.ts`: a pi extension that reports pi's state to Rex
+  (OSC 7501: `working`, `idle`, `blocked` on a UI prompt), so a pi pane waiting
+  for input gets the `*` view's agent-waiting color under Rex too. Install with
+  `cp contrib/pi/rex-status.ts ~/.pi/agent/extensions/`.
 - `*` view: an AI agent pane waiting for input (idle, done, or blocked on a
   permission / question) shows a `⏸` marker in a dedicated color, and its
   session header takes that color with an `N waiting` summary. Read from herdr's
